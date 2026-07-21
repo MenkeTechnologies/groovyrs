@@ -13,7 +13,7 @@
 
 use crate::ast::*;
 use fusevm::{Chunk, ChunkBuilder, Op, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// The desugar target a `rust { ... }` block lowers to (see [`crate::rust_ffi`]).
 const RUST_COMPILE: &str = "__rust_compile";
@@ -62,6 +62,22 @@ struct Compiler {
     /// The active function scope while lowering a function body; `None` at script
     /// top level (where names are globals).
     scope: Option<FnScope>,
+    /// Closure bodies discovered while lowering, awaiting emission as subroutine
+    /// regions after the main body and the user functions (see
+    /// [`Compiler::emit_closure`]). A queue because emitting one closure may
+    /// enqueue further nested closures.
+    pending_closures: VecDeque<PendingClosure>,
+    /// Monotonic id for synthetic closure names (`$closure_0`, `$closure_1`, …).
+    closures_seen: u32,
+}
+
+/// A closure body queued for emission as a subroutine region. `params` already
+/// has the implicit `it` injected when the literal had no explicit parameters.
+struct PendingClosure {
+    name_idx: u16,
+    params: Vec<String>,
+    body: Vec<Stmt>,
+    line: u32,
 }
 
 /// Compile a parsed [`Program`]'s body to a runnable fusevm chunk.
@@ -93,6 +109,8 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         has_ffi,
         fn_names,
         scope: None,
+        pending_closures: VecDeque::new(),
+        closures_seen: 0,
     };
     // Emit the script body (function definitions are hoisted out and emitted as
     // subroutine regions below).
@@ -109,6 +127,12 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         if let StmtKind::Function { name, params, body } = &stmt.kind {
             c.function(stmt.line, name, params, body)?;
         }
+    }
+    // Emit queued closure bodies as subroutine regions. Draining may enqueue
+    // further closures (a closure nested inside another closure), so loop until
+    // the queue is empty.
+    while let Some(pc) = c.pending_closures.pop_front() {
+        c.emit_closure(pc)?;
     }
     let end = c.b.current_pos();
     c.b.patch_jump(skip, end);
@@ -202,6 +226,43 @@ impl Compiler {
         self.b.emit(Op::ReturnValue, self.cur_line);
 
         self.scope = prev;
+        Ok(())
+    }
+
+    /// Emit a queued closure body as a subroutine region, using the same frame
+    /// ABI as [`Compiler::function`]: register the entry, bind parameters from
+    /// the value stack into frame slots, lower the body with an implicit
+    /// last-expression return, and end with a `null` fall-through return. A
+    /// closure's non-parameter names resolve to globals (the enclosing script
+    /// bindings), so it captures the script scope it was defined in.
+    fn emit_closure(&mut self, pc: PendingClosure) -> Result<(), String> {
+        let entry = self.b.current_pos();
+        self.b.add_sub_entry(pc.name_idx, entry);
+
+        let mut vars = HashMap::new();
+        for (i, p) in pc.params.iter().enumerate() {
+            vars.insert(p.clone(), i as u16);
+        }
+        let prev = self.scope.replace(FnScope {
+            vars,
+            next_slot: pc.params.len() as u16,
+        });
+        let saved_line = self.cur_line;
+        self.cur_line = pc.line;
+
+        // Prologue: pop the pushed args top-down into their parameter slots.
+        for i in (0..pc.params.len()).rev() {
+            self.b.emit(Op::SetSlot(i as u16), pc.line);
+        }
+
+        self.fn_body(&pc.body)?;
+
+        // Fall-through: a closure with no trailing value expression returns null.
+        self.b.emit(Op::LoadUndef, self.cur_line);
+        self.b.emit(Op::ReturnValue, self.cur_line);
+
+        self.scope = prev;
+        self.cur_line = saved_line;
         Ok(())
     }
 
@@ -555,26 +616,114 @@ impl Compiler {
                 method,
                 args,
                 line,
+                safe,
             } => {
                 // Stack: [recv, arg0..argN-1, methodname]; the GDK dispatch
-                // builtin pops the name, the N args, then the receiver.
+                // builtin pops the name, the N args, then the receiver. The
+                // safe-navigation form routes through GMETHOD_SAFE, which returns
+                // `null` without dispatching when the receiver is `null`.
                 self.expr(recv)?;
                 for a in args {
                     self.expr(a)?;
                 }
                 let midx = self.b.add_constant(Value::str(method.clone()));
                 self.b.emit(Op::LoadConst(midx), *line);
-                self.b
-                    .emit(Op::CallBuiltin(crate::host::GMETHOD, args.len() as u8), *line);
+                let id = if *safe {
+                    crate::host::GMETHOD_SAFE
+                } else {
+                    crate::host::GMETHOD
+                };
+                self.b.emit(Op::CallBuiltin(id, args.len() as u8), *line);
             }
-            Expr::Property { recv, name, line } => {
+            Expr::Property {
+                recv,
+                name,
+                line,
+                safe,
+            } => {
                 // Stack: [recv, propname]; the property builtin pops both.
                 self.expr(recv)?;
                 let nidx = self.b.add_constant(Value::str(name.clone()));
                 self.b.emit(Op::LoadConst(nidx), *line);
-                self.b.emit(Op::CallBuiltin(crate::host::GPROP, 0), *line);
+                let id = if *safe {
+                    crate::host::GPROP_SAFE
+                } else {
+                    crate::host::GPROP
+                };
+                self.b.emit(Op::CallBuiltin(id, 0), *line);
+            }
+            Expr::Closure { params, body } => self.closure(params, body)?,
+            Expr::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                // Materialise to a Groovy list of the enumerated integers. The
+                // native `Op::Range` is inclusive (`from..=to`); a half-open
+                // `a..<b` lowers to the inclusive range `a..(b-1)`.
+                self.expr(start)?;
+                self.expr(end)?;
+                if !*inclusive {
+                    self.b.emit(Op::LoadInt(1), self.cur_line);
+                    self.b.emit(Op::Sub, self.cur_line);
+                }
+                self.b.emit(Op::Range, self.cur_line);
+            }
+            Expr::Ternary { cond, then, els } => {
+                // `cond ? then : els` — branch on Groovy truthiness.
+                self.expr(cond)?;
+                let jf = self.b.emit(Op::JumpIfFalse(0), self.cur_line);
+                self.expr(then)?;
+                let jend = self.b.emit(Op::Jump(0), self.cur_line);
+                let else_start = self.b.current_pos();
+                self.b.patch_jump(jf, else_start);
+                self.expr(els)?;
+                let end = self.b.current_pos();
+                self.b.patch_jump(jend, end);
+            }
+            Expr::Elvis { lhs, rhs } => {
+                // `lhs ?: rhs` — keep `lhs` when Groovy-truthy, else evaluate
+                // `rhs`. `JumpIfTrueKeep` leaves the deciding `lhs` on the stack.
+                self.expr(lhs)?;
+                let jt = self.b.emit(Op::JumpIfTrueKeep(0), self.cur_line);
+                self.b.emit(Op::Pop, self.cur_line);
+                self.expr(rhs)?;
+                let end = self.b.current_pos();
+                self.b.patch_jump(jt, end);
             }
         }
+        Ok(())
+    }
+
+    /// Lower a closure literal: queue its body for emission as a subroutine
+    /// region and, at the literal site, build the runtime closure handle. The
+    /// handle carries the synthetic name-pool index (which resolves to the body
+    /// entry via `Chunk::find_sub` at call time) and the parameter count. An
+    /// implicit-`it` closure (no explicit parameters) has one parameter, `it`.
+    fn closure(&mut self, params: &[String], body: &[Stmt]) -> Result<(), String> {
+        let effective: Vec<String> = if params.is_empty() {
+            vec!["it".to_string()]
+        } else {
+            params.to_vec()
+        };
+        let id = self.closures_seen;
+        self.closures_seen += 1;
+        let name_idx = self.b.add_name(&format!("$closure_{id}"));
+        self.pending_closures.push_back(PendingClosure {
+            name_idx,
+            params: effective.clone(),
+            body: body.to_vec(),
+            line: self.cur_line,
+        });
+        // Build the closure value: push its name index and parameter count, then
+        // register through the make-closure builtin (returns a `Value::Obj`).
+        self.b.emit(Op::LoadInt(name_idx as i64), self.cur_line);
+        self.b
+            .emit(Op::LoadInt(effective.len() as i64), self.cur_line);
+        self.b.emit(
+            Op::CallBuiltin(crate::host::GMAKE_CLOSURE, 2),
+            self.cur_line,
+        );
         Ok(())
     }
 
@@ -612,8 +761,7 @@ impl Compiler {
         }
         // Unknown callee. With a `rust { ... }` block present it may be an FFI
         // export registered at runtime, so lower to a by-name FFI dispatch: push
-        // the args (deepest first), then the name, then call. Without any FFI
-        // block, an unknown callee stays a compile-time error.
+        // the args (deepest first), then the name, then call.
         if self.has_ffi {
             for a in args {
                 self.expr(a)?;
@@ -624,10 +772,24 @@ impl Compiler {
                 Op::CallBuiltin(crate::host::GFFI_CALL, args.len() as u8),
                 line,
             );
-            Ok(())
-        } else {
-            Err(format!("groovyrs: unresolved reference: {name}"))
+            return Ok(());
         }
+        // Otherwise `name(args)` is a call through a variable — a closure invoked
+        // directly, `def f = { it * 2 }; f(21)`. Load the value, push the args,
+        // and dispatch through the closure-call builtin, which faults with
+        // `unresolved reference: name` if the value is not a closure.
+        let get = self.load_op_for(name);
+        self.b.emit(get, line);
+        for a in args {
+            self.expr(a)?;
+        }
+        let nidx = self.b.add_constant(Value::str(name.to_string()));
+        self.b.emit(Op::LoadConst(nidx), line);
+        self.b.emit(
+            Op::CallBuiltin(crate::host::GCLOSURE_CALL, args.len() as u8),
+            line,
+        );
+        Ok(())
     }
 
     fn binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<(), String> {
@@ -724,10 +886,14 @@ fn expr_has_ffi(e: &Expr) -> bool {
         Expr::Map(entries) => entries
             .iter()
             .any(|(k, v)| expr_has_ffi(k) || expr_has_ffi(v)),
-        Expr::MethodCall { recv, args, .. } => {
-            expr_has_ffi(recv) || args.iter().any(expr_has_ffi)
-        }
+        Expr::MethodCall { recv, args, .. } => expr_has_ffi(recv) || args.iter().any(expr_has_ffi),
         Expr::Property { recv, .. } => expr_has_ffi(recv),
+        Expr::Closure { body, .. } => body_has_ffi(body),
+        Expr::Range { start, end, .. } => expr_has_ffi(start) || expr_has_ffi(end),
+        Expr::Ternary { cond, then, els } => {
+            expr_has_ffi(cond) || expr_has_ffi(then) || expr_has_ffi(els)
+        }
+        Expr::Elvis { lhs, rhs } => expr_has_ffi(lhs) || expr_has_ffi(rhs),
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Str(_)

@@ -25,23 +25,33 @@ compile errors, never silently mis-run.
 - **`++`/`--` in expression position.** Both postfix (`i++`, value before
   update) and prefix (`++i`, value after update), in addition to the statement
   forms.
+- **Closures.** `{ a, b -> … }` and the implicit `{ it }` single-parameter form
+  are first-class callable values: a closure lowers to a fusevm subroutine
+  region and a runtime handle, invoked through the native `Op::Call` frame ABI
+  via `.call(args)` or direct call (`def f = { it * 2 }; f(21)`). A closure
+  captures its enclosing **script** scope by reference (a later mutation of a
+  captured binding is visible).
+- **Closure-driven GDK iteration.** `each`, `eachWithIndex`, `collect`,
+  `findAll`, `find`, `inject` (both the `inject(init){…}` and seedless
+  `inject{…}` forms), and `sum` over lists (and over materialised ranges), e.g.
+  `[1,2,3].collect { it * 2 }` → `[2, 4, 6]` and `[1,2,3,4].findAll { it % 2 == 0 }`
+  → `[2, 4]`.
+- **First-class ranges.** `0..5` (inclusive) and `0..<5` (half-open) build a
+  Groovy list of the enumerated integers, so `.size()`, `.contains(x)`, `.each`,
+  and `.collect` apply.
+- **Ternary, Elvis, safe navigation.** `c ? t : e`, the Elvis `a ?: b`
+  (null/false-coalescing), and `a?.member` / `a?.method()` (yields `null` on a
+  `null` receiver rather than faulting). All branch on Groovy truthiness.
 
 ## Not implemented (errors today)
 
-- **Closures, classes.** `{ it -> … }` closures (so `each`/`collect`/`findAll`
-  over collections), `class`/`trait`, fields, `new`, and `this` are not
-  compiled. The canonical `[1,2,3].collect { it * 2 }` needs closures and is
-  rejected today.
+- **Classes.** `class`/`trait`, fields, `new`, and `this` are not compiled.
 - **GStrings / interpolation.** `"$name"` / `"${expr}"` are lexed as literal
   text — the `${…}` is **not** evaluated. Use `+` concatenation in slice 1.
 - **Multi-entry map print order.** `Value::Hash` is an unordered `HashMap`, so a
   map with more than one entry does not print in Groovy's insertion order.
   Single-entry maps render faithfully.
-- **Ranges as first-class values** (`(1..5)` as a list), and GDK collection
-  methods needing a closure (`each`, `collect`, `find`, `*.`). `for (x in a..b)`
-  integer ranges are the only iterable form.
-- **`switch`, `do/while`, ternary `?:`, the Elvis `?:`, safe-nav `?.`,
-  labeled break, spaceship `<=>`.**
+- **`switch`, `do/while`, labeled break, spaceship `<=>`.**
 - **`try`/`catch`/`finally`, exceptions, `throw`, `assert`.**
 - **`import`/`package`** are tolerated (skipped) but do nothing.
 - **Command-argument chains beyond one arg** (`println a, b`, `foo bar baz`).
@@ -72,6 +82,15 @@ compile errors, never silently mis-run.
   reference identity) for the string/number/boolean operands slice 1 supports.
   Cross-type comparisons that Groovy would coerce (`"5" == 5 → false`) are not
   yet distinguished — both sides compare by their printed form.
+- **Closures capture script scope, not enclosing-function/closure locals.** A
+  closure's non-parameter names resolve to the script (global) bindings, which is
+  faithful for the common script-level case. A closure defined *inside* a function
+  or another closure does not capture that enclosing frame's locals as upvalues
+  (so a curried `{ x -> { y -> x + y } }` does not see the outer `x`). Real
+  lexical upvalue capture is a later wave.
+- **Range values materialise ascending only.** `0..5` / `0..<5` enumerate to a
+  list; a descending literal range (`5..0`) yields an empty list rather than the
+  reverse sequence. `println` of a range value therefore shows the list form.
 - **Uninitialized locals are unbound** and read back as `null`.
 - **The paren-less `println <expr>` command form is more permissive** than
   Groovy's command-expression grammar. groovyrs parses the whole following

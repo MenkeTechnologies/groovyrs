@@ -54,8 +54,12 @@ pub enum Tok {
     Comma,
     Colon,
     Dot,
-    DotDot,   // `..` inclusive range
-    DotDotLt, // `..<` half-open range
+    DotDot,      // `..` inclusive range
+    DotDotLt,    // `..<` half-open range
+    Arrow,       // `->` closure parameter separator
+    Question,    // `?` ternary
+    QuestionDot, // `?.` safe navigation
+    Elvis,       // `?:` elvis / null-coalescing
     /// A significant newline (statement terminator at bracket depth 0).
     Nl,
     // operators
@@ -279,6 +283,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         };
         let (kind, adv) = match two {
             ".." => (Tok::DotDot, 2),
+            "->" => (Tok::Arrow, 2),
+            "?." => (Tok::QuestionDot, 2),
+            "?:" => (Tok::Elvis, 2),
             "+=" => (Tok::PlusAssign, 2),
             "-=" => (Tok::MinusAssign, 2),
             "*=" => (Tok::StarAssign, 2),
@@ -323,6 +330,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 '%' => (Tok::Percent, 1),
                 '<' => (Tok::Lt, 1),
                 '>' => (Tok::Gt, 1),
+                '?' => (Tok::Question, 1),
                 '!' => (Tok::Not, 1),
                 other => {
                     return Err(format!(

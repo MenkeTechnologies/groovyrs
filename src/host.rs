@@ -17,7 +17,7 @@
 //!    installed, delegating any operation with a non-numeric operand to
 //!    [`numeric_hook`], where `+` concatenates via the same [`groovy_str`].
 
-use fusevm::{NumOp, Value, VM};
+use fusevm::{Frame, NumOp, VMResult, Value, VM};
 use std::cell::RefCell;
 
 /// Builtin id for `println` (one Groovy-formatted arg + newline).
@@ -43,6 +43,21 @@ pub const GMETHOD: u16 = 705;
 /// Builtin id for a Groovy property read `recv.name` (e.g. `list.size`,
 /// `str.length`). The stack holds the receiver then the property name on top.
 pub const GPROP: u16 = 706;
+/// Builtin id for building a closure value. The stack holds the closure's
+/// synthetic name-pool index and its parameter count (two integers); the builtin
+/// registers them and returns a `Value::Obj` handle (see [`invoke_closure`]).
+pub const GMAKE_CLOSURE: u16 = 707;
+/// Builtin id for invoking a closure directly, `f(args)`. The stack holds the
+/// closure (deepest), the `argc` args, and the callee name (a `String`) on top;
+/// faults `unresolved reference: name` when the value is not a closure.
+pub const GCLOSURE_CALL: u16 = 708;
+/// Builtin id for the safe-navigation method call `recv?.method(args)`. Same
+/// stack layout as [`GMETHOD`]; returns `null` without dispatching when the
+/// receiver is `null`.
+pub const GMETHOD_SAFE: u16 = 709;
+/// Builtin id for the safe-navigation property read `recv?.name`. Same stack
+/// layout as [`GPROP`]; returns `null` when the receiver is `null`.
+pub const GPROP_SAFE: u16 = 710;
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -61,6 +76,167 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GFFI_CALL, b_ffi_call);
     vm.register_builtin(GMETHOD, b_method);
     vm.register_builtin(GPROP, b_prop);
+    vm.register_builtin(GMAKE_CLOSURE, b_make_closure);
+    vm.register_builtin(GCLOSURE_CALL, b_closure_call);
+    vm.register_builtin(GMETHOD_SAFE, b_method_safe);
+    vm.register_builtin(GPROP_SAFE, b_prop_safe);
+    // A fresh VM install starts with an empty closure registry: handles are
+    // chunk-relative (they carry a name-pool index), so a handle from a prior
+    // run must never survive into a new chunk.
+    reset_closures();
+}
+
+thread_local! {
+    /// Registry of closure values created by [`b_make_closure`]. A `Value::Obj`
+    /// handle indexes this vector; each entry is the closure body's synthetic
+    /// name-pool index (resolved to the entry ip via `Chunk::find_sub` at call
+    /// time) and its parameter count. Cleared on each [`install`] because the
+    /// name index is only meaningful for the chunk that created it.
+    static CLOSURES: RefCell<Vec<ClosureMeta>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A registered closure: the body's name-pool index and its parameter count.
+#[derive(Clone, Copy)]
+struct ClosureMeta {
+    name_idx: u16,
+    params: u8,
+}
+
+/// Clear the closure registry (called from [`install`] on a fresh VM).
+fn reset_closures() {
+    CLOSURES.with(|c| c.borrow_mut().clear());
+}
+
+/// Look up a closure handle's metadata, if `v` is a closure value.
+fn closure_meta(v: &Value) -> Option<ClosureMeta> {
+    match v {
+        Value::Obj(id) => CLOSURES.with(|c| c.borrow().get(*id as usize).copied()),
+        _ => None,
+    }
+}
+
+/// `GMAKE_CLOSURE`: pop the parameter count and name index, register the closure,
+/// and return its `Value::Obj` handle.
+fn b_make_closure(vm: &mut VM, _argc: u8) -> Value {
+    let params = vm.stack.pop().unwrap_or(Value::Undef).to_int() as u8;
+    let name_idx = vm.stack.pop().unwrap_or(Value::Undef).to_int() as u16;
+    let id = CLOSURES.with(|c| {
+        let mut c = c.borrow_mut();
+        let id = c.len() as u32;
+        c.push(ClosureMeta { name_idx, params });
+        id
+    });
+    Value::Obj(id)
+}
+
+/// Invoke a closure `clo` with `args`, running its body through the fusevm frame
+/// ABI. Drives a nested `VM::run`: a call frame is pushed whose `return_ip` is
+/// past the end of the chunk, so the nested run halts exactly when the closure's
+/// `ReturnValue` pops that frame. The interpreter's IP is saved and restored so
+/// the enclosing dispatch loop resumes where it left off.
+fn invoke_closure(vm: &mut VM, clo: &Value, args: &[Value]) -> Result<Value, String> {
+    let meta = closure_meta(clo).ok_or_else(|| "groovyrs: value is not a closure".to_string())?;
+    let entry = vm
+        .chunk
+        .find_sub(meta.name_idx)
+        .ok_or_else(|| "groovyrs: closure body not found".to_string())?;
+    // Push exactly the parameter count the body's prologue expects: pad missing
+    // arguments with `null`, drop extras.
+    let want = meta.params as usize;
+    let stack_base = vm.stack.len();
+    for i in 0..want {
+        vm.stack.push(args.get(i).cloned().unwrap_or(Value::Undef));
+    }
+    let return_ip = vm.chunk.ops.len();
+    vm.frames.push(Frame {
+        return_ip,
+        stack_base,
+        slots: Vec::new(),
+    });
+    let saved_ip = vm.ip;
+    vm.ip = entry;
+    let result = vm.run();
+    vm.ip = saved_ip;
+    match result {
+        VMResult::Ok(v) => Ok(v),
+        VMResult::Halted => Ok(vm.stack.pop().unwrap_or(Value::Undef)),
+        VMResult::Error(e) => Err(e),
+    }
+}
+
+/// `GCLOSURE_CALL`: invoke a closure directly (`f(args)`). Stack: the closure
+/// (deepest), `argc` args, then the callee name on top.
+fn b_closure_call(vm: &mut VM, argc: u8) -> Value {
+    let name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let n = argc as usize;
+    let mut args = Vec::with_capacity(n);
+    for _ in 0..n {
+        args.push(vm.stack.pop().unwrap_or(Value::Undef));
+    }
+    args.reverse();
+    let clo = vm.stack.pop().unwrap_or(Value::Undef);
+    if closure_meta(&clo).is_none() {
+        // Faithful to the compile-time diagnostic the non-closure path replaced.
+        fault(vm, format!("unresolved reference: {name}"));
+        return Value::Undef;
+    }
+    match invoke_closure(vm, &clo, &args) {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    }
+}
+
+/// `GMETHOD_SAFE`: the safe-navigation method call `recv?.method(args)`. Returns
+/// `null` without dispatching when the receiver is `null`; otherwise identical to
+/// [`b_method`].
+fn b_method_safe(vm: &mut VM, argc: u8) -> Value {
+    let name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let n = argc as usize;
+    let mut args = Vec::with_capacity(n);
+    for _ in 0..n {
+        args.push(vm.stack.pop().unwrap_or(Value::Undef));
+    }
+    args.reverse();
+    let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    if matches!(recv, Value::Undef) {
+        return Value::Undef;
+    }
+    dispatch_call(vm, recv, &name, args)
+}
+
+/// `GPROP_SAFE`: the safe-navigation property read `recv?.name`. Returns `null`
+/// when the receiver is `null`; otherwise identical to [`b_prop`].
+fn b_prop_safe(vm: &mut VM, _argc: u8) -> Value {
+    let name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    if matches!(recv, Value::Undef) {
+        return Value::Undef;
+    }
+    match dispatch_property(&recv, &name) {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    }
 }
 
 thread_local! {
@@ -141,12 +317,173 @@ fn b_method(vm: &mut VM, argc: u8) -> Value {
     }
     args.reverse();
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
-    match dispatch_method(&recv, &name, &args) {
+    dispatch_call(vm, recv, &name, args)
+}
+
+/// Dispatch `recv.method(args)`, trying the closure-consuming operations first
+/// (they re-enter the VM to run a closure body) and falling back to the pure GDK
+/// dispatch. Shared by [`b_method`] and [`b_method_safe`].
+fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
+    // `clo.call(args)` — invoke the receiver closure.
+    if method == "call" && closure_meta(&recv).is_some() {
+        return match invoke_closure(vm, &recv, &args) {
+            Ok(v) => v,
+            Err(e) => {
+                fault(vm, e);
+                Value::Undef
+            }
+        };
+    }
+    // Closure-consuming list/range iteration (`each`/`collect`/`findAll`/…).
+    if let Value::Array(items) = &recv {
+        if let Some(res) = dispatch_iteration(vm, items, method, &args) {
+            return match res {
+                Ok(v) => v,
+                Err(e) => {
+                    fault(vm, e);
+                    Value::Undef
+                }
+            };
+        }
+    }
+    // Pure GDK dispatch — no closure, no VM re-entrancy.
+    match dispatch_method(&recv, method, &args) {
         Ok(v) => v,
         Err(e) => {
             fault(vm, e);
             Value::Undef
         }
+    }
+}
+
+/// The closure-driven GDK collection methods over a list (or a materialised
+/// range): `each`, `collect`, `findAll`, `find`, `inject`, `sum`. Returns `None`
+/// when `method` is not one of these (so the caller falls back to the pure GDK
+/// dispatch), else the faithful result (or a fault message).
+fn dispatch_iteration(
+    vm: &mut VM,
+    items: &[Value],
+    method: &str,
+    args: &[Value],
+) -> Option<Result<Value, String>> {
+    match method {
+        // `list.each { it -> ... }` — run the closure for its side effects on
+        // each element; the list itself is returned.
+        "each" => {
+            let clo = args.last()?;
+            closure_meta(clo)?;
+            for it in items {
+                if let Err(e) = invoke_closure(vm, clo, std::slice::from_ref(it)) {
+                    return Some(Err(e));
+                }
+            }
+            Some(Ok(Value::array(items.to_vec())))
+        }
+        // `list.eachWithIndex { it, i -> ... }` — element and 0-based index.
+        "eachWithIndex" => {
+            let clo = args.last()?;
+            closure_meta(clo)?;
+            for (i, it) in items.iter().enumerate() {
+                let call_args = [it.clone(), Value::int(i as i64)];
+                if let Err(e) = invoke_closure(vm, clo, &call_args) {
+                    return Some(Err(e));
+                }
+            }
+            Some(Ok(Value::array(items.to_vec())))
+        }
+        // `list.collect { it -> ... }` — map to a new list of closure results.
+        "collect" => {
+            let clo = args.last()?;
+            closure_meta(clo)?;
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                match invoke_closure(vm, clo, std::slice::from_ref(it)) {
+                    Ok(v) => out.push(v),
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            Some(Ok(Value::array(out)))
+        }
+        // `list.findAll { it -> pred }` — keep the elements the closure accepts.
+        "findAll" => {
+            let clo = args.last()?;
+            closure_meta(clo)?;
+            let mut out = Vec::new();
+            for it in items {
+                match invoke_closure(vm, clo, std::slice::from_ref(it)) {
+                    Ok(v) if v.is_truthy() => out.push(it.clone()),
+                    Ok(_) => {}
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            Some(Ok(Value::array(out)))
+        }
+        // `list.find { it -> pred }` — first accepted element, else `null`.
+        "find" => {
+            let clo = args.last()?;
+            closure_meta(clo)?;
+            for it in items {
+                match invoke_closure(vm, clo, std::slice::from_ref(it)) {
+                    Ok(v) if v.is_truthy() => return Some(Ok(it.clone())),
+                    Ok(_) => {}
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            Some(Ok(Value::Undef))
+        }
+        // `list.inject(initial) { acc, val -> ... }` folds left. The one-arg
+        // form `inject { acc, val -> ... }` seeds with the first element.
+        "inject" => {
+            let (clo, mut acc, start) = match args {
+                [seed, clo] if closure_meta(clo).is_some() => (clo, seed.clone(), 0),
+                [clo] if closure_meta(clo).is_some() => {
+                    match items.first() {
+                        Some(first) => (clo, first.clone(), 1),
+                        // Groovy: `[].inject(clo)` yields null.
+                        None => return Some(Ok(Value::Undef)),
+                    }
+                }
+                _ => return None,
+            };
+            for it in &items[start..] {
+                let call_args = [acc, it.clone()];
+                match invoke_closure(vm, clo, &call_args) {
+                    Ok(v) => acc = v,
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            Some(Ok(acc))
+        }
+        // `list.sum()` adds the elements; `list.sum { it -> ... }` sums the
+        // closure results. An empty list sums to `null` (Groovy).
+        "sum" => {
+            let clo = args.last().filter(|a| closure_meta(a).is_some());
+            let mut acc: Option<Value> = None;
+            for it in items {
+                let v = match clo {
+                    Some(c) => match invoke_closure(vm, c, std::slice::from_ref(it)) {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    },
+                    None => it.clone(),
+                };
+                acc = Some(match acc {
+                    Some(a) => groovy_sum_add(&a, &v),
+                    None => v,
+                });
+            }
+            Some(Ok(acc.unwrap_or(Value::Undef)))
+        }
+        _ => None,
+    }
+}
+
+/// Add two values for `sum`: integer addition stays integral, any float operand
+/// promotes to a float (Groovy's numeric-tower `+`).
+fn groovy_sum_add(a: &Value, b: &Value) -> Value {
+    match (as_i64(a), as_i64(b)) {
+        (Some(x), Some(y)) => Value::int(x + y),
+        _ => Value::float(as_f64(a) + as_f64(b)),
     }
 }
 
@@ -203,7 +540,9 @@ fn dispatch_method(recv: &Value, method: &str, args: &[Value]) -> Result<Value, 
         (Value::Array(a), "isEmpty") => Ok(Value::bool(a.is_empty())),
         (Value::Array(a), "contains") => {
             let want = args.first().cloned().unwrap_or(Value::Undef);
-            Ok(Value::bool(a.iter().any(|v| groovy_str(v) == groovy_str(&want))))
+            Ok(Value::bool(
+                a.iter().any(|v| groovy_str(v) == groovy_str(&want)),
+            ))
         }
         (Value::Array(a), "get") => {
             let i = args.first().and_then(as_i64).unwrap_or(0);

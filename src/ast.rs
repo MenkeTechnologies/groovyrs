@@ -1,13 +1,15 @@
 //! The Groovy AST groovyrs parses and lowers to fusevm bytecode.
 //!
-//! Slice 1 targets the Groovy *script* model: a `.groovy` file is a sequence of
+//! groovyrs targets the Groovy *script* model: a `.groovy` file is a sequence of
 //! top-level statements (no enclosing class or `main` — Groovy synthesises those
-//! itself). The subset covers `def`/typed local declarations, script-binding
-//! assignments, arithmetic / comparison / logic expressions, `if`/`while`, the
+//! itself). The subset covers `def`/typed local declarations and functions,
+//! script-binding assignments, arithmetic / comparison / logic expressions,
+//! ternary / Elvis / safe-navigation, closures (`{ a, b -> … }` / implicit
+//! `{ it }`) with the closure-driven GDK, first-class ranges, `if`/`while`, the
 //! C-style and `for (x in a..b)` range loops, `break`/`continue`, and the
-//! `println`/`print` command calls. Classes, methods, closures, GStrings, and
-//! the GDK are parsed no further today (see `BUGS.md`); the AST is shaped to
-//! grow into them.
+//! `println`/`print` command calls. Classes, GStrings, and lexical upvalue
+//! capture are not modeled yet (see `BUGS.md`); the AST is shaped to grow into
+//! them.
 
 /// A parsed script: the ordered top-level statements.
 #[derive(Debug, Clone, PartialEq)]
@@ -166,20 +168,56 @@ pub enum Expr {
     /// `Op::MakeHash`.
     Map(Vec<(Expr, Expr)>),
     /// A method call on a receiver: `recv.method(args...)`. Routed through the
-    /// host GDK dispatch builtin (`crate::host::GMETHOD`).
+    /// host GDK dispatch builtin (`crate::host::GMETHOD`). `safe` is `true` for
+    /// the safe-navigation form `recv?.method(args)`, which yields `null`
+    /// (without dispatching) when the receiver is `null`.
     MethodCall {
         recv: Box<Expr>,
         method: String,
         args: Vec<Expr>,
         line: u32,
+        safe: bool,
     },
     /// A property read on a receiver: `recv.name` (e.g. `list.size`,
     /// `str.length`). Routed through the host property builtin
-    /// (`crate::host::GPROP`).
+    /// (`crate::host::GPROP`). `safe` is `true` for `recv?.name`, which yields
+    /// `null` when the receiver is `null` rather than faulting.
     Property {
         recv: Box<Expr>,
         name: String,
         line: u32,
+        safe: bool,
+    },
+    /// A closure literal `{ a, b -> body }` or the implicit-`it` form
+    /// `{ body }`. A first-class callable value: it lowers to a subroutine
+    /// region plus a runtime closure handle (`Value::Obj`), invoked through the
+    /// existing `Op::Call` frame ABI via the host closure dispatch. Non-parameter
+    /// names resolve to the enclosing script bindings (globals), so a closure
+    /// captures the script scope it was defined in.
+    Closure {
+        params: Vec<String>,
+        body: Vec<Stmt>,
+    },
+    /// A first-class integer range `start..end` (inclusive) or `start..<end`
+    /// (half-open). Materialised to a Groovy list of the enumerated integers, so
+    /// `.size()`, `.contains(x)`, `.each`, and `.collect` all apply.
+    Range {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        inclusive: bool,
+    },
+    /// The ternary conditional `cond ? then : els`. `cond` uses Groovy
+    /// truthiness (0/""/empty/null are false).
+    Ternary {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        els: Box<Expr>,
+    },
+    /// The Elvis / null-coalescing operator `lhs ?: rhs`: `lhs` when it is
+    /// Groovy-truthy, else `rhs`.
+    Elvis {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
     },
 }
 

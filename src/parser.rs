@@ -188,6 +188,12 @@ impl Parser {
                 StmtKind::Continue
             }
             Tok::LBrace => {
+                // A statement-position `{ params -> ... }` is a closure literal
+                // (e.g. the closure a closure returns), not a block — route it
+                // through the expression path.
+                if self.stmt_lbrace_is_closure() {
+                    return self.simple_statement();
+                }
                 // A bare block: flatten into an always-true `if`. Slice 1 has no
                 // lexical scopes, so inlining is behavior-preserving.
                 self.advance();
@@ -422,7 +428,10 @@ impl Parser {
         }
         let var = self.ident()?;
         self.eat(&Tok::In)?;
-        let start = self.expression()?;
+        // Parse the endpoints with `binary` (not `expression`) so the `..`/`..<`
+        // range operator is consumed here rather than folded into a `Range` node
+        // by `range_expr`.
+        let start = self.binary(0)?;
         let inclusive = match self.peek() {
             Tok::DotDot => {
                 self.advance();
@@ -439,7 +448,7 @@ impl Parser {
                 ))
             }
         };
-        let end = self.expression()?;
+        let end = self.binary(0)?;
         self.eat(&Tok::RParen)?;
         let body = self.braced_or_single()?;
 
@@ -489,8 +498,63 @@ impl Parser {
 
     // ── expressions (precedence climbing) ─────────────────────────────────
 
+    /// The full expression grammar, lowest precedence first:
+    /// `conditional` (ternary / elvis) over `range` (`a..b`) over the
+    /// precedence-climbing `binary` operators.
     fn expression(&mut self) -> Result<Expr, String> {
-        self.binary(0)
+        self.conditional()
+    }
+
+    /// The ternary `c ? t : e` and Elvis `c ?: e` operators — the lowest
+    /// expression precedence, right-associative. Both branch on Groovy
+    /// truthiness. A bare operand with no `?`/`?:` passes straight through.
+    fn conditional(&mut self) -> Result<Expr, String> {
+        let cond = self.range_expr()?;
+        match self.peek() {
+            Tok::Elvis => {
+                self.advance();
+                self.skip_newlines();
+                let rhs = self.conditional()?;
+                Ok(Expr::Elvis {
+                    lhs: Box::new(cond),
+                    rhs: Box::new(rhs),
+                })
+            }
+            Tok::Question => {
+                self.advance();
+                self.skip_newlines();
+                let then = self.conditional()?;
+                self.eat(&Tok::Colon)?;
+                self.skip_newlines();
+                let els = self.conditional()?;
+                Ok(Expr::Ternary {
+                    cond: Box::new(cond),
+                    then: Box::new(then),
+                    els: Box::new(els),
+                })
+            }
+            _ => Ok(cond),
+        }
+    }
+
+    /// A range expression `a..b` (inclusive) or `a..<b` (half-open), sitting
+    /// just above the binary operators. `a` and `b` are full binary
+    /// expressions, so `0..n-1` parses as `0..(n-1)`.
+    fn range_expr(&mut self) -> Result<Expr, String> {
+        let start = self.binary(0)?;
+        let inclusive = match self.peek() {
+            Tok::DotDot => true,
+            Tok::DotDotLt => false,
+            _ => return Ok(start),
+        };
+        self.advance();
+        self.skip_newlines();
+        let end = self.binary(0)?;
+        Ok(Expr::Range {
+            start: Box::new(start),
+            end: Box::new(end),
+            inclusive,
+        })
     }
 
     fn binary(&mut self, min_bp: u8) -> Result<Expr, String> {
@@ -547,23 +611,41 @@ impl Parser {
     /// method calls (`x.foo(args)`) and property reads (`x.size`).
     fn primary(&mut self) -> Result<Expr, String> {
         let mut e = self.atom()?;
-        while self.is(&Tok::Dot) {
+        while self.is(&Tok::Dot) || self.is(&Tok::QuestionDot) {
+            let safe = self.is(&Tok::QuestionDot);
             let line = self.line();
             self.advance();
             let member = self.ident()?;
             if self.is(&Tok::LParen) {
-                let args = self.call_args()?;
+                let mut args = self.call_args()?;
+                // A trailing closure after the parenthesised args:
+                // `list.inject(0) { acc, v -> acc + v }`.
+                if self.is(&Tok::LBrace) {
+                    args.push(self.closure_literal()?);
+                }
                 e = Expr::MethodCall {
                     recv: Box::new(e),
                     method: member,
                     args,
                     line,
+                    safe,
+                };
+            } else if self.is(&Tok::LBrace) {
+                // Paren-less trailing-closure call: `list.each { it -> ... }`.
+                let clo = self.closure_literal()?;
+                e = Expr::MethodCall {
+                    recv: Box::new(e),
+                    method: member,
+                    args: vec![clo],
+                    line,
+                    safe,
                 };
             } else {
                 e = Expr::Property {
                     recv: Box::new(e),
                     name: member,
                     line,
+                    safe,
                 };
             }
         }
@@ -605,6 +687,9 @@ impl Parser {
                 Ok(e)
             }
             Tok::LBracket => self.list_or_map(),
+            // A `{ ... }` in expression position is a closure literal (map
+            // literals use `[...]`, so there is no ambiguity here).
+            Tok::LBrace => self.closure_literal(),
             Tok::Ident(name) => {
                 if name == "println" || name == "print" {
                     return self.print_call(&name);
@@ -729,6 +814,78 @@ impl Parser {
             }
         }
         self.expression()
+    }
+
+    /// Parse a closure literal `{ [params ->] statements }`. The `{` is the
+    /// current token. With an explicit parameter list (`{ a, b -> ... }`) the
+    /// names bind the closure's arguments; without one (`{ ... }`) the closure
+    /// takes a single implicit parameter named `it`. The body is a statement
+    /// list whose last expression is the closure's return value.
+    fn closure_literal(&mut self) -> Result<Expr, String> {
+        self.eat(&Tok::LBrace)?;
+        self.skip_newlines();
+        let params = if self.has_closure_arrow() {
+            let mut params = Vec::new();
+            loop {
+                // An optional type in front of the parameter (`int a`) — a
+                // second identifier follows, so skip the type name.
+                if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Ident(_))
+                {
+                    self.advance();
+                }
+                params.push(self.ident()?);
+                if self.is(&Tok::Comma) {
+                    self.advance();
+                    self.skip_newlines();
+                    continue;
+                }
+                break;
+            }
+            self.eat(&Tok::Arrow)?;
+            self.skip_newlines();
+            params
+        } else {
+            Vec::new()
+        };
+        let body = self.block()?;
+        Ok(Expr::Closure { params, body })
+    }
+
+    /// Lookahead at statement start: is the current `{` a closure with an
+    /// explicit parameter list (`{ a, b -> ... }`) rather than a bare block? An
+    /// implicit-`it` `{ ... }` at statement position stays a block (its value
+    /// would be discarded anyway), so only the unambiguous arrow form is
+    /// re-routed to the expression path.
+    fn stmt_lbrace_is_closure(&self) -> bool {
+        if !self.is(&Tok::LBrace) {
+            return false;
+        }
+        let mut j = self.pos + 1;
+        // Skip a leading newline run inside the brace.
+        while matches!(self.toks.get(j).map(|t| &t.kind), Some(Tok::Nl)) {
+            j += 1;
+        }
+        loop {
+            match self.toks.get(j).map(|t| &t.kind) {
+                Some(Tok::Ident(_)) | Some(Tok::Comma) => j += 1,
+                Some(Tok::Arrow) => return true,
+                _ => return false,
+            }
+        }
+    }
+
+    /// Lookahead: does the closure just entered open with an explicit parameter
+    /// list? True when a run of identifiers/commas (the parameter names, with
+    /// optional type words) is followed by `->` before anything else.
+    fn has_closure_arrow(&self) -> bool {
+        let mut j = self.pos;
+        loop {
+            match self.toks.get(j).map(|t| &t.kind) {
+                Some(Tok::Ident(_)) | Some(Tok::Comma) => j += 1,
+                Some(Tok::Arrow) => return true,
+                _ => return false,
+            }
+        }
     }
 
     /// Parse a parenthesised argument list `( expr, expr, ... )` past the

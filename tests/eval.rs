@@ -203,7 +203,8 @@ fn user_function_implicit_last_expression_return() {
 fn recursion_is_frame_local() {
     // Recursion is only sound if each call frame has its own `n`; a global would
     // clobber. Factorial exercises the frame-slot ABI.
-    let (out, _) = run("def fact(n) {\n  if (n <= 1) return 1\n  return n * fact(n - 1)\n}\nprintln fact(5)");
+    let (out, _) =
+        run("def fact(n) {\n  if (n <= 1) return 1\n  return n * fact(n - 1)\n}\nprintln fact(5)");
     assert_eq!(out, "120\n");
 }
 
@@ -294,7 +295,8 @@ fn string_gdk_methods() {
 
 #[test]
 fn size_method_on_string_list_and_map() {
-    let (out, _) = run("println \"abc\".size()\nprintln [1, 2, 3, 4].size()\nprintln([k: 1].size())");
+    let (out, _) =
+        run("println \"abc\".size()\nprintln [1, 2, 3, 4].size()\nprintln([k: 1].size())");
     assert_eq!(out, "3\n4\n1\n");
 }
 
@@ -311,10 +313,135 @@ fn unknown_method_is_an_error() {
     assert!(!ok, "unknown method should fault");
 }
 
+// ── Closures ──────────────────────────────────────────────────────────────
+
 #[test]
-fn closures_are_not_supported_yet() {
-    // The canonical `[1,2,3].collect { it * 2 }` needs closures (a later wave);
-    // it must fail to parse rather than silently mis-run.
-    let (_out, ok) = run("[1, 2, 3].collect { it * 2 }");
-    assert!(!ok, "closure blocks are not implemented");
+fn closure_implicit_it_direct_call() {
+    // The canonical unlock: a single-implicit-parameter closure, called directly.
+    let (out, ok) = run("def f = { it * 2 }\nprintln f(21)");
+    assert!(ok);
+    assert_eq!(out, "42\n");
+}
+
+#[test]
+fn closure_two_params_direct_call() {
+    let (out, _) = run("def add = { a, b -> a + b }\nprintln add(2, 3)");
+    assert_eq!(out, "5\n");
+}
+
+#[test]
+fn closure_dot_call_method() {
+    // `.call(args)` invokes a closure value, same as calling it directly.
+    let (out, _) = run("def inc = { it + 1 }\nprintln inc.call(41)");
+    assert_eq!(out, "42\n");
+}
+
+#[test]
+fn closure_captures_script_binding_by_reference() {
+    // A closure sees later mutations of a captured script binding (capture is by
+    // reference, not by value at creation time).
+    let (out, _) = run("def base = 10\ndef f = { it + base }\nbase = 100\nprintln f(5)");
+    assert_eq!(out, "105\n");
+}
+
+// ── GDK iteration with closures ─────────────────────────────────────────────
+
+#[test]
+fn collect_doubles_each_element() {
+    // The canonical `collect` line.
+    let (out, ok) = run("println([1, 2, 3].collect { it * 2 })");
+    assert!(ok);
+    assert_eq!(out, "[2, 4, 6]\n");
+}
+
+#[test]
+fn find_all_keeps_matching_elements() {
+    let (out, _) = run("println([1, 2, 3, 4].findAll { it % 2 == 0 })");
+    assert_eq!(out, "[2, 4]\n");
+}
+
+#[test]
+fn find_returns_first_match_else_null() {
+    let (out, _) = run("println([1, 2, 3, 4].find { it > 2 })\nprintln([1, 2].find { it > 9 })");
+    assert_eq!(out, "3\nnull\n");
+}
+
+#[test]
+fn each_runs_closure_per_element() {
+    let (out, _) = run("[1, 2, 3].each { println it * 10 }");
+    assert_eq!(out, "10\n20\n30\n");
+}
+
+#[test]
+fn inject_folds_with_initial_and_seedless_forms() {
+    // Two-arg (explicit initial) and one-arg (seed = first element) forms.
+    let (out, _) = run("println([1, 2, 3, 4].inject(0) { acc, v -> acc + v })\n\
+         println([1, 2, 3, 4].inject { acc, v -> acc + v })");
+    assert_eq!(out, "10\n10\n");
+}
+
+#[test]
+fn sum_adds_list_elements() {
+    let (out, _) = run("println([1, 2, 3, 4].sum())");
+    assert_eq!(out, "10\n");
+}
+
+#[test]
+fn collect_then_sum_chains() {
+    // A closure-driven method feeding another method on its result.
+    let (out, _) = run("println([1, 2, 3].collect { it * 2 }.sum())");
+    assert_eq!(out, "12\n");
+}
+
+// ── First-class ranges ──────────────────────────────────────────────────────
+
+#[test]
+fn range_size_and_contains() {
+    let (out, _) =
+        run("def r = 0..5\nprintln r.size()\nprintln r.contains(3)\nprintln r.contains(9)");
+    assert_eq!(out, "6\ntrue\nfalse\n");
+}
+
+#[test]
+fn half_open_range_excludes_upper_bound() {
+    let (out, _) = run("def r = 0..<5\nprintln r.size()\nprintln r.contains(5)");
+    assert_eq!(out, "5\nfalse\n");
+}
+
+#[test]
+fn range_each_and_collect() {
+    let (out, _) = run("(0..3).each { print it }\nprintln()\nprintln((1..3).collect { it * it })");
+    assert_eq!(out, "0123\n[1, 4, 9]\n");
+}
+
+// ── Ternary, Elvis, safe navigation ─────────────────────────────────────────
+
+#[test]
+fn ternary_selects_branch_on_truthiness() {
+    let (out, _) = run("println(3 > 2 ? \"yes\" : \"no\")\nprintln(1 > 2 ? \"yes\" : \"no\")");
+    assert_eq!(out, "yes\nno\n");
+}
+
+#[test]
+fn elvis_coalesces_falsy_left() {
+    // Truthy left kept; null and 0 (Groovy-falsy) fall through to the right.
+    let (out, _) = run("def x = \"set\"\nprintln(x ?: \"default\")\n\
+         def y = null\nprintln(y ?: \"default\")\n\
+         println(0 ?: \"fallback\")");
+    assert_eq!(out, "set\ndefault\nfallback\n");
+}
+
+#[test]
+fn safe_navigation_short_circuits_on_null() {
+    // `?.` yields null (no dispatch) on a null receiver, dispatches otherwise.
+    let (out, _) = run("def x = null\nprintln(x?.toUpperCase())\n\
+         def s = \"hi\"\nprintln(s?.toUpperCase())");
+    assert_eq!(out, "null\nHI\n");
+}
+
+#[test]
+fn unresolved_call_still_faults() {
+    // A call through an undefined name (not a closure) remains an error.
+    let (_out, ok) = run("println foo(1)");
+    assert!(!ok, "calling an undefined non-closure must fault");
 }

@@ -131,6 +131,16 @@ Implemented and checked against Apache Groovy:
 - **Method / property dispatch** — `s.length()`, `list.size()`,
   `"hi".toUpperCase()`, `map.k`, chains on literals (`[1,2,3].size()`), over a
   faithful GDK subset routed through a host dispatch. An unknown member faults.
+- **Closures** — `{ a, b -> … }` and the implicit `{ it }` form as first-class
+  callable values, invoked with `.call(args)` or directly (`def f = { it * 2 };
+  f(21)`). A closure captures its enclosing script scope.
+- **Closure-driven GDK** — `each`, `eachWithIndex`, `collect`, `findAll`,
+  `find`, `inject`, `sum` over lists and ranges (`[1,2,3].collect { it * 2 }` →
+  `[2, 4, 6]`).
+- **Ranges** — first-class `0..5` / `0..<5` values with `.size()`,
+  `.contains(x)`, `.each`, `.collect`.
+- **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, and
+  `a?.member` / `a?.method()`.
 - **Control flow** — `if` / `else if` / `else`, `while`, the C-style
   `for (init; cond; update)`, the `for (x in a..b)` / `for (x in a..<b)` range
   loop, `break`, `continue`, `return`.
@@ -138,8 +148,8 @@ Implemented and checked against Apache Groovy:
   `println(x)` and paren-less `println x` command forms.
 - **Comments** — `//` line, `/* … */` block.
 
-See [`BUGS.md`](BUGS.md) for the honest known-gaps list (closures, GStrings,
-multi-entry map ordering, the closure-based GDK).
+See [`BUGS.md`](BUGS.md) for the honest known-gaps list (classes, GStrings,
+multi-entry map ordering, lexical upvalue capture).
 
 ---
 
@@ -204,18 +214,22 @@ Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm
 ## [0x06] STATUS & ROADMAP
 
 Groovy scripts — top-level statements, `def`/typed locals, user-defined
-functions (recursion over the native `Op::Call` frame ABI), arithmetic /
-comparison / logic, `BigDecimal`-style division, `if` / `while` / `for` / range
-`for-in` / `break` / `continue` / `return`, list/map literals, method/property
-dispatch over a GDK subset, `println`/`print`, string concatenation — verified
-against Apache Groovy by the frozen example replay and the differential fuzzer.
-The editor tooling is shipped: a bytecode disassembler (`--disasm`), a Language
-Server (`--lsp`), and a Debug Adapter (`--dap`).
+functions (recursion over the native `Op::Call` frame ABI), closures
+(`{ a, b -> … }` / implicit `{ it }`, `.call` and direct invocation) with the
+closure-driven GDK (`each` / `collect` / `findAll` / `find` / `inject` / `sum`),
+first-class ranges (`0..5` / `0..<5`), arithmetic / comparison / logic,
+`BigDecimal`-style division, ternary / Elvis / safe-navigation, `if` / `while` /
+`for` / range `for-in` / `break` / `continue` / `return`, list/map literals,
+method/property dispatch over a GDK subset, `println`/`print`, string
+concatenation — verified against Apache Groovy by the frozen example replay and
+the differential fuzzer. The editor tooling is shipped: a bytecode disassembler
+(`--disasm`), a Language Server (`--lsp`), and a Debug Adapter (`--dap`).
 
 Next waves, in priority order:
 
-1. **Closures** — `{ it -> … }` blocks, unblocking the closure-based GDK
-   (`each` / `collect` / `findAll`, e.g. `[1,2,3].collect { it * 2 }`).
+1. **Lexical upvalue capture** — a closure defined inside a function or another
+   closure capturing that enclosing frame's locals (today closures capture the
+   script scope), unblocking curried `{ x -> { y -> x + y } }`.
 2. **Reference types & interpolation** — a broader `String`/list/map GDK on a
    host heap with insertion-ordered maps; GString `"$name"` / `"${expr}"`.
 3. **Standard library surface** — `Math`, common `java.util`/GDK collection

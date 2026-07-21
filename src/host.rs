@@ -19,7 +19,7 @@
 //!    concatenates/appends, a map merges, and a `String` (or other scalar)
 //!    concatenates. fusevm runs *strict* once a numeric hook is installed,
 //!    delegating any operation with a non-numeric operand to [`numeric_hook`],
-//!    where `+` routes through [`groovy_add`].
+//!    where `+` routes through `groovy_add`.
 
 use fusevm::{Frame, NumOp, VMResult, Value, VM};
 use std::cell::{Cell, RefCell};
@@ -42,14 +42,14 @@ pub const GFFI_COMPILE: u16 = 703;
 pub const GFFI_CALL: u16 = 704;
 /// Builtin id for a Groovy method call `recv.method(args...)`. The stack holds
 /// the receiver (deepest), the `argc` args, and the method name (a `String`) on
-/// top. Dispatches a faithful GDK subset (see [`dispatch_method`]).
+/// top. Dispatches a faithful GDK subset (see `dispatch_method`).
 pub const GMETHOD: u16 = 705;
 /// Builtin id for a Groovy property read `recv.name` (e.g. `list.size`,
 /// `str.length`). The stack holds the receiver then the property name on top.
 pub const GPROP: u16 = 706;
 /// Builtin id for building a closure value. The stack holds the closure's
 /// synthetic name-pool index and its parameter count (two integers); the builtin
-/// registers them and returns a `Value::Obj` handle (see [`invoke_closure`]).
+/// registers them and returns a `Value::Obj` handle (see `invoke_closure`).
 pub const GMAKE_CLOSURE: u16 = 707;
 /// Builtin id for invoking a closure directly, `f(args)`. The stack holds the
 /// closure (deepest), the `argc` args, and the callee name (a `String`) on top;
@@ -84,20 +84,20 @@ pub const GSETPROP: u16 = 713;
 pub const GINDEX: u16 = 714;
 /// Builtin id for Groovy `<=>` (three-way compare). Pops two operands; on a
 /// user-class instance left operand it dispatches `compareTo` (re-entering the
-/// VM), otherwise it yields the primitive sign (`-1`/`0`/`1`). See [`b_cmp`].
+/// VM), otherwise it yields the primitive sign (`-1`/`0`/`1`). See `b_cmp`.
 pub const GCMP: u16 = 716;
 /// Builtin id for a `super.method(args)` call. The stack holds `this` (deepest),
 /// the `argc` args, the method name (`String`), and the superclass name
 /// (`String`) on top. Resolves the method from the superclass upward (skipping
-/// the current class's override) and invokes it on `this`. See [`b_super_method`].
+/// the current class's override) and invokes it on `this`. See `b_super_method`.
 pub const GSUPER_METHOD: u16 = 717;
 /// Builtin id for a `super(args)` constructor call. The stack holds `this`
 /// (deepest), the `argc` args, and the superclass name (`String`) on top. Runs
-/// the superclass's arity-matched constructor on `this`. See [`b_super_ctor`].
+/// the superclass's arity-matched constructor on `this`. See `b_super_ctor`.
 pub const GSUPER_CTOR: u16 = 718;
 /// Builtin id for `value instanceof Class`. The stack holds the value (deepest)
 /// then the class name (`String`) on top. Returns a `Boolean`. See
-/// [`b_instanceof`].
+/// `b_instanceof`.
 pub const GINSTANCEOF: u16 = 719;
 /// Builtin id for building a Groovy map literal `[k: v, …]`. The stack holds the
 /// interleaved key/value pairs (key pushed first) with the entry count on top;
@@ -164,7 +164,7 @@ thread_local! {
     /// fusevm calls the [`NumericHook`](fusevm::NumericHook) with `(op, &a, &b)`
     /// and *no* VM handle, so operator overloading — which must re-enter the VM to
     /// run a user `plus`/`minus`/`compareTo`/… method — has nothing to dispatch
-    /// through. groovyrs publishes the running VM here around [`crate::run_chunk`]'s
+    /// through. groovyrs publishes the running VM here around `crate::run_chunk`'s
     /// `VM::run` so [`numeric_hook`] can reach it. The pointer is the very VM that
     /// is executing (fusevm calls the hook synchronously from inside its dispatch
     /// loop), so it is always live while the hook runs; builtins already receive
@@ -173,13 +173,13 @@ thread_local! {
 }
 
 /// Publish the running VM so the numeric hook can re-enter it for operator
-/// overloading (see [`VM_PTR`]). Called around `VM::run` in [`crate::run_chunk`]
+/// overloading (see `VM_PTR`). Called around `VM::run` in `crate::run_chunk`
 /// and the debug runner; paired with [`clear_vm_ptr`].
 pub fn set_vm_ptr(vm: &mut VM) {
     VM_PTR.with(|p| p.set(vm as *mut VM));
 }
 
-/// Clear the published VM pointer once a run returns (see [`VM_PTR`]).
+/// Clear the published VM pointer once a run returns (see `VM_PTR`).
 pub fn clear_vm_ptr() {
     VM_PTR.with(|p| p.set(std::ptr::null_mut()));
 }
@@ -1139,7 +1139,7 @@ fn b_ffi_call(vm: &mut VM, argc: u8) -> Value {
 
 /// Groovy method-call builtin: the stack holds the receiver (deepest), `argc`
 /// args, and the method name (a `String`) on top. Dispatches a faithful GDK
-/// subset via [`dispatch_method`].
+/// subset via `dispatch_method`.
 fn b_method(vm: &mut VM, argc: u8) -> Value {
     let name = vm
         .stack

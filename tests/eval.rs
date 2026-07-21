@@ -186,8 +186,135 @@ fn single_quoted_string() {
 }
 
 #[test]
-fn unsupported_method_call_is_an_error() {
-    // Method/property access is a later wave; it must error, not mis-run.
-    let (_out, ok) = run("def s = \"hi\"\nprintln s.length()");
-    assert!(!ok, "method access should fail to run in slice 1");
+fn user_function_with_params_and_explicit_return() {
+    let (out, ok) = run("def add(a, b) { return a + b }\nprintln add(2, 3)");
+    assert!(ok);
+    assert_eq!(out, "5\n");
+}
+
+#[test]
+fn user_function_implicit_last_expression_return() {
+    // Groovy returns the value of the last evaluated expression with no `return`.
+    let (out, _) = run("def sq(x) { x * x }\nprintln sq(7)");
+    assert_eq!(out, "49\n");
+}
+
+#[test]
+fn recursion_is_frame_local() {
+    // Recursion is only sound if each call frame has its own `n`; a global would
+    // clobber. Factorial exercises the frame-slot ABI.
+    let (out, _) = run("def fact(n) {\n  if (n <= 1) return 1\n  return n * fact(n - 1)\n}\nprintln fact(5)");
+    assert_eq!(out, "120\n");
+}
+
+#[test]
+fn mutual_recursion_resolves_forward_references() {
+    let src = "def isEven(n) { if (n == 0) return true; return isOdd(n - 1) }\n\
+               def isOdd(n) { if (n == 0) return false; return isEven(n - 1) }\n\
+               println isEven(10)";
+    let (out, _) = run(src);
+    assert_eq!(out, "true\n");
+}
+
+#[test]
+fn function_locals_do_not_leak_across_calls() {
+    // Each invocation's `total` is a fresh frame slot; a shared global would sum
+    // across the two calls.
+    let src = "def sumTo(n) {\n  def total = 0\n  for (i in 1..n) total += i\n  return total\n}\n\
+               println sumTo(3)\nprintln sumTo(3)";
+    let (out, _) = run(src);
+    assert_eq!(out, "6\n6\n");
+}
+
+#[test]
+fn function_reads_script_binding() {
+    // A bare (undeclared) assignment is a script binding, visible inside methods.
+    let (out, _) = run("x = 10\ndef f() { return x + 5 }\nprintln f()");
+    assert_eq!(out, "15\n");
+}
+
+#[test]
+fn postfix_increment_in_expression_position() {
+    // `i++` yields the value before the update.
+    let (out, _) = run("int i = 5\nprintln i++\nprintln i");
+    assert_eq!(out, "5\n6\n");
+}
+
+#[test]
+fn prefix_increment_in_expression_position() {
+    // `++i` yields the value after the update.
+    let (out, _) = run("int i = 5\nprintln ++i\nprintln i");
+    assert_eq!(out, "6\n6\n");
+}
+
+#[test]
+fn list_literal_prints_groovy_style() {
+    let (out, ok) = run("println([1, 2, 3])");
+    assert!(ok);
+    assert_eq!(out, "[1, 2, 3]\n");
+}
+
+#[test]
+fn empty_list_and_string_elements_unquoted() {
+    let (out, _) = run("println([])\nprintln([\"a\", \"b\"])");
+    assert_eq!(out, "[]\n[a, b]\n");
+}
+
+#[test]
+fn nested_list_literal() {
+    let (out, _) = run("println([[1, 2], [3, 4]])");
+    assert_eq!(out, "[[1, 2], [3, 4]]\n");
+}
+
+#[test]
+fn single_entry_map_literal() {
+    // A single entry avoids HashMap ordering nondeterminism.
+    let (out, _) = run("println([name: \"bob\"])");
+    assert_eq!(out, "[name:bob]\n");
+}
+
+#[test]
+fn empty_map_literal() {
+    let (out, _) = run("println([:])");
+    assert_eq!(out, "[:]\n");
+}
+
+#[test]
+fn map_property_read() {
+    let (out, _) = run("def m = [x: 5]\nprintln m.x");
+    assert_eq!(out, "5\n");
+}
+
+#[test]
+fn string_gdk_methods() {
+    let src = "def s = \"Hello\"\nprintln s.length()\nprintln s.toUpperCase()\nprintln s.reverse()";
+    let (out, _) = run(src);
+    assert_eq!(out, "5\nHELLO\nolleH\n");
+}
+
+#[test]
+fn size_method_on_string_list_and_map() {
+    let (out, _) = run("println \"abc\".size()\nprintln [1, 2, 3, 4].size()\nprintln([k: 1].size())");
+    assert_eq!(out, "3\n4\n1\n");
+}
+
+#[test]
+fn list_method_chain_on_literal() {
+    let (out, _) = run("println [10, 20, 30].contains(20)");
+    assert_eq!(out, "true\n");
+}
+
+#[test]
+fn unknown_method_is_an_error() {
+    // A dispatch miss must fault, not mis-run.
+    let (_out, ok) = run("def s = \"hi\"\nprintln s.frobnicate()");
+    assert!(!ok, "unknown method should fault");
+}
+
+#[test]
+fn closures_are_not_supported_yet() {
+    // The canonical `[1,2,3].collect { it * 2 }` needs closures (a later wave);
+    // it must fail to parse rather than silently mis-run.
+    let (_out, ok) = run("[1, 2, 3].collect { it * 2 }");
+    assert!(!ok, "closure blocks are not implemented");
 }

@@ -79,6 +79,19 @@ pub enum StmtKind {
     Break,
     /// `continue`
     Continue,
+    /// `return` / `return <expr>`. Inside a user function the value is carried
+    /// out through `Op::ReturnValue` (a bare `return` returns `null`); at script
+    /// top level the value becomes the script's result and execution ends.
+    Return { value: Option<Expr> },
+    /// A user-defined function: `def name(a, b) { .. }` (or a typed
+    /// `Type name(..) { .. }`). Lowered to a fusevm subroutine chunk region with
+    /// the call-frame ABI; parameters and locals live in frame slots so recursion
+    /// is sound.
+    Function {
+        name: String,
+        params: Vec<String>,
+        body: Vec<Stmt>,
+    },
 }
 
 /// Compound-assignment operator. `Assign` is a plain `=`.
@@ -121,9 +134,16 @@ pub enum Expr {
         newline: bool,
         arg: Option<Box<Expr>>,
     },
-    /// Post-increment / post-decrement of a variable (`i++`, `i--`), evaluated
-    /// as a statement today. The bool is `true` for `++`.
+    /// Post-increment / post-decrement of a variable (`i++`, `i--`). As an
+    /// expression it evaluates to the value *before* the update; as a statement
+    /// the result is discarded. The bool is `true` for `++`.
     PostIncDec {
+        name: String,
+        inc: bool,
+    },
+    /// Pre-increment / pre-decrement of a variable (`++i`, `--i`). Evaluates to
+    /// the value *after* the update. The bool is `true` for `++`.
+    PreIncDec {
         name: String,
         inc: bool,
     },
@@ -136,6 +156,29 @@ pub enum Expr {
     Call {
         name: String,
         args: Vec<Expr>,
+        line: u32,
+    },
+    /// A list literal `[a, b, c]` (or `[]`). Lowered to `Op::MakeArray`.
+    List(Vec<Expr>),
+    /// A map literal `[k: v, ...]` (or the empty map `[:]`). Each key is an
+    /// expression — a bare identifier key is a string constant (Groovy treats
+    /// `[a: 1]` as key `"a"`; use `[(expr): v]` for a computed key). Lowered to
+    /// `Op::MakeHash`.
+    Map(Vec<(Expr, Expr)>),
+    /// A method call on a receiver: `recv.method(args...)`. Routed through the
+    /// host GDK dispatch builtin (`crate::host::GMETHOD`).
+    MethodCall {
+        recv: Box<Expr>,
+        method: String,
+        args: Vec<Expr>,
+        line: u32,
+    },
+    /// A property read on a receiver: `recv.name` (e.g. `list.size`,
+    /// `str.length`). Routed through the host property builtin
+    /// (`crate::host::GPROP`).
+    Property {
+        recv: Box<Expr>,
+        name: String,
         line: u32,
     },
 }

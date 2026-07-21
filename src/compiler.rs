@@ -13,9 +13,21 @@
 
 use crate::ast::*;
 use fusevm::{Chunk, ChunkBuilder, Op, Value};
+use std::collections::{HashMap, HashSet};
 
 /// The desugar target a `rust { ... }` block lowers to (see [`crate::rust_ffi`]).
 const RUST_COMPILE: &str = "__rust_compile";
+
+/// Lexical state while lowering a user-function body: the parameter/local names
+/// bound to frame slots. Inside a function every declared name (parameters and
+/// `def`/typed locals) addresses a frame-local slot via `GetSlot`/`SetSlot`, so
+/// recursion is sound (each call frame has its own slots). A name not bound here
+/// falls back to a global (`GetVar`/`SetVar`) — the script binding, matching
+/// Groovy's method-vs-binding scoping.
+struct FnScope {
+    vars: HashMap<String, u16>,
+    next_slot: u16,
+}
 
 /// One enclosing loop's backpatch targets.
 struct Loop {
@@ -43,6 +55,13 @@ struct Compiler {
     /// runtime FFI dispatch instead of a compile error, so non-FFI programs keep
     /// their exact unresolved-reference compile-time diagnostic.
     has_ffi: bool,
+    /// Names of the program's user-defined functions, collected up front so a
+    /// call can resolve to a forward-declared function (Groovy lets a script call
+    /// a function defined later in the file).
+    fn_names: HashSet<String>,
+    /// The active function scope while lowering a function body; `None` at script
+    /// top level (where names are globals).
+    scope: Option<FnScope>,
 }
 
 /// Compile a parsed [`Program`]'s body to a runnable fusevm chunk.
@@ -58,6 +77,13 @@ pub fn compile_debug(prog: &Program) -> Result<Chunk, String> {
 
 fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     let has_ffi = body_has_ffi(&prog.body);
+    // Collect user-function names up front so calls can resolve forward references.
+    let mut fn_names = HashSet::new();
+    for stmt in &prog.body {
+        if let StmtKind::Function { name, .. } = &stmt.kind {
+            fn_names.insert(name.clone());
+        }
+    }
     let mut c = Compiler {
         b: ChunkBuilder::new(),
         loops: Vec::new(),
@@ -65,12 +91,28 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         cur_line: 0,
         debug,
         has_ffi,
+        fn_names,
+        scope: None,
     };
+    // Emit the script body (function definitions are hoisted out and emitted as
+    // subroutine regions below).
     for stmt in &prog.body {
+        if matches!(stmt.kind, StmtKind::Function { .. }) {
+            continue;
+        }
         c.stmt(stmt)?;
     }
-    // Patch any script-level `break`/`return` to the final position.
+    // Jump past the function bodies so top-level fall-through halts instead of
+    // running into a function body (which is only reachable via `Op::Call`).
+    let skip = c.b.emit(Op::Jump(0), 0);
+    for stmt in &prog.body {
+        if let StmtKind::Function { name, params, body } = &stmt.kind {
+            c.function(stmt.line, name, params, body)?;
+        }
+    }
     let end = c.b.current_pos();
+    c.b.patch_jump(skip, end);
+    // Patch any script-level `break`/`return` to the final position.
     let exit_ops = std::mem::take(&mut c.exit_ops);
     for op in exit_ops {
         c.b.patch_jump(op, end);
@@ -79,6 +121,116 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
 }
 
 impl Compiler {
+    /// The op that reads `name`: a frame slot inside a function body, else a
+    /// global (the script binding).
+    fn load_op_for(&mut self, name: &str) -> Op {
+        match self.scope.as_ref().and_then(|s| s.vars.get(name).copied()) {
+            Some(slot) => Op::GetSlot(slot),
+            None => Op::GetVar(self.b.add_name(name)),
+        }
+    }
+
+    /// The op that writes `name` for an *assignment*: a known local's slot, else
+    /// a global. Unlike a declaration this never introduces a new slot — an
+    /// assignment to an undeclared name is a script binding (global).
+    fn store_op_for(&mut self, name: &str) -> Op {
+        match self.scope.as_ref().and_then(|s| s.vars.get(name).copied()) {
+            Some(slot) => Op::SetSlot(slot),
+            None => Op::SetVar(self.b.add_name(name)),
+        }
+    }
+
+    /// Register a fresh frame slot for a local `name` inside a function (reusing
+    /// an existing mapping if the name was already declared). Returns the slot, or
+    /// `None` at script top level (where a declaration is a global).
+    fn declare_slot(&mut self, name: &str) -> Option<u16> {
+        let scope = self.scope.as_mut()?;
+        if let Some(&s) = scope.vars.get(name) {
+            return Some(s);
+        }
+        let s = scope.next_slot;
+        scope.next_slot += 1;
+        scope.vars.insert(name.to_string(), s);
+        Some(s)
+    }
+
+    /// The op that writes `name` for a *declaration* (`def`/typed local): a newly
+    /// allocated frame slot inside a function, else a global.
+    fn store_op_for_decl(&mut self, name: &str) -> Op {
+        match self.declare_slot(name) {
+            Some(slot) => Op::SetSlot(slot),
+            None => Op::SetVar(self.b.add_name(name)),
+        }
+    }
+
+    /// Lower a user function into a subroutine region: register its entry, bind
+    /// its parameters from the value stack into frame slots, lower the body with
+    /// an implicit last-expression return, and end with a `null` fall-through
+    /// return. See the `Op::Call` frame ABI in fusevm.
+    fn function(
+        &mut self,
+        line: u32,
+        name: &str,
+        params: &[String],
+        body: &[Stmt],
+    ) -> Result<(), String> {
+        let entry = self.b.current_pos();
+        let nidx = self.b.add_name(name);
+        self.b.add_sub_entry(nidx, entry);
+
+        let mut vars = HashMap::new();
+        for (i, p) in params.iter().enumerate() {
+            vars.insert(p.clone(), i as u16);
+        }
+        let prev = self.scope.replace(FnScope {
+            vars,
+            next_slot: params.len() as u16,
+        });
+        self.cur_line = line;
+
+        // Prologue: the caller pushed args left-to-right (param0 deepest,
+        // paramN-1 on top). Pop them top-down into their slots.
+        for i in (0..params.len()).rev() {
+            self.b.emit(Op::SetSlot(i as u16), line);
+        }
+
+        self.fn_body(body)?;
+
+        // Fall-through: a function that does not hit an explicit `return` (or
+        // whose last statement is not a value expression) returns `null`.
+        self.b.emit(Op::LoadUndef, self.cur_line);
+        self.b.emit(Op::ReturnValue, self.cur_line);
+
+        self.scope = prev;
+        Ok(())
+    }
+
+    /// Lower a function body. Groovy returns the value of the last evaluated
+    /// statement; when that statement is a bare value expression it becomes the
+    /// return value (`Op::ReturnValue`). Other trailing statements fall through to
+    /// the `null` return emitted by [`Compiler::function`]; use an explicit
+    /// `return` to carry a value out of a control-flow-terminated body.
+    fn fn_body(&mut self, body: &[Stmt]) -> Result<(), String> {
+        let Some((last, init)) = body.split_last() else {
+            return Ok(());
+        };
+        for s in init {
+            self.stmt(s)?;
+        }
+        match &last.kind {
+            // A value expression as the final statement is the implicit return.
+            // `println`/`print` are void, so they fall through to the null return.
+            StmtKind::Expr(Expr::Println { .. }) => self.stmt(last)?,
+            StmtKind::Expr(e) => {
+                self.cur_line = last.line;
+                self.expr(e)?;
+                self.b.emit(Op::ReturnValue, last.line);
+            }
+            _ => self.stmt(last)?,
+        }
+        Ok(())
+    }
+
     fn stmt(&mut self, s: &Stmt) -> Result<(), String> {
         self.cur_line = s.line;
         // In debug mode, a `DBG_LINE` marker precedes each statement so the
@@ -93,34 +245,40 @@ impl Compiler {
             StmtKind::Local { name, init, .. } => {
                 if let Some(e) = init {
                     self.expr(e)?;
-                    let idx = self.b.add_name(name);
-                    self.b.emit(Op::SetVar(idx), self.cur_line);
+                    let store = self.store_op_for_decl(name);
+                    self.b.emit(store, self.cur_line);
+                } else {
+                    // An uninitialized local stays unbound (Groovy defaults it to
+                    // `null`; a read before assignment yields `null`). Inside a
+                    // function still register the slot so later reads/writes of the
+                    // name resolve to the local, not a same-named global.
+                    self.declare_slot(name);
                 }
-                // An uninitialized local stays unbound (Groovy defaults it to
-                // `null`; a read before assignment yields `null`).
                 Ok(())
             }
             StmtKind::Assign { name, op, value } => {
-                let idx = self.b.add_name(name);
                 match op {
                     AssignOp::Assign => {
                         self.expr(value)?;
                     }
                     AssignOp::Div => {
                         // `x /= e` → x = x / e, through the Groovy division builtin.
-                        self.b.emit(Op::GetVar(idx), self.cur_line);
+                        let get = self.load_op_for(name);
+                        self.b.emit(get, self.cur_line);
                         self.expr(value)?;
                         self.b
                             .emit(Op::CallBuiltin(crate::host::GDIV, 2), self.cur_line);
                     }
                     _ => {
                         // `x <op>= e` → x = x <op> e
-                        self.b.emit(Op::GetVar(idx), self.cur_line);
+                        let get = self.load_op_for(name);
+                        self.b.emit(get, self.cur_line);
                         self.expr(value)?;
                         self.b.emit(compound_op(*op), self.cur_line);
                     }
                 }
-                self.b.emit(Op::SetVar(idx), self.cur_line);
+                let store = self.store_op_for(name);
+                self.b.emit(store, self.cur_line);
                 Ok(())
             }
             StmtKind::Expr(Expr::Println { newline, arg }) => {
@@ -130,8 +288,11 @@ impl Compiler {
                 self.b.emit(Op::Pop, self.cur_line);
                 Ok(())
             }
-            StmtKind::Expr(Expr::PostIncDec { name, inc }) => {
-                self.post_inc_dec(name, *inc);
+            StmtKind::Expr(Expr::PostIncDec { name, inc })
+            | StmtKind::Expr(Expr::PreIncDec { name, inc }) => {
+                // In statement position pre and post are identical: the result is
+                // discarded, so only the in-place update matters.
+                self.inc_dec_update(name, *inc);
                 Ok(())
             }
             StmtKind::Expr(e) => {
@@ -164,6 +325,30 @@ impl Compiler {
                     .push(op);
                 Ok(())
             }
+            StmtKind::Return { value } => {
+                if self.scope.is_some() {
+                    // In a function: carry the value out (a bare `return` → null).
+                    match value {
+                        Some(e) => self.expr(e)?,
+                        None => {
+                            self.b.emit(Op::LoadUndef, self.cur_line);
+                        }
+                    }
+                    self.b.emit(Op::ReturnValue, self.cur_line);
+                } else {
+                    // Top-level: the value (if any) becomes the script result;
+                    // end the script by jumping past the remaining statements.
+                    if let Some(e) = value {
+                        self.expr(e)?;
+                    }
+                    let op = self.b.emit(Op::Jump(0), self.cur_line);
+                    self.exit_ops.push(op);
+                }
+                Ok(())
+            }
+            // Function definitions are hoisted and emitted as subroutine regions
+            // by `compile_with`; they produce no code in statement position.
+            StmtKind::Function { .. } => Ok(()),
         }
     }
 
@@ -262,13 +447,17 @@ impl Compiler {
         Ok(())
     }
 
-    fn post_inc_dec(&mut self, name: &str, inc: bool) {
-        let idx = self.b.add_name(name);
-        self.b.emit(Op::GetVar(idx), self.cur_line);
+    /// Emit the in-place update `name = name ± 1` (leaving nothing on the stack).
+    /// Used by both `++`/`--` in statement position and as the update step of the
+    /// value-position pre/post forms.
+    fn inc_dec_update(&mut self, name: &str, inc: bool) {
+        let get = self.load_op_for(name);
+        self.b.emit(get, self.cur_line);
         self.b.emit(Op::LoadInt(1), self.cur_line);
         self.b
             .emit(if inc { Op::Add } else { Op::Sub }, self.cur_line);
-        self.b.emit(Op::SetVar(idx), self.cur_line);
+        let store = self.store_op_for(name);
+        self.b.emit(store, self.cur_line);
     }
 
     /// Lower `println(arg)` / `print(arg)` to the Groovy-formatting print
@@ -312,8 +501,8 @@ impl Compiler {
                 self.b.emit(Op::LoadUndef, self.cur_line);
             }
             Expr::Var(name) => {
-                let idx = self.b.add_name(name);
-                self.b.emit(Op::GetVar(idx), self.cur_line);
+                let get = self.load_op_for(name);
+                self.b.emit(get, self.cur_line);
             }
             Expr::Unary { op, rhs } => {
                 self.expr(rhs)?;
@@ -333,11 +522,58 @@ impl Compiler {
                 self.println(*newline, arg.as_deref())?;
             }
             Expr::PostIncDec { name, inc } => {
-                let idx = self.b.add_name(name);
-                self.b.emit(Op::GetVar(idx), self.cur_line);
-                self.post_inc_dec(name, *inc);
+                // Post: yield the value before the update, then update.
+                let get = self.load_op_for(name);
+                self.b.emit(get, self.cur_line);
+                self.inc_dec_update(name, *inc);
+            }
+            Expr::PreIncDec { name, inc } => {
+                // Pre: update, then yield the new value.
+                self.inc_dec_update(name, *inc);
+                let get = self.load_op_for(name);
+                self.b.emit(get, self.cur_line);
             }
             Expr::Call { name, args, line } => self.call(name, args, *line)?,
+            Expr::List(elems) => {
+                for e in elems {
+                    self.expr(e)?;
+                }
+                self.b
+                    .emit(Op::MakeArray(elems.len() as u16), self.cur_line);
+            }
+            Expr::Map(entries) => {
+                // MakeHash pops interleaved key/value pairs (key pushed first).
+                for (k, v) in entries {
+                    self.expr(k)?;
+                    self.expr(v)?;
+                }
+                self.b
+                    .emit(Op::MakeHash((entries.len() * 2) as u16), self.cur_line);
+            }
+            Expr::MethodCall {
+                recv,
+                method,
+                args,
+                line,
+            } => {
+                // Stack: [recv, arg0..argN-1, methodname]; the GDK dispatch
+                // builtin pops the name, the N args, then the receiver.
+                self.expr(recv)?;
+                for a in args {
+                    self.expr(a)?;
+                }
+                let midx = self.b.add_constant(Value::str(method.clone()));
+                self.b.emit(Op::LoadConst(midx), *line);
+                self.b
+                    .emit(Op::CallBuiltin(crate::host::GMETHOD, args.len() as u8), *line);
+            }
+            Expr::Property { recv, name, line } => {
+                // Stack: [recv, propname]; the property builtin pops both.
+                self.expr(recv)?;
+                let nidx = self.b.add_constant(Value::str(name.clone()));
+                self.b.emit(Op::LoadConst(nidx), *line);
+                self.b.emit(Op::CallBuiltin(crate::host::GPROP, 0), *line);
+            }
         }
         Ok(())
     }
@@ -362,6 +598,16 @@ impl Compiler {
                     self.b.emit(Op::LoadUndef, line);
                 }
             }
+            return Ok(());
+        }
+        // A user-defined function: push the args (left-to-right) and call through
+        // the fusevm frame ABI; `Op::Call` leaves the return value on the stack.
+        if self.fn_names.contains(name) {
+            for a in args {
+                self.expr(a)?;
+            }
+            let nidx = self.b.add_name(name);
+            self.b.emit(Op::Call(nidx, args.len() as u8), line);
             return Ok(());
         }
         // Unknown callee. With a `rust { ... }` block present it may be an FFI
@@ -462,6 +708,8 @@ fn body_has_ffi(body: &[Stmt]) -> bool {
                     .is_some_and(|s| body_has_ffi(std::slice::from_ref(s)))
                 || body_has_ffi(body)
         }
+        StmtKind::Return { value } => value.as_ref().is_some_and(expr_has_ffi),
+        StmtKind::Function { body, .. } => body_has_ffi(body),
         StmtKind::Break | StmtKind::Continue => false,
     })
 }
@@ -472,13 +720,22 @@ fn expr_has_ffi(e: &Expr) -> bool {
         Expr::Unary { rhs, .. } => expr_has_ffi(rhs),
         Expr::Binary { lhs, rhs, .. } => expr_has_ffi(lhs) || expr_has_ffi(rhs),
         Expr::Println { arg, .. } => arg.as_deref().is_some_and(expr_has_ffi),
+        Expr::List(elems) => elems.iter().any(expr_has_ffi),
+        Expr::Map(entries) => entries
+            .iter()
+            .any(|(k, v)| expr_has_ffi(k) || expr_has_ffi(v)),
+        Expr::MethodCall { recv, args, .. } => {
+            expr_has_ffi(recv) || args.iter().any(expr_has_ffi)
+        }
+        Expr::Property { recv, .. } => expr_has_ffi(recv),
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Str(_)
         | Expr::Bool(_)
         | Expr::Null
         | Expr::Var(_)
-        | Expr::PostIncDec { .. } => false,
+        | Expr::PostIncDec { .. }
+        | Expr::PreIncDec { .. } => false,
     }
 }
 

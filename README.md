@@ -115,20 +115,31 @@ Implemented and checked against Apache Groovy:
   `#!` shebang and `package`/`import` lines are tolerated.
 - **Variables** — `def x = …`, typed `int` / `double` / `String` / `boolean`
   declarations, and bare `x = …` script bindings; plain and compound assignment
-  (`=`, `+=`, `-=`, `*=`, `/=`, `%=`); post-increment / decrement (`i++`, `i--`).
+  (`=`, `+=`, `-=`, `*=`, `/=`, `%=`); increment / decrement in both statement
+  and expression position, postfix (`i++`) and prefix (`++i`).
+- **Functions** — `def f(a, b) { … }` (and typed `Type f(…) { … }`) compiled to
+  fusevm subroutine regions over the native `Op::Call` frame ABI. Parameters and
+  locals are frame slots, so recursion and mutual recursion are sound; `return
+  <expr>` carries a value out, and a `return`-less body returns its last value
+  expression (else `null`).
 - **Expressions** — integer / decimal / string (single- and double-quoted) /
   boolean / `null` literals; `+ - * / %`, `== != < > <= >=`, `&& ||`
   (short-circuiting), unary `-` and `!`, grouping. Integer `/` promotes to a
   decimal (`7 / 2 == 3.5`); `+` concatenates when either side is a string.
+- **Collections** — list literals `[1, 2, 3]` / `[]` and map literals `[a: 1]` /
+  `[:]`, printed Groovy-style (`[1, 2, 3]`, `[a:1]`, `[:]`).
+- **Method / property dispatch** — `s.length()`, `list.size()`,
+  `"hi".toUpperCase()`, `map.k`, chains on literals (`[1,2,3].size()`), over a
+  faithful GDK subset routed through a host dispatch. An unknown member faults.
 - **Control flow** — `if` / `else if` / `else`, `while`, the C-style
   `for (init; cond; update)`, the `for (x in a..b)` / `for (x in a..<b)` range
-  loop, `break`, `continue`.
+  loop, `break`, `continue`, `return`.
 - **Output** — `println` / `print` with Groovy value formatting, in both the
   `println(x)` and paren-less `println x` command forms.
 - **Comments** — `//` line, `/* … */` block.
 
-See [`BUGS.md`](BUGS.md) for the honest known-gaps list (methods, closures,
-GStrings, collections, the GDK).
+See [`BUGS.md`](BUGS.md) for the honest known-gaps list (closures, GStrings,
+multi-entry map ordering, the closure-based GDK).
 
 ---
 
@@ -192,22 +203,23 @@ Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm
 
 ## [0x06] STATUS & ROADMAP
 
-Groovy scripts — top-level statements, `def`/typed locals, arithmetic /
+Groovy scripts — top-level statements, `def`/typed locals, user-defined
+functions (recursion over the native `Op::Call` frame ABI), arithmetic /
 comparison / logic, `BigDecimal`-style division, `if` / `while` / `for` / range
-`for-in` / `break` / `continue`, `println`/`print`, string concatenation — all
-verified byte-for-byte against Apache Groovy by both the frozen example replay
-and the differential fuzzer. The editor tooling is shipped: a bytecode
-disassembler (`--disasm`), a Language Server (`--lsp`), and a Debug Adapter
-(`--dap`).
+`for-in` / `break` / `continue` / `return`, list/map literals, method/property
+dispatch over a GDK subset, `println`/`print`, string concatenation — verified
+against Apache Groovy by the frozen example replay and the differential fuzzer.
+The editor tooling is shipped: a bytecode disassembler (`--disasm`), a Language
+Server (`--lsp`), and a Debug Adapter (`--dap`).
 
 Next waves, in priority order:
 
-1. **User-defined methods and closures** over fusevm's native `Op::Call` frame
-   ABI.
-2. **Reference types** — real `String` methods, lists/maps, and the GDK on a
-   host heap; GString interpolation.
+1. **Closures** — `{ it -> … }` blocks, unblocking the closure-based GDK
+   (`each` / `collect` / `findAll`, e.g. `[1,2,3].collect { it * 2 }`).
+2. **Reference types & interpolation** — a broader `String`/list/map GDK on a
+   host heap with insertion-ordered maps; GString `"$name"` / `"${expr}"`.
 3. **Standard library surface** — `Math`, common `java.util`/GDK collection
-   methods, `each`/`collect`/`find`.
+   methods.
 4. **Scale-tracking decimals** — a real `BigDecimal` value so `10 * 1.25` prints
    `12.50`, closing the last documented arithmetic divergence.
 

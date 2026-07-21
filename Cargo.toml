@@ -70,7 +70,7 @@ path = "src/bin/gen_docs.rs"
 # block compiles to a cached cdylib whose exported functions become callable by
 # name from Groovy (src/rust_ffi.rs desugars the block; src/host.rs routes the
 # `__rust_compile` / by-name-call builtins into `fusevm::ffi`).
-fusevm = { version = "0.14.11", features = ["jit", "jit-disk-cache", "aot", "ffi"] }
+fusevm = { version = "0.14.12", features = ["jit", "jit-disk-cache", "aot", "ffi"] }
 
 thiserror = "2.0"
 

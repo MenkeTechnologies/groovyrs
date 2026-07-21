@@ -36,6 +36,13 @@ pub const GFFI_COMPILE: u16 = 703;
 /// function name (a `String`) on top. Dispatches through `fusevm::ffi::try_call`
 /// and returns the result.
 pub const GFFI_CALL: u16 = 704;
+/// Builtin id for a Groovy method call `recv.method(args...)`. The stack holds
+/// the receiver (deepest), the `argc` args, and the method name (a `String`) on
+/// top. Dispatches a faithful GDK subset (see [`dispatch_method`]).
+pub const GMETHOD: u16 = 705;
+/// Builtin id for a Groovy property read `recv.name` (e.g. `list.size`,
+/// `str.length`). The stack holds the receiver then the property name on top.
+pub const GPROP: u16 = 706;
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -52,6 +59,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GDIV, b_div);
     vm.register_builtin(GFFI_COMPILE, b_ffi_compile);
     vm.register_builtin(GFFI_CALL, b_ffi_call);
+    vm.register_builtin(GMETHOD, b_method);
+    vm.register_builtin(GPROP, b_prop);
 }
 
 thread_local! {
@@ -112,6 +121,139 @@ fn b_ffi_call(vm: &mut VM, argc: u8) -> Value {
             fault(vm, format!("unresolved reference: {name}"));
             Value::Undef
         }
+    }
+}
+
+/// Groovy method-call builtin: the stack holds the receiver (deepest), `argc`
+/// args, and the method name (a `String`) on top. Dispatches a faithful GDK
+/// subset via [`dispatch_method`].
+fn b_method(vm: &mut VM, argc: u8) -> Value {
+    let name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let n = argc as usize;
+    let mut args = Vec::with_capacity(n);
+    for _ in 0..n {
+        args.push(vm.stack.pop().unwrap_or(Value::Undef));
+    }
+    args.reverse();
+    let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    match dispatch_method(&recv, &name, &args) {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    }
+}
+
+/// Groovy property-read builtin: the stack holds the receiver then the property
+/// name on top. Dispatches via [`dispatch_property`].
+fn b_prop(vm: &mut VM, _argc: u8) -> Value {
+    let name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    match dispatch_property(&recv, &name) {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    }
+}
+
+/// The element/character count of a Groovy value: characters for a `String`,
+/// element count for a list, entry count for a map.
+fn value_size(v: &Value) -> i64 {
+    match v {
+        Value::Str(s) => s.chars().count() as i64,
+        Value::Array(a) => a.len() as i64,
+        Value::Hash(h) => h.len() as i64,
+        _ => 0,
+    }
+}
+
+/// Dispatch a faithful subset of the Groovy GDK for `recv.method(args)`. Unknown
+/// combinations raise a `groovyrs: ...` runtime fault rather than mis-running.
+fn dispatch_method(recv: &Value, method: &str, args: &[Value]) -> Result<Value, String> {
+    match (recv, method) {
+        // Universal size query (String chars / list elements / map entries).
+        (_, "size") => Ok(Value::int(value_size(recv))),
+
+        // ── String ──
+        (Value::Str(s), "length") => Ok(Value::int(s.chars().count() as i64)),
+        (Value::Str(s), "toUpperCase") => Ok(Value::str(s.to_uppercase())),
+        (Value::Str(s), "toLowerCase") => Ok(Value::str(s.to_lowercase())),
+        (Value::Str(s), "trim") => Ok(Value::str(s.trim().to_string())),
+        (Value::Str(s), "reverse") => Ok(Value::str(s.chars().rev().collect::<String>())),
+        (Value::Str(s), "isEmpty") => Ok(Value::bool(s.is_empty())),
+        (Value::Str(s), "contains") => {
+            let needle = args.first().map(groovy_str).unwrap_or_default();
+            Ok(Value::bool(s.contains(&needle)))
+        }
+
+        // ── List ──
+        (Value::Array(a), "isEmpty") => Ok(Value::bool(a.is_empty())),
+        (Value::Array(a), "contains") => {
+            let want = args.first().cloned().unwrap_or(Value::Undef);
+            Ok(Value::bool(a.iter().any(|v| groovy_str(v) == groovy_str(&want))))
+        }
+        (Value::Array(a), "get") => {
+            let i = args.first().and_then(as_i64).unwrap_or(0);
+            Ok(a.get(i.max(0) as usize).cloned().unwrap_or(Value::Undef))
+        }
+        (Value::Array(a), "reverse") => {
+            let mut r = a.clone();
+            r.reverse();
+            Ok(Value::array(r))
+        }
+
+        // ── Map ──
+        (Value::Hash(h), "isEmpty") => Ok(Value::bool(h.is_empty())),
+        (Value::Hash(h), "containsKey") => {
+            let k = args.first().map(groovy_str).unwrap_or_default();
+            Ok(Value::bool(h.contains_key(&k)))
+        }
+
+        _ => Err(format!(
+            "groovyrs: no such method `{method}` on {}",
+            type_name(recv)
+        )),
+    }
+}
+
+/// Dispatch a Groovy property read `recv.name`. Supports the `size`/`length`
+/// count properties on `String`/list/map; a map's `k` also reads entry `k`.
+fn dispatch_property(recv: &Value, name: &str) -> Result<Value, String> {
+    match (recv, name) {
+        (_, "size") | (_, "length") => Ok(Value::int(value_size(recv))),
+        // Groovy map property access reads the entry of that key (`m.k` == `m['k']`).
+        (Value::Hash(h), key) => Ok(h.get(key).cloned().unwrap_or(Value::Undef)),
+        _ => Err(format!(
+            "groovyrs: no such property `{name}` on {}",
+            type_name(recv)
+        )),
+    }
+}
+
+/// A short Groovy-ish type name for diagnostics.
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Str(_) => "String",
+        Value::Array(_) => "List",
+        Value::Hash(_) => "Map",
+        Value::Int(_) => "Integer",
+        Value::Float(_) => "BigDecimal",
+        Value::Bool(_) => "Boolean",
+        Value::Undef => "null",
+        _ => "Object",
     }
 }
 
@@ -200,6 +342,25 @@ pub fn groovy_str(v: &Value) -> String {
         Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         Value::Float(f) => format_decimal(*f),
         Value::Undef => "null".to_string(),
+        // Groovy renders a list as `[a, b, c]` and a map as `[k:v, ...]` (the
+        // empty map as `[:]`); collection elements print with the same rules
+        // (strings appear unquoted). NOTE: `Value::Hash` is an unordered
+        // `HashMap`, so a multi-entry map's print order is not Groovy's
+        // insertion order — single-entry maps render faithfully.
+        Value::Array(a) => {
+            let items: Vec<String> = a.iter().map(groovy_str).collect();
+            format!("[{}]", items.join(", "))
+        }
+        Value::Hash(h) => {
+            if h.is_empty() {
+                return "[:]".to_string();
+            }
+            let items: Vec<String> = h
+                .iter()
+                .map(|(k, v)| format!("{k}:{}", groovy_str(v)))
+                .collect();
+            format!("[{}]", items.join(", "))
+        }
         other => other.as_str_cow().into_owned(),
     }
 }

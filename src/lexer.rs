@@ -52,6 +52,7 @@ pub enum Tok {
     RBracket,
     Semi,
     Comma,
+    Colon,
     Dot,
     DotDot,   // `..` inclusive range
     DotDotLt, // `..<` half-open range
@@ -312,6 +313,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 }
                 ';' => (Tok::Semi, 1),
                 ',' => (Tok::Comma, 1),
+                ':' => (Tok::Colon, 1),
                 '.' => (Tok::Dot, 1),
                 '=' => (Tok::Assign, 1),
                 '+' => (Tok::Plus, 1),

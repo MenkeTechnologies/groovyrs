@@ -5,18 +5,41 @@ An honest list of what groovyrs does **not** do yet. Slice 1 is the Groovy
 `println`/`print` commands. Unsupported constructs are reported as parse or
 compile errors, never silently mis-run.
 
+## Implemented
+
+- **User-defined functions.** `def f(a, b) { … }` (and typed `Type f(…) { … }`)
+  compile to fusevm subroutine regions over the native `Op::Call` frame ABI:
+  parameters and locals live in frame slots, so recursion and mutual recursion
+  (forward references resolve) are sound. Explicit `return <expr>` carries a
+  value out; a function with no explicit `return` returns the value of its last
+  statement when that statement is a value expression, else `null`.
+- **Method / property dispatch on values.** `s.length()`, `list.size()`,
+  `"hi".toUpperCase()`, `map.k`, and chains on literals (`[1,2,3].size()`) route
+  through a host GDK dispatch. A faithful subset is modeled: `size` (String
+  chars / list / map), String `length`/`toUpperCase`/`toLowerCase`/`trim`/
+  `reverse`/`isEmpty`/`contains`, list `isEmpty`/`contains`/`get`/`reverse`,
+  map `isEmpty`/`containsKey`; property `.size`/`.length` and map key reads
+  (`m.k`). An unknown method/property faults rather than mis-running.
+- **List and map literals.** `[1, 2, 3]`, `[]`, `[a: 1]`, `[:]` build fusevm
+  `Array`/`Hash` values and print Groovy-style (`[1, 2, 3]`, `[a:1]`, `[:]`).
+- **`++`/`--` in expression position.** Both postfix (`i++`, value before
+  update) and prefix (`++i`, value after update), in addition to the statement
+  forms.
+
 ## Not implemented (errors today)
 
-- **Methods, closures, classes.** `def f(x) { … }`, `{ it -> … }` closures,
-  `class`/`trait`, fields, `new`, and `this` are not compiled. Only the script
-  body runs. (Next wave: fusevm's native `Op::Call` frame ABI.)
-- **Method / property access on values.** `s.length()`, `list.size()`,
-  `obj.field`, `it.toUpperCase()`. Any `.` call after a value is rejected.
+- **Closures, classes.** `{ it -> … }` closures (so `each`/`collect`/`findAll`
+  over collections), `class`/`trait`, fields, `new`, and `this` are not
+  compiled. The canonical `[1,2,3].collect { it * 2 }` needs closures and is
+  rejected today.
 - **GStrings / interpolation.** `"$name"` / `"${expr}"` are lexed as literal
   text — the `${…}` is **not** evaluated. Use `+` concatenation in slice 1.
-- **Collections & the GDK.** Lists (`[1, 2, 3]`), maps (`[a: 1]`), ranges as
-  first-class values, and GDK methods (`each`, `collect`, `find`, `*.`) are not
-  modeled. `for (x in a..b)` integer ranges are the only iterable form.
+- **Multi-entry map print order.** `Value::Hash` is an unordered `HashMap`, so a
+  map with more than one entry does not print in Groovy's insertion order.
+  Single-entry maps render faithfully.
+- **Ranges as first-class values** (`(1..5)` as a list), and GDK collection
+  methods needing a closure (`each`, `collect`, `find`, `*.`). `for (x in a..b)`
+  integer ranges are the only iterable form.
 - **`switch`, `do/while`, ternary `?:`, the Elvis `?:`, safe-nav `?.`,
   labeled break, spaceship `<=>`.**
 - **`try`/`catch`/`finally`, exceptions, `throw`, `assert`.**

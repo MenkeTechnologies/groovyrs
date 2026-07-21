@@ -169,16 +169,15 @@ impl Parser {
             Tok::While => self.while_stmt()?,
             Tok::For => self.for_stmt()?,
             Tok::Return => {
-                // A script's implicit return value is discarded; model a bare
-                // `return`/`return <expr>` as a jump to the end of the script.
+                // `return` / `return <expr>`: the value is carried out (see
+                // `StmtKind::Return`). A bare `return` at end of line returns null.
                 self.advance();
-                if matches!(self.peek(), Tok::Nl | Tok::Semi | Tok::RBrace | Tok::Eof) {
-                    StmtKind::Break
+                let value = if matches!(self.peek(), Tok::Nl | Tok::Semi | Tok::RBrace | Tok::Eof) {
+                    None
                 } else {
-                    // Evaluate the returned expression for side effects, then end.
-                    let _ = self.expression()?;
-                    StmtKind::Break
-                }
+                    Some(self.expression()?)
+                };
+                StmtKind::Return { value }
             }
             Tok::Break => {
                 self.advance();
@@ -220,10 +219,13 @@ impl Parser {
             return Ok(StmtKind::Expr(e));
         }
 
-        // `def name [= expr]`
+        // `def name(params) { .. }` (a function) or `def name [= expr]` (a local).
         if self.is(&Tok::Def) {
             self.advance();
             let name = self.ident()?;
+            if self.is(&Tok::LParen) {
+                return self.function_def(name);
+            }
             let init = self.opt_initializer()?;
             return Ok(StmtKind::Local {
                 ty: "def".into(),
@@ -232,10 +234,14 @@ impl Parser {
             });
         }
 
-        // Typed declaration: `Type name [= expr]` (two identifiers in a row).
+        // Typed declaration `Type name [= expr]` or typed function
+        // `Type name(params) { .. }` (two identifiers in a row).
         if self.looks_like_decl() {
             let ty = self.ident()?;
             let name = self.ident()?;
+            if self.is(&Tok::LParen) {
+                return self.function_def(name);
+            }
             let init = self.opt_initializer()?;
             return Ok(StmtKind::Local { ty, name, init });
         }
@@ -271,6 +277,46 @@ impl Parser {
         } else {
             Ok(None)
         }
+    }
+
+    /// Parse a function definition `name(params) { body }` with the name already
+    /// consumed and the `(` as the current token.
+    fn function_def(&mut self, name: String) -> Result<StmtKind, String> {
+        let params = self.param_list()?;
+        self.skip_newlines();
+        self.eat(&Tok::LBrace)?;
+        let body = self.block()?;
+        Ok(StmtKind::Function { name, params, body })
+    }
+
+    /// Parse a parenthesised parameter list `( [Type] a, [Type] b, ... )`. An
+    /// optional `def` or type name in front of each parameter is skipped — the
+    /// runtime is dynamically typed, so only the parameter names are retained.
+    fn param_list(&mut self) -> Result<Vec<String>, String> {
+        self.eat(&Tok::LParen)?;
+        self.skip_newlines();
+        let mut out = Vec::new();
+        if !self.is(&Tok::RParen) {
+            loop {
+                if self.is(&Tok::Def) {
+                    self.advance();
+                } else if matches!(self.peek(), Tok::Ident(_))
+                    && matches!(self.peek_at(1), Tok::Ident(_))
+                {
+                    self.advance(); // a type in front of the parameter name
+                }
+                out.push(self.ident()?);
+                self.skip_newlines();
+                if self.is(&Tok::Comma) {
+                    self.advance();
+                    self.skip_newlines();
+                    continue;
+                }
+                break;
+            }
+        }
+        self.eat(&Tok::RParen)?;
+        Ok(out)
     }
 
     /// Heuristic: two identifiers in a row (`Type name`) — a typed declaration.
@@ -481,11 +527,52 @@ impl Parser {
                     rhs: Box::new(self.unary()?),
                 })
             }
+            Tok::PlusPlus | Tok::MinusMinus => {
+                let inc = matches!(self.peek(), Tok::PlusPlus);
+                self.advance();
+                match self.unary()? {
+                    Expr::Var(name) => Ok(Expr::PreIncDec { name, inc }),
+                    _ => Err(format!(
+                        "groovyrs: prefix `{}` requires a variable on line {}",
+                        if inc { "++" } else { "--" },
+                        self.line()
+                    )),
+                }
+            }
             _ => self.primary(),
         }
     }
 
+    /// A primary expression: an atom followed by any run of postfix `.member`
+    /// method calls (`x.foo(args)`) and property reads (`x.size`).
     fn primary(&mut self) -> Result<Expr, String> {
+        let mut e = self.atom()?;
+        while self.is(&Tok::Dot) {
+            let line = self.line();
+            self.advance();
+            let member = self.ident()?;
+            if self.is(&Tok::LParen) {
+                let args = self.call_args()?;
+                e = Expr::MethodCall {
+                    recv: Box::new(e),
+                    method: member,
+                    args,
+                    line,
+                };
+            } else {
+                e = Expr::Property {
+                    recv: Box::new(e),
+                    name: member,
+                    line,
+                };
+            }
+        }
+        Ok(e)
+    }
+
+    /// An atom: a literal, a parenthesised expression, a variable/call, or a
+    /// list/map literal — the base a [`Parser::primary`] postfix chain builds on.
+    fn atom(&mut self) -> Result<Expr, String> {
         match self.peek().clone() {
             Tok::Int(n) => {
                 self.advance();
@@ -517,31 +604,25 @@ impl Parser {
                 self.eat(&Tok::RParen)?;
                 Ok(e)
             }
+            Tok::LBracket => self.list_or_map(),
             Tok::Ident(name) => {
                 if name == "println" || name == "print" {
                     return self.print_call(&name);
                 }
                 let line = self.line();
                 self.advance();
-                if matches!(self.peek(), Tok::PlusPlus | Tok::MinusMinus) {
-                    return Err(format!(
-                        "groovyrs: `{name}++`/`--` is only supported as a statement yet (line {})",
-                        self.line()
-                    ));
-                }
-                // A call expression `name(args...)`. Slice 1 has no user methods,
-                // so at compile time the only callees that resolve are the inline-
-                // Rust FFI ones (the `__rust_compile` desugar target and the
-                // barewords a `rust { ... }` block exports).
+                // A call expression `name(args...)`: a user-defined function or an
+                // inline-Rust FFI export (the compiler resolves which).
                 if self.is(&Tok::LParen) {
                     let args = self.call_args()?;
                     return Ok(Expr::Call { name, args, line });
                 }
-                if self.is(&Tok::Dot) {
-                    return Err(format!(
-                        "groovyrs: property access on `{name}` is not supported yet (line {})",
-                        self.line()
-                    ));
+                // Postfix `i++` / `i--` in expression position: yields the value
+                // before the update.
+                if matches!(self.peek(), Tok::PlusPlus | Tok::MinusMinus) {
+                    let inc = matches!(self.peek(), Tok::PlusPlus);
+                    self.advance();
+                    return Ok(Expr::PostIncDec { name, inc });
                 }
                 Ok(Expr::Var(name))
             }
@@ -576,6 +657,78 @@ impl Parser {
             Some(Box::new(self.expression()?))
         };
         Ok(Expr::Println { newline, arg })
+    }
+
+    /// Parse a `[...]` literal: an empty list `[]`, the empty map `[:]`, a map
+    /// `[k: v, ...]`, or a list `[a, b, ...]`. Whether it is a list or a map is
+    /// decided by whether the first element is followed by `:`.
+    fn list_or_map(&mut self) -> Result<Expr, String> {
+        self.eat(&Tok::LBracket)?;
+        self.skip_newlines();
+        // Empty list.
+        if self.is(&Tok::RBracket) {
+            self.advance();
+            return Ok(Expr::List(Vec::new()));
+        }
+        // The empty map literal is written `[:]`.
+        if self.is(&Tok::Colon) {
+            self.advance();
+            self.eat(&Tok::RBracket)?;
+            return Ok(Expr::Map(Vec::new()));
+        }
+        // Decide list vs map on the first entry: a `key:` prefix means a map.
+        let first_key = self.map_key()?;
+        if self.is(&Tok::Colon) {
+            self.advance();
+            self.skip_newlines();
+            let first_val = self.expression()?;
+            let mut entries = vec![(first_key, first_val)];
+            self.skip_newlines();
+            while self.is(&Tok::Comma) {
+                self.advance();
+                self.skip_newlines();
+                if self.is(&Tok::RBracket) {
+                    break;
+                }
+                let k = self.map_key()?;
+                self.eat(&Tok::Colon)?;
+                self.skip_newlines();
+                let v = self.expression()?;
+                entries.push((k, v));
+                self.skip_newlines();
+            }
+            self.eat(&Tok::RBracket)?;
+            return Ok(Expr::Map(entries));
+        }
+        // A list: the first key was actually the first element expression.
+        let mut elems = vec![first_key];
+        self.skip_newlines();
+        while self.is(&Tok::Comma) {
+            self.advance();
+            self.skip_newlines();
+            if self.is(&Tok::RBracket) {
+                break;
+            }
+            elems.push(self.expression()?);
+            self.skip_newlines();
+        }
+        self.eat(&Tok::RBracket)?;
+        Ok(Expr::List(elems))
+    }
+
+    /// Parse a map-literal key. A bare identifier is a string constant (Groovy
+    /// treats `[a: 1]` as key `"a"`); a parenthesised `(expr)` is a computed key;
+    /// otherwise it is an ordinary expression (string/number literal key). When
+    /// the `[...]` turns out to be a list, this is just the first element.
+    fn map_key(&mut self) -> Result<Expr, String> {
+        // A bare identifier immediately followed by `:` is a literal string key.
+        if let Tok::Ident(name) = self.peek().clone() {
+            if matches!(self.peek_at(1), Tok::Colon) {
+                self.advance();
+                return Ok(Expr::Str(name));
+            }
+        }
+        self.expression()
     }
 
     /// Parse a parenthesised argument list `( expr, expr, ... )` past the

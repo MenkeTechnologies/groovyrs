@@ -22,7 +22,7 @@
 //!    where `+` routes through [`groovy_add`].
 
 use fusevm::{Frame, NumOp, VMResult, Value, VM};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 /// Builtin id for `println` (one Groovy-formatted arg + newline).
 pub const GPRINTLN: u16 = 700;
@@ -82,6 +82,23 @@ pub const GSETPROP: u16 = 713;
 /// (deepest) then the index on top. Dispatches to a user `getAt(index)` overload
 /// on an instance, else a list/map/string element.
 pub const GINDEX: u16 = 714;
+/// Builtin id for Groovy `<=>` (three-way compare). Pops two operands; on a
+/// user-class instance left operand it dispatches `compareTo` (re-entering the
+/// VM), otherwise it yields the primitive sign (`-1`/`0`/`1`). See [`b_cmp`].
+pub const GCMP: u16 = 716;
+/// Builtin id for a `super.method(args)` call. The stack holds `this` (deepest),
+/// the `argc` args, the method name (`String`), and the superclass name
+/// (`String`) on top. Resolves the method from the superclass upward (skipping
+/// the current class's override) and invokes it on `this`. See [`b_super_method`].
+pub const GSUPER_METHOD: u16 = 717;
+/// Builtin id for a `super(args)` constructor call. The stack holds `this`
+/// (deepest), the `argc` args, and the superclass name (`String`) on top. Runs
+/// the superclass's arity-matched constructor on `this`. See [`b_super_ctor`].
+pub const GSUPER_CTOR: u16 = 718;
+/// Builtin id for `value instanceof Class`. The stack holds the value (deepest)
+/// then the class name (`String`) on top. Returns a `Boolean`. See
+/// [`b_instanceof`].
+pub const GINSTANCEOF: u16 = 719;
 /// Builtin id for building a Groovy map literal `[k: v, …]`. The stack holds the
 /// interleaved key/value pairs (key pushed first) with the entry count on top;
 /// returns an insertion-ordered map handle (`Value::Obj`). Groovy maps preserve
@@ -115,6 +132,10 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GSETPROP, b_setprop);
     vm.register_builtin(GINDEX, b_index);
     vm.register_builtin(GMAKE_MAP, b_make_map);
+    vm.register_builtin(GCMP, b_cmp);
+    vm.register_builtin(GSUPER_METHOD, b_super_method);
+    vm.register_builtin(GSUPER_CTOR, b_super_ctor);
+    vm.register_builtin(GINSTANCEOF, b_instanceof);
     // A fresh VM install starts with an empty object heap: `Value::Obj` handles
     // are chunk-relative (a closure carries a name-pool index, an instance a
     // class id), so a handle from a prior run must never survive into a new
@@ -138,6 +159,44 @@ thread_local! {
     /// The class registry, keyed by class id. Populated by the class-register
     /// builtin as the program's `class` declarations execute.
     static CLASSES: RefCell<Vec<ClassMeta>> = const { RefCell::new(Vec::new()) };
+    /// The VM currently executing, published for the strict numeric hook.
+    ///
+    /// fusevm calls the [`NumericHook`](fusevm::NumericHook) with `(op, &a, &b)`
+    /// and *no* VM handle, so operator overloading — which must re-enter the VM to
+    /// run a user `plus`/`minus`/`compareTo`/… method — has nothing to dispatch
+    /// through. groovyrs publishes the running VM here around [`crate::run_chunk`]'s
+    /// `VM::run` so [`numeric_hook`] can reach it. The pointer is the very VM that
+    /// is executing (fusevm calls the hook synchronously from inside its dispatch
+    /// loop), so it is always live while the hook runs; builtins already receive
+    /// `&mut VM` and never consult it.
+    static VM_PTR: Cell<*mut VM> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// Publish the running VM so the numeric hook can re-enter it for operator
+/// overloading (see [`VM_PTR`]). Called around `VM::run` in [`crate::run_chunk`]
+/// and the debug runner; paired with [`clear_vm_ptr`].
+pub fn set_vm_ptr(vm: &mut VM) {
+    VM_PTR.with(|p| p.set(vm as *mut VM));
+}
+
+/// Clear the published VM pointer once a run returns (see [`VM_PTR`]).
+pub fn clear_vm_ptr() {
+    VM_PTR.with(|p| p.set(std::ptr::null_mut()));
+}
+
+/// Re-enter the published VM to run `f`. Returns `None` when no VM is published
+/// (the hook fired outside a run — never in practice).
+///
+/// SAFETY: fusevm invokes the numeric hook synchronously from inside `VM::run`,
+/// so the pointer published by [`set_vm_ptr`] is the exact VM executing and stays
+/// valid for the hook's duration. Every operator path clones its operands before
+/// calling this, so no borrow of fusevm's operand stack is read after the nested
+/// run mutates (and possibly reallocates) it.
+fn with_vm<R>(f: impl FnOnce(&mut VM) -> R) -> Option<R> {
+    VM_PTR.with(|p| {
+        let ptr = p.get();
+        (!ptr.is_null()).then(|| f(unsafe { &mut *ptr }))
+    })
 }
 
 /// A heap object behind a `Value::Obj` handle: a closure, a class instance, or
@@ -176,6 +235,10 @@ struct Instance {
 #[derive(Clone)]
 struct ClassMeta {
     name: String,
+    /// The direct superclass's name (`class C extends B`), or `None` for a root
+    /// class. Resolved to an id lazily (via [`find_class`]) so declaration order
+    /// does not matter. Drives method/field inheritance and virtual dispatch.
+    superclass: Option<String>,
     field_names: Vec<String>,
     /// Field initializer thunks: name-pool index of a synthetic 0-arg subroutine
     /// that computes the initial value, per field that has an initializer.
@@ -370,6 +433,53 @@ fn class_meta(id: u32) -> Option<ClassMeta> {
     CLASSES.with(|c| c.borrow().get(id as usize).cloned())
 }
 
+/// Resolve a method name to its subroutine index, walking the superclass chain
+/// so an inherited (or overriding) method is found. A subclass entry shadows its
+/// super's, giving virtual dispatch (the most-derived definition wins).
+fn lookup_method(class: u32, method: &str) -> Option<u16> {
+    let mut cur = Some(class);
+    while let Some(id) = cur {
+        let meta = class_meta(id)?;
+        if let Some(idx) = meta.methods.get(method) {
+            return Some(*idx);
+        }
+        cur = meta.superclass.as_deref().and_then(find_class);
+    }
+    None
+}
+
+/// The class-id chain from a root ancestor down to `class` (inclusive). Used to
+/// materialise inherited fields and run inherited field initializers in the
+/// correct (superclass-first) order.
+fn class_chain(class: u32) -> Vec<u32> {
+    let mut chain = Vec::new();
+    let mut cur = Some(class);
+    while let Some(id) = cur {
+        chain.push(id);
+        cur = class_meta(id).and_then(|m| m.superclass.as_deref().and_then(find_class));
+    }
+    chain.reverse(); // root ancestor first
+    chain
+}
+
+/// Invoke a user method `method` on instance `recv` (implicit `this`), resolving
+/// it through the superclass chain. Returns `None` when `recv` is not an instance
+/// or its class defines no such method (so the caller can fall back), `Some(Err)`
+/// when the body faults.
+fn call_user_method(
+    vm: &mut VM,
+    recv: &Value,
+    method: &str,
+    args: &[Value],
+) -> Option<Result<Value, String>> {
+    let inst = as_instance(recv)?;
+    let idx = lookup_method(inst.class, method)?;
+    let mut pushes = Vec::with_capacity(args.len() + 1);
+    pushes.push(recv.clone());
+    pushes.extend_from_slice(args);
+    Some(invoke_sub(vm, idx, &pushes))
+}
+
 /// If `v` is a heap instance, return a clone of it (class id + fields).
 fn as_instance(v: &Value) -> Option<Instance> {
     match v {
@@ -420,6 +530,15 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
+    // The superclass name (empty string ⇒ root class), pushed first by
+    // `register_class`, so it is popped last.
+    let super_name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let superclass = (!super_name.is_empty()).then_some(super_name);
 
     let field_names: Vec<String> = match fields_a {
         Value::Array(a) => a.iter().map(|v| v.as_str_cow().into_owned()).collect(),
@@ -448,6 +567,7 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
     CLASSES.with(|c| {
         c.borrow_mut().push(ClassMeta {
             name,
+            superclass,
             field_names,
             field_inits,
             methods,
@@ -476,25 +596,40 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
         fault(vm, format!("unable to resolve class {name}"));
         return Value::Undef;
     };
-    let meta = class_meta(cid).unwrap();
-    // Allocate the instance (fields default to null), then run initializers.
+    // Materialise every field across the superclass chain (root → leaf), each
+    // defaulting to null — an inherited field is a real field of the instance.
+    let chain = class_chain(cid);
     let mut fields = std::collections::HashMap::new();
-    for f in &meta.field_names {
-        fields.insert(f.clone(), Value::Undef);
-    }
-    let handle = heap_push(HeapObj::Instance(Instance { class: cid, fields }));
-    for (fname, init_idx) in &meta.field_inits {
-        match invoke_sub(vm, *init_idx, &[]) {
-            Ok(v) => {
-                set_instance_field(&handle, fname, v);
-            }
-            Err(e) => {
-                fault(vm, e);
-                return Value::Undef;
+    for id in &chain {
+        if let Some(m) = class_meta(*id) {
+            for f in &m.field_names {
+                fields.insert(f.clone(), Value::Undef);
             }
         }
     }
-    // Run the arity-matched constructor, if any (implicit `this` in slot 0).
+    let handle = heap_push(HeapObj::Instance(Instance { class: cid, fields }));
+    // Run field initializers superclass-first so a subclass initializer can rely
+    // on inherited state.
+    for id in &chain {
+        let Some(m) = class_meta(*id) else { continue };
+        for (fname, init_idx) in &m.field_inits {
+            match invoke_sub(vm, *init_idx, &[]) {
+                Ok(v) => {
+                    set_instance_field(&handle, fname, v);
+                }
+                Err(e) => {
+                    fault(vm, e);
+                    return Value::Undef;
+                }
+            }
+        }
+    }
+    // Constructor dispatch. The most-derived (leaf) class owns construction: a
+    // matching-arity ctor runs (and may itself invoke `super(...)`). Constructors
+    // are not inherited, so a subclass with its own ctors but none of this arity
+    // is an error; a subclass with no ctors at all gets Groovy's implicit default
+    // constructor, which chains to the superclass's no-arg ctor.
+    let meta = class_meta(cid).unwrap();
     if let Some(ctor_idx) = meta.ctors.get(&argc) {
         let mut pushes = Vec::with_capacity(n + 1);
         pushes.push(handle.clone());
@@ -509,8 +644,183 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
             format!("groovyrs: no constructor for {name} taking {argc} argument(s)"),
         );
         return Value::Undef;
+    } else if argc == 0 {
+        // Implicit default constructor: run the nearest ancestor's no-arg ctor.
+        if let Err(e) = run_implicit_super_ctor(vm, &handle, cid) {
+            fault(vm, e);
+            return Value::Undef;
+        }
+    } else {
+        fault(
+            vm,
+            format!("groovyrs: no constructor for {name} taking {argc} argument(s)"),
+        );
+        return Value::Undef;
     }
     handle
+}
+
+/// Run the implicit superclass constructor for a class with no declared ctors:
+/// walk up to the nearest ancestor that declares a no-arg constructor and run it
+/// on `handle` (that ctor may itself chain further via `super(...)`). An ancestor
+/// that has constructors but no no-arg one is an error (Groovy cannot supply the
+/// missing arguments).
+fn run_implicit_super_ctor(vm: &mut VM, handle: &Value, class: u32) -> Result<(), String> {
+    let mut cur = class_meta(class).and_then(|m| m.superclass.as_deref().and_then(find_class));
+    while let Some(id) = cur {
+        let m = class_meta(id).ok_or("groovyrs: broken class chain")?;
+        if let Some(idx) = m.ctors.get(&0) {
+            invoke_sub(vm, *idx, std::slice::from_ref(handle))?;
+            return Ok(());
+        }
+        if !m.ctors.is_empty() {
+            return Err(format!(
+                "groovyrs: superclass {} has no no-argument constructor",
+                m.name
+            ));
+        }
+        cur = m.superclass.as_deref().and_then(find_class);
+    }
+    Ok(())
+}
+
+/// `GSUPER_METHOD`: `super.method(args)`. Stack: `this` (deepest), `argc` args,
+/// method name, superclass name (top). Resolves `method` from the superclass
+/// upward — skipping the current class's override, which is what `super` means —
+/// and invokes it against `this`.
+fn b_super_method(vm: &mut VM, argc: u8) -> Value {
+    let super_name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let method = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let n = argc as usize;
+    let mut args = Vec::with_capacity(n);
+    for _ in 0..n {
+        args.push(vm.stack.pop().unwrap_or(Value::Undef));
+    }
+    args.reverse();
+    let this = vm.stack.pop().unwrap_or(Value::Undef);
+    let Some(super_id) = find_class(&super_name) else {
+        fault(
+            vm,
+            format!("groovyrs: unable to resolve superclass {super_name}"),
+        );
+        return Value::Undef;
+    };
+    let Some(idx) = lookup_method(super_id, &method) else {
+        fault(
+            vm,
+            format!("groovyrs: no such method `{method}` on {super_name}"),
+        );
+        return Value::Undef;
+    };
+    let mut pushes = Vec::with_capacity(n + 1);
+    pushes.push(this);
+    pushes.extend(args);
+    match invoke_sub(vm, idx, &pushes) {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    }
+}
+
+/// `GSUPER_CTOR`: `super(args)`. Stack: `this` (deepest), `argc` args, superclass
+/// name (top). Runs the superclass's arity-matched constructor on `this` (which
+/// may itself chain further via `super(...)`).
+fn b_super_ctor(vm: &mut VM, argc: u8) -> Value {
+    let super_name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let n = argc as usize;
+    let mut args = Vec::with_capacity(n);
+    for _ in 0..n {
+        args.push(vm.stack.pop().unwrap_or(Value::Undef));
+    }
+    args.reverse();
+    let this = vm.stack.pop().unwrap_or(Value::Undef);
+    let Some(super_id) = find_class(&super_name) else {
+        fault(
+            vm,
+            format!("groovyrs: unable to resolve superclass {super_name}"),
+        );
+        return Value::Undef;
+    };
+    let Some(idx) = class_meta(super_id).and_then(|m| m.ctors.get(&argc).copied()) else {
+        fault(
+            vm,
+            format!("groovyrs: no constructor for {super_name} taking {argc} argument(s)"),
+        );
+        return Value::Undef;
+    };
+    let mut pushes = Vec::with_capacity(n + 1);
+    pushes.push(this);
+    pushes.extend(args);
+    match invoke_sub(vm, idx, &pushes) {
+        Ok(_) => Value::Undef,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    }
+}
+
+/// `GINSTANCEOF`: `value instanceof Class`. Stack: value (deepest), class name
+/// (top). True when `value` is a user instance whose class chain contains the
+/// named class, or when the named class is a built-in type the value matches.
+/// `null instanceof X` is always false (Groovy).
+fn b_instanceof(vm: &mut VM, _argc: u8) -> Value {
+    let class = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let value = vm.stack.pop().unwrap_or(Value::Undef);
+    Value::bool(value_is_a(&value, &class))
+}
+
+/// Whether `value` is an instance of the (user or built-in) type `class`.
+fn value_is_a(value: &Value, class: &str) -> bool {
+    // `null` is never an instance of anything.
+    if matches!(value, Value::Undef) {
+        return false;
+    }
+    // A user class instance: the named class must appear in its superclass chain.
+    if let Some(inst) = as_instance(value) {
+        if let Some(target) = find_class(class) {
+            return class_chain(inst.class).contains(&target);
+        }
+        // Named type is not a user class — fall through to built-in checks (an
+        // instance is still an `Object`/`GroovyObject`).
+    }
+    // Built-in Groovy/Java types (short or common fully-qualified names).
+    let short = class.rsplit('.').next().unwrap_or(class);
+    match short {
+        "Object" | "GroovyObject" => true,
+        "String" | "CharSequence" | "GString" => matches!(value, Value::Str(_)),
+        "Integer" | "Int" | "Long" | "Short" | "Byte" => matches!(value, Value::Int(_)),
+        "BigDecimal" | "Double" | "Float" | "BigInteger" => matches!(value, Value::Float(_)),
+        "Number" => matches!(value, Value::Int(_) | Value::Float(_)),
+        "Boolean" => matches!(value, Value::Bool(_)),
+        "List" | "ArrayList" | "Collection" | "Iterable" => matches!(value, Value::Array(_)),
+        "Map" | "LinkedHashMap" | "HashMap" => {
+            matches!(value, Value::Hash(_)) || as_omap(value).is_some()
+        }
+        _ => false,
+    }
 }
 
 /// Dispatch a method call on a class instance: a user method (implicit `this`),
@@ -524,11 +834,12 @@ fn dispatch_instance_method(
 ) -> Option<Result<Value, String>> {
     let inst = as_instance(recv)?;
     let meta = class_meta(inst.class)?;
-    if let Some(idx) = meta.methods.get(method) {
+    // Virtual dispatch: resolve the method most-derived-first through the chain.
+    if let Some(idx) = lookup_method(inst.class, method) {
         let mut pushes = Vec::with_capacity(args.len() + 1);
         pushes.push(recv.clone());
         pushes.extend_from_slice(args);
-        return Some(invoke_sub(vm, *idx, &pushes));
+        return Some(invoke_sub(vm, idx, &pushes));
     }
     // Auto getter `getX()` / setter `setX(v)` over a field.
     if let Some(field) = method.strip_prefix("get") {
@@ -571,8 +882,8 @@ fn dispatch_instance_prop_get(
     let inst = as_instance(recv)?;
     let meta = class_meta(inst.class)?;
     let getter = format!("get{}", capitalize(name));
-    if let Some(idx) = meta.methods.get(&getter) {
-        return Some(invoke_sub(vm, *idx, std::slice::from_ref(recv)));
+    if let Some(idx) = lookup_method(inst.class, &getter) {
+        return Some(invoke_sub(vm, idx, std::slice::from_ref(recv)));
     }
     if inst.fields.contains_key(name) {
         return Some(Ok(inst.fields.get(name).cloned().unwrap_or(Value::Undef)));
@@ -595,10 +906,10 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
     let value = vm.stack.pop().unwrap_or(Value::Undef);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
     if let Some(inst) = as_instance(&recv) {
-        if let Some(meta) = class_meta(inst.class) {
+        {
             let setter = format!("set{}", capitalize(&name));
-            if let Some(idx) = meta.methods.get(&setter) {
-                return match invoke_sub(vm, *idx, &[recv.clone(), value]) {
+            if let Some(idx) = lookup_method(inst.class, &setter) {
+                return match invoke_sub(vm, idx, &[recv.clone(), value]) {
                     Ok(_) => Value::Undef,
                     Err(e) => {
                         fault(vm, e);
@@ -1223,6 +1534,19 @@ fn print_args(vm: &mut VM, argc: u8, newline: bool) -> Value {
 fn b_div(vm: &mut VM, _argc: u8) -> Value {
     let b = vm.stack.pop().unwrap_or(Value::Undef);
     let a = vm.stack.pop().unwrap_or(Value::Undef);
+    // User-class `/` overload: Groovy dispatches `a / b` as `a.div(b)`. `/` lowers
+    // to this builtin (not the numeric hook), so a class `div` method is resolved
+    // here, with the `&mut VM` this builtin already holds. A non-instance `a` (or
+    // a class without `div`) falls through to native decimal division below.
+    if let Some(res) = call_user_method(vm, &a, "div", std::slice::from_ref(&b)) {
+        return match res {
+            Ok(v) => v,
+            Err(e) => {
+                fault(vm, e);
+                Value::Undef
+            }
+        };
+    }
     match (as_i64(&a), as_i64(&b)) {
         // Both integers: exact → integer, else decimal.
         (Some(x), Some(y)) => {
@@ -1238,6 +1562,43 @@ fn b_div(vm: &mut VM, _argc: u8) -> Value {
             let y = as_f64(&b);
             Value::float(x / y)
         }
+    }
+}
+
+/// `GCMP`: Groovy `<=>`. Pops `a <=> b`. A user-class instance left operand
+/// dispatches `compareTo` (Groovy returns its raw `int`); otherwise a numeric
+/// pair compares numerically and any other pair by Groovy string ordering, both
+/// yielding the sign `-1`/`0`/`1`. Byte-verified against Apache Groovy 5.0.7.
+fn b_cmp(vm: &mut VM, _argc: u8) -> Value {
+    let b = vm.stack.pop().unwrap_or(Value::Undef);
+    let a = vm.stack.pop().unwrap_or(Value::Undef);
+    if let Some(res) = call_user_method(vm, &a, "compareTo", std::slice::from_ref(&b)) {
+        return match res {
+            Ok(v) => v,
+            Err(e) => {
+                fault(vm, e);
+                Value::Undef
+            }
+        };
+    }
+    let ord = match (as_num(&a), as_num(&b)) {
+        (Some(x), Some(y)) => x.partial_cmp(&y),
+        _ => Some(groovy_str(&a).cmp(&groovy_str(&b))),
+    };
+    match ord {
+        Some(std::cmp::Ordering::Less) => Value::int(-1),
+        Some(std::cmp::Ordering::Greater) => Value::int(1),
+        _ => Value::int(0),
+    }
+}
+
+/// A numeric view of a value (`Int`/`Float`/`Bool`), or `None` for a non-number.
+fn as_num(v: &Value) -> Option<f64> {
+    match v {
+        Value::Int(n) => Some(*n as f64),
+        Value::Float(f) => Some(*f),
+        Value::Bool(b) => Some(*b as i64 as f64),
+        _ => None,
     }
 }
 
@@ -1299,8 +1660,7 @@ fn render_value(vm: &mut VM, v: &Value) -> String {
 /// class defines one.
 fn instance_to_string(vm: &mut VM, recv: &Value) -> Option<String> {
     let inst = as_instance(recv)?;
-    let meta = class_meta(inst.class)?;
-    let idx = *meta.methods.get("toString")?;
+    let idx = lookup_method(inst.class, "toString")?;
     match invoke_sub(vm, idx, std::slice::from_ref(recv)) {
         Ok(v) => Some(groovy_str(&v)),
         Err(e) => {
@@ -1404,12 +1764,139 @@ fn groovy_add(a: &Value, b: &Value) -> Value {
     Value::str(format!("{}{}", groovy_str(a), groovy_str(b)))
 }
 
+/// The Groovy method a binary/unary arithmetic operator dispatches to on a
+/// user-class instance (byte-verified against Apache Groovy 5.0.7: `%` maps to
+/// `remainder`, `**` to `power`, unary `-` to `negative`). `/` is handled in
+/// [`b_div`], comparisons/equality in [`instance_operator`], so they are absent.
+fn arith_method(op: NumOp) -> Option<&'static str> {
+    match op {
+        NumOp::Add => Some("plus"),
+        NumOp::Sub => Some("minus"),
+        NumOp::Mul => Some("multiply"),
+        NumOp::Mod => Some("remainder"),
+        NumOp::Pow => Some("power"),
+        NumOp::Neg => Some("negative"),
+        _ => None,
+    }
+}
+
+/// Dispatch a Groovy operator on a user-class instance left operand. Arithmetic
+/// (`+`/`-`/`*`/`%`/`**`/unary `-`) calls the mapped method strictly (a missing
+/// method faults, as Groovy raises `MissingMethodException`); `==`/`!=` go through
+/// [`instance_equals`]; ordered comparisons through `compareTo`. Returns `None`
+/// when the operator has no instance meaning here — an ordered comparison on a
+/// class without `compareTo` — so the hook's default (string comparison) applies.
+fn instance_operator(op: NumOp, a: &Value, b: &Value) -> Option<Result<Value, String>> {
+    // Clone the operands before any VM re-entry (see [`with_vm`] SAFETY note).
+    let recv = a.clone();
+    let rhs = b.clone();
+    match op {
+        NumOp::Add | NumOp::Sub | NumOp::Mul | NumOp::Mod | NumOp::Pow => {
+            let m = arith_method(op)?;
+            Some(dispatch_operator_method(&recv, m, &[rhs]))
+        }
+        NumOp::Neg => Some(dispatch_operator_method(&recv, "negative", &[])),
+        NumOp::Eq | NumOp::Ne => Some(
+            instance_equals(&recv, &rhs)
+                .map(|eq| Value::bool(if matches!(op, NumOp::Eq) { eq } else { !eq })),
+        ),
+        NumOp::Lt | NumOp::Gt | NumOp::Le | NumOp::Ge => match instance_compare(&recv, &rhs) {
+            Some(Ok(c)) => {
+                let r = match op {
+                    NumOp::Lt => c < 0,
+                    NumOp::Gt => c > 0,
+                    NumOp::Le => c <= 0,
+                    NumOp::Ge => c >= 0,
+                    _ => unreachable!(),
+                };
+                Some(Ok(Value::bool(r)))
+            }
+            Some(Err(e)) => Some(Err(e)),
+            // No `compareTo` — defer to the hook's default string comparison.
+            None => None,
+        },
+        // `/` lowers to the GDIV builtin and never reaches the hook.
+        NumOp::Div => None,
+    }
+}
+
+/// Invoke an operator overload method on `recv`, re-entering the VM. A missing
+/// method faults with the same `no such method` diagnostic the GDK dispatch uses
+/// (Groovy signals `MissingMethodException` for an undefined operator method).
+fn dispatch_operator_method(recv: &Value, method: &str, args: &[Value]) -> Result<Value, String> {
+    match with_vm(|vm| call_user_method(vm, recv, method, args)) {
+        Some(Some(res)) => res,
+        // The class does not define the operator method.
+        Some(None) => {
+            let name = as_instance(recv)
+                .and_then(|i| class_meta(i.class))
+                .map(|m| m.name)
+                .unwrap_or_else(|| "Object".to_string());
+            Err(format!("groovyrs: no such method `{method}` on {name}"))
+        }
+        // No VM published — only possible if the hook fired outside a run.
+        None => Err("groovyrs: operator overload dispatched with no active VM".to_string()),
+    }
+}
+
+/// Groovy `==`/`!=` on a user-class instance. Null-safe (an instance is never
+/// `== null`); a class implementing `Comparable` (modeled here as defining
+/// `compareTo`) compares equal when `compareTo` is `0`; otherwise a user `equals`
+/// decides; with neither, equality is object identity (the shared heap handle).
+/// Byte-verified against Apache Groovy 5.0.7.
+fn instance_equals(a: &Value, b: &Value) -> Result<bool, String> {
+    // Groovy `==` is null-safe: a non-null instance never equals null.
+    if matches!(b, Value::Undef) {
+        return Ok(false);
+    }
+    let Some(inst) = as_instance(a) else {
+        return Ok(false);
+    };
+    // Comparable → equality is `compareTo(...) == 0`.
+    if lookup_method(inst.class, "compareTo").is_some() {
+        return match instance_compare(a, b) {
+            Some(res) => res.map(|c| c == 0),
+            None => Ok(false),
+        };
+    }
+    // A user `equals(Object)` decides.
+    if let Some(res) =
+        with_vm(|vm| call_user_method(vm, a, "equals", std::slice::from_ref(b))).flatten()
+    {
+        return res.map(|v| v.is_truthy());
+    }
+    // No `compareTo`/`equals`: default `Object` identity — the same heap handle.
+    Ok(matches!((a, b), (Value::Obj(x), Value::Obj(y)) if x == y))
+}
+
+/// Invoke a user `compareTo` and return its `int` result, for `<`/`>`/`<=`/`>=`
+/// and Comparable-based `==`. `None` when the class defines no `compareTo` (so
+/// an ordered comparison falls back to the hook's default).
+fn instance_compare(a: &Value, b: &Value) -> Option<Result<i64, String>> {
+    let inst = as_instance(a)?;
+    lookup_method(inst.class, "compareTo")?;
+    let res =
+        with_vm(|vm| call_user_method(vm, a, "compareTo", std::slice::from_ref(b))).flatten()?;
+    Some(res.map(|v| v.to_int()))
+}
+
 /// Strict numeric hook: fusevm calls this only for an operation with a
 /// non-numeric operand — Groovy's `+` overload (list concat / map merge / string
 /// concatenation) and value comparisons against strings. All-numeric arithmetic
 /// never reaches here (it stays on the native fast path and the JIT). `/` never
 /// reaches here — it lowers to the [`GDIV`] builtin instead.
 pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
+    // User-class operator overloading. Groovy dispatches an operator on its LEFT
+    // operand as a method call (`a + b` == `a.plus(b)`, `a > b` == `a.compareTo(b)
+    // > 0`, `a == b` via `equals`/`compareTo`). Only a class-instance left operand
+    // routes here; primitive `Int`/`Float`/`String` arithmetic stays on the native
+    // and JIT fast paths and never reaches this hook. `/` is absent — it lowers to
+    // the [`GDIV`] builtin, where the `div` overload is dispatched instead.
+    if as_instance(a).is_some() {
+        if let Some(res) = instance_operator(op, a, b) {
+            return res;
+        }
+    }
     match op {
         // Groovy `+` dispatches on the left operand: list concatenation/append,
         // map merge, else string concatenation.

@@ -55,8 +55,26 @@ compile errors, never silently mis-run.
 - **Collection `+`.** `+` dispatches on its left operand: a list concatenates
   another list or appends a scalar (`[1, 2] + 3` → `[1, 2, 3]`), a map merges
   another map (right wins on a duplicate key, order preserved), and a `String`
-  concatenates. (This is the built-in behavior, not a user `plus` overload — see
-  the operator-overloading gap below.)
+  concatenates. This is the built-in behavior for lists/maps/strings; a
+  user-class left operand instead dispatches its `plus` method (see operator
+  overloading below).
+- **Operator overloading.** A user-class instance operand dispatches the Groovy
+  operator method: `+`→`plus`, `-`→`minus`, `*`→`multiply`, `/`→`div`,
+  `%`→`remainder`, `**`→`power`, unary `-`→`negative`; `<`/`>`/`<=`/`>=` and
+  `<=>` go through `compareTo`; `==`/`!=` use `compareTo` (when the class defines
+  it, i.e. is `Comparable`) else `equals`, and are null-safe (an instance is
+  never `== null`); `recv[i]` uses `getAt`. Primitive (`Int`/`Float`/`String`)
+  operands stay on the native/JIT fast path — only a user-class operand routes to
+  a method. Mechanism: the strict numeric hook (and the `GDIV`/`GCMP` builtins)
+  re-enter the running VM through a published thread-local pointer to invoke the
+  method — no fusevm change.
+- **Inheritance.** `class C extends B { … }` with single-inheritance method and
+  field inheritance, virtual dispatch (the most-derived override wins, and a base
+  method calling a virtual method reaches the override), `super.m(args)` (static
+  parent dispatch), `super(args)` constructor chaining, inherited field
+  initializers, `value instanceof Type` (user chain + built-in type names, with
+  `null instanceof X` false), and `@Override` / other annotations parsed and
+  ignored. `implements` is still ignored (interfaces have no runtime effect).
 - **Closure-driven GDK iteration.** `each`, `eachWithIndex`, `collect`,
   `findAll`, `find`, `inject` (both the `inject(init){…}` and seedless
   `inject{…}` forms), and `sum` over lists (and over materialised ranges), e.g.
@@ -71,19 +89,23 @@ compile errors, never silently mis-run.
 
 ## Not implemented (errors today)
 
-- **`trait`/inheritance/interfaces.** Only flat classes are compiled: `extends`
-  / `implements` clauses are parsed and ignored, there is no `super`, and method
-  resolution does not walk a superclass chain.
-- **Operator overloading through the operators.** A user `getAt` drives `[]` (it
-  routes through a host builtin with VM access), but `plus`/`minus`/`compareTo`/
-  `equals` do **not** yet drive `+`/`-`/`<=>`/`==`. Those operators reach the
-  strict numeric hook, whose signature (`Fn(NumOp, &Value, &Value) -> Result`)
-  has no VM handle and so cannot re-enter the VM to run a user method — and
-  fusevm is a vendored dependency that must not change. Call the method directly
-  (`a.plus(b)`) meanwhile.
+- **`trait` / `implements` behavior.** `extends` (single inheritance) is
+  supported; `trait`s and interface method bodies are not, and `implements`
+  clauses are parsed and ignored (only `Comparable`'s `compareTo` matters, and
+  that is keyed off the method's presence, not the clause).
+- **Method overloading by parameter type.** Methods (and a class's operator
+  methods) are keyed by name only, so two same-named methods with different
+  parameter types collapse to one (the last declared wins). Constructors *are*
+  dispatched, but by arity only, not parameter type.
+- **`++`/`--` do not call `next`/`previous`.** To keep the JIT fast path for
+  integer loop counters (`for (i=0; i<n; i++)`), `++`/`--` lower to native
+  `+ 1` / `- 1` rather than routing through a builtin (which would abort trace
+  JIT). On a user-class instance they therefore dispatch `plus`/`minus`, not
+  Groovy's `next`/`previous`. Call `x.next()` / `x.previous()` explicitly for
+  those.
 - **GStrings / interpolation.** `"$name"` / `"${expr}"` are lexed as literal
   text — the `${…}` is **not** evaluated. Use `+` concatenation.
-- **`switch`, `do/while`, labeled break, spaceship `<=>`.**
+- **`switch`, `do/while`, labeled break.**
 - **`try`/`catch`/`finally`, exceptions, `throw`, `assert`.**
 - **`import`/`package`** are tolerated (skipped) but do nothing.
 - **Command-argument chains beyond one arg** (`println a, b`, `foo bar baz`).

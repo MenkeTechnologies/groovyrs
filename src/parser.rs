@@ -322,9 +322,16 @@ impl Parser {
     fn class_decl(&mut self) -> Result<StmtKind, String> {
         self.advance(); // `class`
         let name = self.ident()?;
-        // Skip any `extends X` / `implements Y, Z` up to the class body.
         self.skip_newlines();
+        // `extends Super` captures the direct superclass; `implements Y, Z` is
+        // still tolerated and ignored (interfaces have no runtime effect here).
+        let mut superclass = None;
         while !self.is(&Tok::LBrace) && !self.is(&Tok::Eof) {
+            if matches!(self.peek(), Tok::Ident(k) if k == "extends") {
+                self.advance();
+                superclass = Some(self.ident()?);
+                continue;
+            }
             self.advance();
         }
         self.eat(&Tok::LBrace)?;
@@ -340,6 +347,7 @@ impl Parser {
         self.eat(&Tok::RBrace)?;
         Ok(StmtKind::Class {
             name,
+            superclass,
             fields,
             ctors,
             methods,
@@ -355,6 +363,32 @@ impl Parser {
         ctors: &mut Vec<Ctor>,
         methods: &mut Vec<Method>,
     ) -> Result<(), String> {
+        // Skip annotations (`@Override`, `@SuppressWarnings("x")`, …): the marker,
+        // its name, and any parenthesised arguments. They have no runtime effect.
+        while self.is(&Tok::At) {
+            self.advance(); // `@`
+            self.ident()?; // annotation name
+            if self.is(&Tok::LParen) {
+                let mut depth = 0;
+                loop {
+                    match self.peek() {
+                        Tok::LParen => depth += 1,
+                        Tok::RParen => {
+                            depth -= 1;
+                            self.advance();
+                            if depth == 0 {
+                                break;
+                            }
+                            continue;
+                        }
+                        Tok::Eof => break,
+                        _ => {}
+                    }
+                    self.advance();
+                }
+            }
+            self.skip_newlines();
+        }
         // Skip modifier keywords.
         while matches!(
             self.peek(),
@@ -461,7 +495,13 @@ impl Parser {
         {
             j += 2;
         }
-        matches!(self.toks.get(j).map(|t| &t.kind), Some(Tok::Ident(_)))
+        // The name position must be an identifier — but not a contextual operator
+        // keyword. `o instanceof P` is a type test, not a declaration of a variable
+        // named `instanceof`; likewise `x in xs`.
+        matches!(
+            self.toks.get(j).map(|t| &t.kind),
+            Some(Tok::Ident(n)) if n != "instanceof" && n != "in"
+        )
     }
 
     fn if_stmt(&mut self) -> Result<StmtKind, String> {
@@ -683,7 +723,20 @@ impl Parser {
 
     fn binary(&mut self, min_bp: u8) -> Result<Expr, String> {
         let mut lhs = self.unary()?;
-        while let Some((op, bp)) = binop(self.peek()) {
+        loop {
+            // `value instanceof Type` — relational precedence (binding power 4).
+            if 4 >= min_bp && matches!(self.peek(), Tok::Ident(k) if k == "instanceof") {
+                self.advance();
+                let class = self.ident()?;
+                lhs = Expr::InstanceOf {
+                    value: Box::new(lhs),
+                    class,
+                };
+                continue;
+            }
+            let Some((op, bp)) = binop(self.peek()) else {
+                break;
+            };
             if bp < min_bp {
                 break;
             }
@@ -859,6 +912,17 @@ impl Parser {
                 if name == "this" {
                     self.advance();
                     return Ok(Expr::This);
+                }
+                // `super` — either a super-constructor call `super(args)` or the
+                // receiver of a `super.method(args)` static-super dispatch.
+                if name == "super" {
+                    let line = self.line();
+                    self.advance();
+                    if self.is(&Tok::LParen) {
+                        let args = self.call_args()?;
+                        return Ok(Expr::SuperCtor { args, line });
+                    }
+                    return Ok(Expr::Super);
                 }
                 let line = self.line();
                 self.advance();
@@ -1108,6 +1172,8 @@ fn binop(t: &Tok) -> Option<(BinOp, u8)> {
         Tok::AndAnd => (BinOp::And, 2),
         Tok::EqEq => (BinOp::Eq, 3),
         Tok::NotEq => (BinOp::Ne, 3),
+        // `<=>` sits at Groovy's equality precedence, below relational ops.
+        Tok::Spaceship => (BinOp::Cmp, 3),
         Tok::Lt => (BinOp::Lt, 4),
         Tok::Gt => (BinOp::Gt, 4),
         Tok::Le => (BinOp::Le, 4),

@@ -101,6 +101,9 @@ pub enum StmtKind {
     /// `compiler::class_def`.
     Class {
         name: String,
+        /// The direct superclass name (`class C extends B`), or `None` for a root
+        /// class. `implements` clauses are still ignored (dynamic dispatch).
+        superclass: Option<String>,
         fields: Vec<Field>,
         ctors: Vec<Ctor>,
         methods: Vec<Method>,
@@ -285,6 +288,22 @@ pub enum Expr {
     /// The `this` reference inside a method or constructor body — the receiver
     /// instance, held in frame slot 0.
     This,
+    /// The `super` reference inside a method — a receiver for `super.m(args)`,
+    /// which statically dispatches `m` starting at the superclass (skipping the
+    /// current class's override). Only meaningful as a `MethodCall` receiver.
+    Super,
+    /// A super-constructor call `super(args)` in a constructor body: runs the
+    /// superclass's arity-matched constructor against the current instance.
+    SuperCtor {
+        args: Vec<Expr>,
+        line: u32,
+    },
+    /// A type test `value instanceof Class` — true when `value`'s class is `Class`
+    /// or a subclass, or matches a built-in type name. Yields a `Boolean`.
+    InstanceOf {
+        value: Box<Expr>,
+        class: String,
+    },
     /// An index read `recv[index]` — Groovy's subscript operator, dispatched to a
     /// list/map/string element or a user `getAt(index)` overload.
     Index {
@@ -315,6 +334,9 @@ pub enum BinOp {
     Gt,
     Le,
     Ge,
+    /// `<=>` — three-way compare. On a user-class instance it dispatches
+    /// `compareTo`; on primitives it yields the sign (`-1`/`0`/`1`).
+    Cmp,
     And,
     Or,
 }

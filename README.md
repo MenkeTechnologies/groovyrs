@@ -59,9 +59,10 @@ frontend over the shared engine. Highlights:
 - **Groovy value semantics** — `println` formats `true`/`false`, `3.0`, and
   `null` the Groovy way, and integer `/` promotes like `BigDecimal` so `7 / 2`
   is `3.5`, not `3`.
-- **Groovy `+` overloading** — a strict numeric hook supplies string
-  concatenation (`"x=" + x`) for the mixed operands the VM's native arithmetic
-  does not compute.
+- **Operator overloading** — a strict numeric hook supplies string concatenation
+  (`"x=" + x`) for mixed operands, and dispatches a user-class instance's operator
+  method (`plus`/`minus`/`multiply`/`compareTo`/`equals`/…) for `+`/`-`/`*`/`<`/
+  `==`/… — by re-entering the VM, with primitives kept on the native fast path.
 
 Every program in `examples/` is diffed byte-for-byte against Apache Groovy in
 the test suite.
@@ -135,6 +136,16 @@ Implemented and checked against Apache Groovy:
   implicit `this`, property get/set with Groovy's auto `getX`/`setX`, a bare
   field resolving to `this.field`, and `toString()` driving `println`. Instances
   are heap objects with reference identity. A user `getAt(i)` drives `obj[i]`.
+- **Inheritance** — `class C extends B { … }` with single-inheritance field and
+  method inheritance, virtual dispatch (most-derived override wins),
+  `super.m(args)` and `super(args)` chaining, inherited field initializers,
+  `value instanceof Type` (user chain + built-in types), and `@Override` parsed
+  and ignored.
+- **Operator overloading** — a user-class instance operand dispatches its
+  operator method: `+`→`plus`, `-`→`minus`, `*`→`multiply`, `/`→`div`,
+  `%`→`remainder`, `**`→`power`, unary `-`→`negative`, `[]`→`getAt`;
+  `<`/`>`/`<=`/`>=`/`<=>` via `compareTo`; null-safe `==`/`!=` via `compareTo`
+  (Comparable) or `equals`. Primitive operands stay on the native/JIT fast path.
 - **Method / property dispatch** — `s.length()`, `list.size()`,
   `"hi".toUpperCase()`, `map.k`, chains on literals (`[1,2,3].size()`), over a
   faithful GDK subset routed through a host dispatch. An unknown member faults.
@@ -157,9 +168,9 @@ Implemented and checked against Apache Groovy:
   `println(x)` and paren-less `println x` command forms.
 - **Comments** — `//` line, `/* … */` block.
 
-See [`BUGS.md`](BUGS.md) for the honest known-gaps list (inheritance/`trait`,
-operator overloading through `+`/`-`/`<=>`/`==`, GStrings, by-reference upvalue
-capture).
+See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
+overloading by parameter type, `++`/`--` not calling `next`/`previous`, GStrings,
+by-reference upvalue capture).
 
 ---
 
@@ -207,15 +218,15 @@ mirrors how `zshrs` hosts zsh, `ruby` hosts Ruby, and `java` hosts Java:
 ```
 Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm VM + Cranelift JIT
                                               │
-                                strict numeric hook (Groovy `+` concat)
-                                GDIV builtin (BigDecimal-style `/`)
+                                strict numeric hook (Groovy `+` concat + operator overloads)
+                                GDIV / GCMP builtins (BigDecimal `/`, `<=>`)
                                 print builtins (Groovy value formatting)
 ```
 
 | Piece | How |
 | --- | --- |
 | **fusevm-hosted** | No local `vm.rs` / `jit.rs`, no JVM. Groovy lowers to fusevm bytecode and runs on the shared three-tier Cranelift JIT; `jit-disk-cache` persists native code across runs. |
-| **Native arithmetic** | `+ - * %`, comparisons, and logic lower to native fusevm ops; the JIT traces hot integer loops. A strict numeric hook supplies Groovy's `+` string concatenation for non-numeric operands. |
+| **Native arithmetic** | `+ - * %`, comparisons, and logic lower to native fusevm ops; the JIT traces hot integer loops. A strict numeric hook supplies Groovy's `+` string concatenation for non-numeric operands, and dispatches a user-class instance's operator method (`plus`/`minus`/`compareTo`/…) by re-entering the VM through a published thread-local pointer — primitives never leave the fast path. |
 | **Groovy division** | `/` lowers to the `GDIV` builtin: two integers divide exactly to an integer and to a decimal otherwise (`7/2 → 3.5`), matching Groovy's `BigDecimal` promotion. |
 | **Groovy print semantics** | `println`/`print` lower to a registered builtin that formats values Groovy-style (`true`/`false`, `3.0`, `null`), rather than the VM's shell-flavoured `PrintLn`. |
 
@@ -230,6 +241,9 @@ closure-driven GDK (`each` / `collect` / `findAll` / `find` / `inject` / `sum`)
 and nested-closure upvalue capture (curried `{ x -> { y -> x + y } }`, chained
 `f(a)(b)`), classes (fields, constructors, methods, `this`, property get/set with
 auto getter/setter, `new`, `toString`, `getAt` subscript) on a host object heap,
+single-inheritance `extends` (virtual dispatch, `super`, `instanceof`), operator
+overloading (`plus`/`minus`/`multiply`/`div`/`remainder`/`power`/`negative`/
+`compareTo`/`equals` driving `+`/`-`/`*`/`/`/`%`/`**`/unary `-`/`<`/`>`/`<=>`/`==`),
 insertion-ordered maps, first-class ranges (`0..5` / `0..<5`), arithmetic /
 comparison / logic, `BigDecimal`-style division, ternary / Elvis /
 safe-navigation, `if` / `while` / `for` / range `for-in` / `break` / `continue` /
@@ -241,14 +255,12 @@ Debug Adapter (`--dap`).
 
 Next waves, in priority order:
 
-1. **Operator overloading through the operators** — `plus`/`minus`/`compareTo`/
-   `equals` driving `+`/`-`/`<=>`/`==` (a user `getAt` already drives `[]`). This
-   needs a VM-re-entrant numeric hook in fusevm; the current hook signature
-   cannot run a user method.
-2. **Inheritance** — `extends`/`super`/interfaces and superclass method
-   resolution (today classes are flat; `extends` is parsed and ignored).
-3. **By-reference upvalue capture** — boxed cells so a closure sees a mutation of
+1. **By-reference upvalue capture** — boxed cells so a closure sees a mutation of
    an outer frame local made after capture (capture is by value today).
+2. **Method overloading by parameter type** — today methods and operator methods
+   are keyed by name only, so same-named overloads collapse to the last declared.
+3. **`trait`s and interface bodies** — `implements` is parsed but has no runtime
+   effect beyond `Comparable`'s `compareTo`.
 4. **Interpolation & standard library** — GString `"$name"` / `"${expr}"`;
    `Math`, broader `java.util`/GDK collection methods.
 5. **Scale-tracking decimals** — a real `BigDecimal` value so `10 * 1.25` prints

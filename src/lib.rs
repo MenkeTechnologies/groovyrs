@@ -58,7 +58,10 @@ pub fn eval_file_debug(path: &str) -> Result<(), String> {
     });
     vm.set_numeric_hook(std::sync::Arc::new(host::numeric_hook));
     let _ = host::take_error();
-    match vm.run() {
+    host::set_vm_ptr(&mut vm);
+    let outcome = vm.run();
+    host::clear_vm_ptr();
+    match outcome {
         VMResult::Ok(_) | VMResult::Halted => match host::take_error() {
             Some(e) => Err(e),
             None => Ok(()),
@@ -75,7 +78,12 @@ fn run_chunk(chunk: fusevm::Chunk) -> Result<Value, String> {
     host::install(&mut vm);
     vm.set_numeric_hook(std::sync::Arc::new(host::numeric_hook));
     vm.enable_tracing_jit();
-    match vm.run() {
+    // Publish the VM so the numeric hook can re-enter it for operator overloading
+    // (the hook receives no VM handle); cleared once the run returns.
+    host::set_vm_ptr(&mut vm);
+    let outcome = vm.run();
+    host::clear_vm_ptr();
+    match outcome {
         // A runtime fault raised inside an FFI builtin (block compile failure or a
         // call to an unregistered export) halts the VM and parks its message here.
         VMResult::Ok(v) => match host::take_error() {

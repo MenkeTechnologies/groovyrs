@@ -670,3 +670,316 @@ fn map_size_and_contains_key() {
         run("def m = [x: 1, y: 2, z: 3]\nprintln m.size()\nprintln m.containsKey(\"y\")\nprintln m.containsKey(\"q\")");
     assert_eq!(out, "3\ntrue\nfalse\n");
 }
+
+// ── Operator overloading (dispatched to user methods) ───────────────────────
+
+#[test]
+fn operator_overloads_arithmetic_on_instances() {
+    // `+`/`-`/`*`/unary `-`/`%` dispatch to plus/minus/multiply/negative/
+    // remainder on a user-class instance (Groovy 5's operator-method names).
+    let src = r#"
+class Vec {
+    int x
+    Vec(int v) { this.x = v }
+    Vec plus(Vec o) { new Vec(x + o.x) }
+    Vec minus(Vec o) { new Vec(x - o.x) }
+    Vec multiply(int n) { new Vec(x * n) }
+    Vec negative() { new Vec(-x) }
+    Vec remainder(int n) { new Vec(x % n) }
+    String toString() { "V(" + x + ")" }
+}
+def a = new Vec(10)
+def b = new Vec(3)
+println a + b
+println a - b
+println a * 2
+println(-a)
+println a % 3
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "V(13)\nV(7)\nV(20)\nV(-10)\nV(1)\n");
+}
+
+#[test]
+fn div_operator_dispatches_user_div() {
+    // Groovy `/` lowers to the GDIV builtin, which dispatches a user `div`
+    // overload before falling back to numeric division.
+    let src = r#"
+class Scale {
+    int v
+    Scale(int v) { this.v = v }
+    Scale div(int k) { new Scale(v - k) }
+    String toString() { "S(" + v + ")" }
+}
+println new Scale(10) / 3
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "S(7)\n");
+}
+
+#[test]
+fn comparable_class_drives_relational_operators() {
+    // A class defining `compareTo` powers `<`, `>`, `<=`, `>=`.
+    let src = r#"
+class Vec {
+    int x
+    Vec(int v) { this.x = v }
+    int compareTo(Vec o) { x - o.x }
+    String toString() { "V(" + x + ")" }
+}
+def a = new Vec(10)
+def b = new Vec(3)
+println a > b
+println a < b
+println a >= b
+println a <= b
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "true\nfalse\ntrue\nfalse\n");
+}
+
+#[test]
+fn equals_method_drives_equality_and_is_null_safe() {
+    // `==` on a class without `compareTo` uses its `equals`; an instance is
+    // never `== null`.
+    let src = r#"
+class P {
+    int x
+    P(int x) { this.x = x }
+    boolean equals(Object o) { o instanceof P && o.x == x }
+    String toString() { "P(" + x + ")" }
+}
+println new P(1) == new P(1)
+println new P(1) == new P(2)
+def p = new P(5)
+println p == p
+println p == null
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "true\nfalse\ntrue\nfalse\n");
+}
+
+#[test]
+fn comparable_drives_equality() {
+    // A Comparable class (defines `compareTo`) compares equal via compareTo==0.
+    let src = r#"
+class Vec {
+    int x
+    Vec(int v) { this.x = v }
+    int compareTo(Vec o) { x - o.x }
+}
+println new Vec(4) == new Vec(4)
+println new Vec(4) == new Vec(9)
+println new Vec(4) != new Vec(9)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "true\nfalse\ntrue\n");
+}
+
+#[test]
+fn spaceship_dispatches_compare_to_and_primitive_sign() {
+    // `<=>` dispatches `compareTo` on an instance and yields the sign on
+    // primitives; it also parses inside a compareTo body.
+    let src = r#"
+class Vec implements Comparable<Vec> {
+    int x
+    Vec(int v) { this.x = v }
+    int compareTo(Vec o) { x <=> o.x }
+    String toString() { "V(" + x + ")" }
+}
+def a = new Vec(10)
+def b = new Vec(3)
+println (a <=> b)
+println (b <=> a)
+println (a <=> new Vec(10))
+println (1 <=> 2)
+println (5 <=> 5)
+println ("apple" <=> "banana")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "1\n-1\n0\n-1\n0\n-1\n");
+}
+
+// ── Inheritance (extends / super / virtual dispatch / instanceof) ────────────
+
+#[test]
+fn subclass_super_constructor_and_inherited_field() {
+    // `super(n)` runs the parent ctor; an inherited field is a real field.
+    let src = r#"
+class Animal {
+    String name
+    Animal(String n) { this.name = n }
+    String kind() { "Animal" }
+}
+class Dog extends Animal {
+    Dog(String n) { super(n) }
+    String fetch() { name + " fetches" }
+}
+def d = new Dog("Rex")
+println d.name
+println d.kind()
+println d.fetch()
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "Rex\nAnimal\nRex fetches\n");
+}
+
+#[test]
+fn method_override_virtual_dispatch() {
+    // A base-class method calling a virtual method resolves to the subclass
+    // override (dynamic dispatch on the runtime class).
+    let src = r#"
+class Animal {
+    String name
+    Animal(String n) { this.name = n }
+    String speak() { "..." }
+    String describe() { name + " says " + speak() }
+}
+class Dog extends Animal {
+    Dog(String n) { super(n) }
+    String speak() { "Woof" }
+}
+def d = new Dog("Rex")
+println d.speak()
+println d.describe()
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "Woof\nRex says Woof\n");
+}
+
+#[test]
+fn super_method_call_reaches_parent_implementation() {
+    // `super.speak()` reaches the parent's implementation, skipping the override.
+    let src = r#"
+class Animal {
+    String speak() { "..." }
+}
+class Dog extends Animal {
+    String speak() { "Woof" }
+}
+class Puppy extends Dog {
+    String speak() { "Yip (" + super.speak() + ")" }
+}
+println new Puppy().speak()
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "Yip (Woof)\n");
+}
+
+#[test]
+fn instanceof_user_and_builtin_types() {
+    // `instanceof` on user classes walks the superclass chain; built-in type
+    // names are recognised; `null instanceof X` is false.
+    let src = r#"
+class A {}
+class B extends A {}
+def b = new B()
+println b instanceof B
+println b instanceof A
+println (new A() instanceof B)
+println ("x" instanceof String)
+println (5 instanceof Integer)
+println ([1, 2] instanceof List)
+println (null instanceof A)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "true\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn inherited_field_initializer_and_bare_method_call() {
+    // Inherited field initializers run; a subclass method calls an inherited
+    // method by bare name (resolved to `this` across the chain).
+    let src = r#"
+class Base {
+    int a = 1
+    int b = 2
+    int sum() { a + b }
+}
+class Derived extends Base {
+    int c = 10
+    int total() { sum() + c }
+}
+def d = new Derived()
+println d.a
+println d.c
+println d.sum()
+println d.total()
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "1\n10\n3\n13\n");
+}
+
+#[test]
+fn override_annotation_is_parsed_and_ignored() {
+    // `@Override` (and other annotations) parse without effect.
+    let src = r#"
+class Animal {
+    String speak() { "..." }
+}
+class Cat extends Animal {
+    @Override
+    String speak() { "Meow" }
+}
+println new Cat().speak()
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "Meow\n");
+}
+
+#[test]
+fn three_level_inheritance_virtual_dispatch() {
+    // A three-level chain: the most-derived override wins, and an inherited base
+    // method dispatches virtually to it.
+    let src = r#"
+class Animal {
+    String name
+    Animal(String n) { this.name = n }
+    String speak() { "..." }
+    String describe() { name + " says " + speak() }
+}
+class Dog extends Animal {
+    Dog(String n) { super(n) }
+    String speak() { "Woof" }
+}
+class Puppy extends Dog {
+    Puppy(String n) { super(n) }
+    String speak() { "Yip (" + super.speak() + ")" }
+}
+def p = new Puppy("Bit")
+println p.speak()
+println p.describe()
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "Yip (Woof)\nBit says Yip (Woof)\n");
+}
+
+#[test]
+fn subclass_inherits_tostring_when_not_overridden() {
+    // A subclass with no `toString` prints through the inherited one.
+    let src = r#"
+class Base {
+    int v = 7
+    String toString() { "Base(" + v + ")" }
+}
+class Sub extends Base {
+}
+println new Sub()
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "Base(7)\n");
+}

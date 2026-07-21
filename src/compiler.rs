@@ -70,6 +70,14 @@ struct Compiler {
     /// lowered. A bare call to one of these (not shadowed by a local) is an
     /// implicit `this.method(args)`.
     cur_class_methods: Option<HashSet<String>>,
+    /// The name of the class whose member body is currently being lowered; `None`
+    /// outside a class member. Used to resolve `super.m()` / `super(...)` to the
+    /// class's declared superclass at compile time.
+    cur_class_super: Option<String>,
+    /// Every declared class's superclass and own field/method names, so a class
+    /// body can resolve *inherited* bare names (`name`, `speak()`) to `this` by
+    /// walking the superclass chain at compile time. Keyed by class name.
+    class_index: HashMap<String, ClassInfo>,
     /// Closure bodies discovered while lowering, awaiting emission as subroutine
     /// regions after the main body and the user functions (see
     /// [`Compiler::emit_closure`]). A queue because emitting one closure may
@@ -77,6 +85,15 @@ struct Compiler {
     pending_closures: VecDeque<PendingClosure>,
     /// Monotonic id for synthetic closure names (`$closure_0`, `$closure_1`, …).
     closures_seen: u32,
+}
+
+/// A declared class's inheritance-relevant shape: its direct superclass and the
+/// names of its own fields and methods. Used to compute the transitive (inherited)
+/// field/method sets that drive bare-name resolution inside a class body.
+struct ClassInfo {
+    superclass: Option<String>,
+    fields: Vec<String>,
+    methods: Vec<String>,
 }
 
 /// A closure body queued for emission as a subroutine region. `params` already
@@ -116,6 +133,29 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             fn_names.insert(name.clone());
         }
     }
+    // Index every class's inheritance shape up front so a subclass body can
+    // resolve inherited bare names to `this` (a subclass may appear before its
+    // superclass in source, like function forward references).
+    let mut class_index = HashMap::new();
+    for stmt in &prog.body {
+        if let StmtKind::Class {
+            name,
+            superclass,
+            fields,
+            methods,
+            ..
+        } = &stmt.kind
+        {
+            class_index.insert(
+                name.clone(),
+                ClassInfo {
+                    superclass: superclass.clone(),
+                    fields: fields.iter().map(|f| f.name.clone()).collect(),
+                    methods: methods.iter().map(|m| m.name.clone()).collect(),
+                },
+            );
+        }
+    }
     let mut c = Compiler {
         b: ChunkBuilder::new(),
         loops: Vec::new(),
@@ -127,6 +167,8 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         scope: None,
         cur_class_fields: None,
         cur_class_methods: None,
+        cur_class_super: None,
+        class_index,
         pending_closures: VecDeque::new(),
         closures_seen: 0,
     };
@@ -135,12 +177,13 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     for stmt in &prog.body {
         if let StmtKind::Class {
             name,
+            superclass,
             fields,
             ctors,
             methods,
         } = &stmt.kind
         {
-            c.register_class(name, fields, ctors, methods);
+            c.register_class(name, superclass.as_deref(), fields, ctors, methods);
         }
     }
     // Emit the script body (function and class definitions are hoisted out and
@@ -166,12 +209,20 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     for stmt in &prog.body {
         if let StmtKind::Class {
             name,
+            superclass,
             fields,
             ctors,
             methods,
         } = &stmt.kind
         {
-            c.class_bodies(stmt.line, name, fields, ctors, methods)?;
+            c.class_bodies(
+                stmt.line,
+                name,
+                superclass.as_deref(),
+                fields,
+                ctors,
+                methods,
+            )?;
         }
     }
     // Emit queued closure bodies as subroutine regions. Draining may enqueue
@@ -342,8 +393,21 @@ impl Compiler {
     /// method table, field-initializer table, and constructor table, then call
     /// the class-register builtin. Runs once at script start (hoisted), so the
     /// class is resolvable before any `new`.
-    fn register_class(&mut self, name: &str, fields: &[Field], ctors: &[Ctor], methods: &[Method]) {
+    fn register_class(
+        &mut self,
+        name: &str,
+        superclass: Option<&str>,
+        fields: &[Field],
+        ctors: &[Ctor],
+        methods: &[Method],
+    ) {
         let line = 0;
+        // superclass name (empty string ⇒ no superclass), pushed first so the
+        // register builtin pops it last.
+        let sidx = self
+            .b
+            .add_constant(Value::str(superclass.unwrap_or("").to_string()));
+        self.b.emit(Op::LoadConst(sidx), line);
         // class name
         let nidx = self.b.add_constant(Value::str(name.to_string()));
         self.b.emit(Op::LoadConst(nidx), line);
@@ -396,12 +460,19 @@ impl Compiler {
         &mut self,
         line: u32,
         name: &str,
+        superclass: Option<&str>,
         fields: &[Field],
         ctors: &[Ctor],
         methods: &[Method],
     ) -> Result<(), String> {
-        let field_set: HashSet<String> = fields.iter().map(|f| f.name.clone()).collect();
-        let method_set: HashSet<String> = methods.iter().map(|m| m.name.clone()).collect();
+        // Include inherited fields/methods so a bare inherited name inside this
+        // class's bodies resolves to `this.field` / `this.method(...)`.
+        let field_set = self.inherited_names(name, |i| &i.fields);
+        let method_set = self.inherited_names(name, |i| &i.methods);
+        // Publish the superclass so `super.m()` / `super(...)` in this class's
+        // bodies resolve to it; restored after emitting the members.
+        let prev_super =
+            std::mem::replace(&mut self.cur_class_super, superclass.map(str::to_string));
         // Field-initializer thunks (0-arg subs that compute the initial value).
         for f in fields {
             if let Some(init) = &f.init {
@@ -423,7 +494,30 @@ impl Compiler {
             let sub = Self::method_sub_name(name, &m.name);
             self.emit_member(line, &sub, &m.params, &m.body, &field_set, &method_set)?;
         }
+        self.cur_class_super = prev_super;
         Ok(())
+    }
+
+    /// The transitive set of field (or method) names for `class`, unioned across
+    /// its superclass chain via [`Compiler::class_index`]. `select` picks the
+    /// field or method list from each ancestor's [`ClassInfo`].
+    fn inherited_names(
+        &self,
+        class: &str,
+        select: impl Fn(&ClassInfo) -> &Vec<String>,
+    ) -> HashSet<String> {
+        let mut set = HashSet::new();
+        let mut cur = Some(class.to_string());
+        while let Some(name) = cur {
+            let Some(info) = self.class_index.get(&name) else {
+                break;
+            };
+            for n in select(info) {
+                set.insert(n.clone());
+            }
+            cur = info.superclass.clone();
+        }
+        set
     }
 
     /// Emit a class member (method or constructor) as a subroutine: `this` in
@@ -922,6 +1016,34 @@ impl Compiler {
             Expr::This => {
                 self.emit_this();
             }
+            // A bare `super` outside a `super.method(...)` call resolves to the
+            // current instance (Groovy has no standalone `super` value).
+            Expr::Super => {
+                self.emit_this();
+            }
+            Expr::SuperCtor { args, line } => {
+                // `super(args)`: run the superclass's arity-matched constructor on
+                // the current instance (stack: [this, args, superclassname]).
+                self.emit_this();
+                for a in args {
+                    self.expr(a)?;
+                }
+                let sname = self.cur_class_super.clone().unwrap_or_default();
+                let sidx = self.b.add_constant(Value::str(sname));
+                self.b.emit(Op::LoadConst(sidx), *line);
+                self.b.emit(
+                    Op::CallBuiltin(crate::host::GSUPER_CTOR, args.len() as u8),
+                    *line,
+                );
+            }
+            Expr::InstanceOf { value, class } => {
+                // `value instanceof Class` — stack: [value, classname].
+                self.expr(value)?;
+                let cidx = self.b.add_constant(Value::str(class.clone()));
+                self.b.emit(Op::LoadConst(cidx), self.cur_line);
+                self.b
+                    .emit(Op::CallBuiltin(crate::host::GINSTANCEOF, 0), self.cur_line);
+            }
             Expr::New { class, args, line } => {
                 // Push the constructor args, then the class name on top.
                 for a in args {
@@ -1011,22 +1133,41 @@ impl Compiler {
                 line,
                 safe,
             } => {
-                // Stack: [recv, arg0..argN-1, methodname]; the GDK dispatch
-                // builtin pops the name, the N args, then the receiver. The
-                // safe-navigation form routes through GMETHOD_SAFE, which returns
-                // `null` without dispatching when the receiver is `null`.
-                self.expr(recv)?;
-                for a in args {
-                    self.expr(a)?;
-                }
-                let midx = self.b.add_constant(Value::str(method.clone()));
-                self.b.emit(Op::LoadConst(midx), *line);
-                let id = if *safe {
-                    crate::host::GMETHOD_SAFE
+                // `super.method(args)` statically dispatches at the superclass,
+                // skipping the current class's override (stack: [this, args,
+                // methodname, superclassname]).
+                if matches!(**recv, Expr::Super) {
+                    self.emit_this();
+                    for a in args {
+                        self.expr(a)?;
+                    }
+                    let midx = self.b.add_constant(Value::str(method.clone()));
+                    self.b.emit(Op::LoadConst(midx), *line);
+                    let sname = self.cur_class_super.clone().unwrap_or_default();
+                    let sidx = self.b.add_constant(Value::str(sname));
+                    self.b.emit(Op::LoadConst(sidx), *line);
+                    self.b.emit(
+                        Op::CallBuiltin(crate::host::GSUPER_METHOD, args.len() as u8),
+                        *line,
+                    );
                 } else {
-                    crate::host::GMETHOD
-                };
-                self.b.emit(Op::CallBuiltin(id, args.len() as u8), *line);
+                    // Stack: [recv, arg0..argN-1, methodname]; the GDK dispatch
+                    // builtin pops the name, the N args, then the receiver. The
+                    // safe-navigation form routes through GMETHOD_SAFE, which
+                    // returns `null` without dispatching when the receiver is null.
+                    self.expr(recv)?;
+                    for a in args {
+                        self.expr(a)?;
+                    }
+                    let midx = self.b.add_constant(Value::str(method.clone()));
+                    self.b.emit(Op::LoadConst(midx), *line);
+                    let id = if *safe {
+                        crate::host::GMETHOD_SAFE
+                    } else {
+                        crate::host::GMETHOD
+                    };
+                    self.b.emit(Op::CallBuiltin(id, args.len() as u8), *line);
+                }
             }
             Expr::Property {
                 recv,
@@ -1267,6 +1408,14 @@ impl Compiler {
                 .emit(Op::CallBuiltin(crate::host::GDIV, 2), self.cur_line);
             return Ok(());
         }
+        // Groovy `<=>` is not a native op — it lowers to the GCMP builtin, which
+        // dispatches a user `compareTo` on an instance operand or yields the
+        // primitive sign (`-1`/`0`/`1`).
+        if let BinOp::Cmp = op {
+            self.b
+                .emit(Op::CallBuiltin(crate::host::GCMP, 2), self.cur_line);
+            return Ok(());
+        }
         let vop = match op {
             BinOp::Add => Op::Add,
             BinOp::Sub => Op::Sub,
@@ -1278,7 +1427,7 @@ impl Compiler {
             BinOp::Gt => Op::NumGt,
             BinOp::Le => Op::NumLe,
             BinOp::Ge => Op::NumGe,
-            BinOp::Div => unreachable!("handled above"),
+            BinOp::Div | BinOp::Cmp => unreachable!("handled above"),
             BinOp::And | BinOp::Or => unreachable!("handled above"),
         };
         self.b.emit(vop, self.cur_line);
@@ -1504,8 +1653,16 @@ fn free_in_expr(
             free_in_expr(lhs, bound, out, seen);
             free_in_expr(rhs, bound, out, seen);
         }
-        // `this` is a captured upvalue when a closure uses it inside a method.
-        Expr::This => note_free("this", bound, out, seen),
+        // `this`/`super` are captured upvalues when a closure inside a method
+        // uses them (both resolve to the receiver instance in slot 0).
+        Expr::This | Expr::Super => note_free("this", bound, out, seen),
+        Expr::SuperCtor { args, .. } => {
+            note_free("this", bound, out, seen);
+            for a in args {
+                free_in_expr(a, bound, out, seen);
+            }
+        }
+        Expr::InstanceOf { value, .. } => free_in_expr(value, bound, out, seen),
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null => {}
     }
 }
@@ -1579,12 +1736,15 @@ fn expr_has_ffi(e: &Expr) -> bool {
         }
         Expr::New { args, .. } => args.iter().any(expr_has_ffi),
         Expr::Index { recv, index, .. } => expr_has_ffi(recv) || expr_has_ffi(index),
+        Expr::SuperCtor { args, .. } => args.iter().any(expr_has_ffi),
+        Expr::InstanceOf { value, .. } => expr_has_ffi(value),
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Str(_)
         | Expr::Bool(_)
         | Expr::Null
         | Expr::This
+        | Expr::Super
         | Expr::Var(_)
         | Expr::PostIncDec { .. }
         | Expr::PreIncDec { .. } => false,

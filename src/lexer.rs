@@ -82,9 +82,11 @@ pub enum Tok {
     Gt,
     Le,
     Ge,
+    Spaceship, // `<=>` compareTo
     AndAnd,
     OrOr,
     Not,
+    At, // `@` annotation marker (e.g. `@Override`)
     Eof,
 }
 
@@ -276,6 +278,14 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             i += 3;
             continue;
         }
+        if three == "<=>" {
+            out.push(Token {
+                kind: Tok::Spaceship,
+                line,
+            });
+            i += 3;
+            continue;
+        }
         let two = if i + 1 < bytes.len() {
             &src[i..i + 2]
         } else {
@@ -332,6 +342,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 '>' => (Tok::Gt, 1),
                 '?' => (Tok::Question, 1),
                 '!' => (Tok::Not, 1),
+                '@' => (Tok::At, 1),
                 other => {
                     return Err(format!(
                         "groovyrs: unexpected character `{other}` on line {line}"

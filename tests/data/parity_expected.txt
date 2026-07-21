@@ -47,6 +47,15 @@ Fizz
 FizzBuzz
 ==== Hello.groovy ====
 Hello from groovyrs — Groovy on fusevm
+==== Inheritance.groovy ====
+Woof
+Rex says Woof
+Rex fetches
+Bit says Yip (Woof)
+true
+true
+false
+true
 ==== Loops.groovy ====
 even sum up to 10 = 30
 ==== Maps.groovy ====
@@ -56,6 +65,18 @@ apple = 5
 cherry = 2
 size = 4
 has apple: true
+==== Operators.groovy ====
+Vec(13)
+Vec(7)
+Vec(20)
+Vec(-10)
+Vec(2)
+1
+true
+false
+true
+false
+false
 ==== Ranges.groovy ====
 sum 1..5 = 15
 0

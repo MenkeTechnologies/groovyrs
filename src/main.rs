@@ -65,7 +65,10 @@ fn main() -> ExitCode {
 }
 
 fn dump_tokens(src: &str) -> Result<String, String> {
-    let toks = groovyrs::lexer::lex(src)?;
+    // Rewrite any inline `rust { ... }` block before lexing, matching the parse
+    // path, so `--dump-tokens` shows the tokens actually fed to the parser.
+    let src = groovyrs::rust_ffi::desugar(src);
+    let toks = groovyrs::lexer::lex(&src)?;
     let mut out = String::new();
     for t in toks {
         out.push_str(&format!("{:>4}  {:?}\n", t.line, t.kind));

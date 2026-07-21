@@ -127,6 +127,17 @@ pub enum Expr {
         name: String,
         inc: bool,
     },
+    /// A general call expression `name(args...)`. Slice 1 has no user methods, so
+    /// the only calls that resolve are the inline-Rust FFI ones: the desugar
+    /// target `__rust_compile("<b64>", line)` and every bareword a `rust { ... }`
+    /// block exports (`add(2, 3)`). The compiler routes an unknown callee through
+    /// the FFI dispatch only when the program contains a `rust { ... }` block;
+    /// otherwise it stays an unresolved-reference error.
+    Call {
+        name: String,
+        args: Vec<Expr>,
+        line: u32,
+    },
 }
 
 /// Unary operators.

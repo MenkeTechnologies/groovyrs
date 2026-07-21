@@ -12,8 +12,13 @@ use crate::ast::*;
 use crate::lexer::{Tok, Token};
 
 /// Parse Groovy `src` into a [`Program`].
+///
+/// Any inline `rust { ... }` FFI block is rewritten to a `__rust_compile(...)`
+/// call by [`crate::rust_ffi::desugar`] before lexing (a no-op when the source
+/// has no `rust` token), so the lexer/parser only ever see ordinary Groovy.
 pub fn parse(src: &str) -> Result<Program, String> {
-    let tokens = crate::lexer::lex(src)?;
+    let src = crate::rust_ffi::desugar(src);
+    let tokens = crate::lexer::lex(&src)?;
     let mut p = Parser {
         toks: tokens,
         pos: 0,
@@ -516,6 +521,7 @@ impl Parser {
                 if name == "println" || name == "print" {
                     return self.print_call(&name);
                 }
+                let line = self.line();
                 self.advance();
                 if matches!(self.peek(), Tok::PlusPlus | Tok::MinusMinus) {
                     return Err(format!(
@@ -523,9 +529,17 @@ impl Parser {
                         self.line()
                     ));
                 }
-                if self.is(&Tok::LParen) || self.is(&Tok::Dot) {
+                // A call expression `name(args...)`. Slice 1 has no user methods,
+                // so at compile time the only callees that resolve are the inline-
+                // Rust FFI ones (the `__rust_compile` desugar target and the
+                // barewords a `rust { ... }` block exports).
+                if self.is(&Tok::LParen) {
+                    let args = self.call_args()?;
+                    return Ok(Expr::Call { name, args, line });
+                }
+                if self.is(&Tok::Dot) {
                     return Err(format!(
-                        "groovyrs: method/property access on `{name}` is not supported yet (line {})",
+                        "groovyrs: property access on `{name}` is not supported yet (line {})",
                         self.line()
                     ));
                 }
@@ -562,6 +576,29 @@ impl Parser {
             Some(Box::new(self.expression()?))
         };
         Ok(Expr::Println { newline, arg })
+    }
+
+    /// Parse a parenthesised argument list `( expr, expr, ... )` past the
+    /// callee. The opening `(` is the current token; consumes through the
+    /// closing `)`. Newlines after `(`, `,`, and before `)` continue the list.
+    fn call_args(&mut self) -> Result<Vec<Expr>, String> {
+        self.eat(&Tok::LParen)?;
+        self.skip_newlines();
+        let mut args = Vec::new();
+        if !self.is(&Tok::RParen) {
+            loop {
+                args.push(self.expression()?);
+                self.skip_newlines();
+                if self.is(&Tok::Comma) {
+                    self.advance();
+                    self.skip_newlines();
+                    continue;
+                }
+                break;
+            }
+        }
+        self.eat(&Tok::RParen)?;
+        Ok(args)
     }
 
     fn ident(&mut self) -> Result<String, String> {

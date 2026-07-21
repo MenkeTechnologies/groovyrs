@@ -17,6 +17,7 @@ pub mod host;
 pub mod lexer;
 pub mod lsp;
 pub mod parser;
+pub mod rust_ffi;
 
 pub use banner::version_banner;
 use fusevm::{VMResult, Value, VM};
@@ -56,8 +57,12 @@ pub fn eval_file_debug(path: &str) -> Result<(), String> {
         Value::Undef
     });
     vm.set_numeric_hook(std::sync::Arc::new(host::numeric_hook));
+    let _ = host::take_error();
     match vm.run() {
-        VMResult::Ok(_) | VMResult::Halted => Ok(()),
+        VMResult::Ok(_) | VMResult::Halted => match host::take_error() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        },
         VMResult::Error(e) => Err(e),
     }
 }
@@ -65,13 +70,22 @@ pub fn eval_file_debug(path: &str) -> Result<(), String> {
 /// Register the groovyrs builtins + strict numeric hook on a fresh VM, enable
 /// the tracing JIT, and run the chunk. Returns the last top-of-stack value.
 fn run_chunk(chunk: fusevm::Chunk) -> Result<Value, String> {
+    let _ = host::take_error(); // clear any stale fault from a prior run
     let mut vm = VM::new(chunk);
     host::install(&mut vm);
     vm.set_numeric_hook(std::sync::Arc::new(host::numeric_hook));
     vm.enable_tracing_jit();
     match vm.run() {
-        VMResult::Ok(v) => Ok(v),
-        VMResult::Halted => Ok(vm.stack.last().cloned().unwrap_or(Value::Undef)),
+        // A runtime fault raised inside an FFI builtin (block compile failure or a
+        // call to an unregistered export) halts the VM and parks its message here.
+        VMResult::Ok(v) => match host::take_error() {
+            Some(e) => Err(e),
+            None => Ok(v),
+        },
+        VMResult::Halted => match host::take_error() {
+            Some(e) => Err(e),
+            None => Ok(vm.stack.last().cloned().unwrap_or(Value::Undef)),
+        },
         VMResult::Error(e) => Err(e),
     }
 }

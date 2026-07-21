@@ -18,6 +18,7 @@
 //!    [`numeric_hook`], where `+` concatenates via the same [`groovy_str`].
 
 use fusevm::{NumOp, Value, VM};
+use std::cell::RefCell;
 
 /// Builtin id for `println` (one Groovy-formatted arg + newline).
 pub const GPRINTLN: u16 = 700;
@@ -25,19 +26,88 @@ pub const GPRINTLN: u16 = 700;
 pub const GPRINT: u16 = 701;
 /// Builtin id for Groovy `/` division (BigDecimal-style promotion).
 pub const GDIV: u16 = 702;
+/// Builtin id for compiling + registering an inline `rust { ... }` FFI block.
+/// Pops the base64 block body (a `String`) and hands it to
+/// `fusevm::ffi::compile_and_register`; the desugar target `__rust_compile`
+/// lowers to this (see [`crate::rust_ffi`]).
+pub const GFFI_COMPILE: u16 = 703;
+/// Builtin id for calling an FFI-exported function by name. The `argc` payload
+/// is the argument count; the stack holds the args (deepest first) with the
+/// function name (a `String`) on top. Dispatches through `fusevm::ffi::try_call`
+/// and returns the result.
+pub const GFFI_CALL: u16 = 704;
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
 /// that calls [`crate::dap::on_debug_line`].
 pub const DBG_LINE: u16 = 799;
 
-/// Install groovyrs builtins on a VM: the Groovy-formatting print builtins and
-/// the division builtin. This is the single install choke point later waves
-/// (methods, `String`/list objects, the GDK) grow into.
+/// Install groovyrs builtins on a VM: the Groovy-formatting print builtins, the
+/// division builtin, and the inline-Rust FFI compile/call dispatch. This is the
+/// single install choke point later waves (methods, `String`/list objects, the
+/// GDK) grow into.
 pub fn install(vm: &mut VM) {
     vm.register_builtin(GPRINTLN, b_println);
     vm.register_builtin(GPRINT, b_print);
     vm.register_builtin(GDIV, b_div);
+    vm.register_builtin(GFFI_COMPILE, b_ffi_compile);
+    vm.register_builtin(GFFI_CALL, b_ffi_call);
+}
+
+thread_local! {
+    /// Parks a runtime fault raised inside a builtin (a `rust { ... }` block that
+    /// fails to compile, or a call to an unregistered FFI export) so the CLI can
+    /// surface it as `groovyrs: <reason>` after `VM::run` returns. A builtin
+    /// cannot return a `Result`, so it halts the VM and leaves the message here.
+    static G_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Take and clear any pending runtime-fault message (see `G_ERROR`).
+pub fn take_error() -> Option<String> {
+    G_ERROR.with(|e| e.borrow_mut().take())
+}
+
+/// Record a fault message and halt the VM; the runtime reports it once
+/// [`VM::run`] returns.
+fn fault(vm: &mut VM, msg: impl Into<String>) {
+    G_ERROR.with(|e| *e.borrow_mut() = Some(msg.into()));
+    vm.request_halt();
+}
+
+/// `__rust_compile` builtin: pop the base64-encoded `rust { ... }` block body and
+/// compile + register its exported functions through `fusevm::ffi`. Returns
+/// `null` (the desugared call is evaluated for its side effect).
+fn b_ffi_compile(vm: &mut VM, _argc: u8) -> Value {
+    let body = vm.stack.pop().unwrap_or(Value::Undef);
+    let b64 = body.as_str_cow().into_owned();
+    if let Err(e) = fusevm::ffi::compile_and_register(&b64) {
+        fault(vm, format!("rust {{}} block: {e}"));
+    }
+    Value::Undef
+}
+
+/// FFI-call builtin: the stack holds the args (deepest first) with the callee
+/// name (a `String`) on top; `argc` is the argument count. Dispatches through
+/// `fusevm::ffi::try_call` and returns the exported function's result.
+fn b_ffi_call(vm: &mut VM, argc: u8) -> Value {
+    let name = vm.stack.pop().unwrap_or(Value::Undef).as_str_cow().into_owned();
+    let n = argc as usize;
+    let mut args = Vec::with_capacity(n);
+    for _ in 0..n {
+        args.push(vm.stack.pop().unwrap_or(Value::Undef));
+    }
+    args.reverse();
+    match fusevm::ffi::try_call(&name, &args) {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
+            fault(vm, format!("rust FFI call {name}: {e}"));
+            Value::Undef
+        }
+        None => {
+            fault(vm, format!("unresolved reference: {name}"));
+            Value::Undef
+        }
+    }
 }
 
 /// `println` builtin: pop `argc` values (0 or 1 in slice 1), print them

@@ -1,0 +1,52 @@
+[package]
+name = "groovyrs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Groovy as a fusevm frontend: a lexer/parser and compiler to fusevm::Chunk — Groovy script source lowered to bytecode and run on the shared three-tier Cranelift JIT, with no bespoke VM and no JVM"
+license = "MIT"
+repository = "https://github.com/MenkeTechnologies/groovyrs"
+homepage = "https://menketechnologies.github.io/groovyrs/"
+readme = "README.md"
+keywords = ["groovy", "compiler", "jit", "fusevm", "bytecode"]
+categories = ["command-line-utilities", "compilers"]
+publish = true
+# Dev-only artifacts kept out of the published crate. Consumers get src + the
+# `groovy` bin — not CI config, the integration-test corpus, or the .groovy
+# examples. None are referenced at compile time (no include_str! into them), so
+# the packaged crate still builds and its bin runs.
+exclude = [
+    "/.github/",
+    "/tests/",
+    "/examples/",
+    "/docs/",
+]
+
+# groovyrs is a standalone crate, not a workspace member. An explicit empty
+# `[workspace]` stops cargo walking up to the MenkeTechnologiesMeta parent.
+[workspace]
+
+[lib]
+name = "groovyrs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "groovy"
+path = "src/main.rs"
+
+[dependencies]
+# Groovy executes on fusevm. groovyrs is a pure frontend: it lexes/parses Groovy
+# script source and lowers it to fusevm bytecode (src/compiler.rs). There is no
+# local vm.rs/jit.rs and no JVM — execution and codegen live in the shared
+# engine behind zshrs, stryke, awkrs, elisp, ruby, python, php, node, java.
+#
+# `jit-disk-cache` turns on fusevm's three-tier Cranelift JIT *and* its
+# persistent on-disk cache of compiled native code (keyed by chunk hash), so hot
+# Groovy loops trace-compile and warm runs skip recompilation. `aot` enables the
+# ahead-of-time object emitter used by later `groovy --build` work.
+fusevm = { version = "0.14.11", features = ["jit", "jit-disk-cache", "aot"] }
+
+thiserror = "2.0"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,196 @@
+```
+ ██████╗ ██████╗  ██████╗  ██████╗ ██╗   ██╗██╗   ██╗
+██╔════╝ ██╔══██╗██╔═══██╗██╔═══██╗██║   ██║╚██╗ ██╔╝
+██║  ███╗██████╔╝██║   ██║██║   ██║██║   ██║ ╚████╔╝
+██║   ██║██╔══██╗██║   ██║██║   ██║╚██╗ ██╔╝  ╚██╔╝
+╚██████╔╝██║  ██║╚██████╔╝╚██████╔╝ ╚████╔╝    ██║
+ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝  ╚═════╝   ╚═══╝     ╚═╝
+```
+
+[![CI](https://github.com/MenkeTechnologies/groovyrs/actions/workflows/ci.yml/badge.svg)](https://github.com/MenkeTechnologies/groovyrs/actions/workflows/ci.yml)
+![Rust](https://img.shields.io/badge/Rust-2021-05d9e8?style=flat-square)
+![license](https://img.shields.io/badge/license-MIT-ff2a6d?style=flat-square)
+![status](https://img.shields.io/badge/status-active%20%C2%B7%20in%20development-9b5de5?style=flat-square)
+
+### `[GROOVY, COMPILED TO BYTECODE — JIT-COMPILED, NOT WALKED — NO JVM]`
+
+> *"Apache Groovy runs Groovy on the JVM. groovyrs runs Groovy on fusevm."*
+
+**Groovy in Rust** — a Groovy frontend that lexes and parses Groovy script
+source, lowers it to [`fusevm`](https://github.com/MenkeTechnologies/fusevm)
+bytecode, and runs it on the shared three-tier Cranelift JIT — the same engine
+behind `zshrs`, `stryke`, `awkrs`, `elisp`, `ruby`, `python`, `php`, `node`, and
+`java`. No bespoke VM. No JVM. No `.class` files.
+
+---
+
+## Table of Contents
+
+- [\[0x00\] Overview](#0x00-overview)
+- [\[0x01\] Install](#0x01-install)
+- [\[0x02\] Usage](#0x02-usage)
+- [\[0x03\] Language Features](#0x03-language-features)
+- [\[0x04\] Command-Line Flags](#0x04-command-line-flags)
+- [\[0x05\] Architecture](#0x05-architecture)
+- [\[0x06\] Status & Roadmap](#0x06-status--roadmap)
+- [\[0xFF\] License](#0xff-license)
+
+---
+
+## [0x00] OVERVIEW
+
+Every Groovy runtime in existence targets the JVM: `groovyc` emits `.class`
+bytecode, and a JVM interprets and JIT-compiles it. `groovyrs` takes a different
+path — it lexes and parses Groovy script source to an AST, lowers that AST
+**directly to fusevm bytecode**, and runs it on fusevm's compiled VM with a
+Cranelift tracing JIT. groovyrs carries no VM or JIT of its own; it is a pure
+frontend over the shared engine. Highlights:
+
+- **Compiled, not tree-walked** — arithmetic, comparisons, and control flow
+  lower to native fusevm ops (`LoadInt`, `Add`, `NumLt`, `JumpIfFalse`, …), so
+  the tracing JIT compiles hot loops to native code.
+- **fusevm-hosted, no JVM** — no local `vm.rs` / `jit.rs`, no `.class` files, no
+  `libjvm`. The same three-tier Cranelift engine that hosts zshrs, stryke,
+  awkrs, elisp, ruby, python, php, node, and java runs Groovy too.
+  `jit-disk-cache` persists native code across runs.
+- **The Groovy script model** — a `.groovy` file is a sequence of top-level
+  statements. No enclosing `class`, no `main`, semicolons optional (newlines
+  terminate statements), and `println x` works with or without parentheses.
+- **Groovy value semantics** — `println` formats `true`/`false`, `3.0`, and
+  `null` the Groovy way, and integer `/` promotes like `BigDecimal` so `7 / 2`
+  is `3.5`, not `3`.
+- **Groovy `+` overloading** — a strict numeric hook supplies string
+  concatenation (`"x=" + x`) for the mixed operands the VM's native arithmetic
+  does not compute.
+
+Every program in `examples/` is diffed byte-for-byte against Apache Groovy in
+the test suite.
+
+---
+
+## [0x01] INSTALL
+
+```sh
+git clone https://github.com/MenkeTechnologies/groovyrs
+cd groovyrs
+cargo build --release
+# the binary is target/release/groovy
+```
+
+Requires a stable Rust toolchain. No JVM, no Groovy install.
+
+---
+
+## [0x02] USAGE
+
+```sh
+groovy script.groovy          # run a Groovy script
+groovy --version              # print the version banner
+groovy --dump-tokens f.groovy # inspect the lexer token stream
+groovy --dump-ast f.groovy    # inspect the parsed AST
+groovy --disasm f.groovy      # inspect the lowered fusevm bytecode
+```
+
+```groovy
+// hello.groovy
+println "Hello from groovyrs — Groovy on fusevm"
+
+for (n in 1..5) {
+    if (n % 2 == 0) println n + " even"
+    else println n + " odd"
+}
+```
+
+---
+
+## [0x03] LANGUAGE FEATURES
+
+Implemented and checked against Apache Groovy:
+
+- **Script model** — a file is top-level statements; no class or `main`.
+  Statements are separated by newlines or `;` (semicolons optional). A leading
+  `#!` shebang and `package`/`import` lines are tolerated.
+- **Variables** — `def x = …`, typed `int` / `double` / `String` / `boolean`
+  declarations, and bare `x = …` script bindings; plain and compound assignment
+  (`=`, `+=`, `-=`, `*=`, `/=`, `%=`); post-increment / decrement (`i++`, `i--`).
+- **Expressions** — integer / decimal / string (single- and double-quoted) /
+  boolean / `null` literals; `+ - * / %`, `== != < > <= >=`, `&& ||`
+  (short-circuiting), unary `-` and `!`, grouping. Integer `/` promotes to a
+  decimal (`7 / 2 == 3.5`); `+` concatenates when either side is a string.
+- **Control flow** — `if` / `else if` / `else`, `while`, the C-style
+  `for (init; cond; update)`, the `for (x in a..b)` / `for (x in a..<b)` range
+  loop, `break`, `continue`.
+- **Output** — `println` / `print` with Groovy value formatting, in both the
+  `println(x)` and paren-less `println x` command forms.
+- **Comments** — `//` line, `/* … */` block.
+
+See [`BUGS.md`](BUGS.md) for the honest known-gaps list (methods, closures,
+GStrings, collections, the GDK).
+
+---
+
+## [0x04] COMMAND-LINE FLAGS
+
+| Flag | Effect |
+| --- | --- |
+| `FILE [args…]` | Run a `.groovy` script. |
+| `-v` / `-version` / `--version` | Print the version banner and exit. |
+| `-h` / `--help` | Print usage and exit. |
+| `--dump-tokens FILE` | Print the lexer token stream and exit. |
+| `--dump-ast FILE` | Print the parsed AST and exit. |
+| `--disasm FILE` | Print the lowered fusevm bytecode and exit. |
+
+`groovy --version` reports the targeted language level (`Groovy 4.0`) followed by
+the real engine (`groovyrs <crate-version>`) and the host triple, so nothing is
+misrepresented as Apache Groovy.
+
+---
+
+## [0x05] ARCHITECTURE
+
+groovyrs contains no virtual machine or JIT of its own. The execution path
+mirrors how `zshrs` hosts zsh, `ruby` hosts Ruby, and `java` hosts Java:
+
+```
+Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm VM + Cranelift JIT
+                                              │
+                                strict numeric hook (Groovy `+` concat)
+                                GDIV builtin (BigDecimal-style `/`)
+                                print builtins (Groovy value formatting)
+```
+
+| Piece | How |
+| --- | --- |
+| **fusevm-hosted** | No local `vm.rs` / `jit.rs`, no JVM. Groovy lowers to fusevm bytecode and runs on the shared three-tier Cranelift JIT; `jit-disk-cache` persists native code across runs. |
+| **Native arithmetic** | `+ - * %`, comparisons, and logic lower to native fusevm ops; the JIT traces hot integer loops. A strict numeric hook supplies Groovy's `+` string concatenation for non-numeric operands. |
+| **Groovy division** | `/` lowers to the `GDIV` builtin: two integers divide exactly to an integer and to a decimal otherwise (`7/2 → 3.5`), matching Groovy's `BigDecimal` promotion. |
+| **Groovy print semantics** | `println`/`print` lower to a registered builtin that formats values Groovy-style (`true`/`false`, `3.0`, `null`), rather than the VM's shell-flavoured `PrintLn`. |
+
+---
+
+## [0x06] STATUS & ROADMAP
+
+Slice 1 (this release): Groovy scripts — top-level statements, `def`/typed
+locals, arithmetic / comparison / logic, `BigDecimal`-style division, `if` /
+`while` / `for` / range `for-in` / `break` / `continue`, `println`/`print`,
+string concatenation — all verified byte-for-byte against Apache Groovy.
+
+Next waves, in priority order:
+
+1. **User-defined methods and closures** over fusevm's native `Op::Call` frame
+   ABI.
+2. **Reference types** — real `String` methods, lists/maps, and the GDK on a
+   host heap; GString interpolation.
+3. **Standard library surface** — `Math`, common `java.util`/GDK collection
+   methods, `each`/`collect`/`find`.
+4. **A differential parity harness** — a snippet corpus diffed live against
+   Apache Groovy, frozen and replayed in CI (the pattern the `ruby`/`node`/
+   `python` frontends use).
+
+See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
+
+---
+
+## [0xFF] LICENSE
+
+MIT — free and open source. See [`LICENSE`](LICENSE).

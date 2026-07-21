@@ -1,0 +1,14 @@
+#compdef groovy
+# Zsh completion for the groovyrs `groovy` binary.
+
+_groovy() {
+  _arguments -s \
+    '(-v -version --version)'{-v,-version,--version}'[print the version banner and exit]' \
+    '(-h --help -help)'{-h,--help,-help}'[print usage and exit]' \
+    '--dump-tokens[print the lexer token stream and exit]' \
+    '--dump-ast[print the parsed AST and exit]' \
+    '--disasm[print the lowered fusevm bytecode and exit]' \
+    '*:groovy file:_files -g "*.groovy"'
+}
+
+_groovy "$@"

@@ -1,3 +1,14 @@
+==== Classes.groovy ====
+Rectangle(3x4)
+area = 12
+perimeter = 14
+after resize, area = 20
+bumps: 1, 2, 3
+==== Closures.groovy ====
+add5(10) = 15
+adder(3)(4) = 7
+triple(7) = 21
+scaled = [10, 20, 30]
 ==== Concat.groovy ====
 x * y = 42
 positive: true
@@ -38,6 +49,13 @@ FizzBuzz
 Hello from groovyrs — Groovy on fusevm
 ==== Loops.groovy ====
 even sum up to 10 = 30
+==== Maps.groovy ====
+[banana:3, apple:5, cherry:2]
+[banana:3, apple:5, cherry:2, date:7]
+apple = 5
+cherry = 2
+size = 4
+has apple: true
 ==== Ranges.groovy ====
 sum 1..5 = 15
 0

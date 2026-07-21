@@ -118,8 +118,9 @@ println(i)   // =&gt; 3</code></pre>
         </article>
         <article class="doc-entry" id="doc-keyword-10">
           <h3><a class="doc-anchor" href="#doc-keyword-10">#</a> <code>new</code></h3>
-          <p>reserved for object construction (`new Type(...)`)</p>
-          <pre><code class="lang-groovy">// new is reserved; object construction lands in a later slice</code></pre>
+          <p>construct a class instance (`new Type(args)`)</p>
+          <pre><code class="lang-groovy">class P { def x; P(v) { x = v } }
+println(new P(7).x)   // =&gt; 7</code></pre>
         </article>
       </section>
 

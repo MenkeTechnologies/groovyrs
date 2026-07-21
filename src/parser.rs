@@ -165,6 +165,7 @@ impl Parser {
     fn statement(&mut self) -> Result<Stmt, String> {
         let line = self.line();
         let kind = match self.peek() {
+            Tok::Ident(w) if w == "class" => self.class_decl()?,
             Tok::If => self.if_stmt()?,
             Tok::While => self.while_stmt()?,
             Tok::For => self.for_stmt()?,
@@ -270,8 +271,26 @@ impl Parser {
             }
         }
 
-        // Fallback: an expression statement.
-        Ok(StmtKind::Expr(self.expression()?))
+        // Fallback: an expression, which may be the left side of a property
+        // assignment (`recv.name = value`, `this.v = x`).
+        let lhs = self.expression()?;
+        if self.is(&Tok::Assign) {
+            if let Expr::Property { recv, name, .. } = lhs {
+                self.advance();
+                self.skip_newlines();
+                let value = self.expression()?;
+                return Ok(StmtKind::SetProperty {
+                    recv: *recv,
+                    name,
+                    value,
+                });
+            }
+            return Err(format!(
+                "groovyrs: invalid assignment target on line {}",
+                self.line()
+            ));
+        }
+        Ok(StmtKind::Expr(lhs))
     }
 
     /// Parse an optional `= expr` initializer (newlines after `=` continue).
@@ -293,6 +312,111 @@ impl Parser {
         self.eat(&Tok::LBrace)?;
         let body = self.block()?;
         Ok(StmtKind::Function { name, params, body })
+    }
+
+    /// Parse a class declaration `class Name [extends/implements ...] { members }`.
+    /// The `class` keyword is the current token. `extends`/`implements` clauses
+    /// are tolerated but ignored (single-level dynamic dispatch only). Members are
+    /// fields (`def x [= init]` / `Type x [= init]`), constructors
+    /// (`Name(params){..}`), and methods (`def m(params){..}` / typed).
+    fn class_decl(&mut self) -> Result<StmtKind, String> {
+        self.advance(); // `class`
+        let name = self.ident()?;
+        // Skip any `extends X` / `implements Y, Z` up to the class body.
+        self.skip_newlines();
+        while !self.is(&Tok::LBrace) && !self.is(&Tok::Eof) {
+            self.advance();
+        }
+        self.eat(&Tok::LBrace)?;
+        let mut fields = Vec::new();
+        let mut ctors = Vec::new();
+        let mut methods = Vec::new();
+        self.skip_terminators();
+        while !self.is(&Tok::RBrace) && !self.is(&Tok::Eof) {
+            self.class_member(&name, &mut fields, &mut ctors, &mut methods)?;
+            self.expect_terminator()?;
+            self.skip_terminators();
+        }
+        self.eat(&Tok::RBrace)?;
+        Ok(StmtKind::Class {
+            name,
+            fields,
+            ctors,
+            methods,
+        })
+    }
+
+    /// Parse one class member into the appropriate bucket. Leading visibility /
+    /// `static` / `final` modifiers are skipped (dynamic runtime).
+    fn class_member(
+        &mut self,
+        class_name: &str,
+        fields: &mut Vec<Field>,
+        ctors: &mut Vec<Ctor>,
+        methods: &mut Vec<Method>,
+    ) -> Result<(), String> {
+        // Skip modifier keywords.
+        while matches!(
+            self.peek(),
+            Tok::Ident(m) if matches!(
+                m.as_str(),
+                "public" | "private" | "protected" | "static" | "final"
+                    | "abstract" | "synchronized" | "transient" | "volatile"
+            )
+        ) {
+            self.advance();
+        }
+        // `def name` — a field or method.
+        if self.is(&Tok::Def) {
+            self.advance();
+            let name = self.ident()?;
+            if self.is(&Tok::LParen) {
+                let params = self.param_list()?;
+                let body = self.member_body()?;
+                methods.push(Method { name, params, body });
+            } else {
+                let init = self.opt_initializer()?;
+                fields.push(Field { name, init });
+            }
+            return Ok(());
+        }
+        // A constructor `ClassName(params) { .. }` — a bare name (matching the
+        // class) directly followed by `(`.
+        if matches!(self.peek(), Tok::Ident(n) if n == class_name)
+            && matches!(self.peek_at(1), Tok::LParen)
+        {
+            self.advance(); // class name
+            let params = self.param_list()?;
+            let body = self.member_body()?;
+            ctors.push(Ctor { params, body });
+            return Ok(());
+        }
+        // A typed member `Type name ...` — a field or method.
+        if self.looks_like_decl() {
+            self.ident()?; // return / field type (ignored)
+            let name = self.ident()?;
+            if self.is(&Tok::LParen) {
+                let params = self.param_list()?;
+                let body = self.member_body()?;
+                methods.push(Method { name, params, body });
+            } else {
+                let init = self.opt_initializer()?;
+                fields.push(Field { name, init });
+            }
+            return Ok(());
+        }
+        Err(format!(
+            "groovyrs: unexpected class member {} on line {}",
+            self.peek(),
+            self.line()
+        ))
+    }
+
+    /// Parse a method/constructor body `{ ... }` (newlines before `{` allowed).
+    fn member_body(&mut self) -> Result<Vec<Stmt>, String> {
+        self.skip_newlines();
+        self.eat(&Tok::LBrace)?;
+        self.block()
     }
 
     /// Parse a parenthesised parameter list `( [Type] a, [Type] b, ... )`. An
@@ -611,42 +735,68 @@ impl Parser {
     /// method calls (`x.foo(args)`) and property reads (`x.size`).
     fn primary(&mut self) -> Result<Expr, String> {
         let mut e = self.atom()?;
-        while self.is(&Tok::Dot) || self.is(&Tok::QuestionDot) {
-            let safe = self.is(&Tok::QuestionDot);
-            let line = self.line();
-            self.advance();
-            let member = self.ident()?;
-            if self.is(&Tok::LParen) {
-                let mut args = self.call_args()?;
-                // A trailing closure after the parenthesised args:
-                // `list.inject(0) { acc, v -> acc + v }`.
-                if self.is(&Tok::LBrace) {
-                    args.push(self.closure_literal()?);
+        loop {
+            if self.is(&Tok::Dot) || self.is(&Tok::QuestionDot) {
+                let safe = self.is(&Tok::QuestionDot);
+                let line = self.line();
+                self.advance();
+                let member = self.ident()?;
+                if self.is(&Tok::LParen) {
+                    let mut args = self.call_args()?;
+                    // A trailing closure after the parenthesised args:
+                    // `list.inject(0) { acc, v -> acc + v }`.
+                    if self.is(&Tok::LBrace) {
+                        args.push(self.closure_literal()?);
+                    }
+                    e = Expr::MethodCall {
+                        recv: Box::new(e),
+                        method: member,
+                        args,
+                        line,
+                        safe,
+                    };
+                } else if self.is(&Tok::LBrace) {
+                    // Paren-less trailing-closure call: `list.each { it -> ... }`.
+                    let clo = self.closure_literal()?;
+                    e = Expr::MethodCall {
+                        recv: Box::new(e),
+                        method: member,
+                        args: vec![clo],
+                        line,
+                        safe,
+                    };
+                } else {
+                    e = Expr::Property {
+                        recv: Box::new(e),
+                        name: member,
+                        line,
+                        safe,
+                    };
                 }
-                e = Expr::MethodCall {
-                    recv: Box::new(e),
-                    method: member,
+            } else if self.is(&Tok::LParen) {
+                // Postfix call-application on a value: `f(a)(b)`, `getFn()(x)`.
+                let line = self.line();
+                let args = self.call_args()?;
+                e = Expr::CallValue {
+                    callee: Box::new(e),
                     args,
                     line,
-                    safe,
                 };
-            } else if self.is(&Tok::LBrace) {
-                // Paren-less trailing-closure call: `list.each { it -> ... }`.
-                let clo = self.closure_literal()?;
-                e = Expr::MethodCall {
+            } else if self.is(&Tok::LBracket) {
+                // Subscript `recv[index]`.
+                let line = self.line();
+                self.advance();
+                self.skip_newlines();
+                let index = self.expression()?;
+                self.skip_newlines();
+                self.eat(&Tok::RBracket)?;
+                e = Expr::Index {
                     recv: Box::new(e),
-                    method: member,
-                    args: vec![clo],
+                    index: Box::new(index),
                     line,
-                    safe,
                 };
             } else {
-                e = Expr::Property {
-                    recv: Box::new(e),
-                    name: member,
-                    line,
-                    safe,
-                };
+                break;
             }
         }
         Ok(e)
@@ -690,9 +840,25 @@ impl Parser {
             // A `{ ... }` in expression position is a closure literal (map
             // literals use `[...]`, so there is no ambiguity here).
             Tok::LBrace => self.closure_literal(),
+            Tok::New => {
+                let line = self.line();
+                self.advance();
+                let class = self.ident()?;
+                let args = if self.is(&Tok::LParen) {
+                    self.call_args()?
+                } else {
+                    Vec::new()
+                };
+                Ok(Expr::New { class, args, line })
+            }
             Tok::Ident(name) => {
                 if name == "println" || name == "print" {
                     return self.print_call(&name);
+                }
+                // `this` is the current instance inside a method/constructor.
+                if name == "this" {
+                    self.advance();
+                    return Ok(Expr::This);
                 }
                 let line = self.line();
                 self.advance();

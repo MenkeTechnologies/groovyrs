@@ -445,3 +445,228 @@ fn unresolved_call_still_faults() {
     let (_out, ok) = run("println foo(1)");
     assert!(!ok, "calling an undefined non-closure must fault");
 }
+
+// ── Nested-closure upvalue capture ──────────────────────────────────────────
+
+#[test]
+fn nested_closure_captures_outer_param() {
+    // The canonical curry: the inner closure captures the outer closure's `x`
+    // as an upvalue, so `adder(5)` returns a closure that adds 5.
+    let (out, ok) =
+        run("def adder = { x -> { y -> x + y } }\ndef add5 = adder(5)\nprintln add5(10)");
+    assert!(ok);
+    assert_eq!(out, "15\n");
+}
+
+#[test]
+fn chained_call_applies_to_returned_closure() {
+    // `f(a)(b)` must parse: the second argument list applies to the closure the
+    // first call returned.
+    let (out, ok) = run("def adder = { x -> { y -> x + y } }\nprintln adder(3)(4)");
+    assert!(ok);
+    assert_eq!(out, "7\n");
+}
+
+#[test]
+fn three_level_curry() {
+    let (out, _) = run("def f = { a -> { b -> { c -> a + b + c } } }\nprintln f(1)(2)(3)");
+    assert_eq!(out, "6\n");
+}
+
+#[test]
+fn closure_captures_enclosing_function_local() {
+    // A closure returned from a function captures that function's local as an
+    // upvalue, surviving the function's return.
+    let src = "def makeCounter(start) {\n  def n = start\n  return { n + 1 }\n}\n\
+               def c = makeCounter(10)\nprintln c()";
+    let (out, _) = run(src);
+    assert_eq!(out, "11\n");
+}
+
+#[test]
+fn gdk_closure_captures_function_param() {
+    // A `collect` closure inside a function captures the function parameter
+    // `factor` — capture and GDK iteration compose.
+    let (out, _) =
+        run("def scale(factor, xs) { xs.collect { it * factor } }\nprintln scale(3, [1, 2, 3])");
+    assert_eq!(out, "[3, 6, 9]\n");
+}
+
+// ── Classes ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn class_fields_constructor_and_method() {
+    let src = "class Point {\n  def x\n  def y\n  Point(a, b) { x = a; y = b }\n  \
+               def dist() { return x * x + y * y }\n}\n\
+               def p = new Point(3, 4)\nprintln p.x\nprintln p.y\nprintln p.dist()";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "3\n4\n25\n");
+}
+
+#[test]
+fn class_default_field_init_and_noarg_ctor() {
+    // A field initializer runs at construction; a class with no constructor is
+    // instantiated with `new C()`.
+    let src = "class Counter {\n  def count = 0\n  def inc() { count = count + 1 }\n  \
+               def get() { count }\n}\n\
+               def c = new Counter()\nc.inc()\nc.inc()\nprintln c.get()\nprintln c.count";
+    let (out, _) = run(src);
+    assert_eq!(out, "2\n2\n");
+}
+
+#[test]
+fn compound_assignment_to_field() {
+    // `total += n` inside a method resolves `total` to `this.total`.
+    let src = "class Acc {\n  def total = 0\n  def add(n) { total += n; return total }\n}\n\
+               def a = new Acc()\nprintln a.add(5)\nprintln a.add(10)";
+    let (out, _) = run(src);
+    assert_eq!(out, "5\n15\n");
+}
+
+#[test]
+fn this_reference_and_method_chaining() {
+    // `this` is the receiver; returning it enables fluent chaining.
+    let src = "class Box {\n  def v\n  def set(x) { this.v = x; return this }\n  \
+               def show() { println this.v }\n}\n\
+               def b = new Box()\nb.set(42).show()";
+    let (out, _) = run(src);
+    assert_eq!(out, "42\n");
+}
+
+#[test]
+fn property_auto_getter_and_setter() {
+    // Groovy synthesises `getX`/`setX` over a field.
+    let src = "class P {\n  def x\n  P(v) { x = v }\n}\n\
+               def p = new P(7)\nprintln p.getX()\np.setX(9)\nprintln p.x\np.x = 11\nprintln p.getX()";
+    let (out, _) = run(src);
+    assert_eq!(out, "7\n9\n11\n");
+}
+
+#[test]
+fn user_getter_drives_property_read() {
+    // A user `getArea()` is invoked by the bare property `.area`.
+    let src = "class Sq {\n  def side\n  Sq(s) { side = s }\n  def getArea() { side * side }\n}\n\
+               def s = new Sq(4)\nprintln s.area\nprintln s.getArea()";
+    let (out, _) = run(src);
+    assert_eq!(out, "16\n16\n");
+}
+
+#[test]
+fn instance_prints_through_tostring() {
+    let src = "class Rect {\n  def w\n  def h\n  Rect(w, h) { this.w = w; this.h = h }\n  \
+               String toString() { \"Rect \" + w + \"x\" + h }\n}\nprintln new Rect(3, 4)";
+    let (out, _) = run(src);
+    assert_eq!(out, "Rect 3x4\n");
+}
+
+#[test]
+fn method_calls_sibling_method_on_implicit_this() {
+    // A bare call `dbl()` inside a method is an implicit `this.dbl()`.
+    let src = "class Calc {\n  def base\n  Calc(b) { base = b }\n  def dbl() { base * 2 }\n  \
+               def quad() { dbl() * 2 }\n}\ndef c = new Calc(5)\nprintln c.quad()";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "20\n");
+}
+
+#[test]
+fn closure_inside_method_captures_field_and_param() {
+    // A `collect` closure inside a method sees the field `items` and the
+    // parameter `f`.
+    let src =
+        "class Repo {\n  def items = [1, 2, 3]\n  def scaled(f) { items.collect { it * f } }\n}\n\
+               def r = new Repo()\nprintln r.scaled(10)";
+    let (out, _) = run(src);
+    assert_eq!(out, "[10, 20, 30]\n");
+}
+
+#[test]
+fn closure_in_method_captures_this_for_field_access() {
+    // The GDK closure `{ it * factor }` reads the field `factor` — it must
+    // capture the method's `this`, not resolve to its own slot 0.
+    let src =
+        "class Multiplier {\n  def factor = 3\n  def apply(xs) { xs.collect { it * factor } }\n}\n\
+               println new Multiplier().apply([1, 2, 3])";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[3, 6, 9]\n");
+}
+
+#[test]
+fn new_of_unknown_class_faults() {
+    let (_out, ok) = run("def x = new Nonexistent()");
+    assert!(!ok, "constructing an unregistered class must fault");
+}
+
+#[test]
+fn unknown_method_on_instance_faults() {
+    let src = "class C { def v = 1 }\ndef c = new C()\nprintln c.nope()";
+    let (_out, ok) = run(src);
+    assert!(!ok, "an unknown method on an instance must fault");
+}
+
+// ── Subscript / getAt ───────────────────────────────────────────────────────
+
+#[test]
+fn subscript_on_list_map_and_string() {
+    let (out, _) =
+        run("println([10, 20, 30][1])\nprintln([a: 1, b: 2][\"b\"])\nprintln(\"hello\"[1])");
+    assert_eq!(out, "20\n2\ne\n");
+}
+
+#[test]
+fn negative_list_index_counts_from_end() {
+    let (out, _) = run("println([1, 2, 3][-1])");
+    assert_eq!(out, "3\n");
+}
+
+#[test]
+fn user_get_at_overload_drives_subscript() {
+    // A user `getAt(i)` is invoked by `v[i]`.
+    let src = "class Vec {\n  def x\n  def y\n  Vec(a, b) { x = a; y = b }\n  \
+               def getAt(i) { i == 0 ? x : y }\n}\n\
+               def v = new Vec(7, 9)\nprintln v[0]\nprintln v[1]";
+    let (out, _) = run(src);
+    assert_eq!(out, "7\n9\n");
+}
+
+// ── Insertion-ordered maps ──────────────────────────────────────────────────
+
+#[test]
+fn multi_entry_map_preserves_insertion_order() {
+    // The round-2 gap: a multi-entry map prints in insertion order, not the
+    // nondeterministic HashMap order.
+    let (out, ok) = run("def m = [b: 1, a: 2, c: 3]\nprintln m");
+    assert!(ok);
+    assert_eq!(out, "[b:1, a:2, c:3]\n");
+}
+
+#[test]
+fn map_key_assignment_appends_and_persists() {
+    // `m.k = v` mutates the map in place (through its shared heap handle) and
+    // appends a new key at the end.
+    let (out, _) = run("def m = [b: 1, a: 2]\nm.c = 3\nprintln m\nprintln m.c");
+    assert_eq!(out, "[b:1, a:2, c:3]\n3\n");
+}
+
+#[test]
+fn list_plus_concatenates_and_appends() {
+    // Groovy `+` on a list concatenates another list or appends a scalar.
+    let (out, _) = run("println([1, 2] + [3, 4])\nprintln([1, 2] + 3)");
+    assert_eq!(out, "[1, 2, 3, 4]\n[1, 2, 3]\n");
+}
+
+#[test]
+fn map_plus_merges_right_wins() {
+    // Map `+` merges; a duplicate key takes the right value, order preserved.
+    let (out, _) = run("println([a: 1, b: 2] + [b: 9, c: 3])");
+    assert_eq!(out, "[a:1, b:9, c:3]\n");
+}
+
+#[test]
+fn map_size_and_contains_key() {
+    let (out, _) =
+        run("def m = [x: 1, y: 2, z: 3]\nprintln m.size()\nprintln m.containsKey(\"y\")\nprintln m.containsKey(\"q\")");
+    assert_eq!(out, "3\ntrue\nfalse\n");
+}

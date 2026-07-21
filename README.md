@@ -54,7 +54,7 @@ frontend over the shared engine. Highlights:
   awkrs, elisp, ruby, python, php, node, and java runs Groovy too.
   `jit-disk-cache` persists native code across runs.
 - **The Groovy script model** — a `.groovy` file is a sequence of top-level
-  statements. No enclosing `class`, no `main`, semicolons optional (newlines
+  statements (classes optional, no `main`); semicolons optional (newlines
   terminate statements), and `println x` works with or without parentheses.
 - **Groovy value semantics** — `println` formats `true`/`false`, `3.0`, and
   `null` the Groovy way, and integer `/` promotes like `BigDecimal` so `7 / 2`
@@ -110,9 +110,9 @@ for (n in 1..5) {
 
 Implemented and checked against Apache Groovy:
 
-- **Script model** — a file is top-level statements; no class or `main`.
-  Statements are separated by newlines or `;` (semicolons optional). A leading
-  `#!` shebang and `package`/`import` lines are tolerated.
+- **Script model** — a file is top-level statements (no `main`); classes may be
+  declared. Statements are separated by newlines or `;` (semicolons optional). A
+  leading `#!` shebang and `package`/`import` lines are tolerated.
 - **Variables** — `def x = …`, typed `int` / `double` / `String` / `boolean`
   declarations, and bare `x = …` script bindings; plain and compound assignment
   (`=`, `+=`, `-=`, `*=`, `/=`, `%=`); increment / decrement in both statement
@@ -126,14 +126,23 @@ Implemented and checked against Apache Groovy:
   boolean / `null` literals; `+ - * / %`, `== != < > <= >=`, `&& ||`
   (short-circuiting), unary `-` and `!`, grouping. Integer `/` promotes to a
   decimal (`7 / 2 == 3.5`); `+` concatenates when either side is a string.
-- **Collections** — list literals `[1, 2, 3]` / `[]` and map literals `[a: 1]` /
-  `[:]`, printed Groovy-style (`[1, 2, 3]`, `[a:1]`, `[:]`).
+- **Collections** — list literals `[1, 2, 3]` / `[]` and insertion-ordered map
+  literals `[a: 1, b: 2]` / `[:]`, printed Groovy-style; subscripting `list[i]`
+  (negative index counts from the end), `map[k]`, `str[i]`. A multi-entry map
+  keeps insertion order and `m.k = v` mutates it in place.
+- **Classes** — `class C { fields; C(..){..}; def m(){..} }`, `new C(args)`,
+  fields with initializers, arity-dispatched constructors, methods with an
+  implicit `this`, property get/set with Groovy's auto `getX`/`setX`, a bare
+  field resolving to `this.field`, and `toString()` driving `println`. Instances
+  are heap objects with reference identity. A user `getAt(i)` drives `obj[i]`.
 - **Method / property dispatch** — `s.length()`, `list.size()`,
   `"hi".toUpperCase()`, `map.k`, chains on literals (`[1,2,3].size()`), over a
   faithful GDK subset routed through a host dispatch. An unknown member faults.
 - **Closures** — `{ a, b -> … }` and the implicit `{ it }` form as first-class
   callable values, invoked with `.call(args)` or directly (`def f = { it * 2 };
-  f(21)`). A closure captures its enclosing script scope.
+  f(21)`). A closure captures its enclosing script scope, and a closure nested in
+  a function/closure captures that frame's locals as upvalues, so a curried
+  `{ x -> { y -> x + y } }` and a chained call `f(a)(b)` work.
 - **Closure-driven GDK** — `each`, `eachWithIndex`, `collect`, `findAll`,
   `find`, `inject`, `sum` over lists and ranges (`[1,2,3].collect { it * 2 }` →
   `[2, 4, 6]`).
@@ -148,8 +157,9 @@ Implemented and checked against Apache Groovy:
   `println(x)` and paren-less `println x` command forms.
 - **Comments** — `//` line, `/* … */` block.
 
-See [`BUGS.md`](BUGS.md) for the honest known-gaps list (classes, GStrings,
-multi-entry map ordering, lexical upvalue capture).
+See [`BUGS.md`](BUGS.md) for the honest known-gaps list (inheritance/`trait`,
+operator overloading through `+`/`-`/`<=>`/`==`, GStrings, by-reference upvalue
+capture).
 
 ---
 
@@ -216,25 +226,32 @@ Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm
 Groovy scripts — top-level statements, `def`/typed locals, user-defined
 functions (recursion over the native `Op::Call` frame ABI), closures
 (`{ a, b -> … }` / implicit `{ it }`, `.call` and direct invocation) with the
-closure-driven GDK (`each` / `collect` / `findAll` / `find` / `inject` / `sum`),
-first-class ranges (`0..5` / `0..<5`), arithmetic / comparison / logic,
-`BigDecimal`-style division, ternary / Elvis / safe-navigation, `if` / `while` /
-`for` / range `for-in` / `break` / `continue` / `return`, list/map literals,
-method/property dispatch over a GDK subset, `println`/`print`, string
-concatenation — verified against Apache Groovy by the frozen example replay and
-the differential fuzzer. The editor tooling is shipped: a bytecode disassembler
-(`--disasm`), a Language Server (`--lsp`), and a Debug Adapter (`--dap`).
+closure-driven GDK (`each` / `collect` / `findAll` / `find` / `inject` / `sum`)
+and nested-closure upvalue capture (curried `{ x -> { y -> x + y } }`, chained
+`f(a)(b)`), classes (fields, constructors, methods, `this`, property get/set with
+auto getter/setter, `new`, `toString`, `getAt` subscript) on a host object heap,
+insertion-ordered maps, first-class ranges (`0..5` / `0..<5`), arithmetic /
+comparison / logic, `BigDecimal`-style division, ternary / Elvis /
+safe-navigation, `if` / `while` / `for` / range `for-in` / `break` / `continue` /
+`return`, list/map literals, subscripting, method/property dispatch over a GDK
+subset, `println`/`print`, string concatenation — verified against Apache Groovy
+by the frozen example replay and the differential fuzzer. The editor tooling is
+shipped: a bytecode disassembler (`--disasm`), a Language Server (`--lsp`), and a
+Debug Adapter (`--dap`).
 
 Next waves, in priority order:
 
-1. **Lexical upvalue capture** — a closure defined inside a function or another
-   closure capturing that enclosing frame's locals (today closures capture the
-   script scope), unblocking curried `{ x -> { y -> x + y } }`.
-2. **Reference types & interpolation** — a broader `String`/list/map GDK on a
-   host heap with insertion-ordered maps; GString `"$name"` / `"${expr}"`.
-3. **Standard library surface** — `Math`, common `java.util`/GDK collection
-   methods.
-4. **Scale-tracking decimals** — a real `BigDecimal` value so `10 * 1.25` prints
+1. **Operator overloading through the operators** — `plus`/`minus`/`compareTo`/
+   `equals` driving `+`/`-`/`<=>`/`==` (a user `getAt` already drives `[]`). This
+   needs a VM-re-entrant numeric hook in fusevm; the current hook signature
+   cannot run a user method.
+2. **Inheritance** — `extends`/`super`/interfaces and superclass method
+   resolution (today classes are flat; `extends` is parsed and ignored).
+3. **By-reference upvalue capture** — boxed cells so a closure sees a mutation of
+   an outer frame local made after capture (capture is by value today).
+4. **Interpolation & standard library** — GString `"$name"` / `"${expr}"`;
+   `Math`, broader `java.util`/GDK collection methods.
+5. **Scale-tracking decimals** — a real `BigDecimal` value so `10 * 1.25` prints
    `12.50`, closing the last documented arithmetic divergence.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.

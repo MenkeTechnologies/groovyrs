@@ -62,6 +62,14 @@ struct Compiler {
     /// The active function scope while lowering a function body; `None` at script
     /// top level (where names are globals).
     scope: Option<FnScope>,
+    /// The field names of the class whose method/constructor body is currently
+    /// being lowered; `None` outside a class member. A bare name that is a field
+    /// (and not shadowed by a parameter/local) resolves to `this.field`.
+    cur_class_fields: Option<HashSet<String>>,
+    /// The method names of the class whose member body is currently being
+    /// lowered. A bare call to one of these (not shadowed by a local) is an
+    /// implicit `this.method(args)`.
+    cur_class_methods: Option<HashSet<String>>,
     /// Closure bodies discovered while lowering, awaiting emission as subroutine
     /// regions after the main body and the user functions (see
     /// [`Compiler::emit_closure`]). A queue because emitting one closure may
@@ -73,11 +81,19 @@ struct Compiler {
 
 /// A closure body queued for emission as a subroutine region. `params` already
 /// has the implicit `it` injected when the literal had no explicit parameters.
+/// `captures` are the enclosing-frame locals the closure reads as upvalues; they
+/// occupy the frame slots immediately after the parameters (see
+/// [`Compiler::emit_closure`]) and are supplied at call time from the closure
+/// handle. `class_fields` carries a class context down into a closure defined
+/// inside a method so a bare field name still resolves to `this.field`.
 struct PendingClosure {
     name_idx: u16,
     params: Vec<String>,
+    captures: Vec<String>,
     body: Vec<Stmt>,
     line: u32,
+    class_fields: Option<HashSet<String>>,
+    class_methods: Option<HashSet<String>>,
 }
 
 /// Compile a parsed [`Program`]'s body to a runnable fusevm chunk.
@@ -109,23 +125,53 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         has_ffi,
         fn_names,
         scope: None,
+        cur_class_fields: None,
+        cur_class_methods: None,
         pending_closures: VecDeque::new(),
         closures_seen: 0,
     };
-    // Emit the script body (function definitions are hoisted out and emitted as
-    // subroutine regions below).
+    // Register every class before running the body so `new C()` and method
+    // dispatch resolve regardless of source order (like function forward refs).
     for stmt in &prog.body {
-        if matches!(stmt.kind, StmtKind::Function { .. }) {
+        if let StmtKind::Class {
+            name,
+            fields,
+            ctors,
+            methods,
+        } = &stmt.kind
+        {
+            c.register_class(name, fields, ctors, methods);
+        }
+    }
+    // Emit the script body (function and class definitions are hoisted out and
+    // emitted as subroutine regions below).
+    for stmt in &prog.body {
+        if matches!(
+            stmt.kind,
+            StmtKind::Function { .. } | StmtKind::Class { .. }
+        ) {
             continue;
         }
         c.stmt(stmt)?;
     }
-    // Jump past the function bodies so top-level fall-through halts instead of
-    // running into a function body (which is only reachable via `Op::Call`).
+    // Jump past the function/method bodies so top-level fall-through halts
+    // instead of running into a body (only reachable via `Op::Call`/dispatch).
     let skip = c.b.emit(Op::Jump(0), 0);
     for stmt in &prog.body {
         if let StmtKind::Function { name, params, body } = &stmt.kind {
             c.function(stmt.line, name, params, body)?;
+        }
+    }
+    // Emit each class's field-initializer, constructor, and method subroutines.
+    for stmt in &prog.body {
+        if let StmtKind::Class {
+            name,
+            fields,
+            ctors,
+            methods,
+        } = &stmt.kind
+        {
+            c.class_bodies(stmt.line, name, fields, ctors, methods)?;
         }
     }
     // Emit queued closure bodies as subroutine regions. Draining may enqueue
@@ -239,19 +285,28 @@ impl Compiler {
         let entry = self.b.current_pos();
         self.b.add_sub_entry(pc.name_idx, entry);
 
+        // Slots: parameters first (0..n), then captured upvalues (n..n+k). At
+        // call time `invoke_closure` pushes the params then the captures in this
+        // order, so the prologue pops all of them into their slots.
         let mut vars = HashMap::new();
         for (i, p) in pc.params.iter().enumerate() {
             vars.insert(p.clone(), i as u16);
         }
+        for (j, cap) in pc.captures.iter().enumerate() {
+            vars.insert(cap.clone(), (pc.params.len() + j) as u16);
+        }
+        let total = pc.params.len() + pc.captures.len();
         let prev = self.scope.replace(FnScope {
             vars,
-            next_slot: pc.params.len() as u16,
+            next_slot: total as u16,
         });
+        let prev_fields = std::mem::replace(&mut self.cur_class_fields, pc.class_fields);
+        let prev_methods = std::mem::replace(&mut self.cur_class_methods, pc.class_methods);
         let saved_line = self.cur_line;
         self.cur_line = pc.line;
 
-        // Prologue: pop the pushed args top-down into their parameter slots.
-        for i in (0..pc.params.len()).rev() {
+        // Prologue: pop the pushed params + captures top-down into their slots.
+        for i in (0..total).rev() {
             self.b.emit(Op::SetSlot(i as u16), pc.line);
         }
 
@@ -262,7 +317,283 @@ impl Compiler {
         self.b.emit(Op::ReturnValue, self.cur_line);
 
         self.scope = prev;
+        self.cur_class_fields = prev_fields;
+        self.cur_class_methods = prev_methods;
         self.cur_line = saved_line;
+        Ok(())
+    }
+
+    // ── Classes ─────────────────────────────────────────────────────────────
+
+    /// Synthetic sub name for a class method body.
+    fn method_sub_name(class: &str, method: &str) -> String {
+        format!("$cls_{class}_m_{method}")
+    }
+    /// Synthetic sub name for a class constructor of the given arity.
+    fn ctor_sub_name(class: &str, arity: usize) -> String {
+        format!("$cls_{class}_ctor_{arity}")
+    }
+    /// Synthetic sub name for a class field's initializer thunk.
+    fn init_sub_name(class: &str, field: &str) -> String {
+        format!("$cls_{class}_init_{field}")
+    }
+
+    /// Emit the runtime registration of a class: push its name, field-name list,
+    /// method table, field-initializer table, and constructor table, then call
+    /// the class-register builtin. Runs once at script start (hoisted), so the
+    /// class is resolvable before any `new`.
+    fn register_class(&mut self, name: &str, fields: &[Field], ctors: &[Ctor], methods: &[Method]) {
+        let line = 0;
+        // class name
+        let nidx = self.b.add_constant(Value::str(name.to_string()));
+        self.b.emit(Op::LoadConst(nidx), line);
+        // field-name array (declaration order)
+        for f in fields {
+            let c = self.b.add_constant(Value::str(f.name.clone()));
+            self.b.emit(Op::LoadConst(c), line);
+        }
+        self.b.emit(Op::MakeArray(fields.len() as u16), line);
+        // method table: name -> sub name-pool index
+        for m in methods {
+            let k = self.b.add_constant(Value::str(m.name.clone()));
+            self.b.emit(Op::LoadConst(k), line);
+            let sub = self.b.add_name(&Self::method_sub_name(name, &m.name));
+            self.b.emit(Op::LoadInt(sub as i64), line);
+        }
+        self.b.emit(Op::MakeHash((methods.len() * 2) as u16), line);
+        // field-initializer table: field -> init-thunk sub name-pool index
+        let mut init_count = 0;
+        for f in fields {
+            if f.init.is_some() {
+                let k = self.b.add_constant(Value::str(f.name.clone()));
+                self.b.emit(Op::LoadConst(k), line);
+                let sub = self.b.add_name(&Self::init_sub_name(name, &f.name));
+                self.b.emit(Op::LoadInt(sub as i64), line);
+                init_count += 1;
+            }
+        }
+        self.b.emit(Op::MakeHash((init_count * 2) as u16), line);
+        // constructor table: arity -> ctor sub name-pool index
+        for ctor in ctors {
+            let k = self
+                .b
+                .add_constant(Value::str(ctor.params.len().to_string()));
+            self.b.emit(Op::LoadConst(k), line);
+            let sub = self
+                .b
+                .add_name(&Self::ctor_sub_name(name, ctor.params.len()));
+            self.b.emit(Op::LoadInt(sub as i64), line);
+        }
+        self.b.emit(Op::MakeHash((ctors.len() * 2) as u16), line);
+        self.b.emit(Op::CallBuiltin(crate::host::GCLASS, 0), line);
+        self.b.emit(Op::Pop, line);
+    }
+
+    /// Emit every subroutine body a class needs: field-initializer thunks,
+    /// constructors, and methods. Constructors and methods carry an implicit
+    /// `this` in slot 0 and resolve bare field names to `this.field`.
+    fn class_bodies(
+        &mut self,
+        line: u32,
+        name: &str,
+        fields: &[Field],
+        ctors: &[Ctor],
+        methods: &[Method],
+    ) -> Result<(), String> {
+        let field_set: HashSet<String> = fields.iter().map(|f| f.name.clone()).collect();
+        let method_set: HashSet<String> = methods.iter().map(|m| m.name.clone()).collect();
+        // Field-initializer thunks (0-arg subs that compute the initial value).
+        for f in fields {
+            if let Some(init) = &f.init {
+                self.emit_field_init(line, name, &f.name, init)?;
+            }
+        }
+        for ctor in ctors {
+            let sub = Self::ctor_sub_name(name, ctor.params.len());
+            self.emit_member(
+                line,
+                &sub,
+                &ctor.params,
+                &ctor.body,
+                &field_set,
+                &method_set,
+            )?;
+        }
+        for m in methods {
+            let sub = Self::method_sub_name(name, &m.name);
+            self.emit_member(line, &sub, &m.params, &m.body, &field_set, &method_set)?;
+        }
+        Ok(())
+    }
+
+    /// Emit a class member (method or constructor) as a subroutine: `this` in
+    /// slot 0, parameters in slots 1..n+1, bare field names resolving to
+    /// `this.field`. Uses the implicit last-expression return like a function.
+    fn emit_member(
+        &mut self,
+        line: u32,
+        sub_name: &str,
+        params: &[String],
+        body: &[Stmt],
+        field_set: &HashSet<String>,
+        method_set: &HashSet<String>,
+    ) -> Result<(), String> {
+        let entry = self.b.current_pos();
+        let nidx = self.b.add_name(sub_name);
+        self.b.add_sub_entry(nidx, entry);
+
+        // `this` occupies slot 0 (a named slot so a nested closure can capture
+        // it); parameters follow in slots 1..n+1.
+        let mut vars = HashMap::new();
+        vars.insert("this".to_string(), 0);
+        for (i, p) in params.iter().enumerate() {
+            vars.insert(p.clone(), (i + 1) as u16);
+        }
+        let prev = self.scope.replace(FnScope {
+            vars,
+            next_slot: (params.len() + 1) as u16,
+        });
+        let prev_fields = self.cur_class_fields.replace(field_set.clone());
+        let prev_methods = self.cur_class_methods.replace(method_set.clone());
+        let saved_line = self.cur_line;
+        self.cur_line = line;
+
+        // Prologue: pop `this` + args top-down into slots 0..n+1.
+        for i in (0..params.len() + 1).rev() {
+            self.b.emit(Op::SetSlot(i as u16), line);
+        }
+        self.fn_body(body)?;
+        self.b.emit(Op::LoadUndef, self.cur_line);
+        self.b.emit(Op::ReturnValue, self.cur_line);
+
+        self.scope = prev;
+        self.cur_class_fields = prev_fields;
+        self.cur_class_methods = prev_methods;
+        self.cur_line = saved_line;
+        Ok(())
+    }
+
+    /// Emit a field-initializer thunk: a 0-arg subroutine that evaluates the
+    /// initializer and returns it. No `this` is bound (initializers see script
+    /// globals, not other fields).
+    fn emit_field_init(
+        &mut self,
+        line: u32,
+        class: &str,
+        field: &str,
+        init: &Expr,
+    ) -> Result<(), String> {
+        let entry = self.b.current_pos();
+        let nidx = self.b.add_name(&Self::init_sub_name(class, field));
+        self.b.add_sub_entry(nidx, entry);
+        let prev = self.scope.replace(FnScope {
+            vars: HashMap::new(),
+            next_slot: 0,
+        });
+        let prev_fields = self.cur_class_fields.take();
+        let prev_methods = self.cur_class_methods.take();
+        let saved_line = self.cur_line;
+        self.cur_line = line;
+        self.expr(init)?;
+        self.b.emit(Op::ReturnValue, self.cur_line);
+        self.scope = prev;
+        self.cur_class_fields = prev_fields;
+        self.cur_class_methods = prev_methods;
+        self.cur_line = saved_line;
+        Ok(())
+    }
+
+    /// True when `name` is a field of the class currently being lowered and is
+    /// not shadowed by a parameter/local — so it resolves to `this.field`.
+    fn is_field(&self, name: &str) -> bool {
+        self.cur_class_fields
+            .as_ref()
+            .is_some_and(|f| f.contains(name))
+            && !self.is_local(name)
+    }
+
+    /// True when `name` is bound to a slot in the current function/method scope
+    /// (a parameter or local), so it must not be reinterpreted as a field/method.
+    fn is_local(&self, name: &str) -> bool {
+        self.scope
+            .as_ref()
+            .is_some_and(|s| s.vars.contains_key(name))
+    }
+
+    /// True when `name` is a method of the class currently being lowered and is
+    /// not shadowed by a local — so a bare call resolves to `this.method(args)`.
+    fn is_method(&self, name: &str) -> bool {
+        self.cur_class_methods
+            .as_ref()
+            .is_some_and(|m| m.contains(name))
+            && !self.is_local(name)
+    }
+
+    /// True when `name` is a field of the class currently being lowered
+    /// (membership only, ignoring local shadowing) — used to decide whether a
+    /// nested closure must capture `this`.
+    fn field_of_class(&self, name: &str) -> bool {
+        self.cur_class_fields
+            .as_ref()
+            .is_some_and(|f| f.contains(name))
+    }
+
+    /// True when `name` is a method of the class currently being lowered.
+    fn method_of_class(&self, name: &str) -> bool {
+        self.cur_class_methods
+            .as_ref()
+            .is_some_and(|m| m.contains(name))
+    }
+
+    /// Push the current instance (`this`). In a method it is frame slot 0; in a
+    /// closure nested inside a method it is a captured upvalue slot — both are
+    /// reached by resolving the name `this` through the scope.
+    fn emit_this(&mut self) {
+        if self.is_local("this") {
+            let get = self.load_op_for("this");
+            self.b.emit(get, self.cur_line);
+        } else {
+            self.b.emit(Op::GetSlot(0), self.cur_line);
+        }
+    }
+
+    /// Emit a read of the current instance's field `name` (`this.field`):
+    /// `this` through the property builtin.
+    fn emit_field_get(&mut self, name: &str) {
+        self.emit_this();
+        let c = self.b.add_constant(Value::str(name.to_string()));
+        self.b.emit(Op::LoadConst(c), self.cur_line);
+        self.b
+            .emit(Op::CallBuiltin(crate::host::GPROP, 0), self.cur_line);
+    }
+
+    /// Lower an assignment to a bare field inside a method: `field <op>= value`
+    /// becomes `this.field = this.field <op> value` through the property-set
+    /// builtin. Stack for the builtin is `this` (deepest), the new value, then
+    /// the field name.
+    fn assign_field(&mut self, name: &str, op: AssignOp, value: &Expr) -> Result<(), String> {
+        self.emit_this(); // receiver for the set
+        match op {
+            AssignOp::Assign => {
+                self.expr(value)?;
+            }
+            AssignOp::Div => {
+                self.emit_field_get(name);
+                self.expr(value)?;
+                self.b
+                    .emit(Op::CallBuiltin(crate::host::GDIV, 2), self.cur_line);
+            }
+            _ => {
+                self.emit_field_get(name);
+                self.expr(value)?;
+                self.b.emit(compound_op(op), self.cur_line);
+            }
+        }
+        let c = self.b.add_constant(Value::str(name.to_string()));
+        self.b.emit(Op::LoadConst(c), self.cur_line);
+        self.b
+            .emit(Op::CallBuiltin(crate::host::GSETPROP, 0), self.cur_line);
+        self.b.emit(Op::Pop, self.cur_line);
         Ok(())
     }
 
@@ -318,6 +649,10 @@ impl Compiler {
                 Ok(())
             }
             StmtKind::Assign { name, op, value } => {
+                // A bare field name inside a method/constructor is `this.field`.
+                if self.is_field(name) {
+                    return self.assign_field(name, *op, value);
+                }
                 match op {
                     AssignOp::Assign => {
                         self.expr(value)?;
@@ -342,6 +677,20 @@ impl Compiler {
                 self.b.emit(store, self.cur_line);
                 Ok(())
             }
+            StmtKind::SetProperty { recv, name, value } => {
+                // `recv.name = value` — stack: recv (deepest), value, name.
+                self.expr(recv)?;
+                self.expr(value)?;
+                let c = self.b.add_constant(Value::str(name.clone()));
+                self.b.emit(Op::LoadConst(c), self.cur_line);
+                self.b
+                    .emit(Op::CallBuiltin(crate::host::GSETPROP, 0), self.cur_line);
+                self.b.emit(Op::Pop, self.cur_line);
+                Ok(())
+            }
+            // Classes are hoisted and emitted as subroutine regions by
+            // `compile_with`; they produce no code in statement position.
+            StmtKind::Class { .. } => Ok(()),
             StmtKind::Expr(Expr::Println { newline, arg }) => {
                 // The print builtin returns `null`; discard it in statement
                 // position.
@@ -562,8 +911,47 @@ impl Compiler {
                 self.b.emit(Op::LoadUndef, self.cur_line);
             }
             Expr::Var(name) => {
-                let get = self.load_op_for(name);
-                self.b.emit(get, self.cur_line);
+                // A bare field name inside a method/constructor is `this.field`.
+                if self.is_field(name) {
+                    self.emit_field_get(name);
+                } else {
+                    let get = self.load_op_for(name);
+                    self.b.emit(get, self.cur_line);
+                }
+            }
+            Expr::This => {
+                self.emit_this();
+            }
+            Expr::New { class, args, line } => {
+                // Push the constructor args, then the class name on top.
+                for a in args {
+                    self.expr(a)?;
+                }
+                let c = self.b.add_constant(Value::str(class.clone()));
+                self.b.emit(Op::LoadConst(c), *line);
+                self.b
+                    .emit(Op::CallBuiltin(crate::host::GNEW, args.len() as u8), *line);
+            }
+            Expr::Index { recv, index, line } => {
+                // `recv[index]` — stack: recv (deepest), index.
+                self.expr(recv)?;
+                self.expr(index)?;
+                self.b.emit(Op::CallBuiltin(crate::host::GINDEX, 0), *line);
+            }
+            Expr::CallValue { callee, args, line } => {
+                // Invoke the value of `callee` with `args` — the postfix
+                // call-application that makes `f(a)(b)` work. Reuses the
+                // closure-call builtin with a synthetic name for diagnostics.
+                self.expr(callee)?;
+                for a in args {
+                    self.expr(a)?;
+                }
+                let nidx = self.b.add_constant(Value::str("<closure>".to_string()));
+                self.b.emit(Op::LoadConst(nidx), *line);
+                self.b.emit(
+                    Op::CallBuiltin(crate::host::GCLOSURE_CALL, args.len() as u8),
+                    *line,
+                );
             }
             Expr::Unary { op, rhs } => {
                 self.expr(rhs)?;
@@ -603,13 +991,18 @@ impl Compiler {
                     .emit(Op::MakeArray(elems.len() as u16), self.cur_line);
             }
             Expr::Map(entries) => {
-                // MakeHash pops interleaved key/value pairs (key pushed first).
+                // Groovy maps preserve insertion order, so a map literal builds a
+                // host-heap ordered map (not the unordered fusevm `Hash`). Push
+                // the interleaved key/value pairs (key first), then the entry
+                // count, and register through the make-map builtin.
                 for (k, v) in entries {
                     self.expr(k)?;
                     self.expr(v)?;
                 }
                 self.b
-                    .emit(Op::MakeHash((entries.len() * 2) as u16), self.cur_line);
+                    .emit(Op::LoadInt(entries.len() as i64), self.cur_line);
+                self.b
+                    .emit(Op::CallBuiltin(crate::host::GMAKE_MAP, 0), self.cur_line);
             }
             Expr::MethodCall {
                 recv,
@@ -706,22 +1099,57 @@ impl Compiler {
         } else {
             params.to_vec()
         };
+        // Upvalues: the closure's free names that resolve to a slot in the
+        // enclosing function/closure frame. At script top level there is no such
+        // frame (`scope` is `None`), so a closure captures nothing and its free
+        // names stay script-binding globals, exactly as before.
+        let mut captures: Vec<String> = match self.scope.as_ref() {
+            Some(scope) => free_vars(&effective, body)
+                .into_iter()
+                .filter(|n| scope.vars.contains_key(n))
+                .collect(),
+            None => Vec::new(),
+        };
+        // A closure that reads a field or calls a sibling method needs the
+        // enclosing `this` even though the bare name is the field/method, not
+        // `this`. Capture `this` (the enclosing slot 0) so `this.field` inside
+        // the closure resolves to the instance, not the closure's own slot 0.
+        if self.is_local("this") && !captures.iter().any(|c| c == "this") {
+            let uses_this = free_vars(&effective, body)
+                .iter()
+                .any(|n| self.field_of_class(n) || self.method_of_class(n));
+            if uses_this {
+                captures.push("this".to_string());
+            }
+        }
+        // Push each captured value (read from the enclosing frame) so the
+        // make-closure builtin can store it in the handle.
+        for cap in &captures {
+            let get = self.load_op_for(cap);
+            self.b.emit(get, self.cur_line);
+        }
         let id = self.closures_seen;
         self.closures_seen += 1;
         let name_idx = self.b.add_name(&format!("$closure_{id}"));
         self.pending_closures.push_back(PendingClosure {
             name_idx,
             params: effective.clone(),
+            captures: captures.clone(),
             body: body.to_vec(),
             line: self.cur_line,
+            class_fields: self.cur_class_fields.clone(),
+            class_methods: self.cur_class_methods.clone(),
         });
-        // Build the closure value: push its name index and parameter count, then
-        // register through the make-closure builtin (returns a `Value::Obj`).
+        // Build the closure value: push its name index, parameter count, and
+        // capture count, then register through the make-closure builtin (returns
+        // a `Value::Obj`).
         self.b.emit(Op::LoadInt(name_idx as i64), self.cur_line);
         self.b
             .emit(Op::LoadInt(effective.len() as i64), self.cur_line);
+        self.b
+            .emit(Op::LoadInt(captures.len() as i64), self.cur_line);
         self.b.emit(
-            Op::CallBuiltin(crate::host::GMAKE_CLOSURE, 2),
+            Op::CallBuiltin(crate::host::GMAKE_CLOSURE, 0),
             self.cur_line,
         );
         Ok(())
@@ -770,6 +1198,21 @@ impl Compiler {
             self.b.emit(Op::LoadConst(nidx), line);
             self.b.emit(
                 Op::CallBuiltin(crate::host::GFFI_CALL, args.len() as u8),
+                line,
+            );
+            return Ok(());
+        }
+        // A bare call to a sibling method inside a class body is an implicit
+        // `this.method(args)` (a local variable of the same name would shadow it).
+        if self.is_method(name) && !self.is_local(name) {
+            self.emit_this(); // this (receiver)
+            for a in args {
+                self.expr(a)?;
+            }
+            let midx = self.b.add_constant(Value::str(name.to_string()));
+            self.b.emit(Op::LoadConst(midx), line);
+            self.b.emit(
+                Op::CallBuiltin(crate::host::GMETHOD, args.len() as u8),
                 line,
             );
             return Ok(());
@@ -843,6 +1286,230 @@ impl Compiler {
     }
 }
 
+// ── Free-variable analysis for closure upvalue capture ──────────────────────
+
+/// The free variables of a closure body: names referenced but not bound by the
+/// closure's own parameters or locals. The caller intersects this with the
+/// enclosing frame's slots to decide which values to capture as upvalues. The
+/// walk descends into nested closures (extending the bound set with their
+/// parameters/locals) so an inner closure's free name propagates outward and is
+/// captured at each intervening level. First-seen order, deduplicated.
+fn free_vars(params: &[String], body: &[Stmt]) -> Vec<String> {
+    let mut bound: HashSet<String> = params.iter().cloned().collect();
+    collect_bound_stmts(body, &mut bound);
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for s in body {
+        free_in_stmt(s, &bound, &mut out, &mut seen);
+    }
+    out
+}
+
+/// Add every name declared as a local at this closure level (including inside
+/// control-flow blocks, but *not* inside nested closures) to `bound`.
+fn collect_bound_stmts(body: &[Stmt], bound: &mut HashSet<String>) {
+    for s in body {
+        match &s.kind {
+            StmtKind::Local { name, .. } => {
+                bound.insert(name.clone());
+            }
+            StmtKind::If { then, els, .. } => {
+                collect_bound_stmts(then, bound);
+                collect_bound_stmts(els, bound);
+            }
+            StmtKind::While { body, .. } => collect_bound_stmts(body, bound),
+            StmtKind::For {
+                init, update, body, ..
+            } => {
+                if let Some(i) = init {
+                    collect_bound_stmts(std::slice::from_ref(i), bound);
+                }
+                if let Some(u) = update {
+                    collect_bound_stmts(std::slice::from_ref(u), bound);
+                }
+                collect_bound_stmts(body, bound);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Record `name` as free if it is not bound in the current scope (deduped).
+fn note_free(
+    name: &str,
+    bound: &HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    if !bound.contains(name) && seen.insert(name.to_string()) {
+        out.push(name.to_string());
+    }
+}
+
+fn free_in_stmt(
+    s: &Stmt,
+    bound: &HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    match &s.kind {
+        StmtKind::Local { init, .. } => {
+            if let Some(e) = init {
+                free_in_expr(e, bound, out, seen);
+            }
+        }
+        StmtKind::Assign { name, value, .. } => {
+            note_free(name, bound, out, seen);
+            free_in_expr(value, bound, out, seen);
+        }
+        StmtKind::Expr(e) => free_in_expr(e, bound, out, seen),
+        StmtKind::If { cond, then, els } => {
+            free_in_expr(cond, bound, out, seen);
+            for s in then {
+                free_in_stmt(s, bound, out, seen);
+            }
+            for s in els {
+                free_in_stmt(s, bound, out, seen);
+            }
+        }
+        StmtKind::While { cond, body } => {
+            free_in_expr(cond, bound, out, seen);
+            for s in body {
+                free_in_stmt(s, bound, out, seen);
+            }
+        }
+        StmtKind::For {
+            init,
+            cond,
+            update,
+            body,
+        } => {
+            if let Some(i) = init {
+                free_in_stmt(i, bound, out, seen);
+            }
+            if let Some(c) = cond {
+                free_in_expr(c, bound, out, seen);
+            }
+            if let Some(u) = update {
+                free_in_stmt(u, bound, out, seen);
+            }
+            for s in body {
+                free_in_stmt(s, bound, out, seen);
+            }
+        }
+        StmtKind::Return { value } => {
+            if let Some(e) = value {
+                free_in_expr(e, bound, out, seen);
+            }
+        }
+        StmtKind::SetProperty { recv, value, .. } => {
+            free_in_expr(recv, bound, out, seen);
+            free_in_expr(value, bound, out, seen);
+        }
+        StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Function { .. }
+        | StmtKind::Class { .. } => {}
+    }
+}
+
+fn free_in_expr(
+    e: &Expr,
+    bound: &HashSet<String>,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    match e {
+        Expr::Var(n) => note_free(n, bound, out, seen),
+        Expr::PostIncDec { name, .. } | Expr::PreIncDec { name, .. } => {
+            note_free(name, bound, out, seen)
+        }
+        Expr::Unary { rhs, .. } => free_in_expr(rhs, bound, out, seen),
+        Expr::Binary { lhs, rhs, .. } => {
+            free_in_expr(lhs, bound, out, seen);
+            free_in_expr(rhs, bound, out, seen);
+        }
+        Expr::Println { arg, .. } => {
+            if let Some(a) = arg {
+                free_in_expr(a, bound, out, seen);
+            }
+        }
+        Expr::Call { name, args, .. } => {
+            // The callee may be an enclosing-scope closure variable, so it is a
+            // free reference too (a global function name simply won't intersect
+            // the enclosing frame's slots and so is never captured).
+            note_free(name, bound, out, seen);
+            for a in args {
+                free_in_expr(a, bound, out, seen);
+            }
+        }
+        Expr::CallValue { callee, args, .. } => {
+            free_in_expr(callee, bound, out, seen);
+            for a in args {
+                free_in_expr(a, bound, out, seen);
+            }
+        }
+        Expr::List(elems) => {
+            for e in elems {
+                free_in_expr(e, bound, out, seen);
+            }
+        }
+        Expr::Map(entries) => {
+            for (k, v) in entries {
+                free_in_expr(k, bound, out, seen);
+                free_in_expr(v, bound, out, seen);
+            }
+        }
+        Expr::MethodCall { recv, args, .. } => {
+            free_in_expr(recv, bound, out, seen);
+            for a in args {
+                free_in_expr(a, bound, out, seen);
+            }
+        }
+        Expr::Property { recv, .. } => free_in_expr(recv, bound, out, seen),
+        Expr::Index { recv, index, .. } => {
+            free_in_expr(recv, bound, out, seen);
+            free_in_expr(index, bound, out, seen);
+        }
+        Expr::New { args, .. } => {
+            for a in args {
+                free_in_expr(a, bound, out, seen);
+            }
+        }
+        Expr::Closure { params, body } => {
+            // Descend with the nested closure's own bindings added, so a name
+            // free in the inner closure but not bound here still surfaces.
+            let mut inner = bound.clone();
+            if params.is_empty() {
+                inner.insert("it".to_string());
+            }
+            for p in params {
+                inner.insert(p.clone());
+            }
+            collect_bound_stmts(body, &mut inner);
+            for s in body {
+                free_in_stmt(s, &inner, out, seen);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            free_in_expr(start, bound, out, seen);
+            free_in_expr(end, bound, out, seen);
+        }
+        Expr::Ternary { cond, then, els } => {
+            free_in_expr(cond, bound, out, seen);
+            free_in_expr(then, bound, out, seen);
+            free_in_expr(els, bound, out, seen);
+        }
+        Expr::Elvis { lhs, rhs } => {
+            free_in_expr(lhs, bound, out, seen);
+            free_in_expr(rhs, bound, out, seen);
+        }
+        // `this` is a captured upvalue when a closure uses it inside a method.
+        Expr::This => note_free("this", bound, out, seen),
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null => {}
+    }
+}
+
 // ── FFI detection (does the program contain a `rust { ... }` block?) ────────
 
 /// True if any statement in `body` (recursively) evaluates a `__rust_compile`
@@ -872,6 +1539,19 @@ fn body_has_ffi(body: &[Stmt]) -> bool {
         }
         StmtKind::Return { value } => value.as_ref().is_some_and(expr_has_ffi),
         StmtKind::Function { body, .. } => body_has_ffi(body),
+        StmtKind::SetProperty { recv, value, .. } => expr_has_ffi(recv) || expr_has_ffi(value),
+        StmtKind::Class {
+            fields,
+            ctors,
+            methods,
+            ..
+        } => {
+            fields
+                .iter()
+                .any(|f| f.init.as_ref().is_some_and(expr_has_ffi))
+                || ctors.iter().any(|c| body_has_ffi(&c.body))
+                || methods.iter().any(|m| body_has_ffi(&m.body))
+        }
         StmtKind::Break | StmtKind::Continue => false,
     })
 }
@@ -894,11 +1574,17 @@ fn expr_has_ffi(e: &Expr) -> bool {
             expr_has_ffi(cond) || expr_has_ffi(then) || expr_has_ffi(els)
         }
         Expr::Elvis { lhs, rhs } => expr_has_ffi(lhs) || expr_has_ffi(rhs),
+        Expr::CallValue { callee, args, .. } => {
+            expr_has_ffi(callee) || args.iter().any(expr_has_ffi)
+        }
+        Expr::New { args, .. } => args.iter().any(expr_has_ffi),
+        Expr::Index { recv, index, .. } => expr_has_ffi(recv) || expr_has_ffi(index),
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Str(_)
         | Expr::Bool(_)
         | Expr::Null
+        | Expr::This
         | Expr::Var(_)
         | Expr::PostIncDec { .. }
         | Expr::PreIncDec { .. } => false,

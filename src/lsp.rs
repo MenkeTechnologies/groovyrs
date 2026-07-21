@@ -95,8 +95,8 @@ const CORPUS: &[(&str, &str, &str, &str)] = &[
     (
         "new",
         "Keyword",
-        "reserved for object construction (`new Type(...)`)",
-        "// new is reserved; object construction lands in a later slice",
+        "construct a class instance (`new Type(args)`)",
+        "class P { def x; P(v) { x = v } }\nprintln(new P(7).x)   // => 7",
     ),
     // ── Literal ──
     (

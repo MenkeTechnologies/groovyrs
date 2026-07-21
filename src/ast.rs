@@ -5,11 +5,12 @@
 //! itself). The subset covers `def`/typed local declarations and functions,
 //! script-binding assignments, arithmetic / comparison / logic expressions,
 //! ternary / Elvis / safe-navigation, closures (`{ a, b -> … }` / implicit
-//! `{ it }`) with the closure-driven GDK, first-class ranges, `if`/`while`, the
-//! C-style and `for (x in a..b)` range loops, `break`/`continue`, and the
-//! `println`/`print` command calls. Classes, GStrings, and lexical upvalue
-//! capture are not modeled yet (see `BUGS.md`); the AST is shaped to grow into
-//! them.
+//! `{ it }`) with the closure-driven GDK and nested-closure upvalue capture,
+//! first-class ranges, `if`/`while`, the C-style and `for (x in a..b)` range
+//! loops, `break`/`continue`, subscripting (`recv[i]`), the `println`/`print`
+//! command calls, and classes (fields, constructors, methods, `this`, property
+//! get/set with auto getter/setter, `new`). GStrings are not modeled yet (see
+//! `BUGS.md`); the AST is shaped to grow into them.
 
 /// A parsed script: the ordered top-level statements.
 #[derive(Debug, Clone, PartialEq)]
@@ -94,6 +95,50 @@ pub enum StmtKind {
         params: Vec<String>,
         body: Vec<Stmt>,
     },
+    /// A class declaration: `class C { fields; C(..){..}; def m(){..} }`. Fields,
+    /// constructors, and methods are hoisted like functions and lowered to
+    /// subroutine regions (methods take an implicit leading `this`). See
+    /// `compiler::class_def`.
+    Class {
+        name: String,
+        fields: Vec<Field>,
+        ctors: Vec<Ctor>,
+        methods: Vec<Method>,
+    },
+    /// A property assignment to a receiver: `recv.name = value` (e.g. `p.x = 10`
+    /// or `this.v = x`). Routes through the host property-set builtin, honouring a
+    /// user `set<Name>` setter and Groovy's auto-setter on a field.
+    SetProperty {
+        recv: Expr,
+        name: String,
+        value: Expr,
+    },
+}
+
+/// A class field: `def x` / `Type x [= init]`. The declared type is ignored at
+/// runtime (dynamic typing); an absent initializer defaults to `null`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Field {
+    pub name: String,
+    pub init: Option<Expr>,
+}
+
+/// A class constructor `C(params) { body }`. Overloads are distinguished by
+/// arity at `new` time (Groovy also dispatches constructors by arity here).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ctor {
+    pub params: Vec<String>,
+    pub body: Vec<Stmt>,
+}
+
+/// A class method `def m(params) { body }` (or typed). Lowered like a function
+/// but with an implicit leading `this` slot; a bare field name in the body reads
+/// / writes `this.field`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Method {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Vec<Stmt>,
 }
 
 /// Compound-assignment operator. `Assign` is a plain `=`.
@@ -160,6 +205,16 @@ pub enum Expr {
         args: Vec<Expr>,
         line: u32,
     },
+    /// Invoke the value produced by an arbitrary expression: `callee(args...)`.
+    /// This is the postfix call-application that makes chained calls parse —
+    /// `f(a)(b)` is `CallValue { callee: Call(f, [a]), args: [b] }` — and lets a
+    /// method result or a bracketed closure be invoked directly. The callee must
+    /// evaluate to a closure handle at runtime; otherwise the call faults.
+    CallValue {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+        line: u32,
+    },
     /// A list literal `[a, b, c]` (or `[]`). Lowered to `Op::MakeArray`.
     List(Vec<Expr>),
     /// A map literal `[k: v, ...]` (or the empty map `[:]`). Each key is an
@@ -218,6 +273,24 @@ pub enum Expr {
     Elvis {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
+    },
+    /// Object construction `new C(args...)`. Allocates a host-heap instance,
+    /// runs field initializers, then the arity-matched constructor; yields the
+    /// instance handle (`Value::Obj`).
+    New {
+        class: String,
+        args: Vec<Expr>,
+        line: u32,
+    },
+    /// The `this` reference inside a method or constructor body — the receiver
+    /// instance, held in frame slot 0.
+    This,
+    /// An index read `recv[index]` — Groovy's subscript operator, dispatched to a
+    /// list/map/string element or a user `getAt(index)` overload.
+    Index {
+        recv: Box<Expr>,
+        index: Box<Expr>,
+        line: u32,
     },
 }
 

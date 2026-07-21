@@ -31,6 +31,32 @@ compile errors, never silently mis-run.
   via `.call(args)` or direct call (`def f = { it * 2 }; f(21)`). A closure
   captures its enclosing **script** scope by reference (a later mutation of a
   captured binding is visible).
+- **Nested-closure upvalue capture.** A closure defined inside a function or
+  another closure captures that enclosing frame's locals as upvalues, so a
+  curried `{ x -> { y -> x + y } }` works and a factory (`def make(n) { return
+  { it + n } }`) keeps `n` after the outer frame returns. Chained calls
+  `f(a)(b)` parse (postfix call-application). Capture of a frame local is
+  **by value** at closure-creation time (see the simplification note below).
+- **Classes.** `class C { fields; C(..){..}; def m(){..} }`, `new C(args)`,
+  fields (with initializers), constructors (arity-dispatched), methods with an
+  implicit `this`, property get/set, and Groovy's auto getter/setter over a
+  field (`getX`/`setX`). A bare field name inside a method resolves to
+  `this.field`; `toString()` drives `println`. Instances live in the host object
+  heap behind a `Value::Obj` handle (reference identity), so a method mutating a
+  field is visible through every reference to the object.
+- **Subscripting (`recv[i]`).** List (with a negative index counting from the
+  end), map (`m[k]`), and String element reads, plus a user `getAt(i)` overload
+  on a class instance.
+- **Insertion-ordered maps.** A map literal `[k: v, …]` builds a host-side
+  ordered map (a `LinkedHashMap` equivalent) behind a `Value::Obj` handle, so a
+  multi-entry map prints in insertion order and `m.k = v` mutates it in place
+  (the new key appends). `size`, `containsKey`, `get`, `keySet`/`keys`, and
+  `values` dispatch over it.
+- **Collection `+`.** `+` dispatches on its left operand: a list concatenates
+  another list or appends a scalar (`[1, 2] + 3` → `[1, 2, 3]`), a map merges
+  another map (right wins on a duplicate key, order preserved), and a `String`
+  concatenates. (This is the built-in behavior, not a user `plus` overload — see
+  the operator-overloading gap below.)
 - **Closure-driven GDK iteration.** `each`, `eachWithIndex`, `collect`,
   `findAll`, `find`, `inject` (both the `inject(init){…}` and seedless
   `inject{…}` forms), and `sum` over lists (and over materialised ranges), e.g.
@@ -45,12 +71,18 @@ compile errors, never silently mis-run.
 
 ## Not implemented (errors today)
 
-- **Classes.** `class`/`trait`, fields, `new`, and `this` are not compiled.
+- **`trait`/inheritance/interfaces.** Only flat classes are compiled: `extends`
+  / `implements` clauses are parsed and ignored, there is no `super`, and method
+  resolution does not walk a superclass chain.
+- **Operator overloading through the operators.** A user `getAt` drives `[]` (it
+  routes through a host builtin with VM access), but `plus`/`minus`/`compareTo`/
+  `equals` do **not** yet drive `+`/`-`/`<=>`/`==`. Those operators reach the
+  strict numeric hook, whose signature (`Fn(NumOp, &Value, &Value) -> Result`)
+  has no VM handle and so cannot re-enter the VM to run a user method — and
+  fusevm is a vendored dependency that must not change. Call the method directly
+  (`a.plus(b)`) meanwhile.
 - **GStrings / interpolation.** `"$name"` / `"${expr}"` are lexed as literal
-  text — the `${…}` is **not** evaluated. Use `+` concatenation in slice 1.
-- **Multi-entry map print order.** `Value::Hash` is an unordered `HashMap`, so a
-  map with more than one entry does not print in Groovy's insertion order.
-  Single-entry maps render faithfully.
+  text — the `${…}` is **not** evaluated. Use `+` concatenation.
 - **`switch`, `do/while`, labeled break, spaceship `<=>`.**
 - **`try`/`catch`/`finally`, exceptions, `throw`, `assert`.**
 - **`import`/`package`** are tolerated (skipped) but do nothing.
@@ -82,12 +114,16 @@ compile errors, never silently mis-run.
   reference identity) for the string/number/boolean operands slice 1 supports.
   Cross-type comparisons that Groovy would coerce (`"5" == 5 → false`) are not
   yet distinguished — both sides compare by their printed form.
-- **Closures capture script scope, not enclosing-function/closure locals.** A
-  closure's non-parameter names resolve to the script (global) bindings, which is
-  faithful for the common script-level case. A closure defined *inside* a function
-  or another closure does not capture that enclosing frame's locals as upvalues
-  (so a curried `{ x -> { y -> x + y } }` does not see the outer `x`). Real
-  lexical upvalue capture is a later wave.
+- **Upvalue capture of a frame local is by value, not by reference.** A closure
+  nested in a function/closure captures the enclosing frame's locals at
+  closure-creation time (the value is copied into the closure handle). Groovy
+  captures the *variable*, so a mutation of the outer local made *after* the
+  closure is created is visible to a later call; groovyrs's copy is not. The
+  common curry / factory shapes (`{ x -> { y -> x + y } }`, `def make(n) {
+  return { it + n } }`) are unaffected because the outer local is not mutated
+  after capture. Capture of a **script** binding (a top-level global) stays
+  by-reference, matching Groovy. Boxed-cell by-reference capture across live
+  frames is a later wave.
 - **Range values materialise ascending only.** `0..5` / `0..<5` enumerate to a
   list; a descending literal range (`5..0`) yields an empty list rather than the
   reverse sequence. `println` of a range value therefore shows the list form.

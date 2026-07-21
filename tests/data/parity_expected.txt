@@ -1,0 +1,46 @@
+==== Concat.groovy ====
+x * y = 42
+positive: true
+nothing: null
+half: 3.5
+==== Division.groovy ====
+3.5
+2
+half of 9 is 4.5
+==== Fib.groovy ====
+0
+1
+1
+2
+3
+5
+8
+13
+21
+34
+==== FizzBuzz.groovy ====
+1
+2
+Fizz
+4
+Buzz
+Fizz
+7
+8
+Fizz
+Buzz
+11
+Fizz
+13
+14
+FizzBuzz
+==== Hello.groovy ====
+Hello from groovyrs — Groovy on fusevm
+==== Loops.groovy ====
+even sum up to 10 = 30
+==== Ranges.groovy ====
+sum 1..5 = 15
+0
+1
+4
+9

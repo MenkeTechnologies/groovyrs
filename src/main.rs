@@ -21,13 +21,17 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let Some(file) = cli.file.clone() else {
-        return fail("no input file (try `groovy --help`)");
-    };
-
-    let src = match std::fs::read_to_string(&file) {
-        Ok(s) => s,
-        Err(e) => return fail(&format!("cannot read {file}: {e}")),
+    // `-e <script>` runs an inline string; otherwise read the file argument.
+    let src = if let Some(script) = cli.eval.clone() {
+        script
+    } else {
+        let Some(file) = cli.file.clone() else {
+            return fail("no input file (try `groovy --help`)");
+        };
+        match std::fs::read_to_string(&file) {
+            Ok(s) => s,
+            Err(e) => return fail(&format!("cannot read {file}: {e}")),
+        }
     };
 
     if cli.dump_tokens {

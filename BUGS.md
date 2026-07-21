@@ -30,8 +30,13 @@ compile errors, never silently mis-run.
   the `GDIV` builtin. The result rides fusevm's `f64`, so a `BigDecimal`'s exact
   scale and non-terminating quotients differ: `1/3` prints the `f64`
   `0.3333333333333333`, not Groovy's `0.3333333333`.
-- **Decimal literals are `f64`, not `BigDecimal`.** `3.10` prints `3.1`;
-  arbitrary-precision decimal arithmetic is not modeled.
+- **Decimal literals are `f64`, not `BigDecimal`.** `3.10` prints `3.1`.
+  Groovy's `BigDecimal` also *accumulates scale* through arithmetic — `10 * 1.25`
+  is `12.50` and `0.25 + 0.25` is `0.50` (trailing zeros), where groovyrs prints
+  `12.5` / `0.5`. Only standalone decimal literals, string concatenation of them,
+  and terminating divisions (whose Groovy quotient is scale-stripped) print
+  identically. Arbitrary-precision / scale-tracking decimal arithmetic is a later
+  wave.
 - **Integer arithmetic uses fusevm's 64-bit wrapping.** Groovy auto-promotes an
   overflowing `int`/`long` to `BigInteger`; groovyrs wraps at `i64` instead.
 - **`for (x in a..b)` iterates ascending only.** A descending literal range
@@ -45,3 +50,10 @@ compile errors, never silently mis-run.
   Cross-type comparisons that Groovy would coerce (`"5" == 5 → false`) are not
   yet distinguished — both sides compare by their printed form.
 - **Uninitialized locals are unbound** and read back as `null`.
+- **The paren-less `println <expr>` command form is more permissive** than
+  Groovy's command-expression grammar. groovyrs parses the whole following
+  expression as the single argument, so `println -42` prints `-42`. Real Groovy
+  reads `println - 42` as a binary `minus` on the `println` method value and
+  throws. Wrap the argument — `println(-42)` — for exact parity; the parenthesised
+  form is unambiguous on both. (The differential fuzzer only ever emits the
+  parenthesised form, so it never reports this.)

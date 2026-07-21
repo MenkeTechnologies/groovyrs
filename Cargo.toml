@@ -34,6 +34,18 @@ path = "src/lib.rs"
 name = "groovy"
 path = "src/main.rs"
 
+# Development-only differential harnesses (not run in CI). `parity` diffs the
+# example corpus against a live `groovy`; `parity-fuzz` generates deterministic
+# snippets and diffs each `groovy -e` against `groovyrs -e`. Both need `groovy`
+# on PATH; the CI-safe frozen replay lives in tests/parity.rs.
+[[bin]]
+name = "parity"
+path = "src/bin/parity.rs"
+
+[[bin]]
+name = "parity-fuzz"
+path = "src/bin/parity_fuzz.rs"
+
 [dependencies]
 # Groovy executes on fusevm. groovyrs is a pure frontend: it lexes/parses Groovy
 # script source and lowers it to fusevm bytecode (src/compiler.rs). There is no

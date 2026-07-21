@@ -85,6 +85,7 @@ Requires a stable Rust toolchain. No JVM, no Groovy install.
 
 ```sh
 groovy script.groovy          # run a Groovy script
+groovy -e 'println 6 * 7'     # run an inline script string
 groovy --version              # print the version banner
 groovy --dump-tokens f.groovy # inspect the lexer token stream
 groovy --dump-ast f.groovy    # inspect the parsed AST
@@ -134,6 +135,7 @@ GStrings, collections, the GDK).
 | Flag | Effect |
 | --- | --- |
 | `FILE [args…]` | Run a `.groovy` script. |
+| `-e` / `--eval SCRIPT` | Run an inline script string and exit. |
 | `-v` / `-version` / `--version` | Print the version banner and exit. |
 | `-h` / `--help` | Print usage and exit. |
 | `--dump-tokens FILE` | Print the lexer token stream and exit. |
@@ -170,10 +172,11 @@ Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm
 
 ## [0x06] STATUS & ROADMAP
 
-Slice 1 (this release): Groovy scripts — top-level statements, `def`/typed
-locals, arithmetic / comparison / logic, `BigDecimal`-style division, `if` /
-`while` / `for` / range `for-in` / `break` / `continue`, `println`/`print`,
-string concatenation — all verified byte-for-byte against Apache Groovy.
+Groovy scripts — top-level statements, `def`/typed locals, arithmetic /
+comparison / logic, `BigDecimal`-style division, `if` / `while` / `for` / range
+`for-in` / `break` / `continue`, `println`/`print`, string concatenation — all
+verified byte-for-byte against Apache Groovy by both the frozen example replay
+and the differential fuzzer.
 
 Next waves, in priority order:
 
@@ -183,11 +186,33 @@ Next waves, in priority order:
    host heap; GString interpolation.
 3. **Standard library surface** — `Math`, common `java.util`/GDK collection
    methods, `each`/`collect`/`find`.
-4. **A differential parity harness** — a snippet corpus diffed live against
-   Apache Groovy, frozen and replayed in CI (the pattern the `ruby`/`node`/
-   `python` frontends use).
+4. **Scale-tracking decimals** — a real `BigDecimal` value so `10 * 1.25` prints
+   `12.50`, closing the last documented arithmetic divergence.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
+
+### Differential parity harness
+
+Two harnesses check groovyrs against the reference `groovy`, both comparing two
+subprocesses exactly as a user would observe them:
+
+```sh
+cargo run --bin parity                 # diff examples/*.groovy vs live `groovy`
+cargo run --bin parity-fuzz -- \
+    --mode control --count 2000        # fuzz: groovy -e <s> vs groovyrs -e <s>
+bash parity-scripts/run.sh -v          # byte-parity over the regression corpus
+```
+
+`parity-fuzz` generates grammar-driven, deterministic-output snippets from a
+per-index seed (so any divergence replays with `--seed <N> --once`, then
+auto-minimizes). It stays strictly inside groovyrs's implemented surface and away
+from the documented f64-vs-`BigDecimal` divergences, so every divergence it
+reports is a real parity gap — the class of bug the slice-1 `continue`-codegen fix
+was. Modes: `arith`, `logic`, `strings`, `control`, `format`, `mixed`.
+
+All three need `groovy` on PATH and never run in CI; the CI-safe replay is the
+frozen `tests/parity.rs` (snapshot in `tests/data/parity_expected.txt`,
+regenerated only from real `groovy`).
 
 ---
 

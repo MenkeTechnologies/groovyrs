@@ -90,7 +90,12 @@ fn b_ffi_compile(vm: &mut VM, _argc: u8) -> Value {
 /// name (a `String`) on top; `argc` is the argument count. Dispatches through
 /// `fusevm::ffi::try_call` and returns the exported function's result.
 fn b_ffi_call(vm: &mut VM, argc: u8) -> Value {
-    let name = vm.stack.pop().unwrap_or(Value::Undef).as_str_cow().into_owned();
+    let name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
     let n = argc as usize;
     let mut args = Vec::with_capacity(n);
     for _ in 0..n {

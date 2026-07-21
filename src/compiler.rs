@@ -110,7 +110,8 @@ impl Compiler {
                         // `x /= e` → x = x / e, through the Groovy division builtin.
                         self.b.emit(Op::GetVar(idx), self.cur_line);
                         self.expr(value)?;
-                        self.b.emit(Op::CallBuiltin(crate::host::GDIV, 2), self.cur_line);
+                        self.b
+                            .emit(Op::CallBuiltin(crate::host::GDIV, 2), self.cur_line);
                     }
                     _ => {
                         // `x <op>= e` → x = x <op> e
@@ -265,7 +266,8 @@ impl Compiler {
         let idx = self.b.add_name(name);
         self.b.emit(Op::GetVar(idx), self.cur_line);
         self.b.emit(Op::LoadInt(1), self.cur_line);
-        self.b.emit(if inc { Op::Add } else { Op::Sub }, self.cur_line);
+        self.b
+            .emit(if inc { Op::Add } else { Op::Sub }, self.cur_line);
         self.b.emit(Op::SetVar(idx), self.cur_line);
     }
 
@@ -372,8 +374,10 @@ impl Compiler {
             }
             let nidx = self.b.add_constant(Value::str(name.to_string()));
             self.b.emit(Op::LoadConst(nidx), line);
-            self.b
-                .emit(Op::CallBuiltin(crate::host::GFFI_CALL, args.len() as u8), line);
+            self.b.emit(
+                Op::CallBuiltin(crate::host::GFFI_CALL, args.len() as u8),
+                line,
+            );
             Ok(())
         } else {
             Err(format!("groovyrs: unresolved reference: {name}"))
@@ -408,7 +412,8 @@ impl Compiler {
         // Groovy `/` is not a native op — it lowers to the GDIV builtin so
         // integer division promotes to a decimal (`7/2 → 3.5`).
         if let BinOp::Div = op {
-            self.b.emit(Op::CallBuiltin(crate::host::GDIV, 2), self.cur_line);
+            self.b
+                .emit(Op::CallBuiltin(crate::host::GDIV, 2), self.cur_line);
             return Ok(());
         }
         let vop = match op {
@@ -449,7 +454,8 @@ fn body_has_ffi(body: &[Stmt]) -> bool {
             update,
             body,
         } => {
-            init.as_deref().is_some_and(|s| body_has_ffi(std::slice::from_ref(s)))
+            init.as_deref()
+                .is_some_and(|s| body_has_ffi(std::slice::from_ref(s)))
                 || cond.as_ref().is_some_and(expr_has_ffi)
                 || update
                     .as_deref()

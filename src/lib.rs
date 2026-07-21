@@ -44,7 +44,7 @@ pub fn compile_debug(src: &str) -> Result<fusevm::Chunk, String> {
 /// adapter's line hook. Installs the groovyrs builtins plus a `DBG_LINE` handler
 /// that pauses at breakpoints/steps, and deliberately does NOT enable the
 /// tracing JIT (a JIT-compiled hot loop would skip the markers). Called by
-/// [`dap::launch`].
+/// [`dap::run`].
 pub fn eval_file_debug(path: &str) -> Result<(), String> {
     let src =
         std::fs::read_to_string(path).map_err(|e| format!("groovyrs: cannot read {path}: {e}"))?;

@@ -230,56 +230,74 @@ fn println_of(expr: String) -> String {
     format!("println({expr})")
 }
 
-/// A small control-flow program: a `for`-`in` range or `while` loop with an
-/// `if`/`else` body that may `break`/`continue`, all printing integers. This is
-/// the mode that exercises the compiler's jump backpatching (the slice-1
-/// `continue` codegen bug lived here).
+/// Distinct loop variables per nesting level (so an inner loop never shadows an
+/// outer counter).
+const LOOP_VARS: &[&str] = &["i", "j", "k", "m", "p"];
+
+/// A control-flow program: `for`-`in` range / `while` loops, up to three levels
+/// deep, with `if`/`else` bodies that may `break`/`continue` (binding to the
+/// innermost loop) and print integers. This is the mode that exercises the
+/// compiler's loop-context stack and jump backpatching hardest — the slice-1
+/// `continue`-codegen bug lived exactly here, and nested loops stress the stack
+/// that a single loop never touches.
 fn gen_control(rng: &mut Rng) -> Vec<String> {
     let mut out = Vec::new();
-    let var = *pick(rng, &["i", "j", "k"]);
+    let max_level = rng.range_i(0, 2) as usize; // 0, 1, or 2 nested levels
+    gen_loop(rng, &mut out, 0, max_level);
+    out
+}
+
+/// Emit one loop at nesting `level`, recursing for a nested loop up to
+/// `max_level`. `while` loops advance their counter before every `continue` and
+/// once at the end, so termination is guaranteed regardless of the guards taken.
+fn gen_loop(rng: &mut Rng, out: &mut Vec<String>, level: usize, max_level: usize) {
+    let var = LOOP_VARS[level.min(LOOP_VARS.len() - 1)];
+    let ind = "  ".repeat(level);
+    let bind = "  ".repeat(level + 1);
     let lo = rng.range_i(0, 3);
-    let hi = lo + rng.range_i(2, 7);
-    let is_while = rng.chance(1, 2);
+    // span 0 admits boundary ranges: `lo..<lo` is empty, `lo..lo` is one iter.
+    let hi = lo + rng.range_i(0, 4);
+    let is_while = rng.chance(2, 5);
 
     if is_while {
-        // while form with an explicit counter
-        out.push(format!("def {var} = {lo}"));
-        out.push(format!("while ({var} <= {hi}) {{"));
+        out.push(format!("{ind}def {var} = {lo}"));
+        out.push(format!("{ind}while ({var} <= {hi}) {{"));
     } else {
-        // for (v in lo..hi) / (v in lo..<hi) — the range loop's own update
-        // advances the counter, so `continue` must NOT step it manually.
         let op = if rng.chance(1, 2) { ".." } else { "..<" };
-        out.push(format!("for ({var} in {lo}{op}{hi}) {{"));
+        out.push(format!("{ind}for ({var} in {lo}{op}{hi}) {{"));
     }
 
-    // Body: optional continue / break guards, then a print. A `while` loop must
-    // advance the counter before `continue` or it would spin forever.
-    if rng.chance(1, 2) {
+    // continue guard (a `while` must advance before continuing or it spins)
+    if rng.chance(2, 5) {
         let g = rng.range_i(lo, hi);
-        out.push(format!("  if ({var} == {g}) {{"));
+        out.push(format!("{bind}if ({var} == {g}) {{"));
         if is_while {
-            out.push(format!("    {var}++"));
+            out.push(format!("{bind}  {var}++"));
         }
-        out.push("    continue".to_string());
-        out.push("  }".to_string());
+        out.push(format!("{bind}  continue"));
+        out.push(format!("{bind}}}"));
     }
-    if rng.chance(1, 2) {
+    // break guard
+    if rng.chance(1, 3) {
         let g = rng.range_i(lo, hi);
-        out.push(format!("  if ({var} == {g}) break"));
+        out.push(format!("{bind}if ({var} == {g}) break"));
     }
-    // A conditional print keeps output varied but deterministic.
+    // a conditional print keeps output varied but deterministic
     if rng.chance(1, 2) {
         out.push(format!(
-            "  if ({var} % 2 == 0) println({var}) else println(\"odd \" + {var})"
+            "{bind}if ({var} % 2 == 0) println({var}) else println(\"odd \" + {var})"
         ));
     } else {
-        out.push(format!("  println({var} * {var})"));
+        out.push(format!("{bind}println({var} * {var})"));
+    }
+    // a nested loop — the inner break/continue must bind to the inner loop only
+    if level < max_level && rng.chance(3, 5) {
+        gen_loop(rng, out, level + 1, max_level);
     }
     if is_while {
-        out.push(format!("  {var}++"));
+        out.push(format!("{bind}{var}++"));
     }
-    out.push("}".to_string());
-    out
+    out.push(format!("{ind}}}"));
 }
 
 /// Generate one case (a list of statements) for a mode and seed.
@@ -302,7 +320,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
     match mode {
         Mode::Control => gen_control(&mut rng),
         _ => {
-            let n = rng.range_i(1, 4) as usize;
+            let n = rng.range_i(1, 5) as usize;
             (0..n)
                 .map(|_| {
                     let expr = match mode {
@@ -310,11 +328,11 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                             if rng.chance(2, 5) {
                                 gen_terminating_div(&mut rng)
                             } else {
-                                gen_int(&mut rng, 3)
+                                gen_int(&mut rng, 4)
                             }
                         }
-                        Mode::Logic => gen_bool(&mut rng, 3),
-                        Mode::Strings => gen_string(&mut rng, 3),
+                        Mode::Logic => gen_bool(&mut rng, 4),
+                        Mode::Strings => gen_string(&mut rng, 4),
                         Mode::Format => gen_format_value(&mut rng),
                         Mode::Control | Mode::Mixed => unreachable!(),
                     };

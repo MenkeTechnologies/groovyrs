@@ -21,6 +21,20 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // `--lsp`/`--dap` speak their protocols on stdio and need no file argument.
+    if cli.lsp {
+        return match groovyrs::lsp::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(&e),
+        };
+    }
+    if cli.dap {
+        return match groovyrs::dap::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(&e),
+        };
+    }
+
     // `-e <script>` runs an inline string; otherwise read the file argument.
     let src = if let Some(script) = cli.eval.clone() {
         script

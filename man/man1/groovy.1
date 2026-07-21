@@ -1,0 +1,88 @@
+.\" Manpage for groovy (groovyrs).
+.\" Contact https://github.com/MenkeTechnologies/groovyrs to correct errors or omissions.
+.TH GROOVY 1 "2026-07-20" "groovyrs 0.1.0" "User Commands"
+.SH NAME
+groovy \- Groovy on fusevm, a compiled Groovy runtime (bytecode VM + Cranelift JIT)
+.SH SYNOPSIS
+.B groovy
+[\fIOPTIONS\fR] [\fIFILE\fR] [\fIARGS\fR...]
+.br
+.B groovy
+.B \-e
+.I SCRIPT
+.br
+.B groovy
+.RB { \-\-lsp | \-\-dap }
+.SH DESCRIPTION
+.B groovyrs
+lexes and parses Groovy script source and lowers it to
+.B fusevm
+bytecode executed on a three\-tier Cranelift JIT. There is no bespoke VM and no
+JVM; execution and codegen live in fusevm, the same engine behind zshrs, stryke,
+awkrs, ruby, python, php, and node.
+.PP
+The current slice targets the Groovy
+.I script
+model: a
+.I .groovy
+file is a sequence of top\-level statements (no enclosing class or
+.BR main ).
+Covered surface: \fBdef\fR / typed local declarations, script\-binding
+assignments and compound assignments, arithmetic / comparison / logic
+expressions, \fBif\fR / \fBwhile\fR, the C\-style \fBfor (;;)\fR and the
+\fBfor (x in a..b)\fR range loop, \fBbreak\fR / \fBcontinue\fR, and the
+\fBprintln\fR / \fBprint\fR commands. Groovy's \fB/\fR divides as BigDecimal
+(\fB7/2\fR is \fB3.5\fR, not \fB3\fR), and \fB+\fR concatenates when either
+operand is a String.
+.SH OPTIONS
+.TP
+.B \-e \fISCRIPT\fR
+Run an inline script string instead of a file, then exit.
+.TP
+.B \-\-dump\-tokens
+Print the lexer token stream for the script and exit.
+.TP
+.B \-\-dump\-ast
+Print the parsed AST for the script and exit.
+.TP
+.B \-\-disasm
+Print a fusevm bytecode disassembly listing (with source line numbers) and exit.
+.TP
+.B \-\-lsp
+Speak the Language Server Protocol over stdio (diagnostics from the runtime
+parser, plus keyword / command completion and hover).
+.TP
+.B \-\-dap
+Speak the Debug Adapter Protocol over stdio (source\-line breakpoints, stepping,
+and locals inspection on the single script frame).
+.TP
+.BR \-v ", " \-\-version
+Print the version banner and exit.
+.TP
+.BR \-h ", " \-\-help
+Print usage and exit.
+.SH EXIT STATUS
+.B 0
+on success;
+.B 1
+on a lex / parse / compile error or a runtime error (reported to stderr as
+\fBgroovyrs: \fR\fIreason\fR).
+.SH EXAMPLES
+.PP
+Run a file:
+.RS
+.EX
+groovy Hello.groovy
+.EE
+.RE
+.PP
+Inline one\-liner:
+.RS
+.EX
+groovy \-e 'for (i in 1..3) println(i * i)'
+.EE
+.RE
+.SH SEE ALSO
+.BR groovyall (1)
+.PP
+Full reference: https://menketechnologies.github.io/groovyrs/

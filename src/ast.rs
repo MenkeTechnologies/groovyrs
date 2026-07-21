@@ -16,9 +16,30 @@ pub struct Program {
     pub body: Vec<Stmt>,
 }
 
-/// A Groovy statement.
+/// A Groovy statement with its 1-based source line.
+///
+/// The line is what `--dap` reports in stack frames and what breakpoints match
+/// against: the debug compiler emits a `DBG_LINE` marker carrying `line` before
+/// each statement (see `compiler::compile_debug`). Normal (non-debug) runs carry
+/// the line as ordinary bytecode line metadata and emit no markers.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Stmt {
+pub struct Stmt {
+    /// 1-based source line the statement begins on.
+    pub line: u32,
+    /// The statement itself.
+    pub kind: StmtKind,
+}
+
+impl Stmt {
+    /// Wrap a [`StmtKind`] with its source line.
+    pub fn new(line: u32, kind: StmtKind) -> Self {
+        Stmt { line, kind }
+    }
+}
+
+/// A Groovy statement kind (the payload of [`Stmt`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StmtKind {
     /// A local declaration: `def x = expr`, `int x = expr`, `String s`. The
     /// declared type (`"def"` for `def`) is retained for diagnostics; the
     /// runtime is dynamically typed on the fusevm value model, so it does not

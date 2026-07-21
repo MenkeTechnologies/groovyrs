@@ -22,6 +22,10 @@ pub struct Cli {
     pub dump_ast: bool,
     /// `--disasm FILE` — print the lowered fusevm bytecode and exit.
     pub disasm: bool,
+    /// `--lsp` — speak the Language Server Protocol over stdio.
+    pub lsp: bool,
+    /// `--dap` — speak the Debug Adapter Protocol over stdio.
+    pub dap: bool,
 }
 
 /// Parse process args (excluding argv[0]).
@@ -37,6 +41,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
             "--dump-tokens" => cli.dump_tokens = true,
             "--dump-ast" => cli.dump_ast = true,
             "--disasm" => cli.disasm = true,
+            "--lsp" => cli.lsp = true,
+            "--dap" => cli.dap = true,
             "-e" | "--eval" => {
                 i += 1;
                 let script = argv.get(i).ok_or_else(|| {
@@ -71,4 +77,6 @@ options:
   --dump-tokens FILE        print the lexer token stream and exit
   --dump-ast FILE           print the parsed AST and exit
   --disasm FILE             print the lowered fusevm bytecode and exit
+  --lsp                     speak the Language Server Protocol over stdio
+  --dap                     speak the Debug Adapter Protocol over stdio
 ";

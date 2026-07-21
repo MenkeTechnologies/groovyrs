@@ -46,6 +46,13 @@ path = "src/bin/parity.rs"
 name = "parity-fuzz"
 path = "src/bin/parity_fuzz.rs"
 
+# Offline generator for docs/reference.html — renders the builtin/keyword
+# reference (the src/lsp.rs corpus) as a static HUD page. Run before pushing
+# GitHub Pages so the page never drifts from what the language server knows.
+[[bin]]
+name = "gen-docs"
+path = "src/bin/gen_docs.rs"
+
 [dependencies]
 # Groovy executes on fusevm. groovyrs is a pure frontend: it lexes/parses Groovy
 # script source and lowers it to fusevm bytecode (src/compiler.rs). There is no
@@ -59,6 +66,17 @@ path = "src/bin/parity_fuzz.rs"
 fusevm = { version = "0.14.11", features = ["jit", "jit-disk-cache", "aot"] }
 
 thiserror = "2.0"
+
+# LSP (`groovy --lsp`) + DAP (`groovy --dap`) over stdio. `lsp-server`/`lsp-types`
+# frame the JSON-RPC language server; `serde_json` frames the DAP wire protocol;
+# `libc` gives the DAP adapter the pipe + dup2 to capture the debuggee's stdout
+# (println) so program output streams as `output` events rather than corrupting
+# the JSON channel, plus the orphan-guard (getppid) for the language server.
+lsp-server = "0.7.9"
+lsp-types = "0.97.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

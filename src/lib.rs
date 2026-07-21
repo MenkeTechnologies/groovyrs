@@ -12,8 +12,10 @@ pub mod ast;
 pub mod banner;
 pub mod cli;
 pub mod compiler;
+pub mod dap;
 pub mod host;
 pub mod lexer;
+pub mod lsp;
 pub mod parser;
 
 pub use banner::version_banner;
@@ -28,6 +30,36 @@ pub fn parse(src: &str) -> Result<ast::Program, String> {
 pub fn compile(src: &str) -> Result<fusevm::Chunk, String> {
     let prog = parser::parse(src)?;
     compiler::compile(&prog)
+}
+
+/// Parse and lower Groovy `src` to a debug chunk carrying per-statement
+/// `DBG_LINE` markers (for `groovy --dap`).
+pub fn compile_debug(src: &str) -> Result<fusevm::Chunk, String> {
+    let prog = parser::parse(src)?;
+    compiler::compile_debug(&prog)
+}
+
+/// Compile a `.groovy` file with debug markers and run it under the debug
+/// adapter's line hook. Installs the groovyrs builtins plus a `DBG_LINE` handler
+/// that pauses at breakpoints/steps, and deliberately does NOT enable the
+/// tracing JIT (a JIT-compiled hot loop would skip the markers). Called by
+/// [`dap::launch`].
+pub fn eval_file_debug(path: &str) -> Result<(), String> {
+    let src =
+        std::fs::read_to_string(path).map_err(|e| format!("groovyrs: cannot read {path}: {e}"))?;
+    let chunk = compile_debug(&src)?;
+    let mut vm = VM::new(chunk);
+    host::install(&mut vm);
+    // Non-capturing closure coerces to the builtin fn pointer.
+    vm.register_builtin(host::DBG_LINE, |vm, _argc| {
+        crate::dap::on_debug_line(vm);
+        Value::Undef
+    });
+    vm.set_numeric_hook(std::sync::Arc::new(host::numeric_hook));
+    match vm.run() {
+        VMResult::Ok(_) | VMResult::Halted => Ok(()),
+        VMResult::Error(e) => Err(e),
+    }
 }
 
 /// Register the groovyrs builtins + strict numeric hook on a fresh VM, enable

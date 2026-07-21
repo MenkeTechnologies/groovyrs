@@ -1,0 +1,125 @@
+.\" groovyall(1) — comprehensive all-in-one man page for groovyrs.
+.\" Modeled after zshall(1): the major sections of the reference in one document.
+.\" Render with:  man -l man/man1/groovyall.1
+.\" Install:      cp man/man1/groovyall.1 /usr/local/share/man/man1/
+.TH GROOVYALL 1 "2026-07-20" "groovyrs 0.1.0" "User Commands"
+.SH NAME
+groovyall \- the groovyrs comprehensive reference (invocation, language subset,
+fusevm bytecode VM, Cranelift JIT, and the LSP / DAP / disassembler tooling)
+.SH OVERVIEW
+This is the all\-in\-one
+.B groovy
+manual, modeled on
+.BR zshall (1).
+It concatenates the major sections of the groovyrs reference into a single page
+so you can grep with `/`:
+.RS 2
+.PP
+.B 1.  INVOCATION
+.RB "\(em " "CLI options, -e, exit status"
+.br
+.B 2.  LANGUAGE
+.RB "\(em " "declarations, expressions, control flow, ranges"
+.br
+.B 3.  SEMANTICS
+.RB "\(em " "Groovy / division, + concatenation, value printing"
+.br
+.B 4.  ENGINE
+.RB "\(em " "fusevm bytecode VM, Cranelift JIT, no JVM"
+.br
+.B 5.  TOOLING
+.RB "\(em " "--lsp, --dap, --disasm, --dump-tokens, --dump-ast"
+.RE
+.SH 1. INVOCATION
+.B groovy
+[\fIOPTIONS\fR] [\fIFILE\fR] [\fIARGS\fR...]
+.PP
+The program text is a
+.I .groovy
+file argument, or an inline string with
+.BR \-e .
+Introspection flags
+.RB ( \-\-dump\-tokens ,
+.BR \-\-dump\-ast ,
+.BR \-\-disasm )
+print and exit without running. The protocol servers
+.RB ( \-\-lsp ,
+.BR \-\-dap )
+take no file and speak their protocol on stdio. Errors are reported to stderr as
+\fBgroovyrs: \fR\fIreason\fR; exit status is
+.B 0
+on success and
+.B 1
+on any error.
+.SH 2. LANGUAGE
+groovyrs targets the Groovy
+.I script
+model: top\-level statements, no enclosing class or
+.BR main .
+.TP
+.B Declarations
+\fBdef\fR \fIname\fR [\fB=\fR \fIexpr\fR] declares a dynamically\-typed local; a
+typed form \fBType\fR \fIname\fR [\fB=\fR \fIexpr\fR] is accepted (the type is
+retained for diagnostics only). A bare \fIname\fR \fB=\fR \fIexpr\fR with no prior
+declaration creates a script binding, as in Groovy.
+.TP
+.B Expressions
+Integer, decimal, string (single/double quoted), boolean, and \fBnull\fR
+literals; variable reads; unary \fB\-\fR / \fB!\fR; binary \fB+ \- * / %\fR,
+comparisons \fB== != < > <= >=\fR, and short\-circuiting \fB&& ||\fR;
+post\-increment / decrement \fBi++\fR / \fBi\-\-\fR.
+.TP
+.B Control flow
+\fBif\fR / \fBelse\fR, \fBwhile\fR, the C\-style \fBfor (init; cond; update)\fR,
+and the range loop \fBfor (\fR\fIx\fR \fBin\fR \fIa\fR\fB..\fR\fIb\fR\fB)\fR
+(inclusive) or \fB..<\fR (half\-open); \fBbreak\fR and \fBcontinue\fR. A bare
+\fBreturn\fR ends the script.
+.SH 3. SEMANTICS
+.TP
+.B Division
+Groovy divides two integers as BigDecimal: \fB7/2\fR is \fB3.5\fR; an exact
+division yields an integer (\fB4/2\fR is \fB2\fR). A decimal operand forces
+decimal division.
+.TP
+.B Plus
+\fB+\fR is string concatenation when either operand is a String, using Groovy's
+value\-to\-string rules (\fBtrue\fR/\fBfalse\fR, a whole decimal as \fB3.0\fR,
+\fBnull\fR).
+.TP
+.B Printing
+\fBprintln\fR / \fBprint\fR format through Groovy's toString rules rather than
+fusevm's shell\-flavoured rendering.
+.SH 4. ENGINE
+Groovy source is lexed and parsed to an AST, then lowered to a
+.B fusevm::Chunk
+(stack bytecode). fusevm runs the chunk on a three\-tier Cranelift JIT with a
+persistent on\-disk cache of compiled native code, so hot loops trace\-compile and
+warm runs skip recompilation. There is no bespoke VM and no JVM: execution and
+codegen are the shared fusevm engine. Groovy semantics fusevm's default flavour
+does not provide (String \fB+\fR, BigDecimal \fB/\fR, Groovy value printing) are
+supplied by a strict numeric hook and a small set of registered builtins.
+.SH 5. TOOLING
+.TP
+.B \-\-disasm
+Prints the lowered bytecode with per\-statement source line numbers.
+.TP
+.B \-\-dump\-tokens ", " \-\-dump\-ast
+Print the lexer token stream / parsed AST and exit.
+.TP
+.B \-\-lsp
+A Language Server over stdio: diagnostics come from the runtime's own parser (a
+syntax error maps to its reported line); completion and hover draw on the
+keyword / literal / command corpus that also generates
+.IR docs/reference.html .
+.TP
+.B \-\-dap
+A Debug Adapter over stdio. The script is compiled with per\-statement line
+markers and run without the tracing JIT so every marker fires; source\-line
+breakpoints, stepping (\fBnext\fR / \fBstepIn\fR / \fBstepOut\fR over the single
+script frame), a \fBstackTrace\fR, and \fBvariables\fR (script locals) are
+supported. Program \fBprintln\fR output is forwarded as \fBoutput\fR events so it
+never corrupts the JSON channel.
+.SH SEE ALSO
+.BR groovy (1)
+.PP
+Full reference: https://menketechnologies.github.io/groovyrs/

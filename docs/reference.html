@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="groovyrs — Builtin reference. Keywords, literals, and script commands recognized by the current groovyrs build. MIT licensed.">
+  <title>groovyrs &mdash; Builtin Reference</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="hud-static.css">
+  <link rel="stylesheet" href="tutorial.css">
+  <style>
+    .tutorial-main { max-width: 76rem; }
+    .file-table { width:100%;border-collapse:collapse;margin:0.6rem 0;font-size:12px; }
+    .file-table th { background:var(--bg-secondary);color:var(--cyan);font-family:'Orbitron',sans-serif;font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;text-align:left;padding:7px 10px;border:1px solid var(--border); }
+    .file-table td { padding:6px 10px;border:1px solid var(--border);color:var(--text-dim);vertical-align:middle; }
+    .file-table tr:hover td { background:var(--bg-hover); }
+    .file-table td:first-child { font-family:'Share Tech Mono',monospace;color:var(--accent-light);font-weight:600;white-space:nowrap; }
+    .section-rule { border:none;border-top:1px dashed var(--border);margin:2rem 0; }
+    .hub-scheme-strip { border-bottom:1px dashed var(--border);background:color-mix(in srgb, var(--bg-secondary) 85%, transparent);padding:0.55rem 1.5rem 0.65rem;position:relative; }
+    .hub-scheme-strip-inner { max-width:76rem;margin:0 auto;display:flex;align-items:center;gap:0.85rem; }
+    .hub-scheme-strip .hud-scheme-label { flex:0 0 auto;font-family:'Orbitron',sans-serif;font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--accent);text-align:left; }
+    .hub-scheme-strip .scheme-grid { flex:1 1 auto;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px; }
+    @media (max-width:720px){ .hub-scheme-strip-inner{flex-direction:column;align-items:stretch}.hub-scheme-strip .scheme-grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
+    .docs-build-line { margin:0.35rem 0 0;font-family:'Share Tech Mono',ui-monospace,monospace;font-size:11px;color:var(--text-dim);letter-spacing:0.03em;max-width:52rem;opacity:0.75; }
+  </style>
+</head>
+<body>
+  <div class="app tutorial-app" id="docsApp">
+    <div class="crt-scanline" id="crtH" aria-hidden="true"></div>
+    <div class="crt-scanline-v" id="crtV" aria-hidden="true"></div>
+
+    <header class="tutorial-header">
+      <div class="tutorial-header-inner">
+        <div>
+          <h1 class="tutorial-brand">// GROOVYRS — BUILTIN REFERENCE</h1>
+          <nav class="tutorial-crumbs" aria-label="Breadcrumb">
+            <a href="index.html">Docs</a>
+            <span class="sep">/</span>
+            <span class="current">Builtin Reference</span>
+            <span class="sep">/</span>
+            <a href="https://github.com/MenkeTechnologies/groovyrs" target="_blank" rel="noopener noreferrer">GitHub</a>
+          </nav>
+          <p class="docs-build-line">groovyrs v0.1.0 · Groovy on fusevm · lex/parse → AST → bytecode → Cranelift JIT · no bespoke VM, no JVM · MIT · in active development</p>
+        </div>
+        <div class="tutorial-toolbar">
+          <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
+          <button type="button" class="btn btn-secondary active" id="btnCrt" title="CRT scanline overlay">CRT</button>
+          <button type="button" class="btn btn-secondary active" id="btnNeon" title="Neon border pulse">Neon</button>
+          <a class="btn btn-secondary" href="index.html">Docs</a>
+          <a class="btn btn-secondary" href="https://github.com/MenkeTechnologies/groovyrs" target="_blank" rel="noopener noreferrer">GitHub</a>
+        </div>
+      </div>
+    </header>
+
+    <div class="hub-scheme-strip">
+      <div class="hub-scheme-strip-inner">
+        <span class="hud-scheme-label">// Color scheme</span>
+        <div class="scheme-grid" id="hudSchemeGrid"></div>
+      </div>
+    </div>
+
+    <main class="tutorial-main">
+      <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>BUILTIN REFERENCE</h2>
+      <p class="tutorial-subtitle">Every reserved keyword, literal, and script command the current groovyrs build recognizes, grouped by keyword then literal then command. This page is generated from the language-server corpus (<code>src/lsp.rs</code>) by the <code>gen-docs</code> binary, so it stays in sync with what the runtime and editor tooling actually know about. Keywords/literals mirror <code>lexer.rs</code>; each command mirrors a real print builtin in <code>src/host.rs</code>.</p>
+
+      <section class="tutorial-section" id="ch-keyword">
+        <h2>Keyword</h2>
+        <article class="doc-entry" id="doc-keyword-1">
+          <h3><a class="doc-anchor" href="#doc-keyword-1">#</a> <code>def</code></h3>
+          <p>declare a dynamically-typed local variable (or a script binding)</p>
+          <pre><code class="lang-groovy">def x = 5
+println(x)   // =&gt; 5</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-2">
+          <h3><a class="doc-anchor" href="#doc-keyword-2">#</a> <code>if</code></h3>
+          <p>conditional branch; runs the block when the condition is truthy</p>
+          <pre><code class="lang-groovy">if (1 &lt; 2) println("yes")   // =&gt; yes</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-3">
+          <h3><a class="doc-anchor" href="#doc-keyword-3">#</a> <code>else</code></h3>
+          <p>fallback branch of an `if`</p>
+          <pre><code class="lang-groovy">if (false) println("a") else println("b")   // =&gt; b</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-4">
+          <h3><a class="doc-anchor" href="#doc-keyword-4">#</a> <code>while</code></h3>
+          <p>loop while the condition is truthy</p>
+          <pre><code class="lang-groovy">def i = 0
+while (i &lt; 3) i++
+println(i)   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-5">
+          <h3><a class="doc-anchor" href="#doc-keyword-5">#</a> <code>for</code></h3>
+          <p>C-style `for (init; cond; update)` or the `for (x in a..b)` range loop</p>
+          <pre><code class="lang-groovy">for (i in 0..2) print(i)   // =&gt; 012</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-6">
+          <h3><a class="doc-anchor" href="#doc-keyword-6">#</a> <code>in</code></h3>
+          <p>the `for (x in range)` iteration separator</p>
+          <pre><code class="lang-groovy">for (n in 1..3) print(n)   // =&gt; 123</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-7">
+          <h3><a class="doc-anchor" href="#doc-keyword-7">#</a> <code>return</code></h3>
+          <p>end the script; a returned expression is evaluated for its effects</p>
+          <pre><code class="lang-groovy">return   // ends the script here</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-8">
+          <h3><a class="doc-anchor" href="#doc-keyword-8">#</a> <code>break</code></h3>
+          <p>exit the nearest enclosing loop immediately</p>
+          <pre><code class="lang-groovy">for (i in 0..9) { if (i == 3) break; print(i) }   // =&gt; 012</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-9">
+          <h3><a class="doc-anchor" href="#doc-keyword-9">#</a> <code>continue</code></h3>
+          <p>skip to the next iteration of the nearest loop</p>
+          <pre><code class="lang-groovy">for (i in 0..3) { if (i == 1) continue; print(i) }   // =&gt; 023</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-10">
+          <h3><a class="doc-anchor" href="#doc-keyword-10">#</a> <code>new</code></h3>
+          <p>reserved for object construction (`new Type(...)`)</p>
+          <pre><code class="lang-groovy">// new is reserved; object construction lands in a later slice</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-literal">
+        <h2>Literal</h2>
+        <article class="doc-entry" id="doc-literal-1">
+          <h3><a class="doc-anchor" href="#doc-literal-1">#</a> <code>true</code></h3>
+          <p>the boolean true value</p>
+          <pre><code class="lang-groovy">println(true)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literal-2">
+          <h3><a class="doc-anchor" href="#doc-literal-2">#</a> <code>false</code></h3>
+          <p>the boolean false value</p>
+          <pre><code class="lang-groovy">println(1 &gt; 2)   // =&gt; false</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literal-3">
+          <h3><a class="doc-anchor" href="#doc-literal-3">#</a> <code>null</code></h3>
+          <p>the null reference; an unassigned `def` reads as null</p>
+          <pre><code class="lang-groovy">def x
+println(x)   // =&gt; null</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-command">
+        <h2>Command</h2>
+        <article class="doc-entry" id="doc-command-1">
+          <h3><a class="doc-anchor" href="#doc-command-1">#</a> <code>println</code></h3>
+          <p>print a Groovy-formatted value and a trailing newline</p>
+          <pre><code class="lang-groovy">println("hi")   // prints hi\n</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-command-2">
+          <h3><a class="doc-anchor" href="#doc-command-2">#</a> <code>print</code></h3>
+          <p>print a Groovy-formatted value with no trailing newline</p>
+          <pre><code class="lang-groovy">print("a"); print("b")   // prints ab</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section">
+        <h2>More</h2>
+        <ul>
+          <li><strong>Docs</strong> — <a href="index.html">index.html</a> (overview, architecture, examples)</li>
+          <li><strong>Engineering report</strong> — <a href="report.html">report.html</a> (value model, status, dependencies)</li>
+          <li><strong>Source</strong> — <a href="https://github.com/MenkeTechnologies/groovyrs">github.com/MenkeTechnologies/groovyrs</a></li>
+        </ul>
+      </section>
+    </main>
+
+  </div>
+
+  <script src="hud-theme.js"></script>
+</body>
+</html>

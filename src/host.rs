@@ -25,6 +25,11 @@ pub const GPRINTLN: u16 = 700;
 pub const GPRINT: u16 = 701;
 /// Builtin id for Groovy `/` division (BigDecimal-style promotion).
 pub const GDIV: u16 = 702;
+/// Builtin id for the `--dap` per-statement line marker. Emitted only by the
+/// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
+/// handler for it, so it costs nothing. The debug run path registers a handler
+/// that calls [`crate::dap::on_debug_line`].
+pub const DBG_LINE: u16 = 799;
 
 /// Install groovyrs builtins on a VM: the Groovy-formatting print builtins and
 /// the division builtin. This is the single install choke point later waves

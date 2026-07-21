@@ -90,6 +90,8 @@ groovy --version              # print the version banner
 groovy --dump-tokens f.groovy # inspect the lexer token stream
 groovy --dump-ast f.groovy    # inspect the parsed AST
 groovy --disasm f.groovy      # inspect the lowered fusevm bytecode
+groovy --lsp                  # Language Server Protocol over stdio
+groovy --dap                  # Debug Adapter Protocol over stdio
 ```
 
 ```groovy
@@ -140,11 +142,29 @@ GStrings, collections, the GDK).
 | `-h` / `--help` | Print usage and exit. |
 | `--dump-tokens FILE` | Print the lexer token stream and exit. |
 | `--dump-ast FILE` | Print the parsed AST and exit. |
-| `--disasm FILE` | Print the lowered fusevm bytecode and exit. |
+| `--disasm FILE` | Print the lowered fusevm bytecode (with source line numbers) and exit. |
+| `--lsp` | Speak the Language Server Protocol over stdio. |
+| `--dap` | Speak the Debug Adapter Protocol over stdio. |
 
 `groovy --version` reports the targeted language level (`Groovy 4.0`) followed by
 the real engine (`groovyrs <crate-version>`) and the host triple, so nothing is
 misrepresented as Apache Groovy.
+
+### Editor tooling
+
+Both editor servers ship in the same binary and speak their protocol over stdio:
+
+- **`--lsp`** — a Language Server. Diagnostics come from the runtime's own
+  parser (a syntax error maps to its reported line); completion and hover draw on
+  the keyword / literal / command corpus in `src/lsp.rs`, which also generates
+  `docs/reference.html` via `cargo run --bin gen-docs` (so the page never drifts
+  from what the server knows).
+- **`--dap`** — a Debug Adapter. The script is compiled with per-statement line
+  markers and run without the tracing JIT so every marker fires; source-line
+  breakpoints, stepping (`next` / `stepIn` / `stepOut` over the single script
+  frame), a `stackTrace`, and `variables` (script locals) are supported. Program
+  `println` output is forwarded as `output` events so it never corrupts the JSON
+  channel.
 
 ---
 
@@ -176,7 +196,9 @@ Groovy scripts — top-level statements, `def`/typed locals, arithmetic /
 comparison / logic, `BigDecimal`-style division, `if` / `while` / `for` / range
 `for-in` / `break` / `continue`, `println`/`print`, string concatenation — all
 verified byte-for-byte against Apache Groovy by both the frozen example replay
-and the differential fuzzer.
+and the differential fuzzer. The editor tooling is shipped: a bytecode
+disassembler (`--disasm`), a Language Server (`--lsp`), and a Debug Adapter
+(`--dap`).
 
 Next waves, in priority order:
 

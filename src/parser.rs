@@ -158,52 +158,61 @@ impl Parser {
     }
 
     fn statement(&mut self) -> Result<Stmt, String> {
-        match self.peek() {
-            Tok::If => self.if_stmt(),
-            Tok::While => self.while_stmt(),
-            Tok::For => self.for_stmt(),
+        let line = self.line();
+        let kind = match self.peek() {
+            Tok::If => self.if_stmt()?,
+            Tok::While => self.while_stmt()?,
+            Tok::For => self.for_stmt()?,
             Tok::Return => {
                 // A script's implicit return value is discarded; model a bare
                 // `return`/`return <expr>` as a jump to the end of the script.
                 self.advance();
                 if matches!(self.peek(), Tok::Nl | Tok::Semi | Tok::RBrace | Tok::Eof) {
-                    Ok(Stmt::Break)
+                    StmtKind::Break
                 } else {
                     // Evaluate the returned expression for side effects, then end.
                     let _ = self.expression()?;
-                    Ok(Stmt::Break)
+                    StmtKind::Break
                 }
             }
             Tok::Break => {
                 self.advance();
-                Ok(Stmt::Break)
+                StmtKind::Break
             }
             Tok::Continue => {
                 self.advance();
-                Ok(Stmt::Continue)
+                StmtKind::Continue
             }
             Tok::LBrace => {
                 // A bare block: flatten into an always-true `if`. Slice 1 has no
                 // lexical scopes, so inlining is behavior-preserving.
                 self.advance();
                 let body = self.block()?;
-                Ok(Stmt::If {
+                StmtKind::If {
                     cond: Expr::Bool(true),
                     then: body,
                     els: vec![],
-                })
+                }
             }
-            _ => self.simple_statement(),
-        }
+            // A simple statement already carries its own line — return directly.
+            _ => return self.simple_statement(),
+        };
+        Ok(Stmt::new(line, kind))
     }
 
-    /// Local decl, assignment, or expression statement.
+    /// Local decl, assignment, or expression statement, wrapped with its line.
     fn simple_statement(&mut self) -> Result<Stmt, String> {
+        let line = self.line();
+        Ok(Stmt::new(line, self.simple_statement_kind()?))
+    }
+
+    /// The kind of a simple statement (local decl / assignment / expression).
+    fn simple_statement_kind(&mut self) -> Result<StmtKind, String> {
         // `println`/`print` command statements are expression statements, not
         // declarations — resolve them before the two-idents-in-a-row heuristic.
         if matches!(self.peek(), Tok::Ident(n) if n == "println" || n == "print") {
             let e = self.expression()?;
-            return Ok(Stmt::Expr(e));
+            return Ok(StmtKind::Expr(e));
         }
 
         // `def name [= expr]`
@@ -211,7 +220,7 @@ impl Parser {
             self.advance();
             let name = self.ident()?;
             let init = self.opt_initializer()?;
-            return Ok(Stmt::Local {
+            return Ok(StmtKind::Local {
                 ty: "def".into(),
                 name,
                 init,
@@ -223,7 +232,7 @@ impl Parser {
             let ty = self.ident()?;
             let name = self.ident()?;
             let init = self.opt_initializer()?;
-            return Ok(Stmt::Local { ty, name, init });
+            return Ok(StmtKind::Local { ty, name, init });
         }
 
         // Assignment / post-inc-dec / expression statement.
@@ -234,18 +243,18 @@ impl Parser {
                 self.advance(); // op
                 self.skip_newlines();
                 let value = self.expression()?;
-                return Ok(Stmt::Assign { name, op, value });
+                return Ok(StmtKind::Assign { name, op, value });
             }
             if matches!(next, Tok::PlusPlus | Tok::MinusMinus) {
                 let inc = matches!(next, Tok::PlusPlus);
                 self.advance(); // name
                 self.advance(); // ++/--
-                return Ok(Stmt::Expr(Expr::PostIncDec { name, inc }));
+                return Ok(StmtKind::Expr(Expr::PostIncDec { name, inc }));
             }
         }
 
         // Fallback: an expression statement.
-        Ok(Stmt::Expr(self.expression()?))
+        Ok(StmtKind::Expr(self.expression()?))
     }
 
     /// Parse an optional `= expr` initializer (newlines after `=` continue).
@@ -274,7 +283,7 @@ impl Parser {
         matches!(self.toks.get(j).map(|t| &t.kind), Some(Tok::Ident(_)))
     }
 
-    fn if_stmt(&mut self) -> Result<Stmt, String> {
+    fn if_stmt(&mut self) -> Result<StmtKind, String> {
         self.eat(&Tok::If)?;
         self.eat(&Tok::LParen)?;
         let cond = self.expression()?;
@@ -290,19 +299,19 @@ impl Parser {
             self.pos = save;
             vec![]
         };
-        Ok(Stmt::If { cond, then, els })
+        Ok(StmtKind::If { cond, then, els })
     }
 
-    fn while_stmt(&mut self) -> Result<Stmt, String> {
+    fn while_stmt(&mut self) -> Result<StmtKind, String> {
         self.eat(&Tok::While)?;
         self.eat(&Tok::LParen)?;
         let cond = self.expression()?;
         self.eat(&Tok::RParen)?;
         let body = self.braced_or_single()?;
-        Ok(Stmt::While { cond, body })
+        Ok(StmtKind::While { cond, body })
     }
 
-    fn for_stmt(&mut self) -> Result<Stmt, String> {
+    fn for_stmt(&mut self) -> Result<StmtKind, String> {
         self.eat(&Tok::For)?;
         self.eat(&Tok::LParen)?;
         if self.for_is_in() {
@@ -328,7 +337,7 @@ impl Parser {
         };
         self.eat(&Tok::RParen)?;
         let body = self.braced_or_single()?;
-        Ok(Stmt::For {
+        Ok(StmtKind::For {
             init,
             cond,
             update,
@@ -352,7 +361,8 @@ impl Parser {
     /// Parse `for ([def|Type] id in start..end)` (or `..<`) and desugar it to a
     /// counting C-style `for`, evaluating `end` once into a synthetic temp so a
     /// body that mutates the endpoint still iterates the original range.
-    fn for_in(&mut self) -> Result<Stmt, String> {
+    fn for_in(&mut self) -> Result<StmtKind, String> {
+        let line = self.line();
         // Optional `def`/type in front of the loop variable.
         if self.is(&Tok::Def) {
             self.advance();
@@ -384,34 +394,43 @@ impl Parser {
 
         let end_tmp = self.fresh_tmp("end");
         let cmp = if inclusive { BinOp::Le } else { BinOp::Lt };
-        let loop_for = Stmt::For {
-            init: Some(Box::new(Stmt::Local {
-                ty: "def".into(),
-                name: var.clone(),
-                init: Some(start),
-            })),
+        let loop_for = StmtKind::For {
+            init: Some(Box::new(Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: "def".into(),
+                    name: var.clone(),
+                    init: Some(start),
+                },
+            ))),
             cond: Some(Expr::Binary {
                 op: cmp,
                 lhs: Box::new(Expr::Var(var.clone())),
                 rhs: Box::new(Expr::Var(end_tmp.clone())),
             }),
-            update: Some(Box::new(Stmt::Expr(Expr::PostIncDec {
-                name: var,
-                inc: true,
-            }))),
+            update: Some(Box::new(Stmt::new(
+                line,
+                StmtKind::Expr(Expr::PostIncDec {
+                    name: var,
+                    inc: true,
+                }),
+            ))),
             body,
         };
         // Wrap in an always-true block so the endpoint temp and the loop share a
         // frame without introducing a Block node.
-        Ok(Stmt::If {
+        Ok(StmtKind::If {
             cond: Expr::Bool(true),
             then: vec![
-                Stmt::Local {
-                    ty: "def".into(),
-                    name: end_tmp,
-                    init: Some(end),
-                },
-                loop_for,
+                Stmt::new(
+                    line,
+                    StmtKind::Local {
+                        ty: "def".into(),
+                        name: end_tmp,
+                        init: Some(end),
+                    },
+                ),
+                Stmt::new(line, loop_for),
             ],
             els: vec![],
         })

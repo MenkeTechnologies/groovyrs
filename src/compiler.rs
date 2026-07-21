@@ -29,14 +29,32 @@ struct Compiler {
     loops: Vec<Loop>,
     /// A top-level `break`/`return` (no enclosing loop) jumps to script end.
     exit_ops: Vec<usize>,
+    /// The source line of the statement currently being lowered — attached to
+    /// every emitted op so `--disasm` and `--dap` carry real line numbers.
+    cur_line: u32,
+    /// When true, emit a `DBG_LINE` marker before each statement (for `--dap`).
+    /// Off for ordinary runs, which carry zero extra ops.
+    debug: bool,
 }
 
 /// Compile a parsed [`Program`]'s body to a runnable fusevm chunk.
 pub fn compile(prog: &Program) -> Result<Chunk, String> {
+    compile_with(prog, false)
+}
+
+/// Compile with per-statement `DBG_LINE` markers for the debug adapter
+/// (`groovy --dap`). Identical bytecode to [`compile`] except for the markers.
+pub fn compile_debug(prog: &Program) -> Result<Chunk, String> {
+    compile_with(prog, true)
+}
+
+fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     let mut c = Compiler {
         b: ChunkBuilder::new(),
         loops: Vec::new(),
         exit_ops: Vec::new(),
+        cur_line: 0,
+        debug,
     };
     for stmt in &prog.body {
         c.stmt(stmt)?;
@@ -52,18 +70,27 @@ pub fn compile(prog: &Program) -> Result<Chunk, String> {
 
 impl Compiler {
     fn stmt(&mut self, s: &Stmt) -> Result<(), String> {
-        match s {
-            Stmt::Local { name, init, .. } => {
+        self.cur_line = s.line;
+        // In debug mode, a `DBG_LINE` marker precedes each statement so the
+        // debug adapter can stop on this line. `CallBuiltin` pushes the
+        // builtin's `Undef` return, discarded by the trailing `Pop`.
+        if self.debug {
+            self.b
+                .emit(Op::CallBuiltin(crate::host::DBG_LINE, 0), s.line);
+            self.b.emit(Op::Pop, s.line);
+        }
+        match &s.kind {
+            StmtKind::Local { name, init, .. } => {
                 if let Some(e) = init {
                     self.expr(e)?;
                     let idx = self.b.add_name(name);
-                    self.b.emit(Op::SetVar(idx), 0);
+                    self.b.emit(Op::SetVar(idx), self.cur_line);
                 }
                 // An uninitialized local stays unbound (Groovy defaults it to
                 // `null`; a read before assignment yields `null`).
                 Ok(())
             }
-            Stmt::Assign { name, op, value } => {
+            StmtKind::Assign { name, op, value } => {
                 let idx = self.b.add_name(name);
                 match op {
                     AssignOp::Assign => {
@@ -71,54 +98,54 @@ impl Compiler {
                     }
                     AssignOp::Div => {
                         // `x /= e` → x = x / e, through the Groovy division builtin.
-                        self.b.emit(Op::GetVar(idx), 0);
+                        self.b.emit(Op::GetVar(idx), self.cur_line);
                         self.expr(value)?;
-                        self.b.emit(Op::CallBuiltin(crate::host::GDIV, 2), 0);
+                        self.b.emit(Op::CallBuiltin(crate::host::GDIV, 2), self.cur_line);
                     }
                     _ => {
                         // `x <op>= e` → x = x <op> e
-                        self.b.emit(Op::GetVar(idx), 0);
+                        self.b.emit(Op::GetVar(idx), self.cur_line);
                         self.expr(value)?;
-                        self.b.emit(compound_op(*op), 0);
+                        self.b.emit(compound_op(*op), self.cur_line);
                     }
                 }
-                self.b.emit(Op::SetVar(idx), 0);
+                self.b.emit(Op::SetVar(idx), self.cur_line);
                 Ok(())
             }
-            Stmt::Expr(Expr::Println { newline, arg }) => {
+            StmtKind::Expr(Expr::Println { newline, arg }) => {
                 // The print builtin returns `null`; discard it in statement
                 // position.
                 self.println(*newline, arg.as_deref())?;
-                self.b.emit(Op::Pop, 0);
+                self.b.emit(Op::Pop, self.cur_line);
                 Ok(())
             }
-            Stmt::Expr(Expr::PostIncDec { name, inc }) => {
+            StmtKind::Expr(Expr::PostIncDec { name, inc }) => {
                 self.post_inc_dec(name, *inc);
                 Ok(())
             }
-            Stmt::Expr(e) => {
+            StmtKind::Expr(e) => {
                 self.expr(e)?;
-                self.b.emit(Op::Pop, 0);
+                self.b.emit(Op::Pop, self.cur_line);
                 Ok(())
             }
-            Stmt::If { cond, then, els } => self.if_stmt(cond, then, els),
-            Stmt::While { cond, body } => self.while_stmt(cond, body),
-            Stmt::For {
+            StmtKind::If { cond, then, els } => self.if_stmt(cond, then, els),
+            StmtKind::While { cond, body } => self.while_stmt(cond, body),
+            StmtKind::For {
                 init,
                 cond,
                 update,
                 body,
             } => self.for_stmt(init, cond, update, body),
-            Stmt::Break => {
-                let op = self.b.emit(Op::Jump(0), 0);
+            StmtKind::Break => {
+                let op = self.b.emit(Op::Jump(0), self.cur_line);
                 match self.loops.last_mut() {
                     Some(l) => l.break_ops.push(op),
                     None => self.exit_ops.push(op),
                 }
                 Ok(())
             }
-            Stmt::Continue => {
-                let op = self.b.emit(Op::Jump(0), 0);
+            StmtKind::Continue => {
+                let op = self.b.emit(Op::Jump(0), self.cur_line);
                 self.loops
                     .last_mut()
                     .ok_or_else(|| "groovyrs: `continue` outside a loop".to_string())?
@@ -131,7 +158,7 @@ impl Compiler {
 
     fn if_stmt(&mut self, cond: &Expr, then: &[Stmt], els: &[Stmt]) -> Result<(), String> {
         self.expr(cond)?;
-        let jf = self.b.emit(Op::JumpIfFalse(0), 0);
+        let jf = self.b.emit(Op::JumpIfFalse(0), self.cur_line);
         for s in then {
             self.stmt(s)?;
         }
@@ -139,7 +166,7 @@ impl Compiler {
             let end = self.b.current_pos();
             self.b.patch_jump(jf, end);
         } else {
-            let jend = self.b.emit(Op::Jump(0), 0);
+            let jend = self.b.emit(Op::Jump(0), self.cur_line);
             let else_start = self.b.current_pos();
             self.b.patch_jump(jf, else_start);
             for s in els {
@@ -154,7 +181,7 @@ impl Compiler {
     fn while_stmt(&mut self, cond: &Expr, body: &[Stmt]) -> Result<(), String> {
         let top = self.b.current_pos();
         self.expr(cond)?;
-        let jf = self.b.emit(Op::JumpIfFalse(0), 0);
+        let jf = self.b.emit(Op::JumpIfFalse(0), self.cur_line);
         self.loops.push(Loop {
             continue_ops: Vec::new(),
             break_ops: Vec::new(),
@@ -167,7 +194,7 @@ impl Compiler {
         for op in &l.continue_ops {
             self.b.patch_jump(*op, top);
         }
-        self.b.emit(Op::Jump(top), 0);
+        self.b.emit(Op::Jump(top), self.cur_line);
         let end = self.b.current_pos();
         self.b.patch_jump(jf, end);
         for op in l.break_ops {
@@ -190,7 +217,7 @@ impl Compiler {
         let jf = match cond {
             Some(c) => {
                 self.expr(c)?;
-                Some(self.b.emit(Op::JumpIfFalse(0), 0))
+                Some(self.b.emit(Op::JumpIfFalse(0), self.cur_line))
             }
             None => None,
         };
@@ -213,7 +240,7 @@ impl Compiler {
         if let Some(update) = update {
             self.stmt(update)?;
         }
-        self.b.emit(Op::Jump(top), 0);
+        self.b.emit(Op::Jump(top), self.cur_line);
         let end = self.b.current_pos();
         if let Some(jf) = jf {
             self.b.patch_jump(jf, end);
@@ -226,10 +253,10 @@ impl Compiler {
 
     fn post_inc_dec(&mut self, name: &str, inc: bool) {
         let idx = self.b.add_name(name);
-        self.b.emit(Op::GetVar(idx), 0);
-        self.b.emit(Op::LoadInt(1), 0);
-        self.b.emit(if inc { Op::Add } else { Op::Sub }, 0);
-        self.b.emit(Op::SetVar(idx), 0);
+        self.b.emit(Op::GetVar(idx), self.cur_line);
+        self.b.emit(Op::LoadInt(1), self.cur_line);
+        self.b.emit(if inc { Op::Add } else { Op::Sub }, self.cur_line);
+        self.b.emit(Op::SetVar(idx), self.cur_line);
     }
 
     /// Lower `println(arg)` / `print(arg)` to the Groovy-formatting print
@@ -247,43 +274,43 @@ impl Compiler {
         } else {
             crate::host::GPRINT
         };
-        self.b.emit(Op::CallBuiltin(id, n), 0);
+        self.b.emit(Op::CallBuiltin(id, n), self.cur_line);
         Ok(())
     }
 
     fn expr(&mut self, e: &Expr) -> Result<(), String> {
         match e {
             Expr::Int(n) => {
-                self.b.emit(Op::LoadInt(*n), 0);
+                self.b.emit(Op::LoadInt(*n), self.cur_line);
             }
             Expr::Float(f) => {
                 let c = self.b.add_constant(Value::float(*f));
-                self.b.emit(Op::LoadConst(c), 0);
+                self.b.emit(Op::LoadConst(c), self.cur_line);
             }
             Expr::Str(s) => {
                 let c = self.b.add_constant(Value::str(s.clone()));
-                self.b.emit(Op::LoadConst(c), 0);
+                self.b.emit(Op::LoadConst(c), self.cur_line);
             }
             Expr::Bool(b) => {
                 self.b
-                    .emit(if *b { Op::LoadTrue } else { Op::LoadFalse }, 0);
+                    .emit(if *b { Op::LoadTrue } else { Op::LoadFalse }, self.cur_line);
             }
             Expr::Null => {
                 // Groovy `null` — fusevm has no Null variant, so it rides as Undef.
-                self.b.emit(Op::LoadUndef, 0);
+                self.b.emit(Op::LoadUndef, self.cur_line);
             }
             Expr::Var(name) => {
                 let idx = self.b.add_name(name);
-                self.b.emit(Op::GetVar(idx), 0);
+                self.b.emit(Op::GetVar(idx), self.cur_line);
             }
             Expr::Unary { op, rhs } => {
                 self.expr(rhs)?;
                 match op {
                     UnOp::Neg => {
-                        self.b.emit(Op::Negate, 0);
+                        self.b.emit(Op::Negate, self.cur_line);
                     }
                     UnOp::Not => {
-                        self.b.emit(Op::LogNot, 0);
+                        self.b.emit(Op::LogNot, self.cur_line);
                     }
                 }
             }
@@ -295,7 +322,7 @@ impl Compiler {
             }
             Expr::PostIncDec { name, inc } => {
                 let idx = self.b.add_name(name);
-                self.b.emit(Op::GetVar(idx), 0);
+                self.b.emit(Op::GetVar(idx), self.cur_line);
                 self.post_inc_dec(name, *inc);
             }
         }
@@ -307,8 +334,8 @@ impl Compiler {
         match op {
             BinOp::And => {
                 self.expr(lhs)?;
-                let jf = self.b.emit(Op::JumpIfFalseKeep(0), 0);
-                self.b.emit(Op::Pop, 0);
+                let jf = self.b.emit(Op::JumpIfFalseKeep(0), self.cur_line);
+                self.b.emit(Op::Pop, self.cur_line);
                 self.expr(rhs)?;
                 let end = self.b.current_pos();
                 self.b.patch_jump(jf, end);
@@ -316,8 +343,8 @@ impl Compiler {
             }
             BinOp::Or => {
                 self.expr(lhs)?;
-                let jt = self.b.emit(Op::JumpIfTrueKeep(0), 0);
-                self.b.emit(Op::Pop, 0);
+                let jt = self.b.emit(Op::JumpIfTrueKeep(0), self.cur_line);
+                self.b.emit(Op::Pop, self.cur_line);
                 self.expr(rhs)?;
                 let end = self.b.current_pos();
                 self.b.patch_jump(jt, end);
@@ -330,7 +357,7 @@ impl Compiler {
         // Groovy `/` is not a native op — it lowers to the GDIV builtin so
         // integer division promotes to a decimal (`7/2 → 3.5`).
         if let BinOp::Div = op {
-            self.b.emit(Op::CallBuiltin(crate::host::GDIV, 2), 0);
+            self.b.emit(Op::CallBuiltin(crate::host::GDIV, 2), self.cur_line);
             return Ok(());
         }
         let vop = match op {
@@ -347,7 +374,7 @@ impl Compiler {
             BinOp::Div => unreachable!("handled above"),
             BinOp::And | BinOp::Or => unreachable!("handled above"),
         };
-        self.b.emit(vop, 0);
+        self.b.emit(vop, self.cur_line);
         Ok(())
     }
 }

@@ -97,6 +97,7 @@ enum Mode {
     Closures,
     Gstring,
     Exceptions,
+    Faults,
     Mixed,
 }
 
@@ -111,6 +112,7 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Closures => "closures",
         Mode::Gstring => "gstring",
         Mode::Exceptions => "exceptions",
+        Mode::Faults => "faults",
         Mode::Mixed => "mixed",
     }
 }
@@ -126,6 +128,7 @@ fn mode_from(s: &str) -> Option<Mode> {
         "closures" => Mode::Closures,
         "gstring" => Mode::Gstring,
         "exceptions" => Mode::Exceptions,
+        "faults" => Mode::Faults,
         "mixed" => Mode::Mixed,
         _ => return None,
     })
@@ -518,6 +521,109 @@ fn gen_exceptions(rng: &mut Rng) -> Vec<String> {
     out
 }
 
+/// One runtime-fault probe: a Groovy expression, the throwable it raises, and
+/// whether that throwable's `getMessage()` is reproducible byte for byte.
+///
+/// `msg_ok` is `false` exactly where Groovy appends its fuzzy
+/// `Possible solutions: …` suggestion list, which enumerates the receiver's real
+/// GDK signatures and so cannot be reproduced without the JDK's method tables
+/// (see BUGS.md). Those probes still assert the throwable *type* and the control
+/// flow around it — only the message text is out of scope.
+const FAULTS: &[(&str, &str, bool)] = &[
+    ("\"hi\".nope()", "MissingMethodException", false),
+    ("[1, 2, 3].nope()", "MissingMethodException", false),
+    ("[a: 1].nope()", "MissingMethodException", false),
+    ("5.nope()", "MissingMethodException", false),
+    ("2.5.nope()", "MissingMethodException", false),
+    ("true.nope()", "MissingMethodException", false),
+    ("5[0]", "MissingMethodException", false),
+    ("\"hi\".zork", "MissingPropertyException", true),
+    ("5.zork", "MissingPropertyException", true),
+    ("true.zork", "MissingPropertyException", true),
+    ("nil.length()", "NullPointerException", true),
+    ("nil.charAt(0)", "NullPointerException", true),
+    ("nil.zork", "NullPointerException", true),
+    ("[1, 2, 3].get(9)", "IndexOutOfBoundsException", true),
+    ("[1, 2, 3].get(-1)", "IndexOutOfBoundsException", true),
+    ("\"abc\"[9]", "StringIndexOutOfBoundsException", true),
+    ("\"abc\"[-9]", "ArrayIndexOutOfBoundsException", true),
+    ("[1, 2, 3][-9]", "ArrayIndexOutOfBoundsException", true),
+    ("\"abc\".toInteger()", "NumberFormatException", true),
+    ("\"abc\".toLong()", "NumberFormatException", true),
+    ("\"1x\".toDouble()", "NumberFormatException", true),
+    ("1 / 0", "ArithmeticException", true),
+];
+
+/// Supertypes a probe's throwable can also be caught as, so a generated `catch`
+/// can name an ancestor and still match. Each list is rooted at the probe's own
+/// type and walks up Groovy's hierarchy.
+fn fault_supertypes(class: &str) -> &'static [&'static str] {
+    match class {
+        "MissingMethodException" | "MissingPropertyException" => {
+            &["GroovyRuntimeException", "RuntimeException", "Exception"]
+        }
+        "NumberFormatException" => &["IllegalArgumentException", "RuntimeException", "Exception"],
+        "StringIndexOutOfBoundsException" | "ArrayIndexOutOfBoundsException" => {
+            &["IndexOutOfBoundsException", "RuntimeException", "Exception"]
+        }
+        _ => &["RuntimeException", "Exception"],
+    }
+}
+
+/// A runtime-fault program: a probe from [`FAULTS`] placed either under a
+/// matching `catch` (the handler runs), under a deliberately *non*-matching
+/// `catch` (the throwable escapes — a non-zero exit and truncated stdout), or
+/// bare (the uncaught path). `finally` and a surrounding function frame are
+/// mixed in, since a fault has to unwind the same way an explicit `throw` does.
+fn gen_faults(rng: &mut Rng) -> Vec<String> {
+    let (expr, class, msg_ok) = *pick(rng, FAULTS);
+    // A script *binding* (no `def`), so the probe still resolves `nil` from
+    // inside a generated function — a top-level `def` would be local to `run`.
+    let mut out = vec!["nil = null".to_string()];
+    out.push("println(\"before\")".to_string());
+    // Catch the exact type, an ancestor, or something unrelated (which escapes).
+    let caught = match rng.below(4) {
+        0 | 1 => class,
+        2 => *pick(rng, fault_supertypes(class)),
+        _ => "IllegalStateException",
+    };
+    // Only print the message where Groovy's text is reproducible; otherwise
+    // print a fixed marker so the case still pins the type and the control flow.
+    let report = if msg_ok && rng.chance(1, 2) {
+        "println(\"caught \" + e.message)"
+    } else {
+        "println(\"caught\")"
+    };
+    let with_finally = rng.chance(1, 2);
+    match rng.below(3) {
+        // The probe inline, under a handler.
+        0 => {
+            out.push("try {".to_string());
+            out.push(format!("  println({expr})"));
+            out.push(format!("}} catch ({caught} e) {{"));
+            out.push(format!("  {report}"));
+            out.push("}".to_string());
+            if with_finally {
+                out.pop();
+                out.push("} finally { println(\"fin\") }".to_string());
+            }
+        }
+        // The probe inside a function, so the throwable crosses a frame.
+        1 => {
+            out.push("def f() {".to_string());
+            out.push(format!("  return {expr}"));
+            out.push("}".to_string());
+            out.push("try {".to_string());
+            out.push("  println(f())".to_string());
+            out.push(format!("}} catch ({caught} e) {{ {report} }}"));
+        }
+        // Uncaught: stdout stops at the fault and the exit status is non-zero.
+        _ => out.push(format!("println({expr})")),
+    }
+    out.push("println(\"after\")".to_string());
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Statement / program generators
 // ---------------------------------------------------------------------------
@@ -613,6 +719,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::Closures,
                 Mode::Gstring,
                 Mode::Exceptions,
+                Mode::Faults,
             ],
         )
     } else {
@@ -624,6 +731,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
         Mode::Closures => gen_closures(&mut rng),
         Mode::Gstring => gen_gstring(&mut rng),
         Mode::Exceptions => gen_exceptions(&mut rng),
+        Mode::Faults => gen_faults(&mut rng),
         _ => {
             let n = rng.range_i(1, 5) as usize;
             (0..n)
@@ -642,6 +750,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         | Mode::Closures
                         | Mode::Gstring
                         | Mode::Exceptions
+                        | Mode::Faults
                         | Mode::Mixed => unreachable!(),
                     };
                     println_of(expr)

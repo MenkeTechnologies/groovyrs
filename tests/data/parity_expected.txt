@@ -145,6 +145,27 @@ sum 1..5 = 15
 1
 4
 9
+==== RuntimeFaults.groovy ====
+nomethod MME
+noprop MPE No such property: zork for class: java.lang.String
+nullcall NPE Cannot invoke method length() on null object
+nullprop NPE Cannot get property 'zork' on null object
+listget IOOBE Index 9 out of bounds for length 3
+strsub SIOOBE Range [9, 10) out of bounds for length 3
+negsub AIOOBE Negative array index [-9] too large for array size 3
+toint NFE For input string: "abc"
+subscript MME
+true
+true
+true
+false
+fin
+outer Cannot invoke method length() on null object
+null
+null
+null
+43
+3.5
 ==== Truthiness.groovy ====
 0 -> false
 1 -> true

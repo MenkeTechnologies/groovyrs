@@ -55,6 +55,16 @@ const THROWABLES: &[(&str, &str, &str)] = &[
         "java.util",
     ),
     ("GroovyRuntimeException", "RuntimeException", "groovy.lang"),
+    (
+        "MissingMethodException",
+        "GroovyRuntimeException",
+        "groovy.lang",
+    ),
+    (
+        "MissingPropertyException",
+        "GroovyRuntimeException",
+        "groovy.lang",
+    ),
 ];
 
 /// Every modeled throwable as `(name, supertype, package)`, root first — so a

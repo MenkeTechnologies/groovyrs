@@ -22,7 +22,7 @@
 //!    where `+` routes through `groovy_add`.
 
 use crate::decimal;
-use bigdecimal::BigDecimal;
+use bigdecimal::{BigDecimal, Zero};
 use fusevm::{Frame, NumOp, VMResult, Value, VM};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -282,8 +282,84 @@ fn raise(vm: &mut VM, class: &str, message: &str) {
     if EXC_ARMED.with(|a| a.get()) {
         set_pending(new_throwable(class, message));
     } else {
-        fault(vm, format!("groovyrs: {message}"));
+        fault(
+            vm,
+            format!("{}: {message}", crate::throwable::qualified(class)),
+        );
     }
+}
+
+/// Raise `groovy.lang.MissingMethodException` for an unresolved `recv.method(…)`,
+/// with the message Groovy builds: the method name, the receiver's Java class,
+/// and the argument types and values. Returns the placeholder the faulting
+/// builtin hands back — the compiler's post-call check unwinds before it is read.
+fn raise_missing_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Value {
+    let types = args
+        .iter()
+        .map(simple_class_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let values = args.iter().map(groovy_str).collect::<Vec<_>>().join(", ");
+    raise(
+        vm,
+        "MissingMethodException",
+        &format!(
+            "No signature of method: {method} for class: {} \
+             is applicable for argument types: ({types}) values: [{values}]",
+            java_class_name(recv)
+        ),
+    );
+    Value::Undef
+}
+
+/// Raise `groovy.lang.MissingPropertyException` for an unresolved `recv.name`.
+fn raise_missing_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
+    raise(
+        vm,
+        "MissingPropertyException",
+        &format!(
+            "No such property: {name} for class: {}",
+            java_class_name(recv)
+        ),
+    );
+    Value::Undef
+}
+
+/// The fully-qualified Java class name Groovy names in a `MissingMethod` /
+/// `MissingProperty` message. A script-declared class prints bare, the way
+/// Groovy prints a class with no package.
+fn java_class_name(v: &Value) -> String {
+    if let Some(inst) = as_instance(v) {
+        if let Some(meta) = class_meta(inst.class) {
+            return crate::throwable::qualified(&meta.name);
+        }
+    }
+    match v {
+        Value::Str(_) => "java.lang.String",
+        Value::Int(_) => "java.lang.Integer",
+        Value::Float(_) => "java.lang.Double",
+        Value::Bool(_) => "java.lang.Boolean",
+        Value::Array(_) => "java.util.ArrayList",
+        Value::Hash(_) => "java.util.LinkedHashMap",
+        Value::Undef => "null",
+        _ if as_dec(v).is_some() => "java.math.BigDecimal",
+        _ if as_omap(v).is_some() => "java.util.LinkedHashMap",
+        _ if closure_meta(v).is_some() => "groovy.lang.Closure",
+        _ => "java.lang.Object",
+    }
+    .to_string()
+}
+
+/// The simple class name Groovy lists in a `MissingMethodException`'s
+/// `argument types: (…)` — the qualified name's last segment, and `null` for a
+/// null argument.
+fn simple_class_name(v: &Value) -> String {
+    let qualified = java_class_name(v);
+    qualified
+        .rsplit('.')
+        .next()
+        .unwrap_or(&qualified)
+        .to_string()
 }
 
 /// Allocate a built-in throwable instance with `message` on the host heap.
@@ -1243,7 +1319,8 @@ fn dispatch_instance_method(
     args: &[Value],
 ) -> Option<Result<Value, String>> {
     let inst = as_instance(recv)?;
-    let meta = class_meta(inst.class)?;
+    // A handle whose class is not in the registry is not an instance call.
+    class_meta(inst.class)?;
     // Virtual dispatch: resolve the method most-derived-first through the chain.
     if let Some(idx) = lookup_method(inst.class, method) {
         let mut pushes = Vec::with_capacity(args.len() + 1);
@@ -1281,10 +1358,7 @@ fn dispatch_instance_method(
             _ => {}
         }
     }
-    Some(Err(format!(
-        "groovyrs: no such method `{method}` on {}",
-        meta.name
-    )))
+    Some(Ok(raise_missing_method(vm, recv, method, args)))
 }
 
 /// Lowercase the first character (`X` → `x`) — the inverse of [`capitalize`],
@@ -1305,7 +1379,8 @@ fn dispatch_instance_prop_get(
     name: &str,
 ) -> Option<Result<Value, String>> {
     let inst = as_instance(recv)?;
-    let meta = class_meta(inst.class)?;
+    // A handle whose class is not in the registry is not an instance read.
+    class_meta(inst.class)?;
     let getter = format!("get{}", capitalize(name));
     if let Some(idx) = lookup_method(inst.class, &getter) {
         return Some(invoke_sub(vm, idx, std::slice::from_ref(recv)));
@@ -1313,10 +1388,7 @@ fn dispatch_instance_prop_get(
     if inst.fields.contains_key(name) {
         return Some(Ok(inst.fields.get(name).cloned().unwrap_or(Value::Undef)));
     }
-    Some(Err(format!(
-        "groovyrs: no such property `{name}` on {}",
-        meta.name
-    )))
+    Some(Ok(raise_missing_property(vm, recv, name)))
 }
 
 /// `GSETPROP`: assign `recv.name = value`. Stack: receiver (deepest), value,
@@ -1343,6 +1415,11 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
                 };
             }
         }
+        // A field the class chain never declared: Groovy raises rather than
+        // growing the object (fields are materialised at construction).
+        if !inst.fields.contains_key(&name) {
+            return raise_missing_property(vm, &recv, &name);
+        }
         set_instance_field(&recv, &name, value.clone());
         return value;
     }
@@ -1350,14 +1427,17 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
     if omap_set(&recv, name.clone(), value.clone()) {
         return value;
     }
-    fault(
-        vm,
-        format!(
-            "groovyrs: cannot set property `{name}` on {}",
-            type_name(&recv)
-        ),
-    );
-    Value::Undef
+    // Groovy's property write on `null` surfaces the JDK's helpful
+    // `NullPointerException` from the receiver's own `getClass()` call.
+    if matches!(recv, Value::Undef) {
+        raise(
+            vm,
+            "NullPointerException",
+            "Cannot invoke \"Object.getClass()\" because \"obj\" is null",
+        );
+        return Value::Undef;
+    }
+    raise_missing_property(vm, &recv, &name)
 }
 
 /// `GINDEX`: read `recv[index]`. Dispatches a user `getAt(index)` on an instance,
@@ -1384,11 +1464,14 @@ fn b_index(vm: &mut VM, _argc: u8) -> Value {
             .unwrap_or(Value::Undef);
     }
     match &recv {
+        // A list index past the end yields `null`; only a negative index that
+        // stays negative after wrapping is an error, and Groovy reports it with
+        // the array-subscript message its `getAt` uses.
         Value::Array(a) => {
             let i = index.to_int();
             let idx = if i < 0 { a.len() as i64 + i } else { i };
             if idx < 0 {
-                Value::Undef
+                raise_negative_index(vm, i, a.len())
             } else {
                 a.get(idx as usize).cloned().unwrap_or(Value::Undef)
             }
@@ -1397,24 +1480,47 @@ fn b_index(vm: &mut VM, _argc: u8) -> Value {
             .get(&index.as_str_cow().into_owned())
             .cloned()
             .unwrap_or(Value::Undef),
+        // A String subscript is a one-character substring, so an index past the
+        // end is a `StringIndexOutOfBoundsException` naming the `[i, i+1)` range.
         Value::Str(s) => {
             let i = index.to_int();
             let chars: Vec<char> = s.chars().collect();
             let idx = if i < 0 { chars.len() as i64 + i } else { i };
             if idx < 0 {
-                Value::Undef
+                raise_negative_index(vm, i, chars.len())
             } else {
-                chars
-                    .get(idx as usize)
-                    .map(|c| Value::str(c.to_string()))
-                    .unwrap_or(Value::Undef)
+                match chars.get(idx as usize) {
+                    Some(c) => Value::str(c.to_string()),
+                    None => {
+                        raise(
+                            vm,
+                            "StringIndexOutOfBoundsException",
+                            &format!(
+                                "Range [{idx}, {}) out of bounds for length {}",
+                                idx + 1,
+                                chars.len()
+                            ),
+                        );
+                        Value::Undef
+                    }
+                }
             }
         }
-        _ => {
-            fault(vm, format!("groovyrs: cannot index {}", type_name(&recv)));
-            Value::Undef
-        }
+        // Groovy has no `getAt` for this receiver, so the subscript is reported
+        // as the missing `getAt` method it desugars to.
+        _ => raise_missing_method(vm, &recv, "getAt", std::slice::from_ref(&index)),
     }
+}
+
+/// Raise the `ArrayIndexOutOfBoundsException` Groovy reports for a negative
+/// subscript whose magnitude exceeds the receiver's length.
+fn raise_negative_index(vm: &mut VM, index: i64, len: usize) -> Value {
+    raise(
+        vm,
+        "ArrayIndexOutOfBoundsException",
+        &format!("Negative array index [{index}] too large for array size {len}"),
+    );
+    Value::Undef
 }
 
 /// `GCLOSURE_CALL`: invoke a closure directly (`f(args)`). Stack: the closure
@@ -1492,13 +1598,7 @@ fn b_prop_safe(vm: &mut VM, _argc: u8) -> Value {
             }
         };
     }
-    match dispatch_property(&recv, &name) {
-        Ok(v) => v,
-        Err(e) => {
-            fault(vm, e);
-            Value::Undef
-        }
-    }
+    dispatch_property(vm, &recv, &name)
 }
 
 thread_local! {
@@ -1586,6 +1686,23 @@ fn b_method(vm: &mut VM, argc: u8) -> Value {
 /// (they re-enter the VM to run a closure body) and falling back to the pure GDK
 /// dispatch. Shared by [`b_method`] and [`b_method_safe`].
 fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
+    // Groovy routes a call on `null` through `NullObject`, which answers
+    // `toString()` and `equals()` and raises a `NullPointerException` for
+    // everything else. The safe-navigation form never reaches here.
+    if matches!(recv, Value::Undef) {
+        return match method {
+            "toString" => Value::str("null".to_string()),
+            "equals" => Value::bool(matches!(args.first(), None | Some(Value::Undef))),
+            _ => {
+                raise(
+                    vm,
+                    "NullPointerException",
+                    &format!("Cannot invoke method {method}() on null object"),
+                );
+                Value::Undef
+            }
+        };
+    }
     // A method on a class instance: a user method (implicit `this`) or Groovy's
     // auto getter/setter over a field. Checked first — an instance handle is a
     // `Value::Obj`, the same tag closures use.
@@ -1626,13 +1743,7 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         }
     }
     // Pure GDK dispatch — no closure, no VM re-entrancy.
-    match dispatch_method(&recv, method, &args) {
-        Ok(v) => v,
-        Err(e) => {
-            fault(vm, e);
-            Value::Undef
-        }
-    }
+    dispatch_method(vm, &recv, method, &args)
 }
 
 /// The closure-driven GDK collection methods over a list (or a materialised
@@ -1820,13 +1931,7 @@ fn b_prop(vm: &mut VM, _argc: u8) -> Value {
             }
         };
     }
-    match dispatch_property(&recv, &name) {
-        Ok(v) => v,
-        Err(e) => {
-            fault(vm, e);
-            Value::Undef
-        }
-    }
+    dispatch_property(vm, &recv, &name)
 }
 
 /// The element/character count of a Groovy value: characters for a `String`,
@@ -1840,67 +1945,97 @@ fn value_size(v: &Value) -> i64 {
     }
 }
 
-/// Dispatch a faithful subset of the Groovy GDK for `recv.method(args)`. Unknown
-/// combinations raise a `groovyrs: ...` runtime fault rather than mis-running.
-fn dispatch_method(recv: &Value, method: &str, args: &[Value]) -> Result<Value, String> {
+/// Dispatch a faithful subset of the Groovy GDK for `recv.method(args)`. A
+/// combination outside the subset raises `groovy.lang.MissingMethodException`
+/// rather than mis-running, and a modeled method that Groovy fails on (an
+/// out-of-range `list.get`, an unparsable `String.toInteger`) raises the same
+/// throwable Groovy does.
+fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Value {
     match (recv, method) {
         // Universal size query (String chars / list elements / map entries).
-        (_, "size") => Ok(Value::int(value_size(recv))),
+        (_, "size") => Value::int(value_size(recv)),
 
         // ── String ──
-        (Value::Str(s), "length") => Ok(Value::int(s.chars().count() as i64)),
-        (Value::Str(s), "toUpperCase") => Ok(Value::str(s.to_uppercase())),
-        (Value::Str(s), "toLowerCase") => Ok(Value::str(s.to_lowercase())),
-        (Value::Str(s), "trim") => Ok(Value::str(s.trim().to_string())),
-        (Value::Str(s), "reverse") => Ok(Value::str(s.chars().rev().collect::<String>())),
-        (Value::Str(s), "isEmpty") => Ok(Value::bool(s.is_empty())),
+        (Value::Str(s), "length") => Value::int(s.chars().count() as i64),
+        (Value::Str(s), "toUpperCase") => Value::str(s.to_uppercase()),
+        (Value::Str(s), "toLowerCase") => Value::str(s.to_lowercase()),
+        (Value::Str(s), "trim") => Value::str(s.trim().to_string()),
+        (Value::Str(s), "reverse") => Value::str(s.chars().rev().collect::<String>()),
+        (Value::Str(s), "isEmpty") => Value::bool(s.is_empty()),
         (Value::Str(s), "contains") => {
             let needle = args.first().map(groovy_str).unwrap_or_default();
-            Ok(Value::bool(s.contains(&needle)))
+            Value::bool(s.contains(&needle))
         }
+        // Groovy's numeric conversions parse the *trimmed* text and raise
+        // `NumberFormatException` naming it when the parse fails.
+        (Value::Str(s), "toInteger" | "toLong") => {
+            let t = s.trim();
+            let parsed = t
+                .parse::<i64>()
+                .ok()
+                .filter(|n| method == "toLong" || (i32::MIN as i64..=i32::MAX as i64).contains(n));
+            match parsed {
+                Some(n) => Value::int(n),
+                None => raise_number_format(vm, t),
+            }
+        }
+        (Value::Str(s), "toDouble" | "toFloat") => match parse_java_double(s) {
+            Some(f) => Value::float(f),
+            None => raise_number_format(vm, s.trim()),
+        },
 
         // ── List ──
-        (Value::Array(a), "isEmpty") => Ok(Value::bool(a.is_empty())),
+        (Value::Array(a), "isEmpty") => Value::bool(a.is_empty()),
         (Value::Array(a), "contains") => {
             let want = args.first().cloned().unwrap_or(Value::Undef);
-            Ok(Value::bool(
-                a.iter().any(|v| groovy_str(v) == groovy_str(&want)),
-            ))
+            Value::bool(a.iter().any(|v| groovy_str(v) == groovy_str(&want)))
         }
+        // Unlike the `[i]` subscript (which yields `null` past the end),
+        // `List.get` is the raw JDK call and raises on any out-of-range index.
         (Value::Array(a), "get") => {
             let i = args.first().and_then(as_i64).unwrap_or(0);
-            Ok(a.get(i.max(0) as usize).cloned().unwrap_or(Value::Undef))
+            match usize::try_from(i).ok().and_then(|u| a.get(u)) {
+                Some(v) => v.clone(),
+                None => {
+                    raise(
+                        vm,
+                        "IndexOutOfBoundsException",
+                        &format!("Index {i} out of bounds for length {}", a.len()),
+                    );
+                    Value::Undef
+                }
+            }
         }
         (Value::Array(a), "reverse") => {
             let mut r = a.clone();
             r.reverse();
-            Ok(Value::array(r))
+            Value::array(r)
         }
 
         // ── Map ──
-        (Value::Hash(h), "isEmpty") => Ok(Value::bool(h.is_empty())),
+        (Value::Hash(h), "isEmpty") => Value::bool(h.is_empty()),
         (Value::Hash(h), "containsKey") => {
             let k = args.first().map(groovy_str).unwrap_or_default();
-            Ok(Value::bool(h.contains_key(&k)))
+            Value::bool(h.contains_key(&k))
         }
 
         // ── BigDecimal (host heap) ──
         _ if as_dec(recv).is_some() => {
             let d = as_dec(recv).unwrap();
             match method {
-                "toString" => Ok(Value::str(decimal::to_groovy_string(&d))),
-                "abs" => Ok(dec_value(decimal::abs(&d))),
-                "negate" => Ok(dec_value(decimal::neg(&d))),
-                "toBigDecimal" => Ok(recv.clone()),
+                "toString" => Value::str(decimal::to_groovy_string(&d)),
+                "abs" => dec_value(decimal::abs(&d)),
+                "negate" => dec_value(decimal::neg(&d)),
+                "toBigDecimal" => recv.clone(),
                 // Truncating conversions; `round` goes to the nearest integer.
                 "intValue" | "longValue" | "toInteger" | "toLong" => {
-                    Ok(Value::int(decimal::truncate_to_i64(&d)))
+                    Value::int(decimal::truncate_to_i64(&d))
                 }
-                "round" => Ok(Value::int(decimal::round_to_i64(&d))),
+                "round" => Value::int(decimal::round_to_i64(&d)),
                 "doubleValue" | "toDouble" | "floatValue" | "toFloat" => {
-                    Ok(Value::float(decimal::to_f64(&d)))
+                    Value::float(decimal::to_f64(&d))
                 }
-                _ => Err(format!("groovyrs: no such method `{method}` on BigDecimal")),
+                _ => raise_missing_method(vm, recv, method, args),
             }
         }
 
@@ -1908,74 +2043,92 @@ fn dispatch_method(recv: &Value, method: &str, args: &[Value]) -> Result<Value, 
         _ if as_omap(recv).is_some() => {
             let entries = as_omap(recv).unwrap();
             match method {
-                "isEmpty" => Ok(Value::bool(entries.is_empty())),
+                "isEmpty" => Value::bool(entries.is_empty()),
                 "containsKey" => {
                     let k = args.first().map(groovy_str).unwrap_or_default();
-                    Ok(Value::bool(entries.iter().any(|(ek, _)| *ek == k)))
+                    Value::bool(entries.iter().any(|(ek, _)| *ek == k))
                 }
                 "get" => {
                     let k = args.first().map(groovy_str).unwrap_or_default();
-                    Ok(entries
+                    entries
                         .iter()
                         .find(|(ek, _)| *ek == k)
                         .map(|(_, v)| v.clone())
-                        .unwrap_or(Value::Undef))
+                        .unwrap_or(Value::Undef)
                 }
-                "keySet" | "keys" => Ok(Value::array(
-                    entries.iter().map(|(k, _)| Value::str(k.clone())).collect(),
-                )),
-                "values" => Ok(Value::array(entries.into_iter().map(|(_, v)| v).collect())),
-                _ => Err(format!("groovyrs: no such method `{method}` on Map")),
+                "keySet" | "keys" => {
+                    Value::array(entries.iter().map(|(k, _)| Value::str(k.clone())).collect())
+                }
+                "values" => Value::array(entries.into_iter().map(|(_, v)| v).collect()),
+                _ => raise_missing_method(vm, recv, method, args),
             }
         }
 
-        _ => Err(format!(
-            "groovyrs: no such method `{method}` on {}",
-            type_name(recv)
-        )),
+        _ => raise_missing_method(vm, recv, method, args),
     }
+}
+
+/// Raise `java.lang.NumberFormatException` the way `Integer`/`Long`/`Double`
+/// parsing does, naming the text that failed to parse.
+fn raise_number_format(vm: &mut VM, text: &str) -> Value {
+    raise(
+        vm,
+        "NumberFormatException",
+        &format!("For input string: \"{text}\""),
+    );
+    Value::Undef
+}
+
+/// Parse `s` the way `Double.parseDouble` does: leading/trailing whitespace and
+/// an optional `d`/`f` type suffix are allowed, and the spelled-out `Infinity` /
+/// `NaN` forms — but not Rust's extra `inf`/`nan` spellings or a hex literal.
+fn parse_java_double(s: &str) -> Option<f64> {
+    let t = s.trim();
+    let core = t.strip_suffix(['d', 'D', 'f', 'F']).unwrap_or(t);
+    match core {
+        "Infinity" | "+Infinity" => return Some(f64::INFINITY),
+        "-Infinity" => return Some(f64::NEG_INFINITY),
+        "NaN" => return Some(f64::NAN),
+        _ => {}
+    }
+    // Any letter other than an exponent marker means a spelling Java rejects.
+    if core
+        .bytes()
+        .any(|b| b.is_ascii_alphabetic() && b != b'e' && b != b'E')
+    {
+        return None;
+    }
+    core.parse().ok()
 }
 
 /// Dispatch a Groovy property read `recv.name`. Supports the `size`/`length`
-/// count properties on `String`/list/map; a map's `k` also reads entry `k`.
-fn dispatch_property(recv: &Value, name: &str) -> Result<Value, String> {
+/// count properties on `String`/list/map; a map's `k` also reads entry `k`. An
+/// unmodeled property raises `groovy.lang.MissingPropertyException`.
+fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     match (recv, name) {
-        (_, "size") | (_, "length") => Ok(Value::int(value_size(recv))),
+        // Every property read on `null` raises, including `size`/`length`.
+        (Value::Undef, _) => {
+            raise(
+                vm,
+                "NullPointerException",
+                &format!("Cannot get property '{name}' on null object"),
+            );
+            Value::Undef
+        }
+        (_, "size") | (_, "length") => Value::int(value_size(recv)),
         // Groovy map property access reads the entry of that key (`m.k` == `m['k']`).
-        (Value::Hash(h), key) => Ok(h.get(key).cloned().unwrap_or(Value::Undef)),
+        (Value::Hash(h), key) => h.get(key).cloned().unwrap_or(Value::Undef),
         _ => {
             // An ordered-map handle: `m.k` reads entry `k` (null if absent).
             if let Some(entries) = as_omap(recv) {
-                return Ok(entries
+                return entries
                     .iter()
                     .find(|(ek, _)| ek == name)
                     .map(|(_, v)| v.clone())
-                    .unwrap_or(Value::Undef));
+                    .unwrap_or(Value::Undef);
             }
-            Err(format!(
-                "groovyrs: no such property `{name}` on {}",
-                type_name(recv)
-            ))
+            raise_missing_property(vm, recv, name)
         }
-    }
-}
-
-/// A short Groovy-ish type name for diagnostics.
-fn type_name(v: &Value) -> &'static str {
-    match v {
-        Value::Str(_) => "String",
-        Value::Array(_) => "List",
-        Value::Hash(_) => "Map",
-        Value::Obj(_) if as_dec(v).is_some() => "BigDecimal",
-        Value::Obj(_) if as_omap(v).is_some() => "Map",
-        Value::Obj(_) if as_instance(v).is_some() => "Object",
-        Value::Int(_) => "Integer",
-        // Only a `d`/`f`-suffixed literal is an IEEE double; an unsuffixed
-        // decimal is a `BigDecimal` on the heap (above).
-        Value::Float(_) => "Double",
-        Value::Bool(_) => "Boolean",
-        Value::Undef => "null",
-        _ => "Object",
     }
 }
 
@@ -2061,10 +2214,10 @@ fn b_div(vm: &mut VM, _argc: u8) -> Value {
         (Some(x), Some(y)) => match decimal::divide(&x, &y) {
             Some(q) => dec_value(q),
             None => {
-                // Groovy raises `java.lang.ArithmeticException: Division by
-                // zero`, which a script can catch; unarmed this degrades to the
-                // hard fault it has always been (see [`raise`]).
-                raise(vm, "ArithmeticException", DIVISION_BY_ZERO);
+                // Groovy raises `java.lang.ArithmeticException`, which a script
+                // can catch; unarmed this degrades to the hard fault it has
+                // always been (see [`raise`]).
+                raise(vm, "ArithmeticException", zero_divisor_message(&x));
                 Value::Undef
             }
         },
@@ -2262,10 +2415,17 @@ pub fn groovy_str(v: &Value) -> String {
     }
 }
 
-/// The fault Groovy raises for a zero divisor (`java.lang.ArithmeticException:
-/// Division by zero`), which aborts the script exactly as an uncaught exception
-/// does.
-const DIVISION_BY_ZERO: &str = "Division by zero";
+/// The `java.lang.ArithmeticException` message Java's `BigDecimal.divide` uses
+/// for a zero divisor: `0 / 0` is *undefined* (no quotient is more right than
+/// any other), while `n / 0` for a non-zero `n` is division by zero. Groovy
+/// promotes integer division to `BigDecimal`, so `0 / 0` reports the same way.
+fn zero_divisor_message(dividend: &BigDecimal) -> &'static str {
+    if dividend.is_zero() {
+        "Division undefined"
+    } else {
+        "Division by zero"
+    }
+}
 
 /// Groovy arithmetic and comparison when a `BigDecimal` is involved. Returns
 /// `None` when the operation is not decimal arithmetic — no decimal operand, or
@@ -2294,7 +2454,7 @@ fn decimal_operator(op: NumOp, a: &Value, b: &Value) -> Option<Result<Value, Str
             if let Some(y) = decimal::from_f64_exact(*f) {
                 return Some(match decimal::remainder(&x, &y) {
                     Some(r) => Ok(dec_value(r)),
-                    None => Err(DIVISION_BY_ZERO.to_string()),
+                    None => Err(zero_divisor_message(&x).to_string()),
                 });
             }
         }
@@ -2312,11 +2472,11 @@ fn decimal_operator(op: NumOp, a: &Value, b: &Value) -> Option<Result<Value, Str
         // completeness (an operand pair fusevm delegates directly).
         NumOp::Div => match decimal::divide(&x, &y) {
             Some(q) => dec_value(q),
-            None => return Some(Err(DIVISION_BY_ZERO.to_string())),
+            None => return Some(Err(zero_divisor_message(&x).to_string())),
         },
         NumOp::Mod => match decimal::remainder(&x, &y) {
             Some(r) => dec_value(r),
-            None => return Some(Err(DIVISION_BY_ZERO.to_string())),
+            None => return Some(Err(zero_divisor_message(&x).to_string())),
         },
         // Groovy raises a decimal to an integer power exactly; a negative or
         // fractional exponent falls back to `double`.

@@ -234,13 +234,14 @@ fn op_name(op: &Op) -> String {
     }
 }
 
-
-/// The counted loop this module's tests measure, in the frontend's own syntax.
-const PROGRAM: &str = "def f(int n) { def t = 0; for (int i = 0; i < n; i++) { t += i }; return t }\nf(200000)";
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The counted loop this module's tests measure, in the frontend's own
+    /// syntax.
+    const PROGRAM: &str =
+        "def f(int n) { def t = 0; for (int i = 0; i < n; i++) { t += i }; return t }\nf(200000)";
 
     /// The report can say yes. A counted loop built by hand in the rotated
     /// shape — entered at its body, closed by a conditional backward branch —

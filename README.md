@@ -153,7 +153,8 @@ Implemented and checked against Apache Groovy:
   (Comparable) or `equals`. Primitive operands stay on the native/JIT fast path.
 - **Method / property dispatch** — `s.length()`, `list.size()`,
   `"hi".toUpperCase()`, `map.k`, chains on literals (`[1,2,3].size()`), over a
-  faithful GDK subset routed through a host dispatch. An unknown member faults.
+  faithful GDK subset routed through a host dispatch. An unknown member raises a
+  catchable `MissingMethodException` / `MissingPropertyException`.
 - **Closures** — `{ a, b -> … }`, the explicit zero-parameter `{ -> … }`, and
    the implicit `{ it }` form as first-class
   callable values, invoked with `.call(args)` or directly (`def f = { it * 2 };
@@ -173,6 +174,13 @@ Implemented and checked against Apache Groovy:
 - **Output** — `println` / `print` with Groovy value formatting, in both the
   `println(x)` and paren-less `println x` command forms.
 - **Comments** — `//` line, `/* … */` block.
+
+- **Catchable runtime faults** — an unknown method or property, a call on
+  `null`, an out-of-range index, and an unparsable numeric conversion raise the
+  Groovy throwable Groovy raises (`MissingMethodException`,
+  `MissingPropertyException`, `NullPointerException`,
+  `IndexOutOfBoundsException`, `NumberFormatException`) with Groovy's own message
+  text, so `try`/`catch` reaches its handler.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
 overloading by parameter type, `++`/`--` not calling `next`/`previous`, `switch`,
@@ -266,14 +274,11 @@ Next waves, in priority order:
 
 1. **By-reference upvalue capture** — boxed cells so a closure sees a mutation of
    an outer frame local made after capture (capture is by value today).
-2. **Catchable runtime faults** — `throw` and a zero divisor raise real
-   exceptions today, but an unknown method/property still aborts the run where
-   Groovy raises a catchable `MissingMethodException` / `NullPointerException`.
-3. **Method overloading by parameter type** — today methods and operator methods
+2. **Method overloading by parameter type** — today methods and operator methods
    are keyed by name only, so same-named overloads collapse to the last declared.
-4. **`trait`s and interface bodies** — `implements` is parsed but has no runtime
+3. **`trait`s and interface bodies** — `implements` is parsed but has no runtime
    effect beyond `Comparable`'s `compareTo`.
-5. **`switch`, `assert`, `do`/`while`, labeled `break`** and a broader standard
+4. **`switch`, `assert`, `do`/`while`, labeled `break`** and a broader standard
    library (`Math`, more `java.util`/GDK collection methods).
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
@@ -298,7 +303,7 @@ every divergence it reports is a real parity gap — the class of bug the slice-
 `continue`-codegen fix was. Decimal literals, scales, and exponent forms are
 generated without restriction now that the `BigDecimal` model is exact. Modes:
 `arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
-`gstring`, `exceptions`, `mixed`.
+`gstring`, `exceptions`, `faults`, `mixed`.
 
 All three need `groovy` on PATH and never run in CI; the CI-safe replay is the
 frozen `tests/parity.rs` (snapshot in `tests/data/parity_expected.txt`,

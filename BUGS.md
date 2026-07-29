@@ -147,6 +147,30 @@ reported as parse or compile errors, never silently mis-run.
   host-side pending value plus compiler-emitted jumps to the innermost handler,
   and a post-call check at every site that can re-enter the VM. **A program with
   no `try`/`throw` emits none of those ops**, so its bytecode is unchanged.
+- **Catchable runtime faults.** A groovyrs runtime fault is an ordinary Groovy
+  throwable, so `try { m.k.length() } catch (Exception e) { … }` reaches its
+  handler. Every fault site allocates the throwable Groovy allocates and parks it
+  as the pending exception rather than aborting, and every raising builtin is
+  emitted with its post-call pending check, so no site can swallow one. Modeled,
+  each with Groovy's own message text: `groovy.lang.MissingMethodException` (an
+  unknown method, and the `getAt` a subscript on a non-collection desugars to),
+  `groovy.lang.MissingPropertyException` (an unknown property read, and a write
+  to a field the class chain never declared),
+  `java.lang.NullPointerException` (`Cannot invoke method m() on null object` /
+  `Cannot get property 'p' on null object` — while `null.toString()` and
+  `null.equals(x)` still answer, as Groovy's `NullObject` does),
+  `java.lang.IndexOutOfBoundsException` (`list.get(i)` past either end),
+  `java.lang.StringIndexOutOfBoundsException` (a `String` subscript past the
+  end), `java.lang.ArrayIndexOutOfBoundsException` (a negative subscript larger
+  than the receiver), and `java.lang.NumberFormatException` (`toInteger` /
+  `toLong` / `toDouble` / `toFloat` on text that does not parse, including an
+  `int`-overflowing literal). The reads Groovy does *not* fault on stay
+  non-faulting: a list subscript past the end and a missing map key are `null`.
+  Each throwable sits in the real hierarchy, so `catch (GroovyRuntimeException
+  e)`, `catch (IndexOutOfBoundsException e)`, and `instanceof` all behave.
+  A fault in a program that uses no `try`/`throw` still aborts (nothing would
+  observe the parked throwable), now reporting `groovyrs: <qualified class>:
+  <message>` on stderr with the same non-zero exit.
 
 ## Not implemented (errors today)
 
@@ -165,16 +189,41 @@ reported as parse or compile errors, never silently mis-run.
   Groovy's `next`/`previous`. Call `x.next()` / `x.previous()` explicitly for
   those.
 - **`switch`, `do/while`, labeled break, `assert`.**
-- **Catchable runtime faults.** Only `throw` and a zero divisor produce a
-  catchable exception. Every other groovyrs runtime fault — an unknown method or
-  property, a method call on `null`, indexing a non-collection — still aborts the
-  run with a `groovyrs:` message on stderr, where Groovy raises a catchable
-  `MissingMethodException` / `NullPointerException`. So `try { m.k.length() }
-  catch (Exception e) { … }` does not reach its handler.
+- **`getClass()`.** There is no runtime class object, so `e.getClass().getName()`
+  raises `MissingMethodException` rather than naming the type. Use `instanceof`.
+- **`%` by zero.** `/` by zero raises a catchable `ArithmeticException` with
+  Groovy's exact message (`Division by zero`, or `Division undefined` when the
+  dividend is zero too), but `%` does not: an integer `x % 0` lowers to fusevm's
+  native `Op::Mod` and yields `0` where Groovy raises `ArithmeticException: /
+  by zero`, and a decimal `x % 0` raises through the numeric hook, which has no
+  pending-exception channel — so the message is right but the run aborts instead
+  of reaching a handler. Making either catchable costs `%`'s native/JIT path (the
+  way `/` already pays for `GDIV`) or a pending check after every arithmetic op.
+- **`String.toBigDecimal()`.** The other numeric conversions are modeled;
+  `toBigDecimal` is not, so it raises `MissingMethodException` where Groovy would
+  either convert or raise `NumberFormatException` with `BigDecimal`'s own
+  character-level message.
 - **`import`/`package`** are tolerated (skipped) but do nothing.
 - **Command-argument chains beyond one arg** (`println a, b`, `foo bar baz`).
 
 ## Modeled with a documented simplification
+
+- **A `MissingMethodException` message omits Groovy's `Possible solutions:`
+  line.** Groovy appends a fuzzy suggestion list built from the receiver's real
+  JDK/GDK method table (`Possible solutions: grep(), next(), size(), …`), which
+  groovyrs has no table to build. Everything before it — `No signature of method:
+  <name> for class: <qualified class> is applicable for argument types:
+  (<simple types>) values: [<values>]` — is byte-identical to Groovy. The same
+  holds for the suggestion line Groovy sometimes appends to a
+  `MissingPropertyException` on a class with fields.
+- **A property read on a list is not a spread read.** Groovy's `list.prop` maps
+  the read over the elements, so `[1,2,3].zork` reports the *element* type
+  (`No such property: zork for class: java.lang.Integer`, wrapped in an
+  `Exception evaluating property` message); groovyrs reports the list itself.
+- **The `NullPointerException` for a property *write* on `null` carries the
+  JDK's helpful-NPE text** (`Cannot invoke "Object.getClass()" because "obj" is
+  null`) rather than a groovyrs-authored message, since that is what Groovy
+  surfaces. The wording is the JDK's, so it can change with the JVM version.
 
 - **A condition whose type is not statically known costs one builtin call.**
   Groovy truthiness is exact everywhere, but where the compiler cannot prove the

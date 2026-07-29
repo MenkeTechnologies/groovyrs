@@ -1441,3 +1441,174 @@ try { println("x ${ [1].collect { throw new IllegalStateException('gs') } }") } 
         "ctor neg\ntostr ts\nget gx\nat ga\nplus pl\nbool ab\nclo clo\ngstr gs\n"
     );
 }
+
+// ── Catchable runtime faults ────────────────────────────────────────────────
+
+#[test]
+fn an_unknown_method_raises_a_catchable_missing_method_exception() {
+    // Before this landed, an unknown method aborted the run, so the handler was
+    // unreachable. Verified against Apache Groovy 5.0.7 (which additionally
+    // appends its `Possible solutions:` GDK suggestion list — see BUGS.md).
+    let src = r#"
+try { println("hi".nope()) }
+catch (MissingMethodException e) { println("mme") }
+println("after")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "mme\nafter\n");
+}
+
+#[test]
+fn an_unknown_property_message_matches_groovy() {
+    let src =
+        r#"try { println("hi".zork) } catch (MissingPropertyException e) { println(e.message) }"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "No such property: zork for class: java.lang.String\n");
+}
+
+#[test]
+fn a_call_on_null_raises_a_catchable_null_pointer_exception() {
+    let src = r#"
+nil = null
+try { println(nil.length()) } catch (NullPointerException e) { println(e.message) }
+try { println(nil.zork) } catch (NullPointerException e) { println(e.message) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "Cannot invoke method length() on null object\n\
+         Cannot get property 'zork' on null object\n"
+    );
+}
+
+#[test]
+fn null_still_answers_to_string_and_equals() {
+    // Groovy routes a call on null through `NullObject`, which answers these two
+    // rather than raising — so the NPE path must not swallow them.
+    let (out, ok) = run("nil = null\nprintln(nil.toString())\nprintln(nil.equals(1))");
+    assert!(ok);
+    assert_eq!(out, "null\nfalse\n");
+}
+
+#[test]
+fn out_of_range_indexing_raises_the_types_groovy_raises() {
+    let src = r#"
+try { println([1, 2, 3].get(9)) } catch (IndexOutOfBoundsException e) { println(e.message) }
+try { println("abc"[9]) } catch (StringIndexOutOfBoundsException e) { println(e.message) }
+try { println([1, 2, 3][-9]) } catch (ArrayIndexOutOfBoundsException e) { println(e.message) }
+// A list subscript past the end is null in Groovy, not an error.
+println([1, 2, 3][5])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "Index 9 out of bounds for length 3\n\
+         Range [9, 10) out of bounds for length 3\n\
+         Negative array index [-9] too large for array size 3\n\
+         null\n"
+    );
+}
+
+#[test]
+fn unparsable_string_conversions_raise_number_format_exception() {
+    let src = r#"
+try { println("abc".toInteger()) } catch (NumberFormatException e) { println(e.message) }
+try { println("1x".toDouble()) } catch (NumberFormatException e) { println(e.message) }
+// An `int`-overflowing literal is a parse failure in Groovy, not a wrap.
+try { println("9999999999".toInteger()) } catch (NumberFormatException e) { println(e.message) }
+println("9999999999".toLong())
+println(" 42 ".toInteger() + 1)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "For input string: \"abc\"\n\
+         For input string: \"1x\"\n\
+         For input string: \"9999999999\"\n\
+         9999999999\n\
+         43\n"
+    );
+}
+
+#[test]
+fn a_runtime_fault_unwinds_across_a_frame_and_runs_finally() {
+    let src = r#"
+nil = null
+def deep(x) {
+    try { return x.length() } finally { println("fin") }
+}
+try { println(deep(nil)) } catch (Exception e) { println("outer " + e.message) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "fin\nouter Cannot invoke method length() on null object\n"
+    );
+}
+
+#[test]
+fn a_runtime_fault_the_handler_does_not_match_still_escapes() {
+    let src = r#"
+println("before")
+try { println("hi".nope()) } catch (IllegalStateException e) { println("no") }
+println("unreachable")
+"#;
+    let (out, ok) = run(src);
+    assert!(!ok, "an unmatched runtime fault must exit non-zero");
+    assert_eq!(out, "before\n");
+}
+
+#[test]
+fn the_new_throwables_sit_in_groovys_hierarchy() {
+    let src = r#"
+try { "hi".nope() } catch (Exception e) {
+    println(e instanceof MissingMethodException)
+    println(e instanceof GroovyRuntimeException)
+    println(e instanceof RuntimeException)
+    println(e instanceof NullPointerException)
+}
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "true\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn writing_an_undeclared_field_raises_missing_property_exception() {
+    let src = r#"
+class Foo { def a = 1 }
+def f = new Foo()
+try { f.zz = 3 } catch (MissingPropertyException e) { println("mpe") }
+f.a = 2
+println(f.a)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "mpe\n2\n");
+}
+
+#[test]
+fn dividing_zero_by_zero_reports_division_undefined() {
+    // Java's `BigDecimal.divide` distinguishes the two zero-divisor cases, and
+    // Groovy promotes integer division to `BigDecimal`, so `0 / 0` differs from
+    // `7 / 0`. Verified against Apache Groovy 5.0.7.
+    let src = r#"
+def p(l, c) { try { println(l + " " + c()) } catch (ArithmeticException e) { println(l + " " + e.message) } }
+p("a", { 0 / 0 })
+p("b", { 7 / 0 })
+p("c", { 0.0 / 0 })
+p("d", { 0.0d / 0.0d })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "a Division undefined\nb Division by zero\nc Division undefined\nd NaN\n"
+    );
+}

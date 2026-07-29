@@ -71,6 +71,19 @@ pub enum StmtKind {
     },
     /// `while (cond) { .. }`.
     While { cond: Expr, body: Vec<Stmt> },
+    /// `do { .. } while (cond)` — the body runs before the first test, so it
+    /// always executes at least once.
+    DoWhile { body: Vec<Stmt>, cond: Expr },
+    /// `switch (subject) { case L: .. default: .. }`. The cases keep source
+    /// order and fall through into one another exactly as Groovy's do; a `break`
+    /// leaves the switch. Each `case` label is matched with Groovy's `isCase`
+    /// rules, not `==` (see `host::GIS_CASE`).
+    Switch {
+        subject: Expr,
+        cases: Vec<SwitchCase>,
+    },
+    /// `label: <loop or switch>` — the target a labeled `break`/`continue` names.
+    Labeled { label: String, stmt: Box<Stmt> },
     /// `for (init; cond; update) { .. }` — the C-style loop. The `for (x in
     /// a..b)` range form is desugared to this by the parser.
     For {
@@ -79,10 +92,13 @@ pub enum StmtKind {
         update: Option<Box<Stmt>>,
         body: Vec<Stmt>,
     },
-    /// `break`
-    Break,
-    /// `continue`
-    Continue,
+    /// `break` / `break label` — leaves the innermost enclosing loop or
+    /// `switch`, or the one carrying `label`.
+    Break(Option<String>),
+    /// `continue` / `continue label` — re-tests the innermost enclosing loop, or
+    /// the one carrying `label`. A `switch` is transparent here: a `continue`
+    /// inside one continues the loop around it.
+    Continue(Option<String>),
     /// `return` / `return <expr>`. Inside a user function the value is carried
     /// out through `Op::ReturnValue` (a bare `return` returns `null`); at script
     /// top level the value becomes the script's result and execution ends.
@@ -130,6 +146,15 @@ pub enum StmtKind {
     /// `throw <expr>` — park the throwable as the pending exception and unwind to
     /// the innermost enclosing handler (or out of the program).
     Throw(Expr),
+}
+
+/// One `case L:` / `default:` section of a [`StmtKind::Switch`], in source
+/// order. `label` is `None` for `default`. An empty `body` is how consecutive
+/// labels (`case 2: case 3: …`) fall into a shared body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwitchCase {
+    pub label: Option<Expr>,
+    pub body: Vec<Stmt>,
 }
 
 /// One `catch (T e) { … }` arm. `types` holds the caught type names — more than
@@ -194,6 +219,10 @@ pub enum Expr {
     /// which is why this is not simply lowered to `+`.
     GString(Vec<GStringPart>),
     Bool(bool),
+    /// A `~/pattern/` literal — Groovy's `java.util.regex.Pattern`. Modeled far
+    /// enough to drive a `switch` `case ~/…/:` label, whose `isCase` is a *full*
+    /// match of the subject's string form.
+    Regex(String),
     /// The `null` literal.
     Null,
     /// A bare identifier — a variable read.

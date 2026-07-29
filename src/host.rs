@@ -23,6 +23,7 @@
 
 use crate::decimal;
 use bigdecimal::{BigDecimal, Zero};
+use fancy_regex::Regex;
 use fusevm::{Frame, NumOp, VMResult, Value, VM};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -168,6 +169,22 @@ pub const GEXC_CUT: u16 = 735;
 /// non-zero exactly as `groovy` does.
 pub const GEXC_ABORT: u16 = 736;
 
+/// `switch` case matching — Groovy's `isCase`, which is *not* `==`: a `Range` or
+/// list label contains, a closure label is called, a `Pattern` label matches the
+/// whole subject, and anything else compares equal. Stack: subject (deepest),
+/// then the label; pushes a `Boolean`.
+pub const GIS_CASE: u16 = 737;
+
+/// `switch` case matching against a *type* label (`case String:`). Stack:
+/// subject (deepest), then the type name as a `String`; pushes a `Boolean`. A
+/// separate builtin because a class name is not a loadable value — the compiler
+/// resolves the name statically (`compiler::names_a_type`).
+pub const GIS_CASE_TYPE: u16 = 738;
+
+/// Build a `java.util.regex.Pattern` from a `~/…/` literal's source. Stack: the
+/// pattern text; pushes the compiled pattern handle.
+pub const GREGEX: u16 = 739;
+
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -210,6 +227,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GEXC_DEPTH, b_exc_depth);
     vm.register_builtin(GEXC_CUT, b_exc_cut);
     vm.register_builtin(GEXC_ABORT, b_exc_abort);
+    vm.register_builtin(GIS_CASE, b_is_case);
+    vm.register_builtin(GIS_CASE_TYPE, b_is_case_type);
+    vm.register_builtin(GREGEX, b_regex);
     // A fresh VM install starts with an empty object heap: `Value::Obj` handles
     // are chunk-relative (a closure carries a name-pool index, an instance a
     // class id), so a handle from a prior run must never survive into a new
@@ -541,6 +561,11 @@ enum HeapObj {
     /// comparison op through [`numeric_hook`], where [`crate::decimal`] applies
     /// Groovy's exact scale rules.
     Dec(BigDecimal),
+    /// A compiled `~/…/` pattern — Groovy's `java.util.regex.Pattern`. Held on
+    /// the heap because it is a value a `switch` label (and a variable) can
+    /// carry, and because compiling it once per literal beats recompiling it on
+    /// every match.
+    Regex(Box<Pattern>),
 }
 
 /// A registered closure: the body's name-pool index, its parameter count, and
@@ -1276,6 +1301,119 @@ fn b_instanceof(vm: &mut VM, _argc: u8) -> Value {
         .into_owned();
     let value = vm.stack.pop().unwrap_or(Value::Undef);
     Value::bool(value_is_a(&value, &class))
+}
+
+/// A `~/…/` literal: its source (which is how Groovy's `Pattern` prints) and the
+/// compiled *whole-string* matcher. Groovy's `case ~/…/` is
+/// `Pattern.matcher(s).matches()`, an all-or-nothing match, so the compiled form
+/// is anchored once here rather than re-derived at every comparison.
+struct Pattern {
+    source: String,
+    whole: Regex,
+}
+
+/// `GREGEX`: compile a `~/…/` literal's source into a pattern handle. An
+/// unsupported pattern faults at the literal, which is where the mistake is.
+fn b_regex(vm: &mut VM, argc: u8) -> Value {
+    let source = pop_args(vm, argc)
+        .into_iter()
+        .next()
+        .map(|v| v.as_str_cow().into_owned())
+        .unwrap_or_default();
+    // `(?:…)` keeps a top-level alternation from binding past the anchors.
+    match Regex::new(&format!(r"\A(?:{source})\z")) {
+        Ok(whole) => heap_push(HeapObj::Regex(Box::new(Pattern { source, whole }))),
+        Err(e) => {
+            fault(vm, format!("groovyrs: bad regex `{source}`: {e}"));
+            Value::Undef
+        }
+    }
+}
+
+/// If `v` is a heap pattern handle, does `text` match it in full?
+fn regex_matches(v: &Value, text: &str) -> Option<bool> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Regex(p)) => Some(p.whole.is_match(text).unwrap_or(false)),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// If `v` is a heap pattern handle, its source text — how Groovy renders a
+/// `Pattern`.
+fn regex_source(v: &Value) -> Option<String> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Regex(p)) => Some(p.source.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// `GIS_CASE_TYPE`: Groovy's `case SomeType:` — `subject instanceof SomeType`.
+/// Stack: subject (deepest), then the type name.
+fn b_is_case_type(vm: &mut VM, _argc: u8) -> Value {
+    let class = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let subject = vm.stack.pop().unwrap_or(Value::Undef);
+    Value::bool(value_is_a(&subject, &class))
+}
+
+/// `GIS_CASE`: Groovy's `switch` case matching, which dispatches on the *label*,
+/// not the subject — `Object.isCase(Object)` and its overrides. Stack: subject
+/// (deepest), then the label.
+///
+/// Verified against Apache Groovy 5.0.7: a list (and therefore a materialised
+/// range) label matches when it contains the subject, a closure label matches
+/// when calling it with the subject yields a Groovy-true value, a `Pattern`
+/// label matches when the subject's string form matches it *entirely*
+/// (`Matcher.matches`, not `find`), and every other label matches on `equals`.
+fn b_is_case(vm: &mut VM, _argc: u8) -> Value {
+    let label = vm.stack.pop().unwrap_or(Value::Undef);
+    let subject = vm.stack.pop().unwrap_or(Value::Undef);
+    // A null subject never matches a pattern; Groovy matches the rest against
+    // their `toString`, which is exactly what `println` renders.
+    if let Some(hit) = regex_matches(&label, &groovy_str(&subject)) {
+        return Value::bool(hit && !matches!(subject, Value::Undef));
+    }
+    if closure_meta(&label).is_some() {
+        return match invoke_closure(vm, &label, std::slice::from_ref(&subject)) {
+            Ok(v) => Value::bool(groovy_truthy(vm, &v)),
+            Err(e) => {
+                fault(vm, e);
+                Value::Undef
+            }
+        };
+    }
+    if let Value::Array(items) = &label {
+        let want = groovy_str(&subject);
+        return Value::bool(items.iter().any(|v| groovy_str(v) == want));
+    }
+    // `case null:` matches only null; otherwise Groovy's `equals`.
+    if matches!(label, Value::Undef) || matches!(subject, Value::Undef) {
+        return Value::bool(matches!(label, Value::Undef) && matches!(subject, Value::Undef));
+    }
+    Value::bool(values_equal(&label, &subject))
+}
+
+/// Groovy's value equality for a `switch` label: numeric operands compare
+/// numerically across types (`case 1:` matches the subject `1.00`), and
+/// everything else compares by its rendered form — the same rule `==` uses.
+fn values_equal(a: &Value, b: &Value) -> bool {
+    if let Some(Ok(v)) = decimal_operator(NumOp::Eq, a, b) {
+        return matches!(v, Value::Bool(true));
+    }
+    if let (Some(x), Some(y)) = (as_i64(a), as_i64(b)) {
+        return x == y;
+    }
+    groovy_str(a) == groovy_str(b)
 }
 
 /// Whether `value` is an instance of the (user or built-in) type `class`.
@@ -2376,6 +2514,10 @@ pub fn groovy_str(v: &Value) -> String {
     // kept, `E+n` form outside the plain-notation window.
     if let Some(d) = as_dec(v) {
         return decimal::to_groovy_string(&d);
+    }
+    // A `Pattern` renders as its source text, the way `Pattern.toString` does.
+    if let Some(src) = regex_source(v) {
+        return src;
     }
     // An ordered-map handle renders `[k:v, …]` in insertion order (`[:]` empty).
     if let Some(entries) = as_omap(v) {

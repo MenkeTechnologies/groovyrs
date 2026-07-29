@@ -183,7 +183,20 @@ impl Parser {
             }
             Tok::If => self.if_stmt()?,
             Tok::While => self.while_stmt()?,
+            Tok::Do => self.do_while_stmt()?,
+            Tok::Switch => self.switch_stmt()?,
             Tok::For => self.for_stmt()?,
+            // `label: <loop or switch>` — the only place a bare `ident :` can
+            // start a statement, so no other construct is shadowed.
+            Tok::Ident(_) if self.starts_a_label() => {
+                let label = self.ident()?;
+                self.eat(&Tok::Colon)?;
+                self.skip_newlines();
+                StmtKind::Labeled {
+                    label,
+                    stmt: Box::new(self.statement()?),
+                }
+            }
             Tok::Return => {
                 // `return` / `return <expr>`: the value is carried out (see
                 // `StmtKind::Return`). A bare `return` at end of line returns null.
@@ -197,11 +210,11 @@ impl Parser {
             }
             Tok::Break => {
                 self.advance();
-                StmtKind::Break
+                StmtKind::Break(self.opt_jump_label())
             }
             Tok::Continue => {
                 self.advance();
-                StmtKind::Continue
+                StmtKind::Continue(self.opt_jump_label())
             }
             Tok::LBrace => {
                 // A statement-position `{ params -> ... }` is a closure literal
@@ -607,6 +620,102 @@ impl Parser {
         })
     }
 
+    /// Does an `ident :` at the current position introduce a statement label?
+    /// Only when a loop or `switch` follows (after any newlines) — otherwise the
+    /// `:` belongs to something else and the statement is an ordinary one.
+    fn starts_a_label(&self) -> bool {
+        if !matches!(self.peek_at(1), Tok::Colon) {
+            return false;
+        }
+        let mut n = 2;
+        while matches!(self.peek_at(n), Tok::Nl) {
+            n += 1;
+        }
+        matches!(
+            self.peek_at(n),
+            Tok::While | Tok::Do | Tok::For | Tok::Switch
+        )
+    }
+
+    /// The optional target label of a `break`/`continue` (`break outer`). It has
+    /// to be on the same line — a bare `break` followed by a statement starting
+    /// with an identifier must not swallow it.
+    fn opt_jump_label(&mut self) -> Option<String> {
+        match self.peek() {
+            Tok::Ident(name) => {
+                let name = name.clone();
+                self.advance();
+                Some(name)
+            }
+            _ => None,
+        }
+    }
+
+    /// `do { … } while (cond)`.
+    fn do_while_stmt(&mut self) -> Result<StmtKind, String> {
+        self.eat(&Tok::Do)?;
+        let body = self.braced_or_single()?;
+        self.skip_newlines();
+        self.eat(&Tok::While)?;
+        self.eat(&Tok::LParen)?;
+        let cond = self.expression()?;
+        self.eat(&Tok::RParen)?;
+        Ok(StmtKind::DoWhile { body, cond })
+    }
+
+    /// `switch (subject) { case L: … default: … }`. Sections keep source order;
+    /// a section with an empty body is how consecutive labels share one.
+    fn switch_stmt(&mut self) -> Result<StmtKind, String> {
+        self.eat(&Tok::Switch)?;
+        self.eat(&Tok::LParen)?;
+        let subject = self.expression()?;
+        self.eat(&Tok::RParen)?;
+        self.skip_newlines();
+        self.eat(&Tok::LBrace)?;
+        let mut cases: Vec<SwitchCase> = Vec::new();
+        self.skip_terminators();
+        while !self.is(&Tok::RBrace) && !self.is(&Tok::Eof) {
+            let label = match self.peek() {
+                Tok::Case => {
+                    self.advance();
+                    let e = self.expression()?;
+                    Some(e)
+                }
+                Tok::Default => {
+                    self.advance();
+                    None
+                }
+                other => {
+                    return Err(format!(
+                    "groovyrs: expected `case` or `default` in switch but found {other} on line {}",
+                    self.line()
+                ))
+                }
+            };
+            self.eat(&Tok::Colon)?;
+            self.skip_terminators();
+            // The section body runs to the next label or the closing brace.
+            let mut body = Vec::new();
+            while !matches!(
+                self.peek(),
+                Tok::Case | Tok::Default | Tok::RBrace | Tok::Eof
+            ) {
+                body.push(self.statement()?);
+                self.expect_terminator()?;
+                self.skip_terminators();
+            }
+            cases.push(SwitchCase { label, body });
+        }
+        self.eat(&Tok::RBrace)?;
+        if cases.iter().filter(|c| c.label.is_none()).count() > 1 {
+            return Err(format!(
+                "groovyrs: duplicate `default` in switch on line {}",
+                self.line()
+            ));
+        }
+        Ok(StmtKind::Switch { subject, cases })
+    }
+
     fn while_stmt(&mut self) -> Result<StmtKind, String> {
         self.eat(&Tok::While)?;
         self.eat(&Tok::LParen)?;
@@ -958,6 +1067,10 @@ impl Parser {
             Tok::Str(s) => {
                 self.advance();
                 Ok(Expr::Str(s))
+            }
+            Tok::Regex(src) => {
+                self.advance();
+                Ok(Expr::Regex(src))
             }
             // A `GString`: each embedded placeholder carries its own source
             // text, re-parsed here through the ordinary expression grammar.

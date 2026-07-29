@@ -166,6 +166,33 @@ null
 null
 43
 3.5
+==== Switch.groovy ====
+1 -> one
+2 -> two-or-three
+3 -> two-or-three
+5 -> range
+7 -> list
+zz -> string
+101 -> big
+null -> null
+9.5 -> other
+string
+animal
+fall 1 -> ab
+fall 2 -> b
+fall 3 -> cd
+fall 4 -> d
+yes
+subject evals=1 labels=12
+do 0
+do 1
+do 2
+always once
+0-0
+1-0
+scan 0
+scan 2
+done
 ==== Truthiness.groovy ====
 0 -> false
 1 -> true

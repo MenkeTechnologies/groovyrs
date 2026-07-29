@@ -53,13 +53,20 @@ pub enum Tok {
     /// programs changes.
     GStr(Vec<GPart>),
     Ident(String),
+    /// A `~/pattern/` regex literal — Groovy's `Pattern` (see `Expr::Regex`).
+    Regex(String),
     // keywords
     Def,
     If,
     Else,
     While,
+    Do,
     For,
     In,
+    Switch,
+    Case,
+    Default,
+    Assert,
     Return,
     Break,
     Continue,
@@ -364,6 +371,44 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             continue;
         }
 
+        // A `~/pattern/` regex literal. The `/` delimiter needs no escaping of
+        // regex metacharacters, so only `\/` is special inside it — every other
+        // backslash escape belongs to the pattern and passes through verbatim.
+        if bytes[i] == b'~' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            let mut j = i + 2;
+            let mut pattern = String::new();
+            loop {
+                if j >= bytes.len() || bytes[j] == b'\n' {
+                    return Err(format!(
+                        "groovyrs: unterminated regex literal on line {line}"
+                    ));
+                }
+                if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                    if bytes[j + 1] == b'/' {
+                        pattern.push('/');
+                    } else {
+                        pattern.push('\\');
+                        pattern.push(bytes[j + 1] as char);
+                    }
+                    j += 2;
+                    continue;
+                }
+                if bytes[j] == b'/' {
+                    j += 1;
+                    break;
+                }
+                let ch = src[j..].chars().next().unwrap();
+                pattern.push(ch);
+                j += ch.len_utf8();
+            }
+            out.push(Token {
+                kind: Tok::Regex(pattern),
+                line,
+            });
+            i = j;
+            continue;
+        }
+
         // operators & punctuation (longest match first)
         let three = if i + 2 < bytes.len() {
             &src[i..i + 3]
@@ -534,8 +579,13 @@ fn keyword_or_ident(word: &str) -> Tok {
         "if" => Tok::If,
         "else" => Tok::Else,
         "while" => Tok::While,
+        "do" => Tok::Do,
         "for" => Tok::For,
         "in" => Tok::In,
+        "switch" => Tok::Switch,
+        "case" => Tok::Case,
+        "default" => Tok::Default,
+        "assert" => Tok::Assert,
         "return" => Tok::Return,
         "break" => Tok::Break,
         "continue" => Tok::Continue,

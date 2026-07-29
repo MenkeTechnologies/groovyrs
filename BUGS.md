@@ -172,6 +172,28 @@ reported as parse or compile errors, never silently mis-run.
   observe the parked throwable), now reporting `groovyrs: <qualified class>:
   <message>` on stderr with the same non-zero exit.
 
+- **`switch`.** Groovy's, with its full `isCase` semantics rather than `==`: a
+  constant label compares equal (numerically across `Integer`/`BigDecimal`), a
+  range or list label *contains* the subject, a bare type name
+  (`case String:`, `case MyClass:`, `case IOException:`) is an `instanceof`, a
+  `~/…/` pattern label matches the subject's string form *entirely*
+  (`Matcher.matches`, not `find`), a closure label is called with the subject and
+  read for Groovy truth, and `case null:` matches only `null`. Sections keep
+  source order and fall through until a `break`; `default` may sit anywhere and
+  is entered only when no label matched. The subject is evaluated once and the
+  labels only until one matches. A `switch` is a `break` target but not a
+  `continue` target — a `continue` inside one continues the enclosing loop.
+- **`~/…/` regex literals.** A `~/pattern/` is a `java.util.regex.Pattern`
+  value: it prints as its source text and drives a `case` label. Compiled by
+  `fancy-regex`, which covers Java's lookaround and backreferences as well as the
+  linear subset (see the simplification note below).
+- **`do` / `while`.** `do { … } while (cond)` runs its body before the first
+  test, so it always executes at least once; `continue` targets the test.
+- **Labeled `break` / `continue`.** `outer: for (…) { … break outer }` and
+  `continue outer`, on `for`, `while`, `do`/`while`, and `switch`. The label
+  binds to the frame it precedes; `break label` naming no enclosing frame is a
+  compile error rather than a silent no-op.
+
 ## Not implemented (errors today)
 
 - **`trait` / `implements` behavior.** `extends` (single inheritance) is
@@ -188,7 +210,7 @@ reported as parse or compile errors, never silently mis-run.
   JIT). On a user-class instance they therefore dispatch `plus`/`minus`, not
   Groovy's `next`/`previous`. Call `x.next()` / `x.previous()` explicitly for
   those.
-- **`switch`, `do/while`, labeled break, `assert`.**
+- **`assert`.**
 - **`getClass()`.** There is no runtime class object, so `e.getClass().getName()`
   raises `MissingMethodException` rather than naming the type. Use `instanceof`.
 - **`%` by zero.** `/` by zero raises a catchable `ArithmeticException` with
@@ -208,6 +230,20 @@ reported as parse or compile errors, never silently mis-run.
 
 ## Modeled with a documented simplification
 
+- **A labeled `break`/`continue` that leaves the loop containing a `try` runs
+  its `finally`; Groovy 5.0.7 does not.** groovyrs follows the JLS here. Repro:
+  `N: for (i in 0..1) { for (j in 0..2) { try { if (j == 1) continue N;
+  println("d"+i+j) } finally { println("df"+i+j) } } }` prints the `df?1`
+  cleanup lines under groovyrs and omits them under `groovy`. An *unlabeled*
+  `break`/`continue`, and a labeled one naming the loop the `try` is directly
+  inside, run the `finally` in both.
+- **`~/…/` uses `fancy-regex`, not `java.util.regex`.** The shared syntax —
+  classes, quantifiers, groups, alternation, anchors, lookaround,
+  backreferences — behaves the same, but Java-only constructs (possessive
+  quantifiers `a*+`, `\p{IsAlphabetic}`-style Unicode script/block properties,
+  `\G`) are not accepted and fault at the literal. A `~/…/` value is modeled far
+  enough to be a `switch` label and to print; the `=~` / `==~` match operators
+  and `Matcher` are not implemented.
 - **A `MissingMethodException` message omits Groovy's `Possible solutions:`
   line.** Groovy appends a fuzzy suggestion list built from the receiver's real
   JDK/GDK method table (`Possible solutions: grep(), next(), size(), …`), which

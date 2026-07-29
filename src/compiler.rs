@@ -68,7 +68,7 @@ struct FinallyFrame {
     try_depth: usize,
 }
 
-/// One enclosing loop's backpatch targets.
+/// One enclosing loop's (or `switch`'s) backpatch targets.
 struct Loop {
     /// `continue` jump op indices, patched to the loop's step/re-test label
     /// once it is known (the label is emitted *after* the loop body, so these
@@ -76,6 +76,24 @@ struct Loop {
     continue_ops: Vec<usize>,
     /// `break` jump op indices, patched to the loop exit once known.
     break_ops: Vec<usize>,
+    /// The `label:` this frame was introduced with, if any — what a
+    /// `break label` / `continue label` names.
+    label: Option<String>,
+    /// True for a `switch` frame. A `switch` is a `break` target but *not* a
+    /// `continue` target: a `continue` inside one continues the enclosing loop.
+    is_switch: bool,
+}
+
+impl Loop {
+    /// A fresh frame carrying `label`.
+    fn new(label: Option<String>, is_switch: bool) -> Self {
+        Loop {
+            continue_ops: Vec::new(),
+            break_ops: Vec::new(),
+            label,
+            is_switch,
+        }
+    }
 }
 
 struct Compiler {
@@ -140,7 +158,38 @@ struct Compiler {
     finallys: Vec<FinallyFrame>,
     /// Monotonic id for compiler-minted temporaries (`$exc_…`).
     temps_seen: u32,
+    /// The `label:` a `StmtKind::Labeled` just introduced, consumed by the loop
+    /// or `switch` it wraps when that pushes its [`Loop`] frame.
+    pending_label: Option<String>,
 }
+
+/// The Groovy/Java type names a `case <Name>:` label can check against without
+/// the script declaring the class — the same set `host::value_is_a` resolves.
+/// Modeled throwables are recognised separately, through `throwable::is_builtin`.
+const BUILTIN_TYPE_NAMES: &[&str] = &[
+    "Object",
+    "GroovyObject",
+    "String",
+    "CharSequence",
+    "GString",
+    "Integer",
+    "Long",
+    "Short",
+    "Byte",
+    "BigDecimal",
+    "Double",
+    "Float",
+    "BigInteger",
+    "Number",
+    "Boolean",
+    "List",
+    "ArrayList",
+    "Collection",
+    "Iterable",
+    "Map",
+    "LinkedHashMap",
+    "HashMap",
+];
 
 /// A declared class's inheritance-relevant shape: its direct superclass and the
 /// names of its own fields and methods. Used to compute the transitive (inherited)
@@ -235,6 +284,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         tries: Vec::new(),
         finallys: Vec::new(),
         temps_seen: 0,
+        pending_label: None,
     };
     // Arm the host's exception machinery for this run. Emitted only by a program
     // that uses `try`/`throw`, and it is what lets a runtime `Throwable` (a zero
@@ -915,6 +965,16 @@ impl Compiler {
             }
             StmtKind::If { cond, then, els } => self.if_stmt(cond, then, els),
             StmtKind::While { cond, body } => self.while_stmt(cond, body),
+            StmtKind::DoWhile { body, cond } => self.do_while_stmt(body, cond),
+            StmtKind::Switch { subject, cases } => self.switch_stmt(subject, cases),
+            StmtKind::Labeled { label, stmt } => {
+                self.pending_label = Some(label.clone());
+                let r = self.stmt(stmt);
+                // A label on something that is not a loop/switch never bound;
+                // drop it so it cannot leak onto the next one.
+                self.pending_label = None;
+                r
+            }
             StmtKind::For {
                 init,
                 cond,
@@ -927,28 +987,8 @@ impl Compiler {
                 finally_body,
             } => self.try_stmt(body, catches, finally_body, s.line),
             StmtKind::Throw(e) => self.throw_stmt(e, s.line),
-            StmtKind::Break => {
-                // Any `finally` entered inside the loop being left runs first.
-                let depth = self.loops.len();
-                self.emit_finallys(|f| f.loop_depth >= depth)?;
-                let op = self.b.emit(Op::Jump(0), self.cur_line);
-                match self.loops.last_mut() {
-                    Some(l) => l.break_ops.push(op),
-                    None => self.exit_ops.push(op),
-                }
-                Ok(())
-            }
-            StmtKind::Continue => {
-                let depth = self.loops.len();
-                self.emit_finallys(|f| f.loop_depth >= depth)?;
-                let op = self.b.emit(Op::Jump(0), self.cur_line);
-                self.loops
-                    .last_mut()
-                    .ok_or_else(|| "groovyrs: `continue` outside a loop".to_string())?
-                    .continue_ops
-                    .push(op);
-                Ok(())
-            }
+            StmtKind::Break(label) => self.break_stmt(label.as_deref()),
+            StmtKind::Continue(label) => self.continue_stmt(label.as_deref()),
             StmtKind::Return { value } => {
                 // Evaluate the returned expression *before* the cleanup, so a
                 // `finally` that mutates a variable cannot change the value
@@ -1288,13 +1328,11 @@ impl Compiler {
     }
 
     fn while_stmt(&mut self, cond: &Expr, body: &[Stmt]) -> Result<(), String> {
+        let label = self.pending_label.take();
         let top = self.b.current_pos();
         self.cond_expr(cond)?;
         let jf = self.b.emit(Op::JumpIfFalse(0), self.cur_line);
-        self.loops.push(Loop {
-            continue_ops: Vec::new(),
-            break_ops: Vec::new(),
-        });
+        self.loops.push(Loop::new(label, false));
         for s in body {
             self.stmt(s)?;
         }
@@ -1319,6 +1357,7 @@ impl Compiler {
         update: &Option<Box<Stmt>>,
         body: &[Stmt],
     ) -> Result<(), String> {
+        let label = self.pending_label.take();
         if let Some(init) = init {
             self.stmt(init)?;
         }
@@ -1332,10 +1371,7 @@ impl Compiler {
         };
         // `continue` runs the update clause, then re-tests — target it at the
         // step label emitted after the body.
-        self.loops.push(Loop {
-            continue_ops: Vec::new(),
-            break_ops: Vec::new(),
-        });
+        self.loops.push(Loop::new(label, false));
         for s in body {
             self.stmt(s)?;
         }
@@ -1358,6 +1394,179 @@ impl Compiler {
             self.b.patch_jump(op, end);
         }
         Ok(())
+    }
+
+    /// Lower `do { … } while (cond)`. The body precedes the test, so it always
+    /// runs at least once; `continue` targets the test, not the top.
+    fn do_while_stmt(&mut self, body: &[Stmt], cond: &Expr) -> Result<(), String> {
+        let label = self.pending_label.take();
+        let top = self.b.current_pos();
+        self.loops.push(Loop::new(label, false));
+        for s in body {
+            self.stmt(s)?;
+        }
+        // `continue` in a `do`/`while` skips the rest of the body and re-tests.
+        let test = self.b.current_pos();
+        let l = self.loops.pop().unwrap();
+        for op in &l.continue_ops {
+            self.b.patch_jump(*op, test);
+        }
+        self.cond_expr(cond)?;
+        self.b.emit(Op::JumpIfTrue(top), self.cur_line);
+        let end = self.b.current_pos();
+        for op in l.break_ops {
+            self.b.patch_jump(op, end);
+        }
+        Ok(())
+    }
+
+    /// The index in [`Compiler::loops`] a `break`/`continue` targets: the frame
+    /// carrying `label`, or the innermost frame when unlabeled. A `continue`
+    /// additionally skips `switch` frames, which it passes straight through.
+    fn loop_target(&self, label: Option<&str>, for_continue: bool) -> Option<usize> {
+        self.loops.iter().enumerate().rev().find_map(|(i, l)| {
+            let usable = !(for_continue && l.is_switch);
+            let named = match label {
+                Some(want) => l.label.as_deref() == Some(want),
+                None => true,
+            };
+            (usable && named).then_some(i)
+        })
+    }
+
+    /// Lower `break` / `break label`: run the `finally` bodies the exit skips,
+    /// then jump to the target frame's exit. A `break` with no enclosing frame
+    /// at all leaves the script, which is what Groovy's top-level `break` does.
+    fn break_stmt(&mut self, label: Option<&str>) -> Result<(), String> {
+        let target = self.loop_target(label, false);
+        if label.is_some() && target.is_none() {
+            return Err(format!(
+                "groovyrs: no enclosing loop labeled `{}` on line {}",
+                label.unwrap_or_default(),
+                self.cur_line
+            ));
+        }
+        // Any `finally` entered inside the frame being left runs first.
+        let depth = target.map_or(0, |i| i + 1);
+        self.emit_finallys(|f| f.loop_depth >= depth)?;
+        let op = self.b.emit(Op::Jump(0), self.cur_line);
+        match target {
+            Some(i) => self.loops[i].break_ops.push(op),
+            None => self.exit_ops.push(op),
+        }
+        Ok(())
+    }
+
+    /// Lower `continue` / `continue label`.
+    fn continue_stmt(&mut self, label: Option<&str>) -> Result<(), String> {
+        let target = self.loop_target(label, true).ok_or_else(|| match label {
+            Some(l) => format!(
+                "groovyrs: no enclosing loop labeled `{l}` on line {}",
+                self.cur_line
+            ),
+            None => "groovyrs: `continue` outside a loop".to_string(),
+        })?;
+        // Every `finally` entered *inside* the target frame (depth above it).
+        self.emit_finallys(|f| f.loop_depth > target)?;
+        let op = self.b.emit(Op::Jump(0), self.cur_line);
+        self.loops[target].continue_ops.push(op);
+        Ok(())
+    }
+
+    /// Lower `switch (subject) { case L: … default: … }`.
+    ///
+    /// ```text
+    ///   subject -> $switch_N
+    ///   $switch_N; <L0>; GIS_CASE; JumpIfTrue body0    ; dispatch chain, in
+    ///   $switch_N; <L1>; GIS_CASE; JumpIfTrue body1    ; source order
+    ///   Jump default_body (or end)
+    /// body0: <stmts>                                   ; falls through …
+    /// body1: <stmts>                                   ; … into the next body
+    /// end:
+    /// ```
+    ///
+    /// The dispatch chain runs first so a label expression is evaluated at most
+    /// once and only until one matches, and the bodies are laid out contiguously
+    /// so fall-through costs nothing. `break` targets `end` through a `switch`
+    /// [`Loop`] frame; `continue` passes through it to the enclosing loop.
+    fn switch_stmt(&mut self, subject: &Expr, cases: &[SwitchCase]) -> Result<(), String> {
+        let label = self.pending_label.take();
+        let subject_tmp = self.fresh_temp("switch");
+        self.expr(subject)?;
+        self.emit_temp_set(&subject_tmp);
+
+        let mut entry_jumps: Vec<(usize, usize)> = Vec::new(); // (case index, op)
+        for (i, case) in cases.iter().enumerate() {
+            let Some(test) = &case.label else { continue };
+            self.emit_temp_get(&subject_tmp);
+            let builtin = self.case_label(test)?;
+            self.emit_call_builtin(builtin, 0, self.cur_line)?;
+            entry_jumps.push((i, self.b.emit(Op::JumpIfTrue(0), self.cur_line)));
+        }
+        // No label matched: enter `default` if the switch has one, else leave.
+        let no_match = self.b.emit(Op::Jump(0), self.cur_line);
+
+        self.loops.push(Loop::new(label, true));
+        let mut starts: Vec<usize> = Vec::with_capacity(cases.len());
+        for case in cases {
+            starts.push(self.b.current_pos());
+            for s in &case.body {
+                self.stmt(s)?;
+            }
+        }
+        let end = self.b.current_pos();
+        let l = self.loops.pop().unwrap();
+
+        for (i, op) in entry_jumps {
+            self.b.patch_jump(op, starts[i]);
+        }
+        let default_start = cases
+            .iter()
+            .position(|c| c.label.is_none())
+            .map_or(end, |i| starts[i]);
+        self.b.patch_jump(no_match, default_start);
+        for op in l.break_ops {
+            self.b.patch_jump(op, end);
+        }
+        // A `continue` inside a switch belongs to the enclosing loop, which the
+        // frame let through — nothing can be parked here.
+        debug_assert!(l.continue_ops.is_empty());
+        Ok(())
+    }
+
+    /// Lower one `case` label onto the stack and name the `isCase` builtin that
+    /// decides it. A bare identifier naming a type is Groovy's `case String:` /
+    /// `case MyClass:` class check, which has to be recognised here because a
+    /// class name is not a value groovyrs can load; it pushes the *name* and
+    /// routes to the type-check builtin. Every other label is an ordinary
+    /// expression whose `isCase` the host decides from its runtime shape.
+    fn case_label(&mut self, label: &Expr) -> Result<u16, String> {
+        if let Expr::Var(name) = label {
+            if self.names_a_type(name) {
+                let idx = self.b.add_constant(Value::str(name.clone()));
+                self.b.emit(Op::LoadConst(idx), self.cur_line);
+                return Ok(crate::host::GIS_CASE_TYPE);
+            }
+        }
+        self.expr(label)?;
+        Ok(crate::host::GIS_CASE)
+    }
+
+    /// Does the bare name `name` denote a type rather than a variable? True for
+    /// a class the script declares, a modeled built-in throwable, and the
+    /// Groovy/Java type names `instanceof` already understands — unless a local
+    /// of that name shadows it in the current frame.
+    fn names_a_type(&self, name: &str) -> bool {
+        if self
+            .scope
+            .as_ref()
+            .is_some_and(|s| s.vars.contains_key(name))
+        {
+            return false;
+        }
+        self.class_index.contains_key(name)
+            || crate::throwable::is_builtin(name)
+            || BUILTIN_TYPE_NAMES.contains(&name)
     }
 
     /// Emit the in-place update `name = name ± 1` (leaving nothing on the stack).
@@ -1400,6 +1609,14 @@ impl Compiler {
             Expr::Float(f) => {
                 let c = self.b.add_constant(Value::float(*f));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
+            }
+            // A `~/…/` literal compiles at run time, through the host, because a
+            // compiled pattern is a heap object with no fusevm representation.
+            Expr::Regex(src) => {
+                let c = self.b.add_constant(Value::str(src.clone()));
+                self.b.emit(Op::LoadConst(c), self.cur_line);
+                self.b
+                    .emit(Op::CallBuiltin(crate::host::GREGEX, 1), self.cur_line);
             }
             // A `BigDecimal` literal has no fusevm `Value` representation, so it
             // is built at run time: push the literal's text and let the `GDEC`
@@ -1996,7 +2213,17 @@ fn collect_bound_stmts(body: &[Stmt], bound: &mut HashSet<String>) {
                 collect_bound_stmts(then, bound);
                 collect_bound_stmts(els, bound);
             }
-            StmtKind::While { body, .. } => collect_bound_stmts(body, bound),
+            StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+                collect_bound_stmts(body, bound)
+            }
+            StmtKind::Switch { cases, .. } => {
+                for c in cases {
+                    collect_bound_stmts(&c.body, bound);
+                }
+            }
+            StmtKind::Labeled { stmt, .. } => {
+                collect_bound_stmts(std::slice::from_ref(stmt), bound)
+            }
             StmtKind::Try {
                 body,
                 catches,
@@ -2063,12 +2290,24 @@ fn free_in_stmt(
                 free_in_stmt(s, bound, out, seen);
             }
         }
-        StmtKind::While { cond, body } => {
+        StmtKind::While { cond, body } | StmtKind::DoWhile { body, cond } => {
             free_in_expr(cond, bound, out, seen);
             for s in body {
                 free_in_stmt(s, bound, out, seen);
             }
         }
+        StmtKind::Switch { subject, cases } => {
+            free_in_expr(subject, bound, out, seen);
+            for c in cases {
+                if let Some(l) = &c.label {
+                    free_in_expr(l, bound, out, seen);
+                }
+                for s in &c.body {
+                    free_in_stmt(s, bound, out, seen);
+                }
+            }
+        }
+        StmtKind::Labeled { stmt, .. } => free_in_stmt(stmt, bound, out, seen),
         StmtKind::For {
             init,
             cond,
@@ -2116,8 +2355,8 @@ fn free_in_stmt(
             }
         }
         StmtKind::Throw(e) => free_in_expr(e, bound, out, seen),
-        StmtKind::Break
-        | StmtKind::Continue
+        StmtKind::Break(_)
+        | StmtKind::Continue(_)
         | StmtKind::Function { .. }
         | StmtKind::Class { .. } => {}
     }
@@ -2130,6 +2369,7 @@ fn free_in_expr(
     seen: &mut HashSet<String>,
 ) {
     match e {
+        Expr::Regex(_) => {}
         Expr::Var(n) => note_free(n, bound, out, seen),
         Expr::PostIncDec { name, .. } | Expr::PreIncDec { name, .. } => {
             note_free(name, bound, out, seen)
@@ -2342,7 +2582,18 @@ fn body_uses_exceptions(body: &[Stmt]) -> bool {
                 || ctors.iter().any(|c| body_uses_exceptions(&c.body))
                 || methods.iter().any(|m| body_uses_exceptions(&m.body))
         }
-        StmtKind::Break | StmtKind::Continue => false,
+        StmtKind::DoWhile { body, cond } => {
+            expr_uses_exceptions(cond) || body_uses_exceptions(body)
+        }
+        StmtKind::Switch { subject, cases } => {
+            expr_uses_exceptions(subject)
+                || cases.iter().any(|c| {
+                    c.label.as_ref().is_some_and(expr_uses_exceptions)
+                        || body_uses_exceptions(&c.body)
+                })
+        }
+        StmtKind::Labeled { stmt, .. } => body_uses_exceptions(std::slice::from_ref(stmt)),
+        StmtKind::Break(_) | StmtKind::Continue(_) => false,
     })
 }
 
@@ -2436,12 +2687,21 @@ fn body_has_ffi(body: &[Stmt]) -> bool {
                 || catches.iter().any(|c| body_has_ffi(&c.body))
         }
         StmtKind::Throw(e) => expr_has_ffi(e),
-        StmtKind::Break | StmtKind::Continue => false,
+        StmtKind::DoWhile { body, cond } => expr_has_ffi(cond) || body_has_ffi(body),
+        StmtKind::Switch { subject, cases } => {
+            expr_has_ffi(subject)
+                || cases
+                    .iter()
+                    .any(|c| c.label.as_ref().is_some_and(expr_has_ffi) || body_has_ffi(&c.body))
+        }
+        StmtKind::Labeled { stmt, .. } => body_has_ffi(std::slice::from_ref(stmt)),
+        StmtKind::Break(_) | StmtKind::Continue(_) => false,
     })
 }
 
 fn expr_has_ffi(e: &Expr) -> bool {
     match e {
+        Expr::Regex(_) => false,
         Expr::Call { name, args, .. } => name == RUST_COMPILE || args.iter().any(expr_has_ffi),
         Expr::Unary { rhs, .. } => expr_has_ffi(rhs),
         Expr::Binary { lhs, rhs, .. } => expr_has_ffi(lhs) || expr_has_ffi(rhs),

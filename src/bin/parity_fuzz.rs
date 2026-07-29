@@ -98,6 +98,7 @@ enum Mode {
     Gstring,
     Exceptions,
     Faults,
+    Switch,
     Mixed,
 }
 
@@ -113,6 +114,7 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Gstring => "gstring",
         Mode::Exceptions => "exceptions",
         Mode::Faults => "faults",
+        Mode::Switch => "switch",
         Mode::Mixed => "mixed",
     }
 }
@@ -129,6 +131,7 @@ fn mode_from(s: &str) -> Option<Mode> {
         "gstring" => Mode::Gstring,
         "exceptions" => Mode::Exceptions,
         "faults" => Mode::Faults,
+        "switch" => Mode::Switch,
         "mixed" => Mode::Mixed,
         _ => return None,
     })
@@ -624,6 +627,119 @@ fn gen_faults(rng: &mut Rng) -> Vec<String> {
     out
 }
 
+/// `case` labels the switch generator emits, paired with the subjects that make
+/// them interesting. Each exercises a different `isCase` rule: a constant is
+/// `equals`, a range and a list are `contains`, a type is `instanceof`, a
+/// pattern is a whole-string match, and a closure is called with the subject.
+const CASE_LABELS: &[&str] = &[
+    "1",
+    "2",
+    "\"s\"",
+    "3..5",
+    "[7, 8]",
+    "String",
+    "Integer",
+    "~/a+b/",
+    "{ it instanceof Integer && it > 100 }",
+    "null",
+];
+
+/// Subjects the switch generator dispatches, chosen so every label above both
+/// matches and misses across the corpus.
+const CASE_SUBJECTS: &[&str] = &[
+    "0", "1", "2", "4", "7", "101", "\"s\"", "\"aab\"", "\"zz\"", "null",
+];
+
+/// A `switch` / `do`-`while` / labeled-jump program. Fall-through is deliberate
+/// (a section only sometimes ends in `break`), and the labeled jumps target both
+/// the inner and the outer loop, since binding a label to the wrong frame is the
+/// bug class this mode exists to catch.
+fn gen_switch(rng: &mut Rng) -> Vec<String> {
+    let mut out = Vec::new();
+    match rng.below(3) {
+        // A switch over several subjects, with fall-through and a default.
+        0 => {
+            let n = rng.range_i(2, 4) as usize;
+            let mut labels: Vec<&str> = Vec::new();
+            while labels.len() < n {
+                let l = *pick(rng, CASE_LABELS);
+                if !labels.contains(&l) {
+                    labels.push(l);
+                }
+            }
+            out.push("def f(x) {".to_string());
+            out.push("  def r = \"\"".to_string());
+            out.push("  switch (x) {".to_string());
+            for (i, l) in labels.iter().enumerate() {
+                out.push(format!("    case {l}: r = r + \"{i}\""));
+                // Omitting `break` is the fall-through case.
+                if rng.chance(2, 3) {
+                    out.push("      break".to_string());
+                }
+            }
+            if rng.chance(3, 4) {
+                out.push("    default: r = r + \"d\"".to_string());
+            }
+            out.push("  }".to_string());
+            out.push("  return r".to_string());
+            out.push("}".to_string());
+            let subjects = rng.range_i(3, 6) as usize;
+            let list: Vec<String> = (0..subjects)
+                .map(|_| pick(rng, CASE_SUBJECTS).to_string())
+                .collect();
+            out.push(format!("def xs = [{}]", list.join(", ")));
+            out.push("for (i in 0..<xs.size()) println(\"\" + xs[i] + \" -> \" + f(xs[i]))".into());
+        }
+        // A `do`/`while`, which must run its body before the first test.
+        1 => {
+            let hi = rng.range_i(0, 4);
+            out.push("def i = 0".to_string());
+            out.push("do {".to_string());
+            out.push("  i++".to_string());
+            if rng.chance(1, 3) {
+                out.push(format!("  if (i == {}) continue", rng.range_i(1, 4)));
+            }
+            if rng.chance(1, 4) {
+                out.push(format!("  if (i == {}) break", rng.range_i(1, 5)));
+            }
+            out.push("  println(\"i \" + i)".to_string());
+            out.push(format!("}} while (i < {hi})"));
+            out.push("println(\"end \" + i)".to_string());
+        }
+        // Nested labeled loops: the jump must bind to the named frame, and a
+        // `continue` inside a `switch` must pass through to the loop around it.
+        _ => {
+            let trip = rng.range_i(0, 2);
+            let outer_jump = rng.chance(1, 2);
+            out.push("outer:".to_string());
+            out.push("for (a in 0..2) {".to_string());
+            out.push("  inner:".to_string());
+            out.push("  for (b in 0..2) {".to_string());
+            out.push(format!("    if (b == {trip}) {{"));
+            let (kw, label) = (
+                if rng.chance(1, 2) {
+                    "break"
+                } else {
+                    "continue"
+                },
+                if outer_jump { "outer" } else { "inner" },
+            );
+            out.push(format!("      {kw} {label}"));
+            out.push("    }".to_string());
+            if rng.chance(1, 2) {
+                out.push("    switch (b) {".to_string());
+                out.push("      case 1: continue".to_string());
+                out.push("      default: break".to_string());
+                out.push("    }".to_string());
+            }
+            out.push("    println(\"\" + a + b)".to_string());
+            out.push("  }".to_string());
+            out.push("}".to_string());
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Statement / program generators
 // ---------------------------------------------------------------------------
@@ -720,6 +836,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::Gstring,
                 Mode::Exceptions,
                 Mode::Faults,
+                Mode::Switch,
             ],
         )
     } else {
@@ -732,6 +849,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
         Mode::Gstring => gen_gstring(&mut rng),
         Mode::Exceptions => gen_exceptions(&mut rng),
         Mode::Faults => gen_faults(&mut rng),
+        Mode::Switch => gen_switch(&mut rng),
         _ => {
             let n = rng.range_i(1, 5) as usize;
             (0..n)
@@ -751,6 +869,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         | Mode::Gstring
                         | Mode::Exceptions
                         | Mode::Faults
+                        | Mode::Switch
                         | Mode::Mixed => unreachable!(),
                     };
                     println_of(expr)

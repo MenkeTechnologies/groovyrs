@@ -63,6 +63,30 @@ const CORPUS: &[(&str, &str, &str, &str)] = &[
         "def i = 0\nwhile (i < 3) i++\nprintln(i)   // => 3",
     ),
     (
+        "do",
+        "Keyword",
+        "`do { … } while (cond)`; the body runs before the first test",
+        "def i = 0\ndo { i++ } while (i < 3)\nprintln(i)   // => 3",
+    ),
+    (
+        "switch",
+        "Keyword",
+        "multi-way branch on Groovy's `isCase` (constant, range, list, type, `~/…/`, closure)",
+        "switch (5) { case 4..6: println(\"in\"); break; default: println(\"out\") }   // => in",
+    ),
+    (
+        "case",
+        "Keyword",
+        "one `switch` label; sections fall through until a `break`",
+        "switch (1) { case 1: println(\"one\"); break }   // => one",
+    ),
+    (
+        "default",
+        "Keyword",
+        "the `switch` section entered when no `case` label matched",
+        "switch (9) { case 1: break; default: println(\"d\") }   // => d",
+    ),
+    (
         "for",
         "Keyword",
         "C-style `for (init; cond; update)` or the `for (x in a..b)` range loop",
@@ -83,13 +107,13 @@ const CORPUS: &[(&str, &str, &str, &str)] = &[
     (
         "break",
         "Keyword",
-        "exit the nearest enclosing loop immediately",
+        "exit the nearest enclosing loop or `switch`; `break label` exits the named one",
         "for (i in 0..9) { if (i == 3) break; print(i) }   // => 012",
     ),
     (
         "continue",
         "Keyword",
-        "skip to the next iteration of the nearest loop",
+        "skip to the next iteration of the nearest loop; `continue label` targets the named one",
         "for (i in 0..3) { if (i == 1) continue; print(i) }   // => 023",
     ),
     (

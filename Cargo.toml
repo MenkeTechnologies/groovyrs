@@ -96,6 +96,13 @@ bigdecimal = "0.4"
 # `libc` gives the DAP adapter the pipe + dup2 to capture the debuggee's stdout
 # (println) so program output streams as `output` events rather than corrupting
 # the JSON channel, plus the orphan-guard (getppid) for the language server.
+# Groovy's `~/…/` pattern literals are `java.util.regex.Pattern`, so a `switch`
+# `case ~/…/:` label runs a Java regex. `fancy-regex` wraps the Rust `regex`
+# crate for the linear fast path and adds a backtracking engine for the
+# constructs Java has and Rust `regex` refuses — lookahead/lookbehind and
+# backreferences. Java syntax it does not share is a documented gap (BUGS.md).
+fancy-regex = "0.18"
+
 lsp-server = "0.7.9"
 lsp-types = "0.97.0"
 serde = { version = "1", features = ["derive"] }

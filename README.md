@@ -168,9 +168,12 @@ Implemented and checked against Apache Groovy:
   `.contains(x)`, `.each`, `.collect`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, and
   `a?.member` / `a?.method()`.
-- **Control flow** — `if` / `else if` / `else`, `while`, the C-style
-  `for (init; cond; update)`, the `for (x in a..b)` / `for (x in a..<b)` range
-  loop, `break`, `continue`, `return`.
+- **Control flow** — `if` / `else if` / `else`, `while`, `do`/`while`, the
+  C-style `for (init; cond; update)`, the `for (x in a..b)` / `for (x in a..<b)`
+  range loop, `break`, `continue`, labeled `break`/`continue`, `return`.
+- **`switch`** — Groovy's, with the full `isCase` semantics: constant, range,
+  list, type (`case String:`), `~/…/` pattern, closure, and `null` labels,
+  source-order fall-through until a `break`, and a `default` anywhere.
 - **Output** — `println` / `print` with Groovy value formatting, in both the
   `println(x)` and paren-less `println x` command forms.
 - **Comments** — `//` line, `/* … */` block.
@@ -183,7 +186,7 @@ Implemented and checked against Apache Groovy:
   text, so `try`/`catch` reaches its handler.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
-overloading by parameter type, `++`/`--` not calling `next`/`previous`, `switch`,
+overloading by parameter type, `++`/`--` not calling `next`/`previous`,
 `assert`, by-reference upvalue capture).
 
 ---
@@ -278,7 +281,7 @@ Next waves, in priority order:
    are keyed by name only, so same-named overloads collapse to the last declared.
 3. **`trait`s and interface bodies** — `implements` is parsed but has no runtime
    effect beyond `Comparable`'s `compareTo`.
-4. **`switch`, `assert`, `do`/`while`, labeled `break`** and a broader standard
+4. **`assert` with Groovy's power-assert rendering** and a broader standard
    library (`Math`, more `java.util`/GDK collection methods).
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
@@ -303,7 +306,7 @@ every divergence it reports is a real parity gap — the class of bug the slice-
 `continue`-codegen fix was. Decimal literals, scales, and exponent forms are
 generated without restriction now that the `BigDecimal` model is exact. Modes:
 `arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
-`gstring`, `exceptions`, `faults`, `mixed`.
+`gstring`, `exceptions`, `faults`, `switch`, `mixed`.
 
 All three need `groovy` on PATH and never run in CI; the CI-safe replay is the
 frozen `tests/parity.rs` (snapshot in `tests/data/parity_expected.txt`,

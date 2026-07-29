@@ -1612,3 +1612,154 @@ p("d", { 0.0d / 0.0d })
         "a Division undefined\nb Division by zero\nc Division undefined\nd NaN\n"
     );
 }
+
+// ── switch / do-while / labeled break ───────────────────────────────────────
+
+#[test]
+fn switch_matches_with_groovys_is_case_rules() {
+    // Not `==`: a range and a list contain, a type is `instanceof`, a pattern
+    // matches the *whole* subject, and a closure is called with it. Verified
+    // against Apache Groovy 5.0.7.
+    let src = r#"
+def f(x) {
+    switch (x) {
+        case 1: return "one"
+        case 4..6: return "range"
+        case [7, 8]: return "list"
+        case String: return "string"
+        case ~/a+b/: return "regex"
+        case { it instanceof Integer && it > 100 }: return "big"
+        case null: return "null"
+        default: return "other"
+    }
+}
+def xs = [1, 5, 7, "zz", 101, null, 9.5]
+for (i in 0..<xs.size()) println(f(xs[i]))
+println(f("aab"))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "one\nrange\nlist\nstring\nbig\nnull\nother\nstring\n");
+}
+
+#[test]
+fn a_regex_case_must_match_the_whole_subject() {
+    // Groovy's `case ~/…/` is `Matcher.matches`, not `find` — `a+` does not
+    // match "aabb" even though it matches a prefix of it.
+    let src = r#"
+switch ("aabb") {
+    case ~/a+/: println("partial"); break
+    case ~/a+b+/: println("full"); break
+    default: println("none")
+}
+println(~/a+b/)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "full\na+b\n");
+}
+
+#[test]
+fn switch_falls_through_until_a_break() {
+    let src = r#"
+def g(x) {
+    def r = ""
+    switch (x) {
+        case 1: r = r + "a"
+        case 2: r = r + "b"; break
+        case 3: r = r + "c"
+        default: r = r + "d"
+    }
+    return r
+}
+for (i in 1..4) println(g(i))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "ab\nb\ncd\nd\n");
+}
+
+#[test]
+fn a_switch_evaluates_its_subject_once_and_labels_lazily() {
+    let src = r#"
+n = 0
+hits = ""
+def bump() { n = n + 1; return 2 }
+def probe(v) { hits = hits + v; return v }
+switch (bump()) {
+    case probe(1): println("no"); break
+    case probe(2): println("yes"); break
+    case probe(3): println("no"); break
+}
+println(n + " " + hits)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "yes\n1 12\n");
+}
+
+#[test]
+fn do_while_runs_its_body_before_the_first_test() {
+    let src = r#"
+def i = 0
+do { println("i " + i); i++ } while (i < 3)
+do { println("once") } while (false)
+def k = 0
+do {
+    k++
+    if (k == 2) continue
+    if (k == 5) break
+    println("k " + k)
+} while (k < 10)
+println("end " + k)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "i 0\ni 1\ni 2\nonce\nk 1\nk 3\nk 4\nend 5\n");
+}
+
+#[test]
+fn a_labeled_break_and_continue_bind_to_the_named_loop() {
+    let src = r#"
+outer:
+for (a in 0..2) {
+    for (b in 0..2) {
+        if (b == 1) continue outer
+        if (a == 2) break outer
+        println(a + "-" + b)
+    }
+}
+o2: for (a in 0..2) { inner: for (b in 0..2) { if (b == 1) break inner; println("i " + a + b) } }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "0-0\n1-0\ni 00\ni 10\ni 20\n");
+}
+
+#[test]
+fn a_switch_is_a_break_target_but_not_a_continue_target() {
+    // Groovy/Java rule: a `continue` inside a `switch` continues the enclosing
+    // loop, while a `break` leaves only the switch. A labeled `break` leaves the
+    // named loop from inside it.
+    let src = r#"
+scan:
+for (a in 0..3) {
+    switch (a) {
+        case 1: continue
+        case 3: break scan
+        default: break
+    }
+    println("scan " + a)
+}
+println("done")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "scan 0\nscan 2\ndone\n");
+}
+
+#[test]
+fn a_break_naming_no_enclosing_loop_is_a_compile_error() {
+    let (_out, ok) = run("for (i in 0..2) { break nope }");
+    assert!(!ok, "a label with no matching loop must not compile");
+}

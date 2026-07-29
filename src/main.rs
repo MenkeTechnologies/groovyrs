@@ -57,6 +57,15 @@ fn main() -> ExitCode {
     if cli.disasm {
         return finish(groovyrs::disassemble(&src));
     }
+    if cli.tiers {
+        return match groovyrs::tiers::report(&src) {
+            Ok(r) => {
+                println!("{r}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(&e),
+        };
+    }
 
     match groovyrs::run_str(&src) {
         Ok(_) => ExitCode::SUCCESS,

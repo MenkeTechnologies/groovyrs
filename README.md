@@ -93,6 +93,7 @@ groovy --version              # print the version banner
 groovy --dump-tokens f.groovy # inspect the lexer token stream
 groovy --dump-ast f.groovy    # inspect the parsed AST
 groovy --disasm f.groovy      # inspect the lowered fusevm bytecode
+groovy --tiers f.groovy       # run it, then report which fusevm tiers took it
 groovy --lsp                  # Language Server Protocol over stdio
 groovy --dap                  # Debug Adapter Protocol over stdio
 ```
@@ -190,6 +191,7 @@ overloading by parameter type, `++`/`--` not calling `next`/`previous`, `switch`
 | `--dump-tokens FILE` | Print the lexer token stream and exit. |
 | `--dump-ast FILE` | Print the parsed AST and exit. |
 | `--disasm FILE` | Print the lowered fusevm bytecode (with source line numbers) and exit. |
+| `--tiers FILE` | Run it, then report which fusevm execution tier took each of its chunks. |
 | `--lsp` | Speak the Language Server Protocol over stdio. |
 | `--dap` | Speak the Debug Adapter Protocol over stdio. |
 

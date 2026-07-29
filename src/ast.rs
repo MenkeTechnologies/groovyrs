@@ -159,7 +159,11 @@ pub enum AssignOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Int(i64),
+    /// A `d`/`f`-suffixed decimal literal: an IEEE double.
     Float(f64),
+    /// An unsuffixed decimal literal — a `java.math.BigDecimal`, held as its
+    /// exact source text (see [`crate::decimal`]).
+    Dec(String),
     Str(String),
     Bool(bool),
     /// The `null` literal.

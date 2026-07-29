@@ -992,6 +992,16 @@ impl Compiler {
                 let c = self.b.add_constant(Value::float(*f));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
             }
+            // A `BigDecimal` literal has no fusevm `Value` representation, so it
+            // is built at run time: push the literal's text and let the `GDEC`
+            // builtin intern it on the host heap (repeated evaluations of the
+            // same literal share one handle).
+            Expr::Dec(text) => {
+                let c = self.b.add_constant(Value::str(text.clone()));
+                self.b.emit(Op::LoadConst(c), self.cur_line);
+                self.b
+                    .emit(Op::CallBuiltin(crate::host::GDEC, 1), self.cur_line);
+            }
             Expr::Str(s) => {
                 let c = self.b.add_constant(Value::str(s.clone()));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
@@ -1663,7 +1673,12 @@ fn free_in_expr(
             }
         }
         Expr::InstanceOf { value, .. } => free_in_expr(value, bound, out, seen),
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null => {}
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Dec(_)
+        | Expr::Str(_)
+        | Expr::Bool(_)
+        | Expr::Null => {}
     }
 }
 
@@ -1740,6 +1755,7 @@ fn expr_has_ffi(e: &Expr) -> bool {
         Expr::InstanceOf { value, .. } => expr_has_ffi(value),
         Expr::Int(_)
         | Expr::Float(_)
+        | Expr::Dec(_)
         | Expr::Str(_)
         | Expr::Bool(_)
         | Expr::Null

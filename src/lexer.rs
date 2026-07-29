@@ -26,7 +26,13 @@ pub struct Token {
 pub enum Tok {
     // literals & names
     Int(i64),
+    /// A `d`/`f`-suffixed decimal literal: an IEEE double.
     Float(f64),
+    /// An unsuffixed (or `g`-suffixed) decimal literal, kept as its exact source
+    /// text because it is a `java.math.BigDecimal` — the literal's own scale
+    /// (`1.50` has two fraction digits, `2.5e7` a scale of -6) is part of the
+    /// value and no `f64` can carry it. See [`crate::decimal`].
+    Dec(String),
     Str(String),
     Ident(String),
     // keywords
@@ -215,11 +221,14 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     }
                 }
             }
-            // integer/long/float/double/BigDecimal suffixes are accepted and
-            // dropped. The slice ends here rather than being alpha-trimmed,
-            // because trimming trailing letters would also eat an exponent's
-            // own `e`.
+            // integer/long/float/double/BigDecimal suffixes are consumed. The
+            // slice ends here rather than being alpha-trimmed, because trimming
+            // trailing letters would also eat an exponent's own `e`. The suffix
+            // decides the *type*: `f`/`F`/`d`/`D` make an IEEE double, while an
+            // unsuffixed (or `g`/`G`-suffixed) decimal is a `BigDecimal` — which
+            // is Groovy's default and what `1.50` / `2.5e7` mean.
             let num_end = i;
+            let mut is_double = false;
             if i < bytes.len()
                 && matches!(
                     bytes[i],
@@ -228,16 +237,29 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             {
                 if matches!(bytes[i], b'f' | b'F' | b'd' | b'D') {
                     is_float = true;
+                    is_double = true;
                 }
                 i += 1;
             }
             let text = &src[start..num_end];
-            if is_float {
+            if is_double {
                 let v: f64 = text.parse().map_err(|_| {
                     format!("groovyrs: bad decimal literal `{text}` on line {line}")
                 })?;
                 out.push(Token {
                     kind: Tok::Float(v),
+                    line,
+                });
+            } else if is_float {
+                // Validated at lex time so a malformed literal is a lex error,
+                // but carried as text: the exact digits are the value.
+                if crate::decimal::parse(text).is_none() {
+                    return Err(format!(
+                        "groovyrs: bad decimal literal `{text}` on line {line}"
+                    ));
+                }
+                out.push(Token {
+                    kind: Tok::Dec(text.to_string()),
                     line,
                 });
             } else {

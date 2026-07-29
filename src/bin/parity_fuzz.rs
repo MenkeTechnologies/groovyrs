@@ -13,18 +13,21 @@
 //! those, and a mutual error teaches nothing.
 //!
 //! **Determinism invariant.** Every case has output that is identical on any
-//! correct runtime. In particular the generator stays clear of the *documented*
-//! f64-vs-BigDecimal divergences (see BUGS.md) so a reported divergence is a real
-//! parity gap, never a known simplification:
+//! correct runtime. The generator stays clear of the two *documented*
+//! simplifications (see BUGS.md) so a reported divergence is a real parity gap:
 //!
 //! * integer arithmetic only (`+ - * %`), with small operands so no result
-//!   overflows `i64`/`int`;
-//! * division only by terminating divisors (factors 2 and 5), so the exact
-//!   rational result prints identically under f64 shortest-round-trip and
-//!   Groovy's stripped `BigDecimal` quotient (`7/2`, `3/8`, `9/20` — never `1/3`);
-//! * decimals appear only as standalone literals / concatenation operands, never
-//!   inside `+`/`-`/`*` — Groovy's `BigDecimal` *accumulates scale* through those
-//!   (`10 * 1.25 → 12.50`), which an f64 cannot reproduce.
+//!   overflows `int` (Groovy wraps an overflowing `Integer` at 32 bits, groovyrs
+//!   at 64);
+//! * every `/` and `%` keeps a non-zero right operand, since a zero divisor
+//!   raises `ArithmeticException` in Groovy and faults in groovyrs — a mutual
+//!   abort teaches nothing.
+//!
+//! Decimals are *not* restricted: since the `BigDecimal` value model landed
+//! (src/decimal.rs) they carry exact scale through `+ - * / %`, so arbitrary
+//! literals, scales, and exponent forms are all in scope — `10 * 1.25` (`12.50`),
+//! `1/3` (`0.3333333333`), `2.5e7 + 1` (`25000001`). Narrowing that generator
+//! again would hide exactly the regressions it exists to catch.
 //!
 //! Within that surface the fuzzer is a parity/regression prover: any divergence
 //! is a groovyrs bug (the kind the `continue`-codegen fix in slice 1 was).
@@ -148,20 +151,92 @@ fn gen_int(rng: &mut Rng, depth: u32) -> String {
     }
 }
 
-/// A dyadic decimal literal — a multiple of 1/8, exactly representable in f64, so
-/// every `+`/`-`/`*` over these values is exact on both sides.
-fn gen_dyadic(rng: &mut Rng) -> String {
-    const VALS: &[&str] = &[
-        "0.5", "0.25", "0.75", "0.125", "0.625", "1.5", "2.25", "3.75", "0.375", "1.25",
-    ];
-    pick(rng, VALS).to_string()
+/// A decimal literal with an arbitrary scale: plain (`0.750`), exponent form
+/// (`2.5e-3`, whose scale is negative for a positive exponent), or `d`-suffixed
+/// (an IEEE double, which prints and divides by different rules). Sometimes
+/// negative. Every shape is in scope for the `BigDecimal` value model.
+fn gen_decimal(rng: &mut Rng) -> String {
+    let digits = rng.range_i(1, 7) as usize;
+    let mut mantissa = String::new();
+    for _ in 0..digits {
+        mantissa.push(char::from(b'0' + rng.below(10) as u8));
+    }
+    // Place the point anywhere inside the digits (scale 0 keeps it integral).
+    let scale = rng.below(digits as u64 + 2) as usize;
+    let mut text = if scale == 0 {
+        format!("{mantissa}.0")
+    } else if scale < mantissa.len() {
+        let split = mantissa.len() - scale;
+        format!("{}.{}", &mantissa[..split], &mantissa[split..])
+    } else {
+        format!("0.{}{mantissa}", "0".repeat(scale - mantissa.len()))
+    };
+    match rng.below(6) {
+        0 => text.push_str(&format!("e{}", rng.range_i(-8, 8))),
+        1 => text.push('d'),
+        _ => {}
+    }
+    if rng.chance(1, 4) {
+        text.insert(0, '-');
+    }
+    text
 }
 
-/// A single division whose exact result terminates (divisor factors are only 2
-/// and 5), so f64 shortest-round-trip and BigDecimal print the same text.
-fn gen_terminating_div(rng: &mut Rng) -> String {
-    let divs = [2, 4, 5, 8, 10, 16, 20, 25, 40, 50];
-    let d = *pick(rng, &divs);
+/// A decimal literal guaranteed non-zero, for the right operand of `/` and `%`
+/// (a zero divisor aborts both runtimes).
+fn gen_nonzero_decimal(rng: &mut Rng) -> String {
+    let text = gen_decimal(rng);
+    let magnitude = text.trim_start_matches('-').trim_end_matches('d');
+    if magnitude.parse::<f64>().map_or(true, |v| v == 0.0) {
+        return "3.7".to_string();
+    }
+    text
+}
+
+/// A decimal arithmetic expression: `+ - * / %` over decimal literals and small
+/// integers, exercising scale accumulation, the `BigDecimal` division policy, and
+/// the `BigDecimal`/`double` mixes.
+fn gen_dec_arith(rng: &mut Rng, depth: u32) -> String {
+    if depth == 0 || rng.chance(1, 3) {
+        return if rng.chance(1, 4) {
+            rng.range_i(0, 40).to_string()
+        } else {
+            gen_decimal(rng)
+        };
+    }
+    match rng.below(5) {
+        0 => format!(
+            "({} + {})",
+            gen_dec_arith(rng, depth - 1),
+            gen_dec_arith(rng, depth - 1)
+        ),
+        1 => format!(
+            "({} - {})",
+            gen_dec_arith(rng, depth - 1),
+            gen_dec_arith(rng, depth - 1)
+        ),
+        2 => format!(
+            "({} * {})",
+            gen_dec_arith(rng, depth - 1),
+            gen_dec_arith(rng, depth - 1)
+        ),
+        3 => format!(
+            "({} / {})",
+            gen_dec_arith(rng, depth - 1),
+            gen_nonzero_decimal(rng)
+        ),
+        _ => format!(
+            "({} % {})",
+            gen_dec_arith(rng, depth - 1),
+            gen_nonzero_decimal(rng)
+        ),
+    }
+}
+
+/// A single division with a non-zero divisor. Any divisor is fair game now that
+/// quotients are exact `BigDecimal`s — `1/3` prints `0.3333333333` on both sides.
+fn gen_div(rng: &mut Rng) -> String {
+    let d = rng.range_i(1, 50);
     let n = rng.range_i(0, 200);
     format!("{n} / {d}")
 }
@@ -199,7 +274,7 @@ fn gen_string(rng: &mut Rng, depth: u32) -> String {
     }
     let rhs = match rng.below(5) {
         0 => gen_int(rng, 2),
-        1 => gen_dyadic(rng),
+        1 => gen_decimal(rng),
         2 => (*pick(rng, &["true", "false"])).to_string(),
         3 => "null".to_string(),
         _ => gen_string(rng, depth - 1),
@@ -214,8 +289,8 @@ fn gen_format_value(rng: &mut Rng) -> String {
         0 => (*pick(rng, &["true", "false"])).to_string(),
         1 => "null".to_string(),
         2 => format!("-{}", rng.range_i(1, 999)),
-        3 => gen_dyadic(rng),
-        4 => gen_terminating_div(rng),
+        3 => gen_decimal(rng),
+        4 => gen_dec_arith(rng, 3),
         5 => gen_string(rng, 2),
         _ => gen_int(rng, 2),
     }
@@ -324,13 +399,11 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
             (0..n)
                 .map(|_| {
                     let expr = match mode {
-                        Mode::Arith => {
-                            if rng.chance(2, 5) {
-                                gen_terminating_div(&mut rng)
-                            } else {
-                                gen_int(&mut rng, 4)
-                            }
-                        }
+                        Mode::Arith => match rng.below(5) {
+                            0 | 1 => gen_dec_arith(&mut rng, 4),
+                            2 => gen_div(&mut rng),
+                            _ => gen_int(&mut rng, 4),
+                        },
                         Mode::Logic => gen_bool(&mut rng, 4),
                         Mode::Strings => gen_string(&mut rng, 4),
                         Mode::Format => gen_format_value(&mut rng),

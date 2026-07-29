@@ -1,0 +1,601 @@
+//! Groovy's decimal value model: `java.math.BigDecimal`.
+//!
+//! An unsuffixed Groovy decimal literal (`1.50`, `2.5e7`) is a `BigDecimal`, not
+//! a `double`. That is not a formatting detail — a `BigDecimal` is an exact
+//! (unscaled value, scale) pair, so it prints through `BigDecimal.toString`
+//! (which switches to `E+n` form outside a narrow plain-notation window) and its
+//! arithmetic *accumulates scale*: `1.25 * 0` is `0.00`, `2.5e7 + 1` is
+//! `25000001` (scale 0, no trailing `.0`), and `1.5e300 * 1.5e300` is `2.25E+600`
+//! rather than an `f64` infinity. Only a `d`/`f`-suffixed literal is an IEEE
+//! double, which keeps its own `Double.toString` rules ([`format_double`]).
+//!
+//! This module is the pure value model: parsing, rendering, and the five
+//! arithmetic operations with Groovy's exact scale rules. [`crate::host`] wires
+//! it into the fusevm object heap (a decimal rides a `Value::Obj` handle), the
+//! strict numeric hook, and the `GDIV` division builtin.
+//!
+//! Every rule below is byte-verified against Apache Groovy 5.0.7 / JVM 26; the
+//! unit tests at the bottom carry the observed reference output.
+
+use bigdecimal::num_bigint::{BigInt, Sign};
+use bigdecimal::{BigDecimal, FromPrimitive, RoundingMode, Signed, ToPrimitive, Zero};
+use std::str::FromStr;
+
+/// Extra significant digits Groovy asks for when a quotient does not terminate
+/// (`BigDecimalMath.DIVISION_EXTRA_PRECISION`): the `MathContext` precision is
+/// `max(precision(a), precision(b)) + 10`.
+const DIVISION_EXTRA_PRECISION: u64 = 10;
+
+/// The floor Groovy puts under a non-terminating quotient's scale
+/// (`BigDecimalMath.DIVISION_MIN_SCALE`): the result is rounded to at most
+/// `max(scale(a), scale(b), 10)` fraction digits. This is why `1.0 / 3.0` is
+/// `0.3333333333` (10 digits) and not the full `MathContext` precision.
+const DIVISION_MIN_SCALE: i64 = 10;
+
+/// The largest `**` exponent computed exactly. An exact decimal power multiplies
+/// the scale by the exponent, so beyond this the result is measured in megabytes
+/// of digits; [`pow`] declines instead, and the caller falls back to `double`.
+const MAX_EXACT_EXPONENT: i64 = 10_000;
+
+/// The plain-notation window of `BigDecimal.toString`: a value whose adjusted
+/// exponent is below this (and any value with a negative scale) prints in
+/// scientific `E+n` form.
+const PLAIN_NOTATION_MIN_EXPONENT: i64 = -6;
+
+/// Parse a Groovy decimal literal (`1.50`, `2.5e7`, `1E+3`) into a `BigDecimal`,
+/// preserving the literal's exact scale. Returns `None` for text that is not a
+/// decimal literal.
+pub fn parse(text: &str) -> Option<BigDecimal> {
+    BigDecimal::from_str(text).ok()
+}
+
+/// The *exact* decimal value of a double — every digit of its binary expansion,
+/// as `new java.math.BigDecimal(double)` gives (`0.555d` becomes
+/// `0.55500000000000004884981308350688777863979339599609375`). Groovy needs this
+/// for `BigDecimal % Double`, the one mixed operation it keeps exact. `None` for
+/// a non-finite double.
+pub fn from_f64_exact(f: f64) -> Option<BigDecimal> {
+    f.is_finite().then(|| BigDecimal::from_f64(f)).flatten()
+}
+
+/// The `BigDecimal` view of an `i64` (scale 0), for mixed `1 + 1.5` arithmetic.
+pub fn from_i64(n: i64) -> BigDecimal {
+    BigDecimal::from(n)
+}
+
+/// The `f64` view of a decimal, for the paths that must fall back to double
+/// arithmetic (a `d`-suffixed operand, a fractional exponent).
+pub fn to_f64(d: &BigDecimal) -> f64 {
+    d.to_f64().unwrap_or(f64::NAN)
+}
+
+/// The exact `i64` value of a decimal, or `None` when it has a fraction part or
+/// does not fit. Used for `**` (whose exponent must be an integer).
+pub fn to_i64(d: &BigDecimal) -> Option<i64> {
+    d.is_integer().then(|| d.to_i64()).flatten()
+}
+
+/// Render a decimal exactly as `java.math.BigDecimal.toString`.
+///
+/// Plain notation is used when the scale is non-negative *and* the adjusted
+/// exponent (`digits - 1 - scale`) is at least -6; everything else — including
+/// every negative scale, which is what an exponent literal like `2.5e7` produces
+/// — uses scientific notation with an explicit exponent sign (`2.5E+7`, `1E-7`).
+/// A single-digit coefficient keeps no fraction part (`1E+3`, not `1.0E+3`).
+pub fn to_groovy_string(d: &BigDecimal) -> String {
+    let (unscaled, scale) = d.as_bigint_and_exponent();
+    let text = unscaled.to_string();
+    let (sign, digits) = match text.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", text.as_str()),
+    };
+    let n = digits.len() as i64;
+    // The exponent the value would carry in scientific notation.
+    let adjusted = n - 1 - scale;
+    let body = if scale == 0 {
+        digits.to_string()
+    } else if scale > 0 && adjusted >= PLAIN_NOTATION_MIN_EXPONENT {
+        if n > scale {
+            let split = (n - scale) as usize;
+            format!("{}.{}", &digits[..split], &digits[split..])
+        } else {
+            format!("0.{}{}", "0".repeat((scale - n) as usize), digits)
+        }
+    } else {
+        let mut out = String::with_capacity(digits.len() + 6);
+        out.push_str(&digits[..1]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('E');
+        out.push(if adjusted >= 0 { '+' } else { '-' });
+        out.push_str(&adjusted.abs().to_string());
+        out
+    };
+    format!("{sign}{body}")
+}
+
+// Addition, subtraction, and multiplication run on the unscaled integers rather
+// than through `bigdecimal`'s operators, which short-circuit a zero operand
+// (`x * 0`, `x - 0`) to a scale-0 zero. Java keeps the scale in those cases —
+// `1.25 * 0` is `0.00`, and a zero remainder is `0.000` — and the scale is the
+// whole point of this module.
+
+/// `a + b` — scale is `max(scale(a), scale(b))` (`1.10 + 2.20` is `3.30`).
+pub fn add(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
+    let (x, y, scale) = aligned(a, b);
+    BigDecimal::from_bigint(x + y, scale)
+}
+
+/// `a - b` — scale is `max(scale(a), scale(b))`.
+pub fn sub(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
+    let (x, y, scale) = aligned(a, b);
+    BigDecimal::from_bigint(x - y, scale)
+}
+
+/// `a * b` — scale is `scale(a) + scale(b)` (`1.25 * 0` is `0.00`).
+pub fn mul(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
+    let (ua, sa) = a.as_bigint_and_exponent();
+    let (ub, sb) = b.as_bigint_and_exponent();
+    BigDecimal::from_bigint(ua * ub, sa + sb)
+}
+
+/// Unary `-a`, keeping the scale.
+pub fn neg(a: &BigDecimal) -> BigDecimal {
+    let (u, scale) = a.as_bigint_and_exponent();
+    BigDecimal::from_bigint(-u, scale)
+}
+
+/// Both operands' unscaled values raised to their common (larger) scale.
+fn aligned(a: &BigDecimal, b: &BigDecimal) -> (BigInt, BigInt, i64) {
+    let (ua, sa) = a.as_bigint_and_exponent();
+    let (ub, sb) = b.as_bigint_and_exponent();
+    let scale = sa.max(sb);
+    (
+        ua * pow10((scale - sa) as u64),
+        ub * pow10((scale - sb) as u64),
+        scale,
+    )
+}
+
+/// `a % b` — Java's `BigDecimal.remainder`: `a - divideToIntegralValue(a, b) * b`,
+/// so the result takes the sign of `a` and the scale of that subtraction
+/// (`1.5 % 0.4` is `0.3`, `657.87e+3 % 1.50` is `0.0`). `None` when `b` is zero
+/// (Groovy raises `ArithmeticException`).
+pub fn remainder(a: &BigDecimal, b: &BigDecimal) -> Option<BigDecimal> {
+    if b.is_zero() {
+        return None;
+    }
+    Some(sub(a, &mul(&divide_to_integral(a, b), b)))
+}
+
+/// Java's `BigDecimal.divideToIntegralValue`: the quotient truncated toward
+/// zero, carried at the preferred scale `scale(a) - scale(b)` — padded up to it,
+/// or with trailing zeros stripped down to it, never past. The scale is not
+/// cosmetic here: [`remainder`] subtracts `q * b` from `a`, so this scale is
+/// what decides the remainder's own.
+fn divide_to_integral(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
+    let preferred = a.fractional_digit_count() - b.fractional_digit_count();
+    // Java short-circuits a quotient of zero straight to the preferred scale.
+    if a.abs() < b.abs() {
+        return BigDecimal::from_bigint(BigInt::zero(), preferred);
+    }
+    at_preferred_scale(integral_quotient(a, b), 0, preferred)
+}
+
+/// `a ** e` for a non-negative integer exponent — exact, with scale
+/// `scale(a) * e` (`10.0 ** 20` keeps 20 fraction digits). Returns `None` for a
+/// negative exponent (which Groovy computes as a `double`) and for an exponent
+/// so large that the exact result would not fit memory.
+pub fn pow(a: &BigDecimal, e: i64) -> Option<BigDecimal> {
+    (0..=MAX_EXACT_EXPONENT).contains(&e).then(|| {
+        // Repeated [`mul`], not the crate's operator: `0.0 ** 3` is `0.000`, and
+        // a zero operand there would collapse the scale.
+        let mut acc = BigDecimal::from(1);
+        for _ in 0..e {
+            acc = mul(&acc, a);
+        }
+        acc
+    })
+}
+
+/// `|a|`, keeping the scale (`(-1.50).abs()` is `1.50`).
+pub fn abs(a: &BigDecimal) -> BigDecimal {
+    a.abs()
+}
+
+/// `intValue()` / `toInteger()`: truncate toward zero.
+pub fn truncate_to_i64(d: &BigDecimal) -> i64 {
+    d.with_scale_round(0, RoundingMode::Down)
+        .to_i64()
+        .unwrap_or(0)
+}
+
+/// The GDK's `round()`: to the nearest integer, halves away from zero
+/// (`1.75.round()` is `2`, `(-1.5).round()` is `-2`).
+pub fn round_to_i64(d: &BigDecimal) -> i64 {
+    d.with_scale_round(0, RoundingMode::HalfUp)
+        .to_i64()
+        .unwrap_or(0)
+}
+
+/// Compare two decimals by value, ignoring scale (`1.5 <=> 1.50` is `0`), which
+/// is what Groovy's `==`/`<`/`<=>` use on a `BigDecimal`.
+pub fn cmp(a: &BigDecimal, b: &BigDecimal) -> std::cmp::Ordering {
+    a.cmp(b)
+}
+
+/// Groovy's `/` on decimals, ported from
+/// `org.codehaus.groovy.runtime.typehandling.BigDecimalMath.divideImpl`: take
+/// Java's exact `BigDecimal.divide` when the quotient terminates, and otherwise
+/// redo the division with `MathContext(max(precision) + 10)` before clamping the
+/// scale to `max(scale(a), scale(b), 10)` with HALF_UP rounding.
+///
+/// `None` signals a zero divisor (Groovy raises `ArithmeticException`).
+pub fn divide(a: &BigDecimal, b: &BigDecimal) -> Option<BigDecimal> {
+    if b.is_zero() {
+        return None;
+    }
+    if let Some(exact) = exact_divide(a, b) {
+        return Some(exact);
+    }
+    let precision = a.digits().max(b.digits()) + DIVISION_EXTRA_PRECISION;
+    let q = divide_to_precision(a, b, precision);
+    let cap = a
+        .fractional_digit_count()
+        .max(b.fractional_digit_count())
+        .max(DIVISION_MIN_SCALE);
+    Some(if q.fractional_digit_count() > cap {
+        q.with_scale_round(cap, RoundingMode::HalfUp)
+    } else {
+        q
+    })
+}
+
+/// Java's exact `BigDecimal.divide(divisor)`: the quotient when it has a
+/// terminating decimal expansion, at the *preferred* scale
+/// (`scale(a) - scale(b)`) when that can hold it and at the smallest exact scale
+/// otherwise — `1.000 / 4` is `0.250` (padded to the preferred scale 3) while
+/// `2.5e7 / 1000` is `2.5E+4` (scale -3, because the preferred -6 cannot
+/// represent 25000). `None` when the expansion does not terminate.
+fn exact_divide(a: &BigDecimal, b: &BigDecimal) -> Option<BigDecimal> {
+    let (ua, sa) = a.as_bigint_and_exponent();
+    let (ub, sb) = b.as_bigint_and_exponent();
+    let preferred = sa - sb;
+    // A zero dividend takes the preferred scale as-is, negative included:
+    // `0 / -0.51251` prints `0E+5`, not `0`.
+    if ua.is_zero() {
+        return Some(BigDecimal::from_bigint(BigInt::zero(), preferred));
+    }
+    // Write |b|'s unscaled value as 2^twos · 5^fives · rest. The quotient
+    // terminates exactly when `rest` (which shares no factor with 10) divides
+    // a's unscaled value.
+    let (rest, twos, fives) = strip_factors_of_ten(ub.abs());
+    if !(&ua % &rest).is_zero() {
+        return None;
+    }
+    let k = twos.max(fives);
+    let numerator = (&ua / &rest) * pow10(k);
+    let denominator = BigInt::from(2).pow(twos as u32) * BigInt::from(5).pow(fives as u32);
+    let mut unscaled = numerator / denominator;
+    if ub.sign() == Sign::Minus {
+        unscaled = -unscaled;
+    }
+    Some(at_preferred_scale(unscaled, k as i64 + sa - sb, preferred))
+}
+
+/// Strip a positive integer's factors of 2 and 5, returning
+/// `(rest, twos, fives)` with `rest` coprime to 10.
+fn strip_factors_of_ten(mut n: BigInt) -> (BigInt, u64, u64) {
+    let (mut twos, mut fives) = (0, 0);
+    while (&n % 2u32).is_zero() {
+        n /= 2u32;
+        twos += 1;
+    }
+    while (&n % 5u32).is_zero() {
+        n /= 5u32;
+        fives += 1;
+    }
+    (n, twos, fives)
+}
+
+/// Rescale an exact quotient to Java's preferred scale: drop trailing zeros
+/// down to `preferred` (never below it), or pad with zeros up to it.
+fn at_preferred_scale(mut unscaled: BigInt, mut scale: i64, preferred: i64) -> BigDecimal {
+    while scale > preferred && !unscaled.is_zero() && (&unscaled % 10u32).is_zero() {
+        unscaled /= 10u32;
+        scale -= 1;
+    }
+    if scale < preferred {
+        unscaled *= pow10((preferred - scale) as u64);
+        scale = preferred;
+    }
+    BigDecimal::from_bigint(unscaled, scale)
+}
+
+/// Divide to exactly `precision` significant digits, rounded HALF_UP — Java's
+/// `a.divide(b, new MathContext(precision))` (whose default rounding is
+/// HALF_UP). Done on the unscaled integers so the result is the correctly
+/// rounded quotient, never a doubly-rounded one.
+fn divide_to_precision(a: &BigDecimal, b: &BigDecimal, precision: u64) -> BigDecimal {
+    let (ua, sa) = a.as_bigint_and_exponent();
+    let (ub, sb) = b.as_bigint_and_exponent();
+    let negative = (ua.sign() == Sign::Minus) != (ub.sign() == Sign::Minus);
+    let (ua, ub) = (ua.abs(), ub.abs());
+    // Scale the numerator so the integer quotient carries at least one digit
+    // more than the requested precision — the extra digit decides the rounding.
+    let shift = (precision as i64 + 2 + digit_count(&ub) as i64 - digit_count(&ua) as i64).max(0);
+    let q = (ua * pow10(shift as u64)) / &ub;
+    // Drop the surplus digits, rounding the truncated tail HALF_UP.
+    let mut drop = digit_count(&q) as i64 - precision as i64;
+    let mut rounded = &q / pow10(drop as u64);
+    if (&q % pow10(drop as u64)) * 2u32 >= pow10(drop as u64) {
+        rounded += 1;
+    }
+    // A carry out of the top digit (999… → 1000…) costs one more digit.
+    if digit_count(&rounded) as u64 > precision {
+        rounded /= 10u32;
+        drop += 1;
+    }
+    BigDecimal::from_bigint(
+        if negative { -rounded } else { rounded },
+        shift - drop + sa - sb,
+    )
+}
+
+/// `truncate(a / b)` toward zero as an integer, for [`divide_to_integral`].
+fn integral_quotient(a: &BigDecimal, b: &BigDecimal) -> BigInt {
+    let (ua, sa) = a.as_bigint_and_exponent();
+    let (ub, sb) = b.as_bigint_and_exponent();
+    // a / b == (ua / ub) · 10^(sb - sa): move the power of ten onto whichever
+    // side keeps both operands integral.
+    let shift = sb - sa;
+    if shift >= 0 {
+        (ua * pow10(shift as u64)) / ub
+    } else {
+        ua / (ub * pow10((-shift) as u64))
+    }
+}
+
+/// `10^n` as a `BigInt`.
+fn pow10(n: u64) -> BigInt {
+    BigInt::from(10).pow(n as u32)
+}
+
+/// The number of decimal digits in an integer's magnitude (`0` has one digit).
+fn digit_count(n: &BigInt) -> usize {
+    let text = n.magnitude().to_string();
+    text.len()
+}
+
+/// Render an IEEE double exactly as `java.lang.Double.toString` — the rules a
+/// `d`/`f`-suffixed Groovy literal prints by, which are *not* the `BigDecimal`
+/// rules: plain notation only in `[1e-3, 1e7)`, scientific notation elsewhere
+/// with no `+` on a positive exponent (`2.5E7`, `1.0E-7`), and always at least
+/// one fraction digit (`1000.0`).
+pub fn format_double(f: f64) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f < 0.0 { "-Infinity" } else { "Infinity" }.to_string();
+    }
+    if f == 0.0 {
+        return if f.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
+    }
+    // Rust's `{:e}` yields the shortest round-tripping digits plus a decimal
+    // exponent — the same digit selection JDK 19+ `Double.toString` makes.
+    let sci = format!("{f:e}");
+    let (mantissa, exponent) = sci
+        .split_once('e')
+        .expect("`{:e}` always emits an exponent");
+    let exponent: i64 = exponent.parse().unwrap_or(0);
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", mantissa),
+    };
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let body = if (-3..7).contains(&exponent) {
+        if exponent >= 0 {
+            let split = exponent as usize + 1;
+            let integral = if digits.len() >= split {
+                digits[..split].to_string()
+            } else {
+                format!("{digits}{}", "0".repeat(split - digits.len()))
+            };
+            let fraction = digits.get(split..).filter(|s| !s.is_empty()).unwrap_or("0");
+            format!("{integral}.{fraction}")
+        } else {
+            format!("0.{}{digits}", "0".repeat((-exponent - 1) as usize))
+        }
+    } else {
+        let fraction = digits.get(1..).filter(|s| !s.is_empty()).unwrap_or("0");
+        format!("{}.{fraction}E{exponent}", &digits[..1])
+    };
+    format!("{sign}{body}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse a literal the way the lexer hands it over.
+    fn d(text: &str) -> BigDecimal {
+        parse(text).expect("decimal literal parses")
+    }
+
+    /// Render `text` as Groovy would print the literal.
+    fn show(text: &str) -> String {
+        to_groovy_string(&d(text))
+    }
+
+    // Every expectation below is the observed stdout of Apache Groovy 5.0.7 on
+    // the same expression — the reason this module exists is that an f64 cannot
+    // produce these strings.
+
+    #[test]
+    fn literal_rendering_matches_bigdecimal_tostring() {
+        // Exponent literals keep a negative scale, so they print in E+n form.
+        assert_eq!(show("2.5e7"), "2.5E+7");
+        assert_eq!(show("1e3"), "1E+3");
+        assert_eq!(show("-2.5e7"), "-2.5E+7");
+        // Trailing zeros are part of the value, not noise.
+        assert_eq!(show("100.00"), "100.00");
+        assert_eq!(show("1.0"), "1.0");
+        // The plain-notation window ends at an adjusted exponent of -6.
+        assert_eq!(show("1.5E-5"), "0.000015");
+        assert_eq!(show("1.0e-6"), "0.0000010");
+        assert_eq!(show("1e-7"), "1E-7");
+        assert_eq!(show("9.99e-4"), "0.000999");
+        assert_eq!(show("123.456e2"), "12345.6");
+        assert_eq!(show("0.0"), "0.0");
+    }
+
+    #[test]
+    fn addition_and_subtraction_take_the_larger_scale() {
+        // The headline case: adding an integer to an exponent literal drops to
+        // scale 0, so Groovy prints no `.0` at all.
+        assert_eq!(
+            to_groovy_string(&add(&d("2.5e7"), &from_i64(1))),
+            "25000001"
+        );
+        assert_eq!(
+            to_groovy_string(&sub(&d("2.5e7"), &from_i64(1))),
+            "24999999"
+        );
+        assert_eq!(to_groovy_string(&add(&d("1.10"), &d("2.20"))), "3.30");
+        // Exact decimal addition, where an f64 would show 0.30000000000000004.
+        assert_eq!(to_groovy_string(&add(&d("0.1"), &d("0.2"))), "0.3");
+        assert_eq!(to_groovy_string(&sub(&d("0.30"), &d("0.10"))), "0.20");
+        assert_eq!(to_groovy_string(&add(&d("12.34"), &d("0.1"))), "12.44");
+    }
+
+    #[test]
+    fn multiplication_sums_the_scales() {
+        assert_eq!(to_groovy_string(&mul(&d("1.1"), &d("1.1"))), "1.21");
+        assert_eq!(to_groovy_string(&mul(&d("2.50"), &from_i64(4))), "10.00");
+        assert_eq!(to_groovy_string(&mul(&d("1.25"), &from_i64(0))), "0.00");
+        assert_eq!(to_groovy_string(&mul(&d("2.5e7"), &from_i64(2))), "5.0E+7");
+        // Beyond an f64's range entirely (which would be Infinity).
+        assert_eq!(
+            to_groovy_string(&mul(&d("1.5e300"), &d("1.5e300"))),
+            "2.25E+600"
+        );
+    }
+
+    #[test]
+    fn terminating_division_uses_javas_preferred_scale() {
+        let div = |x: &str, y: &str| to_groovy_string(&divide(&d(x), &d(y)).expect("nonzero"));
+        assert_eq!(div("7.0", "2.0"), "3.5");
+        assert_eq!(div("1.0", "8"), "0.125");
+        assert_eq!(div("10", "4"), "2.5");
+        // Padded up to the preferred scale (3), not left at the minimal 2.
+        assert_eq!(div("1.000", "4"), "0.250");
+        assert_eq!(div("1.00", "4"), "0.25");
+        // The preferred scale (-6) cannot hold 25000, so the minimal one wins.
+        assert_eq!(div("2.5e7", "1000"), "2.5E+4");
+        assert_eq!(div("0.3", "0.1"), "3");
+        // A zero dividend keeps the preferred scale, negative or not.
+        assert_eq!(div("0.00", "5"), "0.00");
+        assert_eq!(div("0", "-0.51251"), "0E+5");
+        assert_eq!(div("0.0", "0.674128e-1"), "0E+6");
+    }
+
+    #[test]
+    fn nonterminating_division_rounds_to_groovys_scale_floor() {
+        let div = |x: &str, y: &str| to_groovy_string(&divide(&d(x), &d(y)).expect("nonzero"));
+        // Ten fraction digits, not an f64's seventeen.
+        assert_eq!(div("1.0", "3.0"), "0.3333333333");
+        assert_eq!(div("1", "3"), "0.3333333333");
+        assert_eq!(div("1.00000", "3"), "0.3333333333");
+        // HALF_UP at the tenth digit.
+        assert_eq!(div("2", "3"), "0.6666666667");
+        // Precision, not scale, bounds this one: 11 significant digits.
+        assert_eq!(div("1e3", "3"), "333.33333333");
+        assert_eq!(div("-1.0", "3.0"), "-0.3333333333");
+    }
+
+    #[test]
+    fn division_by_zero_is_rejected() {
+        assert!(divide(&d("1.0"), &from_i64(0)).is_none());
+        assert!(remainder(&d("1.0"), &from_i64(0)).is_none());
+    }
+
+    #[test]
+    fn remainder_and_power_keep_bigdecimal_scale() {
+        assert_eq!(
+            to_groovy_string(&remainder(&d("1.5"), &d("0.4")).unwrap()),
+            "0.3"
+        );
+        assert_eq!(
+            to_groovy_string(&remainder(&from_i64(7), &d("2.5")).unwrap()),
+            "2.0"
+        );
+        // The remainder's scale comes from `divideToIntegralValue`, whose own
+        // scale is the preferred `scale(a) - scale(b)` — these six all print a
+        // different number of fraction digits than a naive max-scale rule gives.
+        let rem = |x: &str, y: &str| to_groovy_string(&remainder(&d(x), &d(y)).unwrap());
+        assert_eq!(rem("99.72559", "44.562e-5"), "0.0002902");
+        assert_eq!(rem("657.87e+3", "1.50"), "0.0");
+        assert_eq!(rem("-0.000", "0.041"), "0.000");
+        assert_eq!(rem("71.59514", "8e-9"), "0E-7");
+        assert_eq!(rem("11.535", "0.16859e-3"), "0.0000722");
+        assert_eq!(rem("-91", "0.0100"), "0.00");
+        assert_eq!(rem("1.5", "4.25"), "1.5");
+        assert_eq!(rem("123.456", "1"), "0.456");
+        assert_eq!(rem("1e3", "1e-3"), "0E+3");
+        assert_eq!(rem("2.5e7", "3"), "1");
+        assert_eq!(to_groovy_string(&pow(&d("2.5"), 3).unwrap()), "15.625");
+        assert_eq!(to_groovy_string(&pow(&d("0.0"), 3).unwrap()), "0.000");
+        assert_eq!(to_groovy_string(&pow(&d("2.50"), 2).unwrap()), "6.2500");
+        assert_eq!(to_groovy_string(&pow(&d("1.5"), 0).unwrap()), "1");
+        // 10.0 ** 20 keeps one fraction digit per multiplication.
+        assert_eq!(
+            to_groovy_string(&pow(&d("10.0"), 20).unwrap()),
+            "100000000000000000000.00000000000000000000"
+        );
+        assert!(pow(&d("2.5"), -1).is_none());
+        // `BigDecimal % Double` reads the double exactly, so the remainder
+        // carries the double's full binary expansion.
+        assert_eq!(
+            to_groovy_string(&remainder(&d("1.5"), &from_f64_exact(0.555).unwrap()).unwrap()),
+            "0.38999999999999990230037383298622444272041320800781250"
+        );
+    }
+
+    #[test]
+    fn comparison_ignores_scale() {
+        assert_eq!(cmp(&d("1.5"), &d("1.50")), std::cmp::Ordering::Equal);
+        assert_eq!(cmp(&d("1.5"), &d("1.4")), std::cmp::Ordering::Greater);
+        assert_eq!(cmp(&d("2.5e7"), &d("25000000")), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn arbitrary_precision_survives_the_f64_boundary() {
+        // 30 significant digits: an f64 would round the trailing .5 away.
+        assert_eq!(
+            to_groovy_string(&add(&d("123456789012345678901234567890.5"), &from_i64(1))),
+            "123456789012345678901234567891.5"
+        );
+    }
+
+    #[test]
+    fn double_rendering_matches_java_double_tostring() {
+        // A `d`-suffixed literal is an IEEE double and prints by Java's other
+        // rule set: no `+` on the exponent, and a plain window of [1e-3, 1e7).
+        assert_eq!(format_double(2.5e7), "2.5E7");
+        assert_eq!(format_double(1e3), "1000.0");
+        assert_eq!(format_double(1e-7), "1.0E-7");
+        assert_eq!(format_double(1234567.0), "1234567.0");
+        assert_eq!(format_double(0.1 + 0.2), "0.30000000000000004");
+        assert_eq!(format_double(1.0 / 3.0), "0.3333333333333333");
+        assert_eq!(format_double(f64::INFINITY), "Infinity");
+        assert_eq!(format_double(f64::NEG_INFINITY), "-Infinity");
+        assert_eq!(format_double(f64::NAN), "NaN");
+        assert_eq!(format_double(0.0), "0.0");
+        assert_eq!(format_double(-2.5), "-2.5");
+        assert_eq!(format_double(0.001), "0.001");
+        assert_eq!(format_double(0.0001), "1.0E-4");
+    }
+}

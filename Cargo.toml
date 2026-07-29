@@ -74,6 +74,14 @@ fusevm = { version = "0.14.17", features = ["jit", "jit-disk-cache", "aot", "ffi
 
 thiserror = "2.0"
 
+# Groovy's unsuffixed decimal literals are `java.math.BigDecimal`, not doubles:
+# they carry an exact (unscaled value, scale) pair whose scale propagates through
+# arithmetic (`1.25 * 0` is `0.00`) and whose magnitude is unbounded
+# (`1.5e300 * 1.5e300` is `2.25E+600`, not an f64 infinity). `bigdecimal` supplies
+# that representation over `num-bigint`; src/decimal.rs adds the Groovy/Java rules
+# on top (BigDecimal.toString, the divideImpl scale policy).
+bigdecimal = "0.4"
+
 # LSP (`groovy --lsp`) + DAP (`groovy --dap`) over stdio. `lsp-server`/`lsp-types`
 # frame the JSON-RPC language server; `serde_json` frames the DAP wire protocol;
 # `libc` gives the DAP adapter the pipe + dup2 to capture the debuggee's stdout

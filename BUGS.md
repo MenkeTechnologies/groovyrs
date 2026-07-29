@@ -86,6 +86,19 @@ compile errors, never silently mis-run.
 - **Ternary, Elvis, safe navigation.** `c ? t : e`, the Elvis `a ?: b`
   (null/false-coalescing), and `a?.member` / `a?.method()` (yields `null` on a
   `null` receiver rather than faulting). All branch on Groovy truthiness.
+- **`BigDecimal` decimals.** An unsuffixed decimal literal is a
+  `java.math.BigDecimal` with the literal's exact scale, not an `f64`: it prints
+  through `BigDecimal.toString` (`2.5e7` → `2.5E+7`, `100.00` → `100.00`,
+  `1e-7` → `1E-7`) and carries scale through arithmetic — `2.5e7 + 1` is
+  `25000001`, `1.25 * 0` is `0.00`, `0.1 + 0.2` is exactly `0.3`. `/` follows
+  Groovy's `BigDecimalMath` policy (exact quotient at Java's preferred scale, else
+  `max(precision) + 10` significant digits clamped to `max(scale, 10)` fraction
+  digits, so `1/3` is `0.3333333333`), `%` follows `BigDecimal.remainder`
+  including the `BigDecimal % Double` case Groovy keeps exact, and a zero divisor
+  faults as Groovy's `ArithmeticException` aborts. Magnitude is unbounded
+  (`1.5e300 * 1.5e300` is `2.25E+600`). A `d`/`f`-suffixed literal stays an IEEE
+  double with `Double.toString` rules (`2.5e7d` → `2.5E7`, `5.0d/0.0d` →
+  `Infinity`). Value model in `src/decimal.rs`.
 
 ## Not implemented (errors today)
 
@@ -112,20 +125,27 @@ compile errors, never silently mis-run.
 
 ## Modeled with a documented simplification
 
-- **Decimal division promotes, but stays `f64`.** Groovy's `/` on two integers
-  yields a `BigDecimal` (`7/2 == 3.5`, `4/2 == 2`), which groovyrs reproduces via
-  the `GDIV` builtin. The result rides fusevm's `f64`, so a `BigDecimal`'s exact
-  scale and non-terminating quotients differ: `1/3` prints the `f64`
-  `0.3333333333333333`, not Groovy's `0.3333333333`.
-- **Decimal literals are `f64`, not `BigDecimal`.** `3.10` prints `3.1`.
-  Groovy's `BigDecimal` also *accumulates scale* through arithmetic — `10 * 1.25`
-  is `12.50` and `0.25 + 0.25` is `0.50` (trailing zeros), where groovyrs prints
-  `12.5` / `0.5`. Only standalone decimal literals, string concatenation of them,
-  and terminating divisions (whose Groovy quotient is scale-stripped) print
-  identically. Arbitrary-precision / scale-tracking decimal arithmetic is a later
-  wave.
-- **Integer arithmetic uses fusevm's 64-bit wrapping.** Groovy auto-promotes an
-  overflowing `int`/`long` to `BigInteger`; groovyrs wraps at `i64` instead.
+- **A decimal is truthy even when it is zero.** A `BigDecimal` is a host-heap
+  value behind fusevm's opaque `Value::Obj` handle, and fusevm treats every
+  handle as true, so `if (0.0)` takes the then-branch where Groovy takes the
+  else. The same already applies to an empty ordered map (`if ([:])`). Numeric
+  conditions written as comparisons (`if (x != 0)`, `while (i < n)`) are exact;
+  those also stay on the JIT's native fast path, which is why the conditions are
+  not routed through a truthiness builtin.
+- **Every decimal operation allocates a heap slot that is never reclaimed.**
+  Decimal literals are interned (a literal inside a loop allocates once), but each
+  arithmetic *result* takes a new slot in the host heap, which has no collector.
+  A script doing millions of decimal operations in a loop grows memory for the
+  length of the run; integer and `double` arithmetic are unaffected (they never
+  touch the heap).
+- **`float`/`Float` is modeled as a `double`.** An `f`-suffixed literal parses to
+  an `f64`, so it prints and computes with `double` precision: `0.1f + 0.2f` is
+  `0.30000000000000004` where Groovy's `Float` prints `0.30000000447034836`.
+- **Integer arithmetic uses fusevm's 64-bit wrapping.** Groovy's `Integer`
+  arithmetic wraps at 32 bits (`2147483647 + 1` is `-2147483648`, `9993973 *
+  -490` is `-602079474`); groovyrs computes in `i64` and wraps there instead, so
+  a result that overflows an `int` but fits an `i64` prints the mathematically
+  correct value rather than Groovy's wrapped one.
 - **`for (x in a..b)` iterates ascending only.** A descending literal range
   (`5..1`, which Groovy walks downward) runs zero times. The endpoint is
   evaluated once (a body that mutates it still iterates the original range).

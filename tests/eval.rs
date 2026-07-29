@@ -983,3 +983,126 @@ println new Sub()
     assert!(ok);
     assert_eq!(out, "Base(7)\n");
 }
+
+// ── BigDecimal value model ─────────────────────────────────────────────────
+//
+// An unsuffixed Groovy decimal is a `java.math.BigDecimal`, so its scale is part
+// of the value. Each expectation below is the observed stdout of Apache Groovy
+// 5.0.7; every one of them differs from what an f64 prints, which is exactly the
+// class of regression these pin.
+
+#[test]
+fn decimal_literals_print_through_bigdecimal_tostring() {
+    // An exponent literal carries a negative scale and prints in E+n form; a
+    // literal's trailing zeros are kept; the plain window ends at 1e-7.
+    let src = "println 2.5e7\nprintln 1e3\nprintln 100.00\nprintln 1e-7\nprintln 1.5E-5";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "2.5E+7\n1E+3\n100.00\n1E-7\n0.000015\n");
+}
+
+#[test]
+fn decimal_arithmetic_accumulates_scale() {
+    // `+`/`-` take the larger scale (so adding 1 to an exponent literal lands at
+    // scale 0 and prints no `.0` at all), `*` sums the scales.
+    let src = "println 2.5e7 + 1\nprintln 1.10 + 2.20\nprintln 1.25 * 0\nprintln 2.50 * 4";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "25000001\n3.30\n0.00\n10.00\n");
+}
+
+#[test]
+fn decimal_addition_is_exact_not_binary_floating_point() {
+    // The canonical f64 tell: 0.1 + 0.2 is 0.30000000000000004 in binary.
+    let (out, _) = run("println 0.1 + 0.2\nprintln 1.1 * 1.1");
+    assert_eq!(out, "0.3\n1.21\n");
+}
+
+#[test]
+fn decimal_division_follows_groovys_scale_policy() {
+    // Terminating quotients take Java's preferred scale (`1.000/4` keeps three
+    // fraction digits); a non-terminating one is cut to ten.
+    let src = "println 1.000 / 4\nprintln 2.5e7 / 1000\nprintln 1 / 3\nprintln 1.0 / 3.0";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "0.250\n2.5E+4\n0.3333333333\n0.3333333333\n");
+}
+
+#[test]
+fn decimal_remainder_takes_the_preferred_scale() {
+    // `%` is `a - divideToIntegralValue(a, b) * b`, whose scale is neither
+    // operand's — 657.87e+3 % 1.50 prints one fraction digit, not two.
+    let (out, _) = run("println 1.5 % 0.4\nprintln 657.87e+3 % 1.50\nprintln 7 % 2.5");
+    assert_eq!(out, "0.3\n0.0\n2.0\n");
+}
+
+#[test]
+fn decimals_exceed_the_f64_range_and_precision() {
+    // An f64 would return Infinity for the product and drop the trailing .5.
+    let src = "println 1.5e300 * 1.5e300\nprintln 123456789012345678901234567890.5 + 1";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "2.25E+600\n123456789012345678901234567891.5\n");
+}
+
+#[test]
+fn suffixed_literals_stay_ieee_doubles() {
+    // `d`/`f` keep the IEEE path: binary rounding, Infinity on divide-by-zero,
+    // and `Double.toString` formatting (no `+` in the exponent).
+    let src = "println 0.1d + 0.2d\nprintln 5.0d / 0.0d\nprintln 2.5e7d\nprintln 1e3d";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "0.30000000000000004\nInfinity\n2.5E7\n1000.0\n");
+}
+
+#[test]
+fn decimal_and_double_mix_widens_to_double_except_for_remainder() {
+    // Groovy widens a BigDecimal/Double mix to Double — except `BigDecimal %
+    // Double`, which reads the double's exact binary expansion and stays exact.
+    let src = "println 1.0 + 1.0d\nprintln 1.5 % 0.555d";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "2.0\n0.38999999999999990230037383298622444272041320800781250\n"
+    );
+}
+
+#[test]
+fn decimals_render_inside_collections_and_concatenation() {
+    // A decimal keeps its scale wherever it is printed from.
+    let src = "println([1.50, 2.0])\nprintln([a: 1.50])\nprintln(\"x\" + 1.50)";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[1.50, 2.0]\n[a:1.50]\nx1.50\n");
+}
+
+#[test]
+fn decimal_comparison_ignores_scale() {
+    // `1.5 == 1.50` is true (Groovy compares BigDecimals by value), and `<=>`
+    // agrees, while `.toString()` still shows the scale each carries.
+    let src =
+        "println 1.5 == 1.50\nprintln 1.5 <=> 1.50\nprintln 1.50.toString()\nprintln 1.5 > 1.4";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "true\n0\n1.50\ntrue\n");
+}
+
+#[test]
+fn decimal_accumulates_across_a_loop() {
+    // The literal is interned and the running total stays exact — an f64 would
+    // print 0.30000000000000004 here.
+    let src = "def t = 0.0\nfor (i in 1..3) { t = t + 0.1 }\nprintln t";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "0.3\n");
+}
+
+#[test]
+fn decimal_division_by_zero_aborts() {
+    // Groovy raises ArithmeticException; groovyrs faults, which likewise aborts
+    // the script rather than yielding an f64 Infinity.
+    let (out, ok) = run("println 1.0 / 0\nprintln \"unreachable\"");
+    assert!(!ok);
+    assert_eq!(out, "");
+}

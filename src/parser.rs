@@ -867,6 +867,10 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Float(f))
             }
+            Tok::Dec(text) => {
+                self.advance();
+                Ok(Expr::Dec(text))
+            }
             Tok::Str(s) => {
                 self.advance();
                 Ok(Expr::Str(s))

@@ -57,8 +57,10 @@ frontend over the shared engine. Highlights:
   statements (classes optional, no `main`); semicolons optional (newlines
   terminate statements), and `println x` works with or without parentheses.
 - **Groovy value semantics** — `println` formats `true`/`false`, `3.0`, and
-  `null` the Groovy way, and integer `/` promotes like `BigDecimal` so `7 / 2`
-  is `3.5`, not `3`.
+  `null` the Groovy way; an unsuffixed decimal literal is a real
+  `java.math.BigDecimal` (exact scale, `2.5e7` prints `2.5E+7`, `1.25 * 0` is
+  `0.00`), and integer `/` promotes to it so `7 / 2` is `3.5` and `1 / 3` is
+  `0.3333333333`.
 - **Operator overloading** — a strict numeric hook supplies string concatenation
   (`"x=" + x`) for mixed operands, and dispatches a user-class instance's operator
   method (`plus`/`minus`/`multiply`/`compareTo`/`equals`/…) for `+`/`-`/`*`/`<`/
@@ -125,8 +127,10 @@ Implemented and checked against Apache Groovy:
   expression (else `null`).
 - **Expressions** — integer / decimal / string (single- and double-quoted) /
   boolean / `null` literals; `+ - * / %`, `== != < > <= >=`, `&& ||`
-  (short-circuiting), unary `-` and `!`, grouping. Integer `/` promotes to a
-  decimal (`7 / 2 == 3.5`); `+` concatenates when either side is a string.
+  (short-circuiting), unary `-` and `!`, grouping. An unsuffixed decimal literal
+  is a `BigDecimal` whose scale propagates (`1.10 + 2.20 == 3.30`), a `d`/`f`
+  suffix makes an IEEE double; integer `/` promotes to a decimal
+  (`7 / 2 == 3.5`); `+` concatenates when either side is a string.
 - **Collections** — list literals `[1, 2, 3]` / `[]` and insertion-ordered map
   literals `[a: 1, b: 2]` / `[:]`, printed Groovy-style; subscripting `list[i]`
   (negative index counts from the end), `map[k]`, `str[i]`. A multi-entry map
@@ -219,7 +223,7 @@ mirrors how `zshrs` hosts zsh, `ruby` hosts Ruby, and `java` hosts Java:
 Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm VM + Cranelift JIT
                                               │
                                 strict numeric hook (Groovy `+` concat + operator overloads)
-                                GDIV / GCMP builtins (BigDecimal `/`, `<=>`)
+                                GDIV / GCMP / GDEC builtins (`/`, `<=>`, BigDecimal literals)
                                 print builtins (Groovy value formatting)
 ```
 
@@ -227,7 +231,8 @@ Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm
 | --- | --- |
 | **fusevm-hosted** | No local `vm.rs` / `jit.rs`, no JVM. Groovy lowers to fusevm bytecode and runs on the shared three-tier Cranelift JIT; `jit-disk-cache` persists native code across runs. |
 | **Native arithmetic** | `+ - * %`, comparisons, and logic lower to native fusevm ops; the JIT traces hot integer loops. A strict numeric hook supplies Groovy's `+` string concatenation for non-numeric operands, and dispatches a user-class instance's operator method (`plus`/`minus`/`compareTo`/…) by re-entering the VM through a published thread-local pointer — primitives never leave the fast path. |
-| **Groovy division** | `/` lowers to the `GDIV` builtin: two integers divide exactly to an integer and to a decimal otherwise (`7/2 → 3.5`), matching Groovy's `BigDecimal` promotion. |
+| **Groovy division** | `/` lowers to the `GDIV` builtin: two integers divide exactly to an integer and to a `BigDecimal` otherwise (`7/2 → 3.5`, `1/3 → 0.3333333333`), following Groovy's `BigDecimalMath` scale policy; a zero divisor faults as Groovy's `ArithmeticException` aborts. |
+| **`BigDecimal` value model** | An unsuffixed decimal literal is an exact (unscaled value, scale) pair on the host heap (`src/decimal.rs`), so scale propagates through `+ - * / %` (`1.25 * 0 → 0.00`, `2.5e7 + 1 → 25000001`) and magnitude is unbounded (`1.5e300 * 1.5e300 → 2.25E+600`). Being non-numeric to fusevm, decimals route through the strict numeric hook; `d`/`f`-suffixed literals stay IEEE doubles on the native fast path. |
 | **Groovy print semantics** | `println`/`print` lower to a registered builtin that formats values Groovy-style (`true`/`false`, `3.0`, `null`), rather than the VM's shell-flavoured `PrintLn`. |
 
 ---
@@ -263,8 +268,9 @@ Next waves, in priority order:
    effect beyond `Comparable`'s `compareTo`.
 4. **Interpolation & standard library** — GString `"$name"` / `"${expr}"`;
    `Math`, broader `java.util`/GDK collection methods.
-5. **Scale-tracking decimals** — a real `BigDecimal` value so `10 * 1.25` prints
-   `12.50`, closing the last documented arithmetic divergence.
+5. **Groovy truth for host-heap values** — a zero `BigDecimal` and an empty map
+   are truthy today (fusevm treats every object handle as true), where Groovy
+   reads them as false.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
 
@@ -283,9 +289,11 @@ bash parity-scripts/run.sh -v          # byte-parity over the regression corpus
 `parity-fuzz` generates grammar-driven, deterministic-output snippets from a
 per-index seed (so any divergence replays with `--seed <N> --once`, then
 auto-minimizes). It stays strictly inside groovyrs's implemented surface and away
-from the documented f64-vs-`BigDecimal` divergences, so every divergence it
-reports is a real parity gap — the class of bug the slice-1 `continue`-codegen fix
-was. Modes: `arith`, `logic`, `strings`, `control`, `format`, `mixed`.
+from the documented simplifications (32-bit integer overflow, zero divisors), so
+every divergence it reports is a real parity gap — the class of bug the slice-1
+`continue`-codegen fix was. Decimal literals, scales, and exponent forms are
+generated without restriction now that the `BigDecimal` model is exact. Modes:
+`arith`, `logic`, `strings`, `control`, `format`, `mixed`.
 
 All three need `groovy` on PATH and never run in CI; the CI-safe replay is the
 frozen `tests/parity.rs` (snapshot in `tests/data/parity_expected.txt`,

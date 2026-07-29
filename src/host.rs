@@ -21,8 +21,11 @@
 //!    delegating any operation with a non-numeric operand to [`numeric_hook`],
 //!    where `+` routes through `groovy_add`.
 
+use crate::decimal;
+use bigdecimal::BigDecimal;
 use fusevm::{Frame, NumOp, VMResult, Value, VM};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 /// Builtin id for `println` (one Groovy-formatted arg + newline).
 pub const GPRINTLN: u16 = 700;
@@ -105,6 +108,12 @@ pub const GINSTANCEOF: u16 = 719;
 /// insertion order (a `LinkedHashMap`), which fusevm's unordered `Hash` cannot,
 /// so the map lives in the host heap instead.
 pub const GMAKE_MAP: u16 = 715;
+/// Builtin id for materializing a `BigDecimal` literal. The stack holds the
+/// literal's source text (a `String`); the builtin parses it into an exact
+/// (unscaled value, scale) decimal on the host heap and returns its handle.
+/// Literals are interned by text, so re-evaluating one in a loop reuses the same
+/// handle instead of growing the heap. See [`crate::decimal`].
+pub const GDEC: u16 = 720;
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -136,6 +145,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GSUPER_METHOD, b_super_method);
     vm.register_builtin(GSUPER_CTOR, b_super_ctor);
     vm.register_builtin(GINSTANCEOF, b_instanceof);
+    vm.register_builtin(GDEC, b_dec);
     // A fresh VM install starts with an empty object heap: `Value::Obj` handles
     // are chunk-relative (a closure carries a name-pool index, an instance a
     // class id), so a handle from a prior run must never survive into a new
@@ -170,6 +180,10 @@ thread_local! {
     /// loop), so it is always live while the hook runs; builtins already receive
     /// `&mut VM` and never consult it.
     static VM_PTR: Cell<*mut VM> = const { Cell::new(std::ptr::null_mut()) };
+    /// Decimal literals already materialized on the heap, keyed by source text.
+    /// A literal inside a loop is pushed once per iteration; interning keeps
+    /// that from appending a heap entry every time. Cleared with the heap.
+    static DEC_LITERALS: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
 }
 
 /// Publish the running VM so the numeric hook can re-enter it for operator
@@ -208,6 +222,13 @@ enum HeapObj {
     /// equivalent). Lives on the heap so `println` order is Groovy's and
     /// `m.k = v` mutates in place through the shared handle.
     OrderedMap(Vec<(String, Value)>),
+    /// A `java.math.BigDecimal` — every unsuffixed Groovy decimal. fusevm's
+    /// `Value::Float` is an `f64` and cannot carry a decimal's scale or its
+    /// unbounded magnitude, so decimals ride a handle like any other host
+    /// object. Being non-numeric to fusevm, they route every arithmetic and
+    /// comparison op through [`numeric_hook`], where [`crate::decimal`] applies
+    /// Groovy's exact scale rules.
+    Dec(BigDecimal),
 }
 
 /// A registered closure: the body's name-pool index, its parameter count, and
@@ -249,10 +270,12 @@ struct ClassMeta {
     ctors: std::collections::HashMap<u8, u16>,
 }
 
-/// Clear the object heap and class registry (called from [`install`]).
+/// Clear the object heap, class registry, and decimal-literal intern table
+/// (called from [`install`]).
 fn reset_heap() {
     HEAP.with(|h| h.borrow_mut().clear());
     CLASSES.with(|c| c.borrow_mut().clear());
+    DEC_LITERALS.with(|d| d.borrow_mut().clear());
 }
 
 /// Push an object onto the heap and return its `Value::Obj` handle.
@@ -275,6 +298,54 @@ fn closure_meta(v: &Value) -> Option<ClosureMeta> {
         }),
         _ => None,
     }
+}
+
+/// Clone the `BigDecimal` behind a handle, if `v` is a decimal.
+fn as_dec(v: &Value) -> Option<BigDecimal> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Dec(d)) => Some(d.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// The `BigDecimal` view of any Groovy number: a decimal as itself, an
+/// `Integer`/`Boolean` at scale 0. `None` for a `double` (which must stay on the
+/// IEEE path) and for non-numbers.
+fn as_exact_dec(v: &Value) -> Option<BigDecimal> {
+    match v {
+        Value::Int(n) => Some(decimal::from_i64(*n)),
+        Value::Bool(b) => Some(decimal::from_i64(*b as i64)),
+        _ => as_dec(v),
+    }
+}
+
+/// Put a `BigDecimal` on the heap and return its handle.
+fn dec_value(d: BigDecimal) -> Value {
+    heap_push(HeapObj::Dec(d))
+}
+
+/// `GDEC`: pop a decimal literal's source text and return the handle of its
+/// `BigDecimal`, interning by text so a literal in a loop allocates once.
+fn b_dec(vm: &mut VM, _argc: u8) -> Value {
+    let text = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    if let Some(id) = DEC_LITERALS.with(|d| d.borrow().get(&text).copied()) {
+        return Value::Obj(id);
+    }
+    // The lexer already rejected malformed literals, so this parse cannot fail
+    // for compiler-emitted text; a zero keeps a hypothetical bad call total.
+    let value = dec_value(decimal::parse(&text).unwrap_or_else(|| decimal::from_i64(0)));
+    if let Value::Obj(id) = value {
+        DEC_LITERALS.with(|d| d.borrow_mut().insert(text, id));
+    }
+    value
 }
 
 /// Clone the entries of an ordered-map handle, if `v` is one.
@@ -321,7 +392,8 @@ fn b_make_map(vm: &mut VM, _argc: u8) -> Value {
     let mut entries: Vec<(String, Value)> = Vec::with_capacity(n);
     let mut i = 0;
     while i + 1 < flat.len() {
-        let key = flat[i].as_str_cow().into_owned();
+        // Groovy-format the key so a decimal key reads `1.50`, not a raw handle.
+        let key = groovy_str(&flat[i]);
         let val = flat[i + 1].clone();
         match entries.iter_mut().find(|(k, _)| *k == key) {
             Some(slot) => slot.1 = val,
@@ -1327,13 +1399,17 @@ fn dispatch_iteration(
     }
 }
 
-/// Add two values for `sum`: integer addition stays integral, any float operand
-/// promotes to a float (Groovy's numeric-tower `+`).
+/// Add two values for `sum`: integer addition stays integral, a decimal operand
+/// keeps `BigDecimal` scale, and a `double` operand promotes to a double
+/// (Groovy's numeric-tower `+`).
 fn groovy_sum_add(a: &Value, b: &Value) -> Value {
-    match (as_i64(a), as_i64(b)) {
-        (Some(x), Some(y)) => Value::int(x + y),
-        _ => Value::float(as_f64(a) + as_f64(b)),
+    if let (Some(x), Some(y)) = (as_i64(a), as_i64(b)) {
+        return Value::int(x + y);
     }
+    if let Some(Ok(v)) = decimal_operator(NumOp::Add, a, b) {
+        return v;
+    }
+    Value::float(as_f64(a) + as_f64(b))
 }
 
 /// Groovy property-read builtin: the stack holds the receiver then the property
@@ -1419,6 +1495,26 @@ fn dispatch_method(recv: &Value, method: &str, args: &[Value]) -> Result<Value, 
             Ok(Value::bool(h.contains_key(&k)))
         }
 
+        // ── BigDecimal (host heap) ──
+        _ if as_dec(recv).is_some() => {
+            let d = as_dec(recv).unwrap();
+            match method {
+                "toString" => Ok(Value::str(decimal::to_groovy_string(&d))),
+                "abs" => Ok(dec_value(decimal::abs(&d))),
+                "negate" => Ok(dec_value(decimal::neg(&d))),
+                "toBigDecimal" => Ok(recv.clone()),
+                // Truncating conversions; `round` goes to the nearest integer.
+                "intValue" | "longValue" | "toInteger" | "toLong" => {
+                    Ok(Value::int(decimal::truncate_to_i64(&d)))
+                }
+                "round" => Ok(Value::int(decimal::round_to_i64(&d))),
+                "doubleValue" | "toDouble" | "floatValue" | "toFloat" => {
+                    Ok(Value::float(decimal::to_f64(&d)))
+                }
+                _ => Err(format!("groovyrs: no such method `{method}` on BigDecimal")),
+            }
+        }
+
         // ── Ordered map (host heap) ──
         _ if as_omap(recv).is_some() => {
             let entries = as_omap(recv).unwrap();
@@ -1481,10 +1577,13 @@ fn type_name(v: &Value) -> &'static str {
         Value::Str(_) => "String",
         Value::Array(_) => "List",
         Value::Hash(_) => "Map",
+        Value::Obj(_) if as_dec(v).is_some() => "BigDecimal",
         Value::Obj(_) if as_omap(v).is_some() => "Map",
         Value::Obj(_) if as_instance(v).is_some() => "Object",
         Value::Int(_) => "Integer",
-        Value::Float(_) => "BigDecimal",
+        // Only a `d`/`f`-suffixed literal is an IEEE double; an unsuffixed
+        // decimal is a `BigDecimal` on the heap (above).
+        Value::Float(_) => "Double",
         Value::Bool(_) => "Boolean",
         Value::Undef => "null",
         _ => "Object",
@@ -1547,20 +1646,37 @@ fn b_div(vm: &mut VM, _argc: u8) -> Value {
             }
         };
     }
-    match (as_i64(&a), as_i64(&b)) {
-        // Both integers: exact → integer, else decimal.
-        (Some(x), Some(y)) => {
-            if y != 0 && x % y == 0 {
-                Value::int(x / y)
-            } else {
-                Value::float(x as f64 / y as f64)
-            }
+    // Groovy divides two integers exactly when it can (`4/2` is the Integer 2)
+    // and promotes to `BigDecimal` otherwise (`7/2` is 3.5, `1/3` is
+    // 0.3333333333) — never to a double.
+    if let (Some(x), Some(y)) = (as_i64(&a), as_i64(&b)) {
+        if y != 0 && x % y == 0 {
+            return Value::int(x / y);
         }
-        // A decimal operand (or a non-integer numeric): decimal division.
+    }
+    // A `double` operand keeps the IEEE path, where `5.0d / 0.0d` is Infinity.
+    if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
+        return Value::float(as_f64(&a) / as_f64(&b));
+    }
+    match (as_exact_dec(&a), as_exact_dec(&b)) {
+        (Some(x), Some(y)) => match decimal::divide(&x, &y) {
+            Some(q) => dec_value(q),
+            None => {
+                fault(vm, DIVISION_BY_ZERO.to_string());
+                Value::Undef
+            }
+        },
+        // A non-numeric operand: no Groovy meaning for `/`.
         _ => {
-            let x = as_f64(&a);
-            let y = as_f64(&b);
-            Value::float(x / y)
+            fault(
+                vm,
+                format!(
+                    "groovyrs: operator `/` is not defined for operands `{}` and `{}`",
+                    groovy_str(&a),
+                    groovy_str(&b)
+                ),
+            );
+            Value::Undef
         }
     }
 }
@@ -1581,9 +1697,16 @@ fn b_cmp(vm: &mut VM, _argc: u8) -> Value {
             }
         };
     }
-    let ord = match (as_num(&a), as_num(&b)) {
-        (Some(x), Some(y)) => x.partial_cmp(&y),
-        _ => Some(groovy_str(&a).cmp(&groovy_str(&b))),
+    // A decimal operand compares exactly (scale-insensitively); other numbers
+    // compare as doubles; anything else by Groovy string ordering.
+    let ord = match (as_dec(&a).is_some() || as_dec(&b).is_some())
+        .then(|| (as_exact_dec(&a), as_exact_dec(&b)))
+    {
+        Some((Some(x), Some(y))) => Some(decimal::cmp(&x, &y)),
+        _ => match (as_num(&a), as_num(&b)) {
+            (Some(x), Some(y)) => x.partial_cmp(&y),
+            _ => Some(groovy_str(&a).cmp(&groovy_str(&b))),
+        },
     };
     match ord {
         Some(std::cmp::Ordering::Less) => Value::int(-1),
@@ -1592,13 +1715,14 @@ fn b_cmp(vm: &mut VM, _argc: u8) -> Value {
     }
 }
 
-/// A numeric view of a value (`Int`/`Float`/`Bool`), or `None` for a non-number.
+/// A numeric view of a value (`Int`/`Float`/`Bool`/`BigDecimal`), or `None` for
+/// a non-number.
 fn as_num(v: &Value) -> Option<f64> {
     match v {
         Value::Int(n) => Some(*n as f64),
         Value::Float(f) => Some(*f),
         Value::Bool(b) => Some(*b as i64 as f64),
-        _ => None,
+        _ => as_dec(v).map(|d| decimal::to_f64(&d)),
     }
 }
 
@@ -1611,13 +1735,13 @@ fn as_i64(v: &Value) -> Option<i64> {
     }
 }
 
-/// A float view of a value for decimal arithmetic.
+/// A float view of a value, for the paths that must run on IEEE doubles.
 fn as_f64(v: &Value) -> f64 {
     match v {
         Value::Int(n) => *n as f64,
         Value::Float(f) => *f,
         Value::Bool(b) => *b as i64 as f64,
-        _ => f64::NAN,
+        _ => as_dec(v).map(|d| decimal::to_f64(&d)).unwrap_or(f64::NAN),
     }
 }
 
@@ -1683,6 +1807,11 @@ fn default_instance_str(inst: &Instance) -> String {
 /// fusevm's shell-flavoured `as_str_cow`): booleans as `true`/`false`, whole
 /// decimals with a trailing `.0`, `Undef`/`null` as `null`.
 pub fn groovy_str(v: &Value) -> String {
+    // A decimal handle renders through `BigDecimal.toString` — trailing zeros
+    // kept, `E+n` form outside the plain-notation window.
+    if let Some(d) = as_dec(v) {
+        return decimal::to_groovy_string(&d);
+    }
     // An ordered-map handle renders `[k:v, …]` in insertion order (`[:]` empty).
     if let Some(entries) = as_omap(v) {
         if entries.is_empty() {
@@ -1696,7 +1825,7 @@ pub fn groovy_str(v: &Value) -> String {
     }
     match v {
         Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-        Value::Float(f) => format_decimal(*f),
+        Value::Float(f) => decimal::format_double(*f),
         Value::Undef => "null".to_string(),
         // Groovy renders a list as `[a, b, c]` and a map as `[k:v, ...]` (the
         // empty map as `[:]`); collection elements print with the same rules
@@ -1721,18 +1850,95 @@ pub fn groovy_str(v: &Value) -> String {
     }
 }
 
-/// Groovy prints a whole `BigDecimal`/`double` with a trailing `.0` (`3.0`, not
-/// `3`) and keeps a decimal point; non-finite `double`s print as
-/// `Infinity`/`-Infinity`/`NaN`.
-fn format_decimal(f: f64) -> String {
-    if f.is_nan() {
-        "NaN".to_string()
-    } else if f.is_infinite() {
-        if f < 0.0 { "-Infinity" } else { "Infinity" }.to_string()
-    } else if f.fract() == 0.0 && f.abs() < 1e16 {
-        format!("{f}.0")
-    } else {
-        format!("{f}")
+/// The fault Groovy raises for a zero divisor (`java.lang.ArithmeticException:
+/// Division by zero`), which aborts the script exactly as an uncaught exception
+/// does.
+const DIVISION_BY_ZERO: &str = "groovyrs: division by zero";
+
+/// Groovy arithmetic and comparison when a `BigDecimal` is involved. Returns
+/// `None` when the operation is not decimal arithmetic — no decimal operand, or
+/// a `String` operand, where `+` concatenates and comparisons compare printed
+/// forms through the hook's default paths.
+///
+/// Mixing a decimal with a `double` widens to `double` (Groovy: `1.0 + 1.0d` is
+/// a `Double`); every other numeric mix stays exact, with `Integer` read at
+/// scale 0.
+fn decimal_operator(op: NumOp, a: &Value, b: &Value) -> Option<Result<Value, String>> {
+    if matches!(op, NumOp::Neg) {
+        return Some(Ok(dec_value(decimal::neg(&as_dec(a)?))));
+    }
+    if as_dec(a).is_none() && as_dec(b).is_none() {
+        return None;
+    }
+    if matches!(a, Value::Str(_)) || matches!(b, Value::Str(_)) {
+        return None;
+    }
+    // Groovy keeps exactly one mixed case exact: a `BigDecimal % Double` reads
+    // the double as its full binary expansion and stays a `BigDecimal`
+    // (`1.5 % 0.555d` is `0.38999999999999990230…0781250`). The mirrored
+    // `Double % BigDecimal`, and every other mixed operation, widens to double.
+    if matches!(op, NumOp::Mod) {
+        if let (Some(x), Value::Float(f)) = (as_dec(a), b) {
+            if let Some(y) = decimal::from_f64_exact(*f) {
+                return Some(match decimal::remainder(&x, &y) {
+                    Some(r) => Ok(dec_value(r)),
+                    None => Err(DIVISION_BY_ZERO.to_string()),
+                });
+            }
+        }
+    }
+    if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
+        return Some(Ok(double_operator(op, as_f64(a), as_f64(b))));
+    }
+    let (x, y) = (as_exact_dec(a)?, as_exact_dec(b)?);
+    let ordering = || decimal::cmp(&x, &y);
+    let result = match op {
+        NumOp::Add => dec_value(decimal::add(&x, &y)),
+        NumOp::Sub => dec_value(decimal::sub(&x, &y)),
+        NumOp::Mul => dec_value(decimal::mul(&x, &y)),
+        // `/` lowers to the `GDIV` builtin, but the hook still handles it for
+        // completeness (an operand pair fusevm delegates directly).
+        NumOp::Div => match decimal::divide(&x, &y) {
+            Some(q) => dec_value(q),
+            None => return Some(Err(DIVISION_BY_ZERO.to_string())),
+        },
+        NumOp::Mod => match decimal::remainder(&x, &y) {
+            Some(r) => dec_value(r),
+            None => return Some(Err(DIVISION_BY_ZERO.to_string())),
+        },
+        // Groovy raises a decimal to an integer power exactly; a negative or
+        // fractional exponent falls back to `double`.
+        NumOp::Pow => match decimal::to_i64(&y).and_then(|e| decimal::pow(&x, e)) {
+            Some(p) => dec_value(p),
+            None => Value::float(decimal::to_f64(&x).powf(decimal::to_f64(&y))),
+        },
+        NumOp::Eq => Value::bool(ordering().is_eq()),
+        NumOp::Ne => Value::bool(ordering().is_ne()),
+        NumOp::Lt => Value::bool(ordering().is_lt()),
+        NumOp::Gt => Value::bool(ordering().is_gt()),
+        NumOp::Le => Value::bool(ordering().is_le()),
+        NumOp::Ge => Value::bool(ordering().is_ge()),
+        NumOp::Neg => unreachable!("unary negation returns above"),
+    };
+    Some(Ok(result))
+}
+
+/// The same operator set on two IEEE doubles, for a decimal/`double` mix.
+fn double_operator(op: NumOp, x: f64, y: f64) -> Value {
+    match op {
+        NumOp::Add => Value::float(x + y),
+        NumOp::Sub => Value::float(x - y),
+        NumOp::Mul => Value::float(x * y),
+        NumOp::Div => Value::float(x / y),
+        NumOp::Mod => Value::float(x % y),
+        NumOp::Pow => Value::float(x.powf(y)),
+        NumOp::Eq => Value::bool(x == y),
+        NumOp::Ne => Value::bool(x != y),
+        NumOp::Lt => Value::bool(x < y),
+        NumOp::Gt => Value::bool(x > y),
+        NumOp::Le => Value::bool(x <= y),
+        NumOp::Ge => Value::bool(x >= y),
+        NumOp::Neg => Value::float(-x),
     }
 }
 
@@ -1896,6 +2102,12 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
         if let Some(res) = instance_operator(op, a, b) {
             return res;
         }
+    }
+    // Decimal arithmetic. A `BigDecimal` is a host-heap handle, so fusevm sees a
+    // non-numeric operand and delegates every `+`/`-`/`*`/`%`/`**`/comparison on
+    // one to this hook — which is exactly where Groovy's scale rules belong.
+    if let Some(res) = decimal_operator(op, a, b) {
+        return res;
     }
     match op {
         // Groovy `+` dispatches on the left operand: list concatenation/append,

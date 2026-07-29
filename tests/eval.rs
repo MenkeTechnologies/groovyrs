@@ -1916,3 +1916,363 @@ fn a_passing_assert_is_silent_and_an_uncaught_one_exits_nonzero() {
     assert!(!ok, "an uncaught assert must exit non-zero");
     assert_eq!(out, "a\n");
 }
+
+// ── `%` by zero (verified against Apache Groovy 5.0.7) ─────────────────────
+
+#[test]
+fn integer_modulo_by_zero_raises_slash_by_zero() {
+    // Groovy: `java.lang.ArithmeticException: / by zero`, catchable. A literal
+    // divisor and a variable one take the two different compiler paths.
+    let src = r#"
+def z = 0
+try { println(7 % z) } catch (ArithmeticException e) { println("var " + e.message) }
+try { println(7 % 0) } catch (ArithmeticException e) { println("lit " + e.message) }
+println(7 % 3)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "var / by zero\nlit / by zero\n1\n");
+}
+
+#[test]
+fn decimal_modulo_by_zero_reaches_its_handler() {
+    // A BigDecimal operand uses BigDecimal.remainder's wording, and `0.0 % 0`
+    // is *undefined* rather than division by zero.
+    let src = r#"
+def z = 0
+try { println(7.5 % z) } catch (ArithmeticException e) { println("a " + e.message) }
+try { println(0.0 % 0.0) } catch (ArithmeticException e) { println("b " + e.message) }
+try { println(7 % 0.0) } catch (ArithmeticException e) { println("c " + e.message) }
+println("after")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "a Division by zero\nb Division undefined\nc Division by zero\nafter\n"
+    );
+}
+
+#[test]
+fn double_modulo_by_zero_is_nan_not_an_exception() {
+    let (out, ok) = run("println(7.0d % 0.0d)\nprintln(7 % 0.0d)\nprintln(7.0d % 0)");
+    assert!(ok);
+    assert_eq!(out, "NaN\nNaN\nNaN\n");
+}
+
+#[test]
+fn compound_modulo_assign_shares_the_zero_check() {
+    let src = r#"
+def z = 0
+def x = 17
+x %= 5
+println(x)
+try { x %= z } catch (ArithmeticException e) { println(e.message) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "2\n/ by zero\n");
+}
+
+#[test]
+fn an_uncaught_modulo_by_zero_exits_nonzero() {
+    let (out, ok) = run("def z = 0\nprintln(\"a\")\nprintln(7 % z)\nprintln(\"b\")");
+    assert!(!ok, "an uncaught ArithmeticException must exit non-zero");
+    assert_eq!(out, "a\n");
+}
+
+// ── Interfaces (`interface`, `implements`, `default` methods) ──────────────
+
+#[test]
+fn an_implemented_interface_answers_instanceof() {
+    let src = r#"
+interface Named { def name() }
+interface Tagged extends Named { def tag() }
+class Thing implements Tagged {
+    def name() { "t" }
+    def tag() { "g" }
+}
+def t = new Thing()
+println(t.name())
+println(t instanceof Named)
+println(t instanceof Tagged)
+println(t instanceof Thing)
+println(t instanceof Comparable)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "t\ntrue\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn an_interface_default_method_is_inherited_and_overridable() {
+    // The default may call the interface's own abstract method, and a class
+    // definition wins over it.
+    let src = r#"
+interface Named {
+    def name()
+    default def greet() { "hi " + name() }
+}
+class A implements Named { def name() { "a" } }
+class B implements Named { def name() { "b" }; def greet() { "yo" } }
+println(new A().greet())
+println(new B().greet())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "hi a\nyo\n");
+}
+
+#[test]
+fn an_interface_reached_through_a_superclass_still_answers() {
+    let src = r#"
+interface Named { def name(); default def greet() { "hi " + name() } }
+abstract class Base implements Named { def describe() { greet() + "!" } }
+class Leaf extends Base { def name() { "leaf" } }
+def l = new Leaf()
+println(l.describe())
+println(l instanceof Named)
+println(l instanceof Base)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "hi leaf!\ntrue\ntrue\n");
+}
+
+// ── GDK collections, spread, and `for (x in …)` ────────────────────────────
+
+#[test]
+fn sort_and_unique_mutate_a_variable_receiver() {
+    // Groovy's List.sort()/unique() sort the receiver in place and return it.
+    let src = r#"
+def xs = [3, 1, 2, 3]
+println(xs.sort())
+println(xs)
+println(xs.unique())
+println(xs)
+def ys = [3, 1, 2]
+println(ys.sort(false))
+println(ys)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[1, 2, 3, 3]\n[1, 2, 3, 3]\n[1, 2, 3]\n[1, 2, 3]\n[1, 2, 3]\n[3, 1, 2]\n"
+    );
+}
+
+#[test]
+fn a_one_parameter_sort_closure_is_a_key_extractor() {
+    let src = r#"
+println(["bbb", "a", "cc"].sort { it.size() })
+println([3, 1, 2].sort { a, b -> b <=> a })
+println(["bbb", "a", "cc"].max { it.size() })
+println([3, 1, 2].min())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[a, cc, bbb]\n[3, 2, 1]\nbbb\n1\n");
+}
+
+#[test]
+fn list_group_by_join_and_sum() {
+    let src = r#"
+println([1, 2, 3, 4].groupBy { it % 2 })
+println([1, 2, 3].join("-"))
+println([1, [2, 3]].join("-"))
+println([1, 2, 3].sum(100))
+println(["a", "b"].sum())
+println([].max())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[1:[1, 3], 0:[2, 4]]\n1-2-3\n1-[2, 3]\n106\nab\nnull\n"
+    );
+}
+
+#[test]
+fn map_gdk_passes_key_value_or_a_single_entry() {
+    let src = r#"
+def m = [b: 2, a: 1]
+m.each { k, v -> println(k + "=" + v) }
+m.each { e -> println(e) }
+println(m.collect { k, v -> k + v })
+println(m.findAll { k, v -> v > 1 })
+println(m.find { k, v -> v == 1 })
+println(m.groupBy { k, v -> v > 1 })
+println(m.inject(0) { acc, e -> acc + e.value })
+println(m.sort())
+println(m.max { it.value })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "b=2\na=1\nb=2\na=1\n[b2, a1]\n[b:2]\na=1\n[true:[b:2], false:[a:1]]\n3\n[a:1, b:2]\nb=2\n"
+    );
+}
+
+#[test]
+fn the_spread_operator_maps_a_member_over_the_elements() {
+    // `*.` is `collect { it?.member }`, so a null element spreads to null.
+    let src = r#"
+class P { def x; P(x) { this.x = x }; def twice() { x * 2 } }
+def ps = [new P(1), new P(4)]
+println(ps*.x)
+println(ps*.twice())
+println([1, null, 3]*.toString())
+println([[1, 2], [3]]*.size())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[1, 4]\n[2, 8]\n[1, null, 3]\n[2, 1]\n");
+}
+
+#[test]
+fn for_in_walks_lists_maps_strings_and_nothing_for_null() {
+    let src = r#"
+for (x in [10, 20]) { println(x) }
+for (e in [k: 1, j: 2]) { println(e) }
+for (c in "hi") { println(c) }
+for (x in null) { println("never") }
+for (x in 5) { println(x) }
+def xs = [1, 2, 3]
+for (x in xs) { if (x == 2) continue; println("v" + x) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "10\n20\nk=1\nj=2\nh\ni\n5\nv1\nv3\n");
+}
+
+// ── `getClass()` and `String.toBigDecimal()` ───────────────────────────────
+
+#[test]
+fn get_class_names_the_java_type() {
+    let src = r#"
+println(1.getClass())
+println("s".class)
+println(1.5.getClass().getName())
+println(1.5d.class.simpleName)
+println([1].getClass())
+println([a: 1].getClass())
+println(null.getClass())
+class W {}
+println(new W().getClass().getName())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "class java.lang.Integer\nclass java.lang.String\njava.math.BigDecimal\nDouble\n\
+         class java.util.ArrayList\nclass java.util.LinkedHashMap\n\
+         class org.codehaus.groovy.runtime.NullObject\nW\n"
+    );
+}
+
+#[test]
+fn to_big_decimal_parses_with_exact_scale() {
+    let src = r#"
+println("1.5".toBigDecimal())
+println("100.00".toBigDecimal())
+println(" 7 ".toBigDecimal())
+println(".5".toBigDecimal())
+println("1.".toBigDecimal())
+println("2.5e7".toBigDecimal())
+println("1e-7".toBigDecimal())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "1.5\n100.00\n7\n0.5\n1\n2.5E+7\n1E-7\n");
+}
+
+#[test]
+fn to_big_decimal_reports_big_decimals_own_parse_messages() {
+    // Three distinct diagnostics, plus the message-less form the JDK throws for
+    // an empty string and for an exponent mark with no digits (`null` message).
+    let src = r#"
+def bad = ["x", "1.2.3", "+", "1e999999999999", "1ex", "", "1e"]
+for (s in bad) {
+    try { println(s.toBigDecimal()) }
+    catch (NumberFormatException e) { println("[" + s + "] " + e.message) }
+}
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[x] Character x is neither a decimal digit number, decimal point, nor \"e\" notation exponential mark.\n\
+         [1.2.3] Character array contains more than one decimal point.\n\
+         [+] No digits found.\n\
+         [1e999999999999] Too many nonzero exponent digits.\n\
+         [1ex] Not a digit.\n\
+         [] null\n\
+         [1e] null\n"
+    );
+}
+
+#[test]
+fn map_sort_does_not_mutate_its_receiver() {
+    // Regression: the `List.sort()` write-back must not fire for a map, whose
+    // `sort()` returns a new map and leaves the receiver in insertion order.
+    // (Caught by the `gdk` fuzz mode against Apache Groovy 5.0.7.)
+    let src = r#"
+def m = [b: 2, a: 1, c: 3]
+println(m.sort())
+println(m)
+for (e in m) { println("e" + e) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[a:1, b:2, c:3]\n[b:2, a:1, c:3]\neb=2\nea=1\nec=3\n");
+}
+
+#[test]
+fn a_map_property_read_is_only_ever_a_key_read() {
+    // Groovy: `m.size`, `m.class`, and `m.length` are key reads on a Map, so an
+    // absent key is null — the count properties do NOT apply. A key that *is*
+    // named `size`/`class` reads its own value.
+    let src = r#"
+def m = [a: 1]
+println(m.size)
+println(m.class)
+println(m.length)
+println(m.size())
+def m2 = [size: 9, class: "c", a: 1]
+println(m2.size)
+println(m2.size())
+println(m2.class)
+println(m2.getClass())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "null\nnull\nnull\n1\n9\n3\nc\nclass java.util.LinkedHashMap\n"
+    );
+}
+
+#[test]
+fn sort_writes_back_for_the_mutating_forms_only() {
+    // Groovy: `sort()`, `sort(true)`, and `sort(closure)` mutate the receiver;
+    // `sort(false)` returns a copy and leaves it alone.
+    let src = r#"
+def a = [3, 1, 2]
+println(a.sort(true))
+println(a)
+def b = [3, 1, 2]
+println(b.sort(false) { x, y -> x <=> y })
+println(b)
+def c = [3, 1, 2]
+println(c.sort(true) { x, y -> y <=> x })
+println(c)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[1, 2, 3]\n[1, 2, 3]\n[1, 2, 3]\n[3, 1, 2]\n[3, 2, 1]\n[3, 2, 1]\n"
+    );
+}

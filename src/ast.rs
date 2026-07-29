@@ -119,11 +119,24 @@ pub enum StmtKind {
     Class {
         name: String,
         /// The direct superclass name (`class C extends B`), or `None` for a root
-        /// class. `implements` clauses are still ignored (dynamic dispatch).
+        /// class.
         superclass: Option<String>,
+        /// The names in an `implements A, B` clause — or, for an `interface`, the
+        /// names in its own (multiple-inheritance) `extends A, B`. They make
+        /// `instanceof` answer and supply `default` method bodies.
+        interfaces: Vec<String>,
+        /// True when this declaration is an `interface` rather than a `class`.
+        /// An interface cannot be instantiated; its method declarations with a
+        /// body are Java 8 `default` methods, inherited by every implementor.
+        is_interface: bool,
         fields: Vec<Field>,
         ctors: Vec<Ctor>,
         methods: Vec<Method>,
+        /// Names declared without a body — an interface's abstract methods. They
+        /// bind nothing at runtime (the implementing class supplies the body),
+        /// but a bare call to one inside a sibling `default` method must still
+        /// compile to `this.m()`, which is what this list drives.
+        abstract_methods: Vec<String>,
     },
     /// A property assignment to a receiver: `recv.name = value` (e.g. `p.x = 10`
     /// or `this.v = x`). Routes through the host property-set builtin, honouring a
@@ -350,6 +363,11 @@ pub enum Expr {
         /// `it`, which is what `false` selects.
         explicit_params: bool,
     },
+    /// The sequence a `for (x in <expr>)` walks — the parser wraps the loop's
+    /// subject in this, and it lowers to the host's iteration builtin
+    /// (`crate::host::GITER`), which yields a list's elements, a map's entries,
+    /// a `String`'s characters, nothing for `null`, and any other value once.
+    Iterable(Box<Expr>),
     /// A first-class integer range `start..end` (inclusive) or `start..<end`
     /// (half-open). Materialised to a Groovy list of the enumerated integers, so
     /// `.size()`, `.contains(x)`, `.each`, and `.collect` all apply.

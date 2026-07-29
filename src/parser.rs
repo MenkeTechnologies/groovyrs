@@ -203,7 +203,15 @@ impl Parser {
     fn statement(&mut self) -> Result<Stmt, String> {
         let line = self.line();
         let kind = match self.peek() {
-            Tok::Ident(w) if w == "class" => self.class_decl()?,
+            // `class`/`interface`, optionally behind modifiers
+            // (`abstract class C`, `public final class C`).
+            Tok::Ident(_) if self.type_decl_ahead().is_some() => {
+                let is_interface = self.type_decl_ahead() == Some(true);
+                while !matches!(self.peek(), Tok::Ident(w) if w == "class" || w == "interface") {
+                    self.advance();
+                }
+                self.class_decl(is_interface)?
+            }
             // `try`/`throw` are contextual keywords (the lexer emits them as
             // identifiers); a `try` is only a statement when a block follows.
             Tok::Ident(w) if w == "try" && matches!(self.peek_at(1), Tok::LBrace) => {
@@ -376,22 +384,82 @@ impl Parser {
         Ok(StmtKind::Function { name, params, body })
     }
 
-    /// Parse a class declaration `class Name [extends/implements ...] { members }`.
-    /// The `class` keyword is the current token. `extends`/`implements` clauses
-    /// are tolerated but ignored (single-level dynamic dispatch only). Members are
-    /// fields (`def x [= init]` / `Type x [= init]`), constructors
-    /// (`Name(params){..}`), and methods (`def m(params){..}` / typed).
-    fn class_decl(&mut self) -> Result<StmtKind, String> {
-        self.advance(); // `class`
+    /// Does a `class`/`interface` declaration start here, possibly behind
+    /// modifiers (`abstract class C`, `public final class C`)? Answers
+    /// `Some(true)` for an interface, `Some(false)` for a class, `None` when
+    /// this is not a type declaration. The keyword must be followed by a name,
+    /// so a variable called `class` or `interface` still parses as one.
+    fn type_decl_ahead(&self) -> Option<bool> {
+        let mut i = 0;
+        loop {
+            match self.peek_at(i) {
+                Tok::Ident(w) if w == "class" || w == "interface" => {
+                    return matches!(self.peek_at(i + 1), Tok::Ident(_))
+                        .then_some(w == "interface");
+                }
+                Tok::Ident(w)
+                    if matches!(
+                        w.as_str(),
+                        "public" | "private" | "protected" | "static" | "final" | "abstract"
+                    ) =>
+                {
+                    i += 1;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Parse a class or interface declaration
+    /// `class Name [extends S] [implements A, B] { members }` /
+    /// `interface Name [extends A, B] { members }`. The `class`/`interface`
+    /// keyword is the current token.
+    ///
+    /// A class takes at most one `extends` (single inheritance) plus any number
+    /// of `implements` names; an interface's `extends` list is itself a list of
+    /// interfaces (Java allows several). Members are fields
+    /// (`def x [= init]` / `Type x [= init]`), constructors (`Name(params){..}`),
+    /// and methods (`def m(params){..}` / typed). Inside an interface a method
+    /// with no body is an abstract declaration and contributes nothing; one with
+    /// a body is a `default` method every implementor inherits.
+    fn class_decl(&mut self, is_interface: bool) -> Result<StmtKind, String> {
+        self.advance(); // `class` / `interface`
         let name = self.ident()?;
         self.skip_newlines();
-        // `extends Super` captures the direct superclass; `implements Y, Z` is
-        // still tolerated and ignored (interfaces have no runtime effect here).
         let mut superclass = None;
+        let mut interfaces = Vec::new();
         while !self.is(&Tok::LBrace) && !self.is(&Tok::Eof) {
             if matches!(self.peek(), Tok::Ident(k) if k == "extends") {
                 self.advance();
-                superclass = Some(self.ident()?);
+                // A class extends one superclass; an interface extends a list of
+                // interfaces.
+                loop {
+                    let parent = self.ident()?;
+                    if is_interface {
+                        interfaces.push(parent);
+                    } else {
+                        superclass = Some(parent);
+                    }
+                    if self.is(&Tok::Comma) {
+                        self.advance();
+                        self.skip_newlines();
+                        continue;
+                    }
+                    break;
+                }
+                continue;
+            }
+            if matches!(self.peek(), Tok::Ident(k) if k == "implements") {
+                self.advance();
+                loop {
+                    interfaces.push(self.ident()?);
+                    if self.is(&Tok::Comma) {
+                        self.advance();
+                        self.skip_newlines();
+                        continue;
+                    }
+                    break;
+                }
                 continue;
             }
             self.advance();
@@ -400,9 +468,17 @@ impl Parser {
         let mut fields = Vec::new();
         let mut ctors = Vec::new();
         let mut methods = Vec::new();
+        let mut abstract_methods = Vec::new();
         self.skip_terminators();
         while !self.is(&Tok::RBrace) && !self.is(&Tok::Eof) {
-            self.class_member(&name, &mut fields, &mut ctors, &mut methods)?;
+            self.class_member(
+                &name,
+                is_interface,
+                &mut fields,
+                &mut ctors,
+                &mut methods,
+                &mut abstract_methods,
+            )?;
             self.expect_terminator()?;
             self.skip_terminators();
         }
@@ -410,20 +486,29 @@ impl Parser {
         Ok(StmtKind::Class {
             name,
             superclass,
+            interfaces,
+            is_interface,
             fields,
             ctors,
             methods,
+            abstract_methods,
         })
     }
 
     /// Parse one class member into the appropriate bucket. Leading visibility /
     /// `static` / `final` modifiers are skipped (dynamic runtime).
+    ///
+    /// In an interface (`in_interface`) a method signature may end without a
+    /// body — that abstract declaration binds nothing and is dropped, leaving
+    /// dispatch to the implementing class.
     fn class_member(
         &mut self,
         class_name: &str,
+        in_interface: bool,
         fields: &mut Vec<Field>,
         ctors: &mut Vec<Ctor>,
         methods: &mut Vec<Method>,
+        abstract_methods: &mut Vec<String>,
     ) -> Result<(), String> {
         // Skip annotations (`@Override`, `@SuppressWarnings("x")`, …): the marker,
         // its name, and any parenthesised arguments. They have no runtime effect.
@@ -451,15 +536,18 @@ impl Parser {
             }
             self.skip_newlines();
         }
-        // Skip modifier keywords.
-        while matches!(
-            self.peek(),
-            Tok::Ident(m) if matches!(
-                m.as_str(),
-                "public" | "private" | "protected" | "static" | "final"
-                    | "abstract" | "synchronized" | "transient" | "volatile"
+        // Skip modifier keywords. `default` is a real token (the `switch` label),
+        // and in front of an interface method it is a modifier like the rest.
+        while self.is(&Tok::Default)
+            || matches!(
+                self.peek(),
+                Tok::Ident(m) if matches!(
+                    m.as_str(),
+                    "public" | "private" | "protected" | "static" | "final"
+                        | "abstract" | "synchronized" | "transient" | "volatile"
+                )
             )
-        ) {
+        {
             self.advance();
         }
         // `def name` — a field or method.
@@ -468,7 +556,10 @@ impl Parser {
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
                 let params = self.param_list()?;
-                let body = self.member_body()?;
+                let Some(body) = self.opt_member_body(in_interface)? else {
+                    abstract_methods.push(name);
+                    return Ok(());
+                };
                 methods.push(Method { name, params, body });
             } else {
                 let init = self.opt_initializer()?;
@@ -493,7 +584,10 @@ impl Parser {
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
                 let params = self.param_list()?;
-                let body = self.member_body()?;
+                let Some(body) = self.opt_member_body(in_interface)? else {
+                    abstract_methods.push(name);
+                    return Ok(());
+                };
                 methods.push(Method { name, params, body });
             } else {
                 let init = self.opt_initializer()?;
@@ -506,6 +600,19 @@ impl Parser {
             self.peek(),
             self.line()
         ))
+    }
+
+    /// Parse a method body, or recognise an interface's abstract declaration.
+    ///
+    /// Inside an interface a signature may end at the statement terminator
+    /// (`String name()` + newline): that declares the method without binding a
+    /// body, so `None` comes back and the member is dropped. Everywhere else a
+    /// body is required.
+    fn opt_member_body(&mut self, in_interface: bool) -> Result<Option<Vec<Stmt>>, String> {
+        if in_interface && !self.is(&Tok::LBrace) {
+            return Ok(None);
+        }
+        self.member_body().map(Some)
     }
 
     /// Parse a method/constructor body `{ ... }` (newlines before `{` allowed).
@@ -874,12 +981,8 @@ impl Parser {
                 self.advance();
                 false
             }
-            other => {
-                return Err(format!(
-                    "groovyrs: only integer ranges (`a..b`, `a..<b`) are supported in `for-in`, found {other} on line {}",
-                    self.line()
-                ))
-            }
+            // Not a range: `for (x in <collection>)`, desugared below.
+            _ => return self.for_in_sequence(line, var, start),
         };
         let end = self.binary(0)?;
         self.eat(&Tok::RParen)?;
@@ -921,6 +1024,86 @@ impl Parser {
                         ty: "def".into(),
                         name: end_tmp,
                         init: Some(end),
+                    },
+                ),
+                Stmt::new(line, loop_for),
+            ],
+            els: vec![],
+        })
+    }
+
+    /// Desugar `for (var in <collection>)` to a counting loop over the
+    /// materialised sequence:
+    ///
+    /// ```text
+    ///   def $seq = <collection as a sequence>
+    ///   def $len = $seq.size()
+    ///   for (def $i = 0; $i < $len; $i++) { def var = $seq[$i]; <body> }
+    /// ```
+    ///
+    /// The sequence is materialised once ([`Expr::Iterable`]) and its length
+    /// read once, so the loop condition stays a native integer compare and a
+    /// body that mutates the collection still walks the original elements —
+    /// which is what Groovy's snapshot iterator does.
+    fn for_in_sequence(
+        &mut self,
+        line: u32,
+        var: String,
+        subject: Expr,
+    ) -> Result<StmtKind, String> {
+        self.eat(&Tok::RParen)?;
+        let mut body = self.braced_or_single()?;
+        let seq = self.fresh_tmp("seq");
+        let len = self.fresh_tmp("len");
+        let idx = self.fresh_tmp("idx");
+        let local = |name: &str, init: Expr| {
+            Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: "def".into(),
+                    name: name.to_string(),
+                    init: Some(init),
+                },
+            )
+        };
+        body.insert(
+            0,
+            local(
+                &var,
+                Expr::Index {
+                    recv: Box::new(Expr::Var(seq.clone())),
+                    index: Box::new(Expr::Var(idx.clone())),
+                    line,
+                },
+            ),
+        );
+        let loop_for = StmtKind::For {
+            init: Some(Box::new(local(&idx, Expr::Int(0)))),
+            cond: Some(Expr::Binary {
+                op: BinOp::Lt,
+                lhs: Box::new(Expr::Var(idx.clone())),
+                rhs: Box::new(Expr::Var(len.clone())),
+            }),
+            update: Some(Box::new(Stmt::new(
+                line,
+                StmtKind::Expr(Expr::PostIncDec {
+                    name: idx,
+                    inc: true,
+                }),
+            ))),
+            body,
+        };
+        Ok(StmtKind::If {
+            cond: Expr::Bool(true),
+            then: vec![
+                local(&seq, Expr::Iterable(Box::new(subject))),
+                local(
+                    &len,
+                    Expr::Property {
+                        recv: Box::new(Expr::Var(seq)),
+                        name: "size".to_string(),
+                        line,
+                        safe: false,
                     },
                 ),
                 Stmt::new(line, loop_for),
@@ -1115,6 +1298,42 @@ impl Parser {
                         },
                     );
                 }
+            } else if self.is(&Tok::StarDot) {
+                // The spread operator `recv*.member` / `recv*.method(args)`:
+                // apply the member to every element and collect the results.
+                // Groovy's own definition is `recv.collect { it?.member }`, and
+                // that is exactly the desugar — including the safe navigation,
+                // which is why a `null` element spreads to `null`.
+                let line = self.line();
+                self.advance();
+                let member = self.ident()?;
+                let inner = if self.is(&Tok::LParen) {
+                    Expr::MethodCall {
+                        recv: Box::new(Expr::Var("it".to_string())),
+                        method: member,
+                        args: self.call_args()?,
+                        line,
+                        safe: true,
+                    }
+                } else {
+                    Expr::Property {
+                        recv: Box::new(Expr::Var("it".to_string())),
+                        name: member,
+                        line,
+                        safe: true,
+                    }
+                };
+                e = Expr::MethodCall {
+                    recv: Box::new(e),
+                    method: "collect".to_string(),
+                    args: vec![Expr::Closure {
+                        params: vec!["it".to_string()],
+                        body: vec![Stmt::new(line, StmtKind::Expr(inner))],
+                        explicit_params: false,
+                    }],
+                    line,
+                    safe: false,
+                };
             } else if self.is(&Tok::LParen) {
                 // Postfix call-application on a value: `f(a)(b)`, `getFn()(x)`.
                 let line = self.line();

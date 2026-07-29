@@ -197,6 +197,22 @@ pub const GASSERT_REC: u16 = 741;
 /// comma-joined `Values:` variable names.
 pub const GASSERT_FAIL: u16 = 742;
 
+/// Builtin id for Groovy `%` on a divisor the compiler's guard found to be zero.
+/// Stack: dividend, divisor. Emitted *only* behind that guard, so `%` keeps the
+/// native `Op::Mod` (and its JIT trace) on every non-zero divisor.
+pub const GMOD: u16 = 743;
+
+/// Builtin id for materialising `for (x in <expr>)`'s sequence. Stack: the
+/// value; pushes the list of elements Groovy iterates over.
+pub const GITER: u16 = 744;
+
+/// Builtin id for choosing what a self-mutating GDK call writes back to its
+/// variable receiver. Stack: the call's result, then the receiver's *current*
+/// value; pushes the result when the receiver is a list (Groovy's `List.sort` /
+/// `List.unique` mutate in place) and the receiver unchanged otherwise (a map's
+/// `sort` returns a new map and leaves the receiver alone).
+pub const GWRITEBACK: u16 = 745;
+
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -211,6 +227,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GPRINTLN, b_println);
     vm.register_builtin(GPRINT, b_print);
     vm.register_builtin(GDIV, b_div);
+    vm.register_builtin(GMOD, b_mod);
+    vm.register_builtin(GITER, b_iter);
+    vm.register_builtin(GWRITEBACK, b_writeback);
     vm.register_builtin(GFFI_COMPILE, b_ffi_compile);
     vm.register_builtin(GFFI_CALL, b_ffi_call);
     vm.register_builtin(GMETHOD, b_method);
@@ -318,12 +337,24 @@ fn set_pending(exc: Value) {
 /// `groovyrs:` fault the same condition has always produced, so an
 /// exception-free program's behaviour is unchanged.
 fn raise(vm: &mut VM, class: &str, message: &str) {
+    raise_opt(vm, class, Some(message));
+}
+
+/// [`raise`] for a throwable whose message may be *absent*. `java.math`'s
+/// `BigDecimal` parser throws a message-less `NumberFormatException` for a few
+/// inputs, and `e.getMessage()` then answers `null` — a difference a script can
+/// print, so it is modeled rather than flattened to an empty string.
+fn raise_opt(vm: &mut VM, class: &str, message: Option<&str>) {
     if EXC_ARMED.with(|a| a.get()) {
-        set_pending(new_throwable(class, message));
+        set_pending(new_throwable_opt(class, message));
     } else {
+        let name = crate::throwable::qualified(class);
         fault(
             vm,
-            format!("{}: {message}", crate::throwable::qualified(class)),
+            match message {
+                Some(m) => format!("{name}: {m}"),
+                None => name,
+            },
         );
     }
 }
@@ -393,19 +424,27 @@ fn java_class_name(v: &Value) -> String {
 /// `argument types: (…)` — the qualified name's last segment, and `null` for a
 /// null argument.
 fn simple_class_name(v: &Value) -> String {
-    let qualified = java_class_name(v);
+    simple_name_of(&java_class_name(v))
+}
+
+/// The last segment of a qualified class name (`java.lang.String` → `String`).
+fn simple_name_of(qualified: &str) -> String {
     qualified
         .rsplit('.')
         .next()
-        .unwrap_or(&qualified)
+        .unwrap_or(qualified)
         .to_string()
 }
 
-/// Allocate a built-in throwable instance with `message` on the host heap.
-fn new_throwable(class: &str, message: &str) -> Value {
+/// Allocate a built-in throwable instance on the host heap. `None` gives it the
+/// `null` message a message-less `NumberFormatException` carries.
+fn new_throwable_opt(class: &str, message: Option<&str>) -> Value {
     let cid = find_class(class).unwrap_or(0);
     let mut fields = std::collections::HashMap::new();
-    fields.insert("message".to_string(), Value::str(message.to_string()));
+    fields.insert(
+        "message".to_string(),
+        message.map_or(Value::Undef, |m| Value::str(m.to_string())),
+    );
     heap_push(HeapObj::Instance(Instance { class: cid, fields }))
 }
 
@@ -421,6 +460,8 @@ fn register_throwables() {
             c.push(ClassMeta {
                 name: name.to_string(),
                 superclass: superclass.map(str::to_string),
+                interfaces: Vec::new(),
+                is_interface: false,
                 field_names: if superclass.is_none() {
                     vec!["message".to_string()]
                 } else {
@@ -595,6 +636,14 @@ enum HeapObj {
     /// carry, and because compiling it once per literal beats recompiling it on
     /// every match.
     Regex(Box<Pattern>),
+    /// A `java.lang.Class` — what `getClass()` / the `.class` property answers.
+    /// Holds the fully-qualified class name (a script-declared class has no
+    /// package, so its qualified and simple names coincide).
+    ClassRef(String),
+    /// One `Map.Entry` — what the single-parameter closure form of a map's
+    /// `each` / `collect` / `find` receives. Holds the entry's key and value; it
+    /// prints as `k=v` and answers `key`/`value` (and `getKey`/`getValue`).
+    Entry(String, Value),
 }
 
 /// A registered closure: the body's name-pool index, its parameter count, and
@@ -626,6 +675,11 @@ struct ClassMeta {
     /// class. Resolved to an id lazily (via [`find_class`]) so declaration order
     /// does not matter. Drives method/field inheritance and virtual dispatch.
     superclass: Option<String>,
+    /// The `implements A, B` names (an interface's own `extends` list lands here
+    /// too). They make `instanceof` answer and contribute `default` methods.
+    interfaces: Vec<String>,
+    /// True for an `interface` declaration — it cannot be instantiated.
+    is_interface: bool,
     field_names: Vec<String>,
     /// Field initializer thunks: name-pool index of a synthetic 0-arg subroutine
     /// that computes the initial value, per field that has an initializer.
@@ -665,6 +719,29 @@ fn closure_meta(v: &Value) -> Option<ClosureMeta> {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
             Some(HeapObj::Closure(c)) => Some(c.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// The fully-qualified class name behind a `java.lang.Class` handle, if `v` is
+/// one.
+fn as_class_ref(v: &Value) -> Option<String> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::ClassRef(n)) => Some(n.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// The `(key, value)` behind a `Map.Entry` handle, if `v` is one.
+fn as_entry(v: &Value) -> Option<(String, Value)> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Entry(k, val)) => Some((k.clone(), val.clone())),
             _ => None,
         }),
         _ => None,
@@ -965,7 +1042,45 @@ fn lookup_method(class: u32, method: &str) -> Option<u16> {
         }
         cur = meta.superclass.as_deref().and_then(find_class);
     }
+    // No class in the chain defines it: an implemented interface may, as a Java 8
+    // `default` method. Interfaces are searched after the whole class chain, so a
+    // class definition always wins over a default.
+    for id in interface_closure(class) {
+        if let Some(idx) = class_meta(id).and_then(|m| m.methods.get(method).copied()) {
+            return Some(idx);
+        }
+    }
     None
+}
+
+/// Every interface `class` implements, transitively — through its superclass
+/// chain and through interfaces that themselves `extend` others. Breadth-first
+/// from the most-derived class, so a nearer `default` method shadows a farther
+/// one. Cycles (`interface A extends B`, `B extends A`) terminate on the seen
+/// set.
+fn interface_closure(class: u32) -> Vec<u32> {
+    let mut queue: Vec<u32> = class_chain(class);
+    queue.reverse(); // most-derived class first
+    let mut seen: Vec<u32> = queue.clone();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < queue.len() {
+        let Some(meta) = class_meta(queue[i]) else {
+            i += 1;
+            continue;
+        };
+        for name in &meta.interfaces {
+            if let Some(id) = find_class(name) {
+                if !seen.contains(&id) {
+                    seen.push(id);
+                    queue.push(id);
+                    out.push(id);
+                }
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 /// The class-id chain from a root ancestor down to `class` (inclusive). Used to
@@ -1050,8 +1165,11 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    // The superclass name (empty string ⇒ root class), pushed first by
-    // `register_class`, so it is popped last.
+    // The interface-name array, the `interface` flag, and the superclass name
+    // (empty string ⇒ root class) are pushed first by `register_class`, so they
+    // pop last and in that order.
+    let interfaces_a = vm.stack.pop().unwrap_or(Value::Undef);
+    let is_interface = matches!(vm.stack.pop(), Some(Value::Bool(true)));
     let super_name = vm
         .stack
         .pop()
@@ -1059,6 +1177,10 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
         .as_str_cow()
         .into_owned();
     let superclass = (!super_name.is_empty()).then_some(super_name);
+    let interfaces: Vec<String> = match interfaces_a {
+        Value::Array(a) => a.iter().map(|v| v.as_str_cow().into_owned()).collect(),
+        _ => Vec::new(),
+    };
 
     let field_names: Vec<String> = match fields_a {
         Value::Array(a) => a.iter().map(|v| v.as_str_cow().into_owned()).collect(),
@@ -1088,6 +1210,8 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
         c.borrow_mut().push(ClassMeta {
             name,
             superclass,
+            interfaces,
+            is_interface,
             field_names,
             field_inits,
             methods,
@@ -1116,6 +1240,10 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
         fault(vm, format!("unable to resolve class {name}"));
         return Value::Undef;
     };
+    if class_meta(cid).is_some_and(|m| m.is_interface) {
+        fault(vm, format!("groovyrs: {name} is an interface"));
+        return Value::Undef;
+    }
     // Materialise every field across the superclass chain (root → leaf), each
     // defaulting to null — an inherited field is a real field of the instance.
     let chain = class_chain(cid);
@@ -1646,7 +1774,8 @@ fn value_is_a(value: &Value, class: &str) -> bool {
     // A user class instance: the named class must appear in its superclass chain.
     if let Some(inst) = as_instance(value) {
         if let Some(target) = find_class(class) {
-            return class_chain(inst.class).contains(&target);
+            return class_chain(inst.class).contains(&target)
+                || interface_closure(inst.class).contains(&target);
         }
         // Named type is not a user class — fall through to built-in checks (an
         // instance is still an `Object`/`GroovyObject`).
@@ -1702,6 +1831,11 @@ fn dispatch_instance_method(
             return Some(Ok(Value::Undef));
         }
     }
+    // `getClass()` answers on every object (a user override was already found
+    // by `lookup_method` above).
+    if method == "getClass" && args.is_empty() {
+        return Some(Ok(class_ref_of(recv)));
+    }
     // The `Throwable` methods a script actually calls, for the modeled built-in
     // hierarchy (a user override was already found by `lookup_method` above).
     if is_throwable_class(inst.class) {
@@ -1746,6 +1880,11 @@ fn dispatch_instance_prop_get(
     }
     if inst.fields.contains_key(name) {
         return Some(Ok(inst.fields.get(name).cloned().unwrap_or(Value::Undef)));
+    }
+    // `obj.class` is the `getClass()` property, on a user instance too — but a
+    // declared field named `class` (read above) still wins.
+    if name == "class" {
+        return Some(Ok(class_ref_of(recv)));
     }
     Some(Ok(raise_missing_property(vm, recv, name)))
 }
@@ -2052,6 +2191,8 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         return match method {
             "toString" => Value::str("null".to_string()),
             "equals" => Value::bool(matches!(args.first(), None | Some(Value::Undef))),
+            // Groovy routes `null.getClass()` to `NullObject`, which answers.
+            "getClass" => class_ref_of(&recv),
             _ => {
                 raise(
                     vm,
@@ -2092,6 +2233,19 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // Closure-consuming list/range iteration (`each`/`collect`/`findAll`/…).
     if let Value::Array(items) = &recv {
         if let Some(res) = dispatch_iteration(vm, items, method, &args) {
+            return match res {
+                Ok(v) => v,
+                Err(e) => {
+                    fault(vm, e);
+                    Value::Undef
+                }
+            };
+        }
+    }
+    // The same operations over a map, which passes `(key, value)` (or one
+    // `Map.Entry`) to the closure and rebuilds a map where Groovy does.
+    if let Some(entries) = as_omap(&recv) {
+        if let Some(res) = dispatch_map_iteration(vm, &entries, method, &args) {
             return match res {
                 Ok(v) => v,
                 Err(e) => {
@@ -2230,10 +2384,13 @@ fn dispatch_iteration(
             Some(Ok(acc))
         }
         // `list.sum()` adds the elements; `list.sum { it -> ... }` sums the
-        // closure results. An empty list sums to `null` (Groovy).
+        // closure results; `list.sum(seed)` starts from `seed`. An empty list
+        // with no seed sums to `null` (Groovy).
         "sum" => {
             let clo = args.last().filter(|a| closure_meta(a).is_some());
-            let mut acc: Option<Value> = None;
+            // A leading non-closure argument is the seed.
+            let mut acc: Option<Value> =
+                args.first().filter(|a| closure_meta(a).is_none()).cloned();
             for it in items {
                 let v = match clo {
                     Some(c) => match invoke_closure(vm, c, std::slice::from_ref(it)) {
@@ -2254,7 +2411,248 @@ fn dispatch_iteration(
             }
             Some(Ok(acc.unwrap_or(Value::Undef)))
         }
+        // `list.sort()` / `sort { it.key }` / `sort { a, b -> … }`. Groovy sorts
+        // the receiver *in place* and returns it; the compiler writes the result
+        // back to a variable receiver (see `compiler::Compiler::emit_receiver_writeback`).
+        // `sort(false)` asks for a copy, which is what this always produces.
+        "sort" => {
+            let order = OrderBy::of(args);
+            Some(sort_values(vm, items, &order).map(Value::array))
+        }
+        // `list.unique()` / `unique { key }` — drop later duplicates, keeping
+        // source order. Mutates the receiver in Groovy, like `sort`.
+        "unique" => {
+            let order = OrderBy::of(args);
+            let mut out: Vec<Value> = Vec::new();
+            for it in items {
+                let mut dup = false;
+                for kept in &out {
+                    match order.apply(vm, it, kept) {
+                        Ok(o) => dup |= o.is_eq(),
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+                if !dup {
+                    out.push(it.clone());
+                }
+            }
+            Some(Ok(Value::array(out)))
+        }
+        // `list.max()` / `max { … }`, `list.min()` / `min { … }`.
+        "max" | "min" => {
+            let order = OrderBy::of(args);
+            let want = if method == "max" {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            };
+            Some(extreme_value(vm, items, &order, want))
+        }
+        // `list.groupBy { … }` — a map from the closure's value to the sublist
+        // of elements that produced it, keys in first-seen order.
+        "groupBy" => {
+            let clo = args.last()?;
+            closure_meta(clo)?;
+            let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
+            for it in items {
+                let key = match invoke_closure(vm, clo, std::slice::from_ref(it)) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                let key = groovy_str(&key);
+                match groups.iter_mut().find(|(k, _)| *k == key) {
+                    Some(slot) => slot.1.push(it.clone()),
+                    None => groups.push((key, vec![it.clone()])),
+                }
+            }
+            Some(Ok(heap_push(HeapObj::OrderedMap(
+                groups
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::array(v)))
+                    .collect(),
+            ))))
+        }
         _ => None,
+    }
+}
+
+/// The closure-driven GDK over a **map**: `each`, `collect`, `findAll`, `find`,
+/// `any`, `every`, `groupBy`, `inject`, `sort`, `max`, `min`. Returns `None`
+/// when `method` is not one of these, so the caller falls back to the pure map
+/// dispatch (`size`, `containsKey`, …).
+///
+/// Groovy hands a map's closure either `(key, value)` (a two-parameter closure)
+/// or one `Map.Entry` (a one-parameter closure); [`entry_args`] picks between
+/// them from the closure's declared parameter count.
+fn dispatch_map_iteration(
+    vm: &mut VM,
+    entries: &[(String, Value)],
+    method: &str,
+    args: &[Value],
+) -> Option<Result<Value, String>> {
+    // Every operation here consumes a trailing closure except `sort`, which also
+    // has a no-argument (sort-by-key) form.
+    let clo = args.last().filter(|a| closure_meta(a).is_some());
+    match method {
+        "each" | "eachWithIndex" => {
+            let clo = clo?;
+            for (i, (k, v)) in entries.iter().enumerate() {
+                let mut call = entry_args(clo, k, v);
+                if method == "eachWithIndex" {
+                    call.push(Value::int(i as i64));
+                }
+                if let Err(e) = invoke_closure(vm, clo, &call) {
+                    return Some(Err(e));
+                }
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+            }
+            Some(Ok(heap_push(HeapObj::OrderedMap(entries.to_vec()))))
+        }
+        // `map.collect { k, v -> … }` yields a *list* of the closure's results.
+        "collect" => {
+            let clo = clo?;
+            let mut out = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                match invoke_closure(vm, clo, &entry_args(clo, k, v)) {
+                    Ok(r) => out.push(r),
+                    Err(e) => return Some(Err(e)),
+                }
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+            }
+            Some(Ok(Value::array(out)))
+        }
+        // `map.findAll { … }` yields a *map* of the accepted entries; `find`
+        // yields the first accepted entry (a `Map.Entry`), else `null`.
+        "findAll" | "find" | "any" | "every" => {
+            let clo = clo?;
+            let mut kept: Vec<(String, Value)> = Vec::new();
+            for (k, v) in entries {
+                let r = match invoke_closure(vm, clo, &entry_args(clo, k, v)) {
+                    Ok(r) => r,
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                let ok = groovy_truthy(vm, &r);
+                match method {
+                    "find" if ok => {
+                        return Some(Ok(heap_push(HeapObj::Entry(k.clone(), v.clone()))))
+                    }
+                    "any" if ok => return Some(Ok(Value::bool(true))),
+                    "every" if !ok => return Some(Ok(Value::bool(false))),
+                    "findAll" if ok => kept.push((k.clone(), v.clone())),
+                    _ => {}
+                }
+            }
+            Some(Ok(match method {
+                "findAll" => heap_push(HeapObj::OrderedMap(kept)),
+                "any" => Value::bool(false),
+                "every" => Value::bool(true),
+                _ => Value::Undef,
+            }))
+        }
+        // `map.groupBy { … }` — a map from the closure's value to the *sub-map*
+        // of entries that produced it.
+        "groupBy" => {
+            let clo = clo?;
+            let mut groups: Vec<(String, Vec<(String, Value)>)> = Vec::new();
+            for (k, v) in entries {
+                let key = match invoke_closure(vm, clo, &entry_args(clo, k, v)) {
+                    Ok(r) => groovy_str(&r),
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                match groups.iter_mut().find(|(gk, _)| *gk == key) {
+                    Some(slot) => slot.1.push((k.clone(), v.clone())),
+                    None => groups.push((key, vec![(k.clone(), v.clone())])),
+                }
+            }
+            Some(Ok(heap_push(HeapObj::OrderedMap(
+                groups
+                    .into_iter()
+                    .map(|(k, v)| (k, heap_push(HeapObj::OrderedMap(v))))
+                    .collect(),
+            ))))
+        }
+        // `map.inject(seed) { acc, entry -> … }` folds over the entries.
+        "inject" => {
+            let clo = clo?;
+            let mut acc = match args {
+                [seed, _] => seed.clone(),
+                _ => return None,
+            };
+            for (k, v) in entries {
+                let entry = heap_push(HeapObj::Entry(k.clone(), v.clone()));
+                match invoke_closure(vm, clo, &[acc, entry]) {
+                    Ok(r) => acc = r,
+                    Err(e) => return Some(Err(e)),
+                }
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+            }
+            Some(Ok(acc))
+        }
+        // `map.sort()` orders by key and yields a *new* map (Groovy does not
+        // mutate the receiver here, unlike `List.sort`).
+        "sort" => {
+            let handles: Vec<Value> = entries
+                .iter()
+                .map(|(k, v)| heap_push(HeapObj::Entry(k.clone(), v.clone())))
+                .collect();
+            let order = match clo {
+                Some(c) => OrderBy::Key(c),
+                None => OrderBy::Natural,
+            };
+            // With no closure Groovy orders by key; the entry handles themselves
+            // have no natural order, so sort the keys and rebuild.
+            if clo.is_none() {
+                let mut sorted = entries.to_vec();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                return Some(Ok(heap_push(HeapObj::OrderedMap(sorted))));
+            }
+            Some(sort_values(vm, &handles, &order).map(|sorted| {
+                heap_push(HeapObj::OrderedMap(
+                    sorted.iter().filter_map(as_entry).collect(),
+                ))
+            }))
+        }
+        // `map.max { it.value }` / `min` yield the extreme *entry*.
+        "max" | "min" => {
+            let clo = clo?;
+            let handles: Vec<Value> = entries
+                .iter()
+                .map(|(k, v)| heap_push(HeapObj::Entry(k.clone(), v.clone())))
+                .collect();
+            let want = if method == "max" {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            };
+            Some(extreme_value(vm, &handles, &OrderBy::Key(clo), want))
+        }
+        _ => None,
+    }
+}
+
+/// The argument list a map's GDK closure receives for one entry: `(key, value)`
+/// for a two-parameter closure, a single `Map.Entry` for a one-parameter one —
+/// which is how Groovy decides too.
+fn entry_args(clo: &Value, key: &str, value: &Value) -> Vec<Value> {
+    if closure_meta(clo).map(|m| m.params).unwrap_or(1) >= 2 {
+        vec![Value::str(key.to_string()), value.clone()]
+    } else {
+        vec![heap_push(HeapObj::Entry(key.to_string(), value.clone()))]
     }
 }
 
@@ -2268,7 +2666,12 @@ fn groovy_sum_add(a: &Value, b: &Value) -> Value {
     if let Some(Ok(v)) = decimal_operator(NumOp::Add, a, b) {
         return v;
     }
-    Value::float(as_f64(a) + as_f64(b))
+    if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
+        return Value::float(as_f64(a) + as_f64(b));
+    }
+    // A non-numeric element sums with Groovy's `plus` — strings concatenate,
+    // lists append — exactly as the `+` operator does.
+    groovy_add(a, b)
 }
 
 /// Groovy property-read builtin: the stack holds the receiver then the property
@@ -2310,6 +2713,10 @@ fn value_size(v: &Value) -> i64 {
 /// out-of-range `list.get`, an unparsable `String.toInteger`) raises the same
 /// throwable Groovy does.
 fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Value {
+    // `getClass()` answers on every value, so it precedes the per-type table.
+    if method == "getClass" && args.is_empty() {
+        return class_ref_of(recv);
+    }
     match (recv, method) {
         // Universal size query (String chars / list elements / map entries).
         (_, "size") => Value::int(value_size(recv)),
@@ -2342,6 +2749,16 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             Some(f) => Value::float(f),
             None => raise_number_format(vm, s.trim()),
         },
+        // `String.toBigDecimal()` is `new BigDecimal(text.trim())`, whose
+        // `NumberFormatException` carries `BigDecimal`'s own character-level
+        // diagnostics — including the message-less form for an empty string.
+        (Value::Str(s), "toBigDecimal") => match decimal::parse_java(s.trim()) {
+            Ok(d) => dec_value(d),
+            Err(msg) => {
+                raise_opt(vm, "NumberFormatException", msg.as_deref());
+                Value::Undef
+            }
+        },
 
         // ── List ──
         (Value::Array(a), "isEmpty") => Value::bool(a.is_empty()),
@@ -2370,6 +2787,13 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             r.reverse();
             Value::array(r)
         }
+        // `list.join([separator])` renders each element the way `println` does
+        // and joins with the separator (the empty string when omitted).
+        (Value::Array(a), "join") => {
+            let sep = args.first().map(groovy_str).unwrap_or_default();
+            let parts: Vec<String> = a.iter().map(|v| render_value(vm, v)).collect();
+            Value::str(parts.join(&sep))
+        }
 
         // ── Map ──
         (Value::Hash(h), "isEmpty") => Value::bool(h.is_empty()),
@@ -2394,6 +2818,26 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 "doubleValue" | "toDouble" | "floatValue" | "toFloat" => {
                     Value::float(decimal::to_f64(&d))
                 }
+                _ => raise_missing_method(vm, recv, method, args),
+            }
+        }
+
+        // ── java.lang.Class (host heap) ──
+        _ if as_class_ref(recv).is_some() => {
+            let qualified = as_class_ref(recv).unwrap();
+            match method {
+                "getName" | "getTypeName" | "getCanonicalName" => Value::str(qualified),
+                "getSimpleName" => Value::str(simple_name_of(&qualified)),
+                _ => raise_missing_method(vm, recv, method, args),
+            }
+        }
+
+        // ── Map.Entry (host heap) ──
+        _ if as_entry(recv).is_some() => {
+            let (k, v) = as_entry(recv).unwrap();
+            match method {
+                "getKey" => Value::str(k),
+                "getValue" => v,
                 _ => raise_missing_method(vm, recv, method, args),
             }
         }
@@ -2464,6 +2908,42 @@ fn parse_java_double(s: &str) -> Option<f64> {
 /// count properties on `String`/list/map; a map's `k` also reads entry `k`. An
 /// unmodeled property raises `groovy.lang.MissingPropertyException`.
 fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
+    // A map's property access is *only* a key read (`m.k` == `m['k']`), and an
+    // absent key is `null` — including the names that are properties on every
+    // other value: `[a:1].size`, `[a:1].class`, and `[a:1].length` are all
+    // `null` in Groovy, while `[size: 9].size` is `9`. Checked first for that
+    // reason.
+    if let Some(entries) = as_omap(recv) {
+        return entries
+            .iter()
+            .find(|(ek, _)| ek == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Value::Undef);
+    }
+    if let Value::Hash(h) = recv {
+        return h.get(name).cloned().unwrap_or(Value::Undef);
+    }
+    // Groovy's `.class` is the `getClass()` property, on every value but `null`
+    // (where it answers `NullObject`'s class rather than raising).
+    if name == "class" {
+        return class_ref_of(recv);
+    }
+    // A `java.lang.Class` exposes its accessors as properties (`c.name`,
+    // `c.simpleName`) — Groovy's getter-to-property rule.
+    if let Some(qualified) = as_class_ref(recv) {
+        return match name {
+            "name" | "typeName" | "canonicalName" => Value::str(qualified),
+            "simpleName" => Value::str(simple_name_of(&qualified)),
+            _ => raise_missing_property(vm, recv, name),
+        };
+    }
+    if let Some((k, v)) = as_entry(recv) {
+        return match name {
+            "key" => Value::str(k),
+            "value" => v,
+            _ => raise_missing_property(vm, recv, name),
+        };
+    }
     match (recv, name) {
         // Every property read on `null` raises, including `size`/`length`.
         (Value::Undef, _) => {
@@ -2475,19 +2955,7 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
             Value::Undef
         }
         (_, "size") | (_, "length") => Value::int(value_size(recv)),
-        // Groovy map property access reads the entry of that key (`m.k` == `m['k']`).
-        (Value::Hash(h), key) => h.get(key).cloned().unwrap_or(Value::Undef),
-        _ => {
-            // An ordered-map handle: `m.k` reads entry `k` (null if absent).
-            if let Some(entries) = as_omap(recv) {
-                return entries
-                    .iter()
-                    .find(|(ek, _)| ek == name)
-                    .map(|(_, v)| v.clone())
-                    .unwrap_or(Value::Undef);
-            }
-            raise_missing_property(vm, recv, name)
-        }
+        _ => raise_missing_property(vm, recv, name),
     }
 }
 
@@ -2595,6 +3063,118 @@ fn b_div(vm: &mut VM, _argc: u8) -> Value {
     }
 }
 
+/// The `java.lang.Class` handle for a value. `null` answers Groovy's
+/// `NullObject` class rather than raising — `null.getClass()` and `null.class`
+/// both do in Groovy, because a `null` receiver is routed to `NullObject`.
+fn class_ref_of(v: &Value) -> Value {
+    if matches!(v, Value::Undef) {
+        return heap_push(HeapObj::ClassRef(
+            "org.codehaus.groovy.runtime.NullObject".to_string(),
+        ));
+    }
+    heap_push(HeapObj::ClassRef(java_class_name(v)))
+}
+
+/// `GITER`: materialise what `for (x in v)` iterates over. Pops the value and
+/// pushes the element list, following Groovy's `DefaultTypeTransformation`:
+/// a list yields its elements, a map its `Map.Entry`s, a `String` its
+/// characters, `null` nothing at all, and any other value exactly itself (so
+/// `for (x in 5)` runs once).
+fn b_iter(vm: &mut VM, _argc: u8) -> Value {
+    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    Value::array(iteration_elements(&v))
+}
+
+/// `GWRITEBACK`: pick the value a self-mutating GDK call stores back over its
+/// variable receiver. Only a **list** receiver is mutated in place by Groovy —
+/// `Map.sort()` returns a new map and leaves the receiver alone — so a
+/// non-list receiver writes itself back unchanged.
+fn b_writeback(vm: &mut VM, _argc: u8) -> Value {
+    let receiver = vm.stack.pop().unwrap_or(Value::Undef);
+    let result = vm.stack.pop().unwrap_or(Value::Undef);
+    if matches!(receiver, Value::Array(_)) {
+        result
+    } else {
+        receiver
+    }
+}
+
+/// The elements [`b_iter`] enumerates for a value.
+fn iteration_elements(v: &Value) -> Vec<Value> {
+    if let Some(entries) = as_omap(v) {
+        return entries
+            .into_iter()
+            .map(|(k, val)| heap_push(HeapObj::Entry(k, val)))
+            .collect();
+    }
+    match v {
+        Value::Undef => Vec::new(),
+        Value::Array(a) => a.clone(),
+        Value::Str(s) => s.chars().map(|c| Value::str(c.to_string())).collect(),
+        other => vec![other.clone()],
+    }
+}
+
+/// `GMOD`: Groovy `%` for the zero-divisor case. The compiler emits this only
+/// behind a native `divisor == 0` guard (see `compiler::Compiler::emit_mod`), so a
+/// non-zero divisor never pays for it and `%` keeps `Op::Mod` and its JIT trace.
+///
+/// Groovy's `%` splits three ways on a zero divisor, and this reproduces all
+/// three (verified against Apache Groovy 5.0.7):
+///
+/// | operands                | `7 % 0`                              |
+/// |-------------------------|--------------------------------------|
+/// | `Integer % Integer`     | `ArithmeticException: / by zero`     |
+/// | either a `BigDecimal`   | `ArithmeticException: Division by zero` (`Division undefined` when the dividend is zero too) |
+/// | a `Double`, no decimal  | `NaN` (IEEE, no exception)           |
+fn b_mod(vm: &mut VM, _argc: u8) -> Value {
+    let b = vm.stack.pop().unwrap_or(Value::Undef);
+    let a = vm.stack.pop().unwrap_or(Value::Undef);
+    // A user-class left operand dispatches Groovy's `remainder` overload, the
+    // same method the numeric hook would reach for a non-zero divisor.
+    if as_instance(&a).is_some() {
+        if let Some(res) = instance_operator(NumOp::Mod, &a, &b) {
+            return match res {
+                Ok(v) => v,
+                Err(e) => {
+                    fault(vm, e);
+                    Value::Undef
+                }
+            };
+        }
+    }
+    // Two `Integer`s: `Integer.remainder`, whose zero-divisor message is the
+    // JDK's `/ by zero` (not `BigDecimal`'s wording).
+    if let (Some(x), Some(y)) = (as_i64(&a), as_i64(&b)) {
+        if y == 0 {
+            raise(vm, "ArithmeticException", "/ by zero");
+            return Value::Undef;
+        }
+        return Value::int(x.wrapping_rem(y));
+    }
+    // A `BigDecimal` operand: `BigDecimal.remainder`, whose zero divisor carries
+    // `Division by zero` / `Division undefined`.
+    match decimal_operator(NumOp::Mod, &a, &b) {
+        Some(Ok(v)) => return v,
+        Some(Err(msg)) => {
+            raise(vm, "ArithmeticException", &msg);
+            return Value::Undef;
+        }
+        None => {}
+    }
+    // A `double` with no decimal operand: IEEE `%`, where `x % 0.0` is NaN.
+    if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
+        return Value::float(as_f64(&a) % as_f64(&b));
+    }
+    match numeric_hook(NumOp::Mod, &a, &b) {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    }
+}
+
 /// `GCMP`: Groovy `<=>`. Pops `a <=> b`. A user-class instance left operand
 /// dispatches `compareTo` (Groovy returns its raw `int`); otherwise a numeric
 /// pair compares numerically and any other pair by Groovy string ordering, both
@@ -2611,22 +3191,134 @@ fn b_cmp(vm: &mut VM, _argc: u8) -> Value {
             }
         };
     }
-    // A decimal operand compares exactly (scale-insensitively); other numbers
-    // compare as doubles; anything else by Groovy string ordering.
-    let ord = match (as_dec(&a).is_some() || as_dec(&b).is_some())
-        .then(|| (as_exact_dec(&a), as_exact_dec(&b)))
+    match natural_order(&a, &b) {
+        std::cmp::Ordering::Less => Value::int(-1),
+        std::cmp::Ordering::Greater => Value::int(1),
+        std::cmp::Ordering::Equal => Value::int(0),
+    }
+}
+
+/// Groovy's natural ordering for two values with no user `compareTo`: a decimal
+/// operand compares exactly (scale-insensitively), other numbers compare as
+/// doubles, and anything else compares by its rendered form (Groovy's `String`
+/// ordering). An incomparable pair (a NaN) reports `Equal`, which keeps a sort
+/// stable rather than panicking.
+fn natural_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    let ord = match (as_dec(a).is_some() || as_dec(b).is_some())
+        .then(|| (as_exact_dec(a), as_exact_dec(b)))
     {
         Some((Some(x), Some(y))) => Some(decimal::cmp(&x, &y)),
-        _ => match (as_num(&a), as_num(&b)) {
+        _ => match (as_num(a), as_num(b)) {
             (Some(x), Some(y)) => x.partial_cmp(&y),
-            _ => Some(groovy_str(&a).cmp(&groovy_str(&b))),
+            _ => Some(groovy_str(a).cmp(&groovy_str(b))),
         },
     };
-    match ord {
-        Some(std::cmp::Ordering::Less) => Value::int(-1),
-        Some(std::cmp::Ordering::Greater) => Value::int(1),
-        _ => Value::int(0),
+    ord.unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Compare two values the way a GDK `sort`/`max`/`min` with no closure does: a
+/// user-class operand dispatches its `compareTo`, everything else falls to
+/// [`natural_order`].
+fn compare_values(vm: &mut VM, a: &Value, b: &Value) -> Result<std::cmp::Ordering, String> {
+    if let Some(res) = call_user_method(vm, a, "compareTo", std::slice::from_ref(b)) {
+        return res.map(|v| v.to_int().cmp(&0));
     }
+    Ok(natural_order(a, b))
+}
+
+/// How a GDK closure argument orders two elements.
+enum OrderBy<'a> {
+    /// No closure: natural ordering (a user `compareTo` when the element is an
+    /// instance).
+    Natural,
+    /// A one-parameter closure: a *key extractor*; elements order by the values
+    /// it returns (`list.sort { it.length() }`).
+    Key(&'a Value),
+    /// A two-parameter closure: a *comparator* returning a negative / zero /
+    /// positive `int` (`list.sort { a, b -> b <=> a }`).
+    Comparator(&'a Value),
+}
+
+impl<'a> OrderBy<'a> {
+    /// Read the trailing closure argument (if any) as an ordering rule. Groovy
+    /// picks key-extractor vs comparator from the closure's parameter count.
+    fn of(args: &'a [Value]) -> Self {
+        match args.last().filter(|a| closure_meta(a).is_some()) {
+            Some(clo) if closure_meta(clo).map(|m| m.params).unwrap_or(1) >= 2 => {
+                OrderBy::Comparator(clo)
+            }
+            Some(clo) => OrderBy::Key(clo),
+            None => OrderBy::Natural,
+        }
+    }
+
+    fn apply(&self, vm: &mut VM, a: &Value, b: &Value) -> Result<std::cmp::Ordering, String> {
+        match self {
+            OrderBy::Natural => compare_values(vm, a, b),
+            OrderBy::Key(clo) => {
+                let ka = invoke_closure(vm, clo, std::slice::from_ref(a))?;
+                let kb = invoke_closure(vm, clo, std::slice::from_ref(b))?;
+                compare_values(vm, &ka, &kb)
+            }
+            OrderBy::Comparator(clo) => {
+                let r = invoke_closure(vm, clo, &[a.clone(), b.clone()])?;
+                Ok(r.to_int().cmp(&0))
+            }
+        }
+    }
+}
+
+/// Stable merge sort over `items` under `order`. Groovy's `List.sort` is
+/// `Collections.sort`, which is stable — a hand-rolled merge keeps that while
+/// letting a comparator closure that faults abort the sort (Rust's `sort_by`
+/// cannot return an error from its comparator).
+fn sort_values(vm: &mut VM, items: &[Value], order: &OrderBy) -> Result<Vec<Value>, String> {
+    if items.len() < 2 {
+        return Ok(items.to_vec());
+    }
+    let mid = items.len() / 2;
+    let left = sort_values(vm, &items[..mid], order)?;
+    let right = sort_values(vm, &items[mid..], order)?;
+    let mut out = Vec::with_capacity(items.len());
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        // `<=` keeps equal elements in their original order (stability).
+        if order.apply(vm, &right[j], &left[i])?.is_lt() {
+            out.push(right[j].clone());
+            j += 1;
+        } else {
+            out.push(left[i].clone());
+            i += 1;
+        }
+    }
+    out.extend_from_slice(&left[i..]);
+    out.extend_from_slice(&right[j..]);
+    Ok(out)
+}
+
+/// The extreme element under `order` — `max` when `want` is `Greater`, `min`
+/// when it is `Less`. Groovy keeps the *first* element on a tie, and answers
+/// `null` for an empty collection.
+fn extreme_value(
+    vm: &mut VM,
+    items: &[Value],
+    order: &OrderBy,
+    want: std::cmp::Ordering,
+) -> Result<Value, String> {
+    let mut best: Option<Value> = None;
+    for it in items {
+        best = Some(match best {
+            None => it.clone(),
+            Some(b) => {
+                if order.apply(vm, it, &b)? == want {
+                    it.clone()
+                } else {
+                    b
+                }
+            }
+        });
+    }
+    Ok(best.unwrap_or(Value::Undef))
 }
 
 /// A numeric view of a value (`Int`/`Float`/`Bool`/`BigDecimal`), or `None` for
@@ -2739,6 +3431,14 @@ pub fn groovy_str(v: &Value) -> String {
     // A `Pattern` renders as its source text, the way `Pattern.toString` does.
     if let Some(src) = regex_source(v) {
         return src;
+    }
+    // `java.lang.Class.toString` prefixes the qualified name with `class `.
+    if let Some(name) = as_class_ref(v) {
+        return format!("class {name}");
+    }
+    // `Map.Entry.toString` is `key=value`.
+    if let Some((k, val)) = as_entry(v) {
+        return format!("{k}={}", groovy_str(&val));
     }
     // An ordered-map handle renders `[k:v, …]` in insertion order (`[:]` empty).
     if let Some(entries) = as_omap(v) {

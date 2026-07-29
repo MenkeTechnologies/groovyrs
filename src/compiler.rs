@@ -196,7 +196,14 @@ const BUILTIN_TYPE_NAMES: &[&str] = &[
 /// field/method sets that drive bare-name resolution inside a class body.
 struct ClassInfo {
     superclass: Option<String>,
+    /// The `implements A, B` names (or an interface's own `extends` list). A
+    /// bare call inside a member reaches an interface's `default` methods
+    /// through this, exactly as it reaches a superclass's.
+    interfaces: Vec<String>,
     fields: Vec<String>,
+    /// Method names declared here — including an interface's *abstract*
+    /// declarations, which bind no body but still make a bare call inside a
+    /// sibling `default` method mean `this.m()`.
     methods: Vec<String>,
 }
 
@@ -245,8 +252,10 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         if let StmtKind::Class {
             name,
             superclass,
+            interfaces,
             fields,
             methods,
+            abstract_methods,
             ..
         } = &stmt.kind
         {
@@ -254,8 +263,13 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
                 name.clone(),
                 ClassInfo {
                     superclass: superclass.clone(),
+                    interfaces: interfaces.clone(),
                     fields: fields.iter().map(|f| f.name.clone()).collect(),
-                    methods: methods.iter().map(|m| m.name.clone()).collect(),
+                    methods: methods
+                        .iter()
+                        .map(|m| m.name.clone())
+                        .chain(abstract_methods.iter().cloned())
+                        .collect(),
                 },
             );
         }
@@ -299,12 +313,23 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         if let StmtKind::Class {
             name,
             superclass,
+            interfaces,
+            is_interface,
             fields,
             ctors,
             methods,
+            ..
         } = &stmt.kind
         {
-            c.register_class(name, superclass.as_deref(), fields, ctors, methods);
+            c.register_class(
+                name,
+                superclass.as_deref(),
+                interfaces,
+                *is_interface,
+                fields,
+                ctors,
+                methods,
+            );
         }
     }
     // Emit the script body (function and class definitions are hoisted out and
@@ -334,6 +359,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             fields,
             ctors,
             methods,
+            ..
         } = &stmt.kind
         {
             c.class_bodies(
@@ -535,10 +561,13 @@ impl Compiler {
     /// method table, field-initializer table, and constructor table, then call
     /// the class-register builtin. Runs once at script start (hoisted), so the
     /// class is resolvable before any `new`.
+    #[allow(clippy::too_many_arguments)]
     fn register_class(
         &mut self,
         name: &str,
         superclass: Option<&str>,
+        interfaces: &[String],
+        is_interface: bool,
         fields: &[Field],
         ctors: &[Ctor],
         methods: &[Method],
@@ -550,6 +579,14 @@ impl Compiler {
             .b
             .add_constant(Value::str(superclass.unwrap_or("").to_string()));
         self.b.emit(Op::LoadConst(sidx), line);
+        // `interface` flag, then the implemented-interface name array.
+        let iidx = self.b.add_constant(Value::bool(is_interface));
+        self.b.emit(Op::LoadConst(iidx), line);
+        for i in interfaces {
+            let c = self.b.add_constant(Value::str(i.clone()));
+            self.b.emit(Op::LoadConst(c), line);
+        }
+        self.b.emit(Op::MakeArray(interfaces.len() as u16), line);
         // class name
         let nidx = self.b.add_constant(Value::str(name.to_string()));
         self.b.emit(Op::LoadConst(nidx), line);
@@ -649,15 +686,25 @@ impl Compiler {
         select: impl Fn(&ClassInfo) -> &Vec<String>,
     ) -> HashSet<String> {
         let mut set = HashSet::new();
-        let mut cur = Some(class.to_string());
-        while let Some(name) = cur {
+        // Breadth-first over the superclass chain and every implemented
+        // interface (transitively); `seen` terminates a cyclic `extends`.
+        let mut queue = vec![class.to_string()];
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut i = 0;
+        while i < queue.len() {
+            let name = queue[i].clone();
+            i += 1;
+            if !seen.insert(name.clone()) {
+                continue;
+            }
             let Some(info) = self.class_index.get(&name) else {
-                break;
+                continue;
             };
             for n in select(info) {
                 set.insert(n.clone());
             }
-            cur = info.superclass.clone();
+            queue.extend(info.superclass.iter().cloned());
+            queue.extend(info.interfaces.iter().cloned());
         }
         set
     }
@@ -825,6 +872,12 @@ impl Compiler {
                 self.expr(value)?;
                 self.emit_call_builtin(crate::host::GDIV, 2, self.cur_line)?;
             }
+            // `field %= e` shares `%`'s zero-divisor guard.
+            AssignOp::Mod => {
+                self.emit_field_get(name)?;
+                self.expr(value)?;
+                self.emit_mod(value, self.cur_line)?;
+            }
             _ => {
                 self.emit_field_get(name)?;
                 self.expr(value)?;
@@ -918,6 +971,13 @@ impl Compiler {
                         self.b.emit(get, self.cur_line);
                         self.expr(value)?;
                         self.emit_call_builtin(crate::host::GDIV, 2, self.cur_line)?;
+                    }
+                    // `x %= e` shares `%`'s zero-divisor guard.
+                    AssignOp::Mod => {
+                        let get = self.load_op_for(name);
+                        self.b.emit(get, self.cur_line);
+                        self.expr(value)?;
+                        self.emit_mod(value, self.cur_line)?;
                     }
                     _ => {
                         // `x <op>= e` → x = x <op> e
@@ -1681,6 +1741,12 @@ impl Compiler {
                 let c = self.b.add_constant(Value::float(*f));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
             }
+            // The sequence a `for-in` walks: the host materialises the value's
+            // iteration elements once, before the loop.
+            Expr::Iterable(inner) => {
+                self.expr(inner)?;
+                self.emit_call_builtin(crate::host::GITER, 1, self.cur_line)?;
+            }
             // A `~/…/` literal compiles at run time, through the host, because a
             // compiled pattern is a heap object with no fusevm representation.
             // An `assert` sub-expression whose value the power-assert renderer
@@ -1893,6 +1959,7 @@ impl Compiler {
                         crate::host::GMETHOD
                     };
                     self.emit_call_builtin(id, args.len() as u8, *line)?;
+                    self.emit_receiver_writeback(recv, method, args);
                 }
             }
             Expr::Property {
@@ -2159,11 +2226,17 @@ impl Compiler {
             self.emit_call_builtin(crate::host::GCMP, 2, self.cur_line)?;
             return Ok(());
         }
+        // Groovy `%` raises `ArithmeticException` on a zero divisor, which
+        // fusevm's native `Op::Mod` answers with `0`. The guard branches to the
+        // `GMOD` builtin only when the divisor really is zero.
+        if let BinOp::Mod = op {
+            return self.emit_mod(rhs, self.cur_line);
+        }
         let vop = match op {
             BinOp::Add => Op::Add,
             BinOp::Sub => Op::Sub,
             BinOp::Mul => Op::Mul,
-            BinOp::Mod => Op::Mod,
+            BinOp::Mod => unreachable!("handled above"),
             BinOp::Eq => Op::NumEq,
             BinOp::Ne => Op::NumNe,
             BinOp::Lt => Op::NumLt,
@@ -2182,6 +2255,107 @@ impl Compiler {
             self.emit_exc_check(self.cur_line)?;
         }
         Ok(())
+    }
+
+    /// Write a self-mutating GDK result back to a variable receiver.
+    ///
+    /// Groovy's `List.sort()` and `List.unique()` sort/dedupe the receiver **in
+    /// place** and return it, so `l.sort(); println(l)` prints the sorted list.
+    /// A fusevm `Value::Array` is a value, not a reference, so the host can only
+    /// return a new list — this stores that result back over a bare-variable
+    /// receiver, which reproduces Groovy for the shape scripts actually write.
+    /// The call's own value stays on the stack, so the expression is unchanged.
+    ///
+    /// Whether the receiver is a list is a *runtime* question (`Map.sort()`
+    /// returns a new map and does **not** mutate), so the receiver is re-read
+    /// and [`crate::host::GWRITEBACK`] picks between the result and the
+    /// unchanged receiver:
+    ///
+    /// ```text
+    ///   <call>            ; [result]
+    ///   Dup               ; [result, result]
+    ///   <load recv>       ; [result, result, receiver]
+    ///   GWRITEBACK        ; [result, value-to-store]
+    ///   <store recv>      ; [result]
+    /// ```
+    ///
+    /// `sort(false)` explicitly asks for a copy, so only the no-argument, the
+    /// `sort(true)`, and the closure-argument forms write back at all.
+    fn emit_receiver_writeback(&mut self, recv: &Expr, method: &str, args: &[Expr]) {
+        let mutating = matches!(method, "sort" | "unique")
+            && args
+                .iter()
+                .all(|a| matches!(a, Expr::Closure { .. } | Expr::Bool(true)));
+        let Expr::Var(name) = recv else { return };
+        // A bare field name inside a method is `this.field`, not a variable —
+        // leave that to the (unsupported) property path rather than inventing a
+        // local of the same name.
+        if !mutating || self.is_field(name) {
+            return;
+        }
+        self.b.emit(Op::Dup, self.cur_line);
+        let load = self.load_op_for(name);
+        self.b.emit(load, self.cur_line);
+        self.b
+            .emit(Op::CallBuiltin(crate::host::GWRITEBACK, 2), self.cur_line);
+        let store = self.store_op_for(name);
+        self.b.emit(store, self.cur_line);
+    }
+
+    /// Lower Groovy `%` for two operands already on the stack.
+    ///
+    /// Java's `%` throws `ArithmeticException` on a zero divisor where fusevm's
+    /// native `Op::Mod` yields `0` — a silent wrong answer. Rather than route
+    /// every `%` through a builtin (which would cost the native op and its JIT
+    /// trace, the way `/` pays for `GDIV`), the divisor is tested against zero
+    /// with native ops and only the zero branch calls [`crate::host::GMOD`]:
+    ///
+    /// ```text
+    ///   Dup; LoadInt(0); NumEq; JumpIfFalse native
+    ///   GMOD(a, b)                 ; raises, or answers NaN for a double
+    ///   Jump end
+    /// native:
+    ///   Op::Mod
+    /// end:
+    /// ```
+    ///
+    /// A **literal non-zero divisor** is proved safe at compile time and emits
+    /// the bare `Op::Mod`, so `i % 2` in a loop is byte-identical to before.
+    fn emit_mod(&mut self, divisor: &Expr, line: u32) -> Result<(), String> {
+        if is_nonzero_literal(divisor) {
+            self.b.emit(Op::Mod, line);
+            if self.exc_after_arith {
+                self.emit_exc_check(line)?;
+            }
+            return Ok(());
+        }
+        self.b.emit(Op::Dup, line);
+        self.b.emit(Op::LoadInt(0), line);
+        self.b.emit(Op::NumEq, line);
+        let to_native = self.b.emit(Op::JumpIfFalse(0), line);
+        self.emit_call_builtin(crate::host::GMOD, 2, line)?;
+        let to_end = self.b.emit(Op::Jump(0), line);
+        let native = self.b.current_pos();
+        self.b.patch_jump(to_native, native);
+        self.b.emit(Op::Mod, line);
+        if self.exc_after_arith {
+            self.emit_exc_check(line)?;
+        }
+        let end = self.b.current_pos();
+        self.b.patch_jump(to_end, end);
+        Ok(())
+    }
+}
+
+/// Is this expression a numeric literal the compiler can prove is not zero? Used
+/// to elide the `%` zero-divisor guard for the constant-divisor shapes (`i % 2`,
+/// `n % -3`) that make up every hot loop.
+fn is_nonzero_literal(e: &Expr) -> bool {
+    match e {
+        Expr::Int(n) => *n != 0,
+        Expr::Float(f) => *f != 0.0,
+        Expr::Unary { op: UnOp::Neg, rhs } => is_nonzero_literal(rhs),
+        _ => false,
     }
 }
 
@@ -2455,6 +2629,7 @@ fn free_in_expr(
 ) {
     match e {
         Expr::Regex(_) => {}
+        Expr::Iterable(inner) => free_in_expr(inner, bound, out, seen),
         Expr::Recorded { inner, .. } => free_in_expr(inner, bound, out, seen),
         Expr::Var(n) => note_free(n, bound, out, seen),
         Expr::PostIncDec { name, .. } | Expr::PreIncDec { name, .. } => {
@@ -2795,6 +2970,7 @@ fn body_has_ffi(body: &[Stmt]) -> bool {
 fn expr_has_ffi(e: &Expr) -> bool {
     match e {
         Expr::Regex(_) => false,
+        Expr::Iterable(inner) => expr_has_ffi(inner),
         Expr::Recorded { inner, .. } => expr_has_ffi(inner),
         Expr::Call { name, args, .. } => name == RUST_COMPILE || args.iter().any(expr_has_ffi),
         Expr::Unary { rhs, .. } => expr_has_ffi(rhs),
@@ -2842,7 +3018,7 @@ fn compound_op(op: AssignOp) -> Op {
         AssignOp::Add => Op::Add,
         AssignOp::Sub => Op::Sub,
         AssignOp::Mul => Op::Mul,
-        AssignOp::Mod => Op::Mod,
+        AssignOp::Mod => unreachable!("Mod lowers through Compiler::emit_mod, not compound_op"),
         AssignOp::Div => unreachable!("Div lowers through the GDIV builtin, not compound_op"),
         AssignOp::Assign => unreachable!("plain assign never lowers through compound_op"),
     }

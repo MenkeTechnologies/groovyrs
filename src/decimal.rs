@@ -49,6 +49,95 @@ pub fn parse(text: &str) -> Option<BigDecimal> {
     BigDecimal::from_str(text).ok()
 }
 
+/// The most exponent digits `BigDecimal`'s parser will look at; beyond this it
+/// gives up with `Too many nonzero exponent digits.` rather than overflowing.
+/// Leading zeros are skipped before the count, so `1e0000000000000005` parses.
+const MAX_EXPONENT_DIGITS: usize = 10;
+
+/// Parse `text` the way `new java.math.BigDecimal(String)` does, reporting the
+/// same `NumberFormatException` messages on failure.
+///
+/// `Err(Some(msg))` carries the JDK's message; `Err(None)` is the *message-less*
+/// `NumberFormatException` the JDK throws for an empty string and for an
+/// exponent mark with no digits after it (`""`, `"1e"`, `"1e+"`) — Groovy
+/// surfaces that as a `null` message, so the distinction is observable.
+///
+/// The port covers the ASCII grammar; the JDK additionally accepts Unicode
+/// decimal digits (`Character.digit`), which this rejects as ordinary
+/// unexpected characters.
+pub fn parse_java(text: &str) -> Result<BigDecimal, Option<String>> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return Err(None);
+    }
+    // An optional leading sign, then digits with at most one decimal point,
+    // ending either at the end of the text or at an exponent mark.
+    let mut i = usize::from(matches!(chars[0], '+' | '-'));
+    let mut digits = 0usize;
+    let mut seen_dot = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_ascii_digit() {
+            digits += 1;
+        } else if c == '.' {
+            if seen_dot {
+                return Err(Some(
+                    "Character array contains more than one decimal point.".to_string(),
+                ));
+            }
+            seen_dot = true;
+        } else if c == 'e' || c == 'E' {
+            parse_java_exponent(&chars[i + 1..])?;
+            break;
+        } else {
+            return Err(Some(format!(
+                "Character {c} is neither a decimal digit number, decimal point, \
+                 nor \"e\" notation exponential mark."
+            )));
+        }
+        i += 1;
+    }
+    if digits == 0 {
+        return Err(Some("No digits found.".to_string()));
+    }
+    BigDecimal::from_str(text).map_err(|_| None)
+}
+
+/// Validate the exponent part (everything after the `e`/`E`) of a `BigDecimal`
+/// literal, reproducing `BigDecimal.parseExp`'s diagnostics.
+fn parse_java_exponent(rest: &[char]) -> Result<(), Option<String>> {
+    let signed = rest.first().is_some_and(|c| matches!(c, '+' | '-'));
+    let negative = rest.first() == Some(&'-');
+    let mut digits = &rest[usize::from(signed)..];
+    // No digits at all after the mark is the message-less failure.
+    if digits.is_empty() {
+        return Err(None);
+    }
+    while digits.len() > MAX_EXPONENT_DIGITS && digits[0] == '0' {
+        digits = &digits[1..];
+    }
+    if digits.len() > MAX_EXPONENT_DIGITS {
+        return Err(Some("Too many nonzero exponent digits.".to_string()));
+    }
+    let mut exp: i64 = 0;
+    for c in digits {
+        let Some(d) = c.to_digit(10) else {
+            return Err(Some("Not a digit.".to_string()));
+        };
+        exp = exp * 10 + i64::from(d);
+    }
+    if negative {
+        exp = -exp;
+    }
+    // The JDK stores the *scale*, which is the negated exponent, in an `int` —
+    // so the range is asymmetric: `1e2147483648` parses and `1e-2147483648`
+    // does not.
+    if i32::try_from(-exp).is_err() {
+        return Err(Some("Exponent overflow.".to_string()));
+    }
+    Ok(())
+}
+
 /// The *exact* decimal value of a double — every digit of its binary expansion,
 /// as `new java.math.BigDecimal(double)` gives (`0.555d` becomes
 /// `0.55500000000000004884981308350688777863979339599609375`). Groovy needs this

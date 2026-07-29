@@ -146,6 +146,10 @@ Implemented and checked against Apache Groovy:
   `super.m(args)` and `super(args)` chaining, inherited field initializers,
   `value instanceof Type` (user chain + built-in types), and `@Override` parsed
   and ignored.
+- **Interfaces** — `interface I { … }`, `class C implements A, B`, an interface's
+  own multiple `extends`, abstract method declarations, and Java 8 `default`
+  methods (inherited by every implementor, overridable by a class). `instanceof`
+  walks superclasses and interfaces transitively.
 - **Operator overloading** — a user-class instance operand dispatches its
   operator method: `+`→`plus`, `-`→`minus`, `*`→`multiply`, `/`→`div`,
   `%`→`remainder`, `**`→`power`, unary `-`→`negative`, `[]`→`getAt`;
@@ -161,16 +165,29 @@ Implemented and checked against Apache Groovy:
   f(21)`). A closure captures its enclosing script scope, and a closure nested in
   a function/closure captures that frame's locals as upvalues, so a curried
   `{ x -> { y -> x + y } }` and a chained call `f(a)(b)` work.
-- **Closure-driven GDK** — `each`, `eachWithIndex`, `collect`, `findAll`,
-  `find`, `inject`, `sum` over lists and ranges (`[1,2,3].collect { it * 2 }` →
-  `[2, 4, 6]`).
+- **Closure-driven GDK** — over lists and ranges: `each`, `eachWithIndex`,
+  `collect`, `findAll`, `find`, `inject`, `sum`, `sort`, `unique`, `max`, `min`,
+  `groupBy`, `join`, `reverse` (`[1,2,3].collect { it * 2 }` → `[2, 4, 6]`). A
+  one-parameter closure to `sort`/`max`/`min`/`unique` is a key extractor, a
+  two-parameter one a comparator, and `sort`/`unique` mutate a variable receiver
+  the way Groovy's do. Over maps: `each`, `collect`, `findAll`, `find`, `any`,
+  `every`, `groupBy`, `inject`, `sort`, `max`, `min` — a two-parameter closure
+  gets `(key, value)`, a one-parameter closure a `Map.Entry`.
+- **Spread `*.`** — `list*.member` / `list*.method(args)` applies the member to
+  every element (null-safe, so a `null` element spreads to `null`).
+- **`getClass()` / `.class`** — a `java.lang.Class` value that prints
+  `class java.lang.Integer` and answers `name`/`simpleName`/`canonicalName`.
+- **`String.toBigDecimal()`** — `new BigDecimal(text.trim())`, with the exact
+  scale and `BigDecimal`'s own character-level `NumberFormatException` messages.
 - **Ranges** — first-class `0..5` / `0..<5` values with `.size()`,
   `.contains(x)`, `.each`, `.collect`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, and
   `a?.member` / `a?.method()`.
 - **Control flow** — `if` / `else if` / `else`, `while`, `do`/`while`, the
   C-style `for (init; cond; update)`, the `for (x in a..b)` / `for (x in a..<b)`
-  range loop, `break`, `continue`, labeled `break`/`continue`, `return`.
+  range loop and the `for (x in <collection>)` loop (a list's elements, a map's
+  entries, a `String`'s characters), `break`, `continue`, labeled
+  `break`/`continue`, `return`.
 - **`assert`** — with Groovy's power-assert rendering: the statement's source
   followed by every sub-expression's value under its own column. The
   `assert cond : message` form raises the plain `AssertionError` Groovy does.
@@ -189,8 +206,8 @@ Implemented and checked against Apache Groovy:
   text, so `try`/`catch` reaches its handler.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
-overloading by parameter type, `++`/`--` not calling `next`/`previous`,
-by-reference upvalue capture).
+overloading by parameter type, static type references as values, `++`/`--` not
+calling `next`/`previous`, by-reference upvalue capture).
 
 ---
 
@@ -247,8 +264,8 @@ Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm
 | Piece | How |
 | --- | --- |
 | **fusevm-hosted** | No local `vm.rs` / `jit.rs`, no JVM. Groovy lowers to fusevm bytecode and runs on the shared three-tier Cranelift JIT; `jit-disk-cache` persists native code across runs. |
-| **Native arithmetic** | `+ - * %`, comparisons, and logic lower to native fusevm ops; the JIT traces hot integer loops. A strict numeric hook supplies Groovy's `+` string concatenation for non-numeric operands, and dispatches a user-class instance's operator method (`plus`/`minus`/`compareTo`/…) by re-entering the VM through a published thread-local pointer — primitives never leave the fast path. |
-| **Groovy division** | `/` lowers to the `GDIV` builtin: two integers divide exactly to an integer and to a `BigDecimal` otherwise (`7/2 → 3.5`, `1/3 → 0.3333333333`), following Groovy's `BigDecimalMath` scale policy; a zero divisor faults as Groovy's `ArithmeticException` aborts. |
+| **Native arithmetic** | `+ - * %`, comparisons, and logic lower to native fusevm ops; the JIT traces hot integer loops. `%` additionally carries a four-op zero-divisor guard (Java's `%` throws where fusevm's `Op::Mod` answers `0`), elided entirely when the divisor is a non-zero literal — see BUGS.md for what it costs when it is not. A strict numeric hook supplies Groovy's `+` string concatenation for non-numeric operands, and dispatches a user-class instance's operator method (`plus`/`minus`/`compareTo`/…) by re-entering the VM through a published thread-local pointer — primitives never leave the fast path. |
+| **Groovy division** | `/` lowers to the `GDIV` builtin: two integers divide exactly to an integer and to a `BigDecimal` otherwise (`7/2 → 3.5`, `1/3 → 0.3333333333`), following Groovy's `BigDecimalMath` scale policy; a zero divisor raises Groovy's catchable `ArithmeticException`. |
 | **`BigDecimal` value model** | An unsuffixed decimal literal is an exact (unscaled value, scale) pair on the host heap (`src/decimal.rs`), so scale propagates through `+ - * / %` (`1.25 * 0 → 0.00`, `2.5e7 + 1 → 25000001`) and magnitude is unbounded (`1.5e300 * 1.5e300 → 2.25E+600`). Being non-numeric to fusevm, decimals route through the strict numeric hook; `d`/`f`-suffixed literals stay IEEE doubles on the native fast path. |
 | **Groovy print semantics** | `println`/`print` lower to a registered builtin that formats values Groovy-style (`true`/`false`, `3.0`, `null`), rather than the VM's shell-flavoured `PrintLn`. |
 
@@ -259,7 +276,8 @@ Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm
 Groovy scripts — top-level statements, `def`/typed locals, user-defined
 functions (recursion over the native `Op::Call` frame ABI), closures
 (`{ a, b -> … }` / implicit `{ it }`, `.call` and direct invocation) with the
-closure-driven GDK (`each` / `collect` / `findAll` / `find` / `inject` / `sum`)
+closure-driven GDK (`each` / `collect` / `findAll` / `find` / `inject` / `sum` /
+`sort` / `groupBy` / `max` / `min` / `join`) and the spread operator
 and nested-closure upvalue capture (curried `{ x -> { y -> x + y } }`, chained
 `f(a)(b)`), classes (fields, constructors, methods, `this`, property get/set with
 auto getter/setter, `new`, `toString`, `getAt` subscript) on a host object heap,
@@ -282,8 +300,8 @@ Next waves, in priority order:
    an outer frame local made after capture (capture is by value today).
 2. **Method overloading by parameter type** — today methods and operator methods
    are keyed by name only, so same-named overloads collapse to the last declared.
-3. **`trait`s and interface bodies** — `implements` is parsed but has no runtime
-   effect beyond `Comparable`'s `compareTo`.
+3. **`trait`s** — `interface` and `implements` are modeled (including `default`
+   methods); `trait` is not.
 4. **A broader standard library** — `Math`, the `=~` / `==~` match operators over
    the `~/…/` patterns `switch` already understands, and more `java.util`/GDK
    collection methods.
@@ -305,12 +323,13 @@ bash parity-scripts/run.sh -v          # byte-parity over the regression corpus
 `parity-fuzz` generates grammar-driven, deterministic-output snippets from a
 per-index seed (so any divergence replays with `--seed <N> --once`, then
 auto-minimizes). It stays strictly inside groovyrs's implemented surface and away
-from the documented simplifications (32-bit integer overflow, zero divisors), so
+from the documented simplifications (32-bit integer overflow, `/` by zero), so
 every divergence it reports is a real parity gap — the class of bug the slice-1
 `continue`-codegen fix was. Decimal literals, scales, and exponent forms are
 generated without restriction now that the `BigDecimal` model is exact. Modes:
 `arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
-`gstring`, `exceptions`, `faults`, `switch`, `asserts`, `mixed`.
+`gstring`, `exceptions`, `faults`, `switch`, `asserts`, `modzero`, `gdk`,
+`conversions`, `classes`, `mixed`.
 
 All three need `groovy` on PATH and never run in CI; the CI-safe replay is the
 frozen `tests/parity.rs` (snapshot in `tests/data/parity_expected.txt`,

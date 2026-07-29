@@ -8,10 +8,12 @@
 //!
 //! **Scope invariant.** The generator only emits constructs groovyrs actually
 //! implements: arithmetic, comparisons, `&&`/`||`, string `+` concatenation,
-//! `if`/`while`/`for`-`in` ranges, `break`/`continue`, `println`/`print`,
-//! Groovy truthiness over every value shape, closures and the closure-driven
-//! GDK, `GString` interpolation, and `try`/`catch`/`finally`/`throw`. It stays
-//! out of constructs groovyrs rejects — a mutual error teaches nothing.
+//! `if`/`while`/`for`-`in` over ranges and collections, `break`/`continue`,
+//! `println`/`print`, Groovy truthiness over every value shape, closures and the
+//! closure-driven GDK over lists and maps, the spread operator, `GString`
+//! interpolation, `try`/`catch`/`finally`/`throw`, classes and interfaces,
+//! `getClass()`, and `String.toBigDecimal()`. It stays out of constructs
+//! groovyrs rejects — a mutual error teaches nothing.
 //!
 //! **Determinism invariant.** Every case has output that is identical on any
 //! correct runtime. The generator stays clear of the two *documented*
@@ -20,9 +22,12 @@
 //! * integer arithmetic only (`+ - * %`), with small operands so no result
 //!   overflows `int` (Groovy wraps an overflowing `Integer` at 32 bits, groovyrs
 //!   at 64);
-//! * every `/` and `%` keeps a non-zero right operand, since a zero divisor
-//!   raises `ArithmeticException` in Groovy and faults in groovyrs — a mutual
-//!   abort teaches nothing.
+//! * every `/` in the arithmetic modes keeps a non-zero right operand, since a
+//!   zero divisor aborts an unarmed program in both runtimes and a mutual abort
+//!   teaches nothing. `%` by zero has its own dedicated mode (`modzero`), which
+//!   pins the three different answers Groovy gives (`/ by zero` for two
+//!   Integers, `Division by zero` for a BigDecimal operand, `NaN` for a double)
+//!   both caught and uncaught.
 //!
 //! Decimals are *not* restricted: since the `BigDecimal` value model landed
 //! (src/decimal.rs) they carry exact scale through `+ - * / %`, so arbitrary
@@ -100,6 +105,10 @@ enum Mode {
     Faults,
     Switch,
     Asserts,
+    ModZero,
+    Gdk,
+    Conversions,
+    Classes,
     Mixed,
 }
 
@@ -117,6 +126,10 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Faults => "faults",
         Mode::Switch => "switch",
         Mode::Asserts => "asserts",
+        Mode::ModZero => "modzero",
+        Mode::Gdk => "gdk",
+        Mode::Conversions => "conversions",
+        Mode::Classes => "classes",
         Mode::Mixed => "mixed",
     }
 }
@@ -135,6 +148,10 @@ fn mode_from(s: &str) -> Option<Mode> {
         "faults" => Mode::Faults,
         "switch" => Mode::Switch,
         "asserts" => Mode::Asserts,
+        "modzero" => Mode::ModZero,
+        "gdk" => Mode::Gdk,
+        "conversions" => Mode::Conversions,
+        "classes" => Mode::Classes,
         "mixed" => Mode::Mixed,
         _ => return None,
     })
@@ -891,6 +908,251 @@ fn gen_loop(rng: &mut Rng, out: &mut Vec<String>, level: usize, max_level: usize
     out.push(format!("{ind}}}"));
 }
 
+/// Zero-divisor `%` probes: an `Integer % 0` raises `/ by zero`, a `BigDecimal`
+/// operand raises `Division by zero` / `Division undefined`, and a `double`
+/// operand answers `NaN` without raising. The divisor comes from a *variable* in
+/// half the cases so the compile-time literal elision is exercised both ways.
+const MOD_ZERO_OPERANDS: &[(&str, &str)] = &[
+    ("7", "0"),
+    ("-7", "0"),
+    ("0", "0"),
+    ("7.5", "0"),
+    ("0.0", "0"),
+    ("7", "0.0"),
+    ("7.50", "0.00"),
+    ("7.0d", "0"),
+    ("7", "0.0d"),
+    ("7.5", "0.0d"),
+    ("7.0d", "0.0d"),
+];
+
+/// A `%`-by-zero program. Half the cases catch, half let the throwable escape
+/// (which pins the exit status and the truncated stdout too).
+fn gen_mod_zero(rng: &mut Rng) -> Vec<String> {
+    let (a, b) = *pick(rng, MOD_ZERO_OPERANDS);
+    let mut out = vec!["println(\"before\")".to_string()];
+    // A variable divisor defeats the compiler's literal-zero elision; a literal
+    // one exercises the other branch of `Compiler::emit_mod`.
+    let divisor = if rng.chance(1, 2) {
+        out.push(format!("def z = {b}"));
+        "z".to_string()
+    } else {
+        b.to_string()
+    };
+    // A non-zero `%` in the same program keeps the native path under test.
+    let (n, d) = (rng.range_i(-20, 20), rng.range_i(1, 7));
+    out.push(format!("println({n} % {d})"));
+    match rng.below(3) {
+        0 => out.push(format!("println({a} % {divisor})")),
+        1 => {
+            out.push(format!("try {{ println({a} % {divisor}) }}"));
+            out.push("catch (ArithmeticException e) { println(\"caught \" + e.message) }".into());
+        }
+        _ => {
+            out.push(format!("def x = {a}"));
+            out.push(format!("try {{ x %= {divisor}; println(x) }}"));
+            out.push("catch (ArithmeticException e) { println(\"c \" + e.message) }".into());
+        }
+    }
+    out.push("println(\"after\")".to_string());
+    out
+}
+
+/// List and map values the GDK generator dispatches over. Each is chosen so
+/// every modeled method has a defined, deterministic answer on it.
+const GDK_LISTS: &[&str] = &[
+    "[]",
+    "[1]",
+    "[3, 1, 2]",
+    "[3, 1, 2, 3, 1]",
+    "[-2, 5, 0, 5]",
+    "[\"b\", \"a\", \"cc\"]",
+    "[1.50, 0.5, 2]",
+];
+
+/// GDK list calls, paired with the list above. Every one is closed under the
+/// documented value model (no `Float`, no 32-bit overflow).
+const GDK_LIST_CALLS: &[&str] = &[
+    "sort()",
+    "sort(false)",
+    "sort { a, b -> b <=> a }",
+    "unique()",
+    "reverse()",
+    "max()",
+    "min()",
+    "sum()",
+    "sum(100)",
+    "join(\"-\")",
+    "join()",
+    "groupBy { it }",
+    "collect { it }",
+    "findAll { it != null }",
+    "inject(0) { a, b -> a }",
+    "size()",
+    "collect { it }.join(\",\")",
+];
+
+const GDK_MAPS: &[&str] = &["[:]", "[a: 1]", "[b: 2, a: 1, c: 3]", "[x: 0, y: -1]"];
+
+const GDK_MAP_CALLS: &[&str] = &[
+    "each { k, v -> println(k + \"=\" + v) }",
+    "each { e -> println(e) }",
+    "collect { k, v -> k + v }",
+    "collect { e -> e.key }",
+    "findAll { k, v -> v > 0 }",
+    "find { k, v -> v > 0 }",
+    "any { k, v -> v > 1 }",
+    "every { k, v -> v > 0 }",
+    "groupBy { k, v -> v > 1 }",
+    "inject(0) { a, e -> a + e.value }",
+    "sort()",
+    "max { it.value }",
+    "min { it.value }",
+    "keySet()",
+    "values()",
+    "size()",
+];
+
+/// A GDK / spread program: one list or map call, plus a spread expression and a
+/// `for-in` walk over the same value, so the three list surfaces agree.
+fn gen_gdk(rng: &mut Rng) -> Vec<String> {
+    let mut out = Vec::new();
+    if rng.chance(1, 2) {
+        let lst = pick(rng, GDK_LISTS);
+        out.push(format!("def xs = {lst}"));
+        out.push(format!("println(xs.{})", pick(rng, GDK_LIST_CALLS)));
+        // `sort`/`unique` mutate the receiver in Groovy — print it again so a
+        // missing write-back diverges.
+        out.push("println(xs)".to_string());
+        match rng.below(3) {
+            0 => out.push("println(xs*.toString())".to_string()),
+            1 => out.push("for (x in xs) { println(\"e\" + x) }".to_string()),
+            _ => out.push("println(xs*.getClass().size())".to_string()),
+        }
+    } else {
+        let m = pick(rng, GDK_MAPS);
+        out.push(format!("def m = {m}"));
+        out.push(format!("println(m.{})", pick(rng, GDK_MAP_CALLS)));
+        out.push("println(m)".to_string());
+        if rng.chance(1, 2) {
+            out.push("for (e in m) { println(\"e\" + e) }".to_string());
+        }
+    }
+    out
+}
+
+/// Values whose `getClass()` naming is stable across runs (a closure's synthetic
+/// class name is not, so closures stay out).
+const CLASS_OF: &[&str] = &[
+    "1", "-7", "\"s\"", "\"\"", "1.5", "1.50", "2.5e7", "1.5d", "true", "false", "[1, 2]", "[]",
+    "[a: 1]", "[:]", "null",
+];
+
+/// Strings the `toBigDecimal` generator parses — half valid, half each of
+/// `BigDecimal`'s distinct parse diagnostics (including the two inputs whose
+/// `NumberFormatException` carries a `null` message).
+const BIG_DECIMAL_TEXTS: &[&str] = &[
+    "1.5",
+    "100.00",
+    "0",
+    "-3",
+    "+4",
+    " 7 ",
+    "1e5",
+    "1E5",
+    "1e-7",
+    "2.5e7",
+    ".5",
+    "1.",
+    "007",
+    "",
+    "  ",
+    "x",
+    "abc",
+    "12a",
+    "1_0",
+    "0x10",
+    "1.2.3",
+    "..",
+    "1e",
+    "1e+",
+    "1ex",
+    "1e5.5",
+    "--1",
+    "1-",
+    "+",
+    "-",
+    ".",
+    "1,5",
+    "1.5d",
+    "NaN",
+    "Infinity",
+    "1e999999999999",
+    "1e2147483648",
+    "1e-2147483648",
+];
+
+/// A `getClass()` / `toBigDecimal()` program.
+fn gen_conversions(rng: &mut Rng) -> Vec<String> {
+    let mut out = Vec::new();
+    if rng.chance(1, 2) {
+        let v = pick(rng, CLASS_OF);
+        out.push(format!("def v = {v}"));
+        match rng.below(4) {
+            0 => out.push("println(v.getClass())".to_string()),
+            1 => out.push("println(v.class)".to_string()),
+            2 => out.push("println(v.getClass().getName())".to_string()),
+            _ => out.push("println(v.class.simpleName)".to_string()),
+        }
+    } else {
+        let text = pick(rng, BIG_DECIMAL_TEXTS);
+        out.push(format!("def s = \"{text}\""));
+        out.push("try { println(s.toBigDecimal()) }".to_string());
+        out.push("catch (NumberFormatException e) { println(\"nfe \" + e.message) }".to_string());
+    }
+    out
+}
+
+/// A class / interface program: an interface with an abstract method and a
+/// `default` one, an implementing class, and the `instanceof` answers for both.
+fn gen_classes(rng: &mut Rng) -> Vec<String> {
+    let k = rng.range_i(1, 9);
+    let mut out = vec![
+        "interface Named { def label(); default def shout() { return label() + \"!\" } }".into(),
+        "interface Tagged extends Named { def tag() }".into(),
+    ];
+    let (decl, extra): (String, Vec<String>) = if rng.chance(1, 2) {
+        (
+            "class Thing implements Tagged {".into(),
+            vec![
+                format!("  def label() {{ return \"t{k}\" }}"),
+                "  def tag() { return \"g\" }".to_string(),
+            ],
+        )
+    } else {
+        (
+            "class Thing implements Named {".into(),
+            vec![format!("  def label() {{ return \"t{k}\" }}")],
+        )
+    };
+    out.push(decl);
+    out.extend(extra);
+    // A `shout` override in half the cases, so the interface default both wins
+    // and loses across the corpus.
+    if rng.chance(1, 3) {
+        out.push("  def shout() { return \"over\" }".to_string());
+    }
+    out.push("}".to_string());
+    out.push("def t = new Thing()".to_string());
+    out.push("println(t.label())".to_string());
+    out.push("println(t.shout())".to_string());
+    out.push("println(t instanceof Named)".to_string());
+    out.push("println(t instanceof Tagged)".to_string());
+    out.push("println(t instanceof Thing)".to_string());
+    out.push(format!("println([t]*.label() == [\"t{k}\"])"));
+    out
+}
+
 /// Generate one case (a list of statements) for a mode and seed.
 fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
     let mut rng = Rng::new(seed);
@@ -910,6 +1172,10 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::Faults,
                 Mode::Switch,
                 Mode::Asserts,
+                Mode::ModZero,
+                Mode::Gdk,
+                Mode::Conversions,
+                Mode::Classes,
             ],
         )
     } else {
@@ -924,6 +1190,10 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
         Mode::Faults => gen_faults(&mut rng),
         Mode::Switch => gen_switch(&mut rng),
         Mode::Asserts => gen_asserts(&mut rng),
+        Mode::ModZero => gen_mod_zero(&mut rng),
+        Mode::Gdk => gen_gdk(&mut rng),
+        Mode::Conversions => gen_conversions(&mut rng),
+        Mode::Classes => gen_classes(&mut rng),
         _ => {
             let n = rng.range_i(1, 5) as usize;
             (0..n)
@@ -945,6 +1215,10 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         | Mode::Faults
                         | Mode::Switch
                         | Mode::Asserts
+                        | Mode::ModZero
+                        | Mode::Gdk
+                        | Mode::Conversions
+                        | Mode::Classes
                         | Mode::Mixed => unreachable!(),
                     };
                     println_of(expr)

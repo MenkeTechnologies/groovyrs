@@ -19,10 +19,10 @@ so you can grep with `/`:
 .RB "\(em " "CLI options, -e, exit status"
 .br
 .B 2.  LANGUAGE
-.RB "\(em " "declarations, expressions, control flow, ranges"
+.RB "\(em " "declarations, expressions, control flow, classes, collections"
 .br
 .B 3.  SEMANTICS
-.RB "\(em " "Groovy / division, + concatenation, value printing"
+.RB "\(em " "Groovy / division and remainder, + concatenation, printing"
 .br
 .B 4.  ENGINE
 .RB "\(em " "fusevm bytecode VM, Cranelift JIT, no JVM"
@@ -70,16 +70,41 @@ comparisons \fB== != < > <= >=\fR, and short\-circuiting \fB&& ||\fR;
 post\-increment / decrement \fBi++\fR / \fBi\-\-\fR.
 .TP
 .B Control flow
-\fBif\fR / \fBelse\fR, \fBwhile\fR, the C\-style \fBfor (init; cond; update)\fR,
-and the range loop \fBfor (\fR\fIx\fR \fBin\fR \fIa\fR\fB..\fR\fIb\fR\fB)\fR
-(inclusive) or \fB..<\fR (half\-open); \fBbreak\fR and \fBcontinue\fR. A bare
-\fBreturn\fR ends the script.
+\fBif\fR / \fBelse\fR, \fBwhile\fR, \fBdo\fR / \fBwhile\fR, the C\-style
+\fBfor (init; cond; update)\fR, the range loop
+\fBfor (\fR\fIx\fR \fBin\fR \fIa\fR\fB..\fR\fIb\fR\fB)\fR (inclusive) or \fB..<\fR
+(half\-open), and \fBfor (\fR\fIx\fR \fBin\fR \fIcollection\fR\fB)\fR over a list's
+elements, a map's entries, or a String's characters; \fBbreak\fR and
+\fBcontinue\fR, including the labeled forms; \fBswitch\fR with Groovy's
+\fBisCase\fR labels; \fBtry\fR / \fBcatch\fR / \fBfinally\fR / \fBthrow\fR; and
+\fBassert\fR with Groovy's power\-assert rendering. A bare \fBreturn\fR ends the
+script.
+.TP
+.B Functions, classes, interfaces
+\fBdef\fR \fIname\fR\fB(\fR\fIparams\fR\fB)\fR functions (recursive and mutually
+recursive); \fBclass\fR with fields, arity\-dispatched constructors, methods, an
+implicit \fBthis\fR, auto \fBget\fR/\fBset\fR accessors, \fBextends\fR with
+virtual dispatch and \fBsuper\fR, operator overloading, and \fBinstanceof\fR;
+\fBinterface\fR with abstract declarations and Java 8 \fBdefault\fR methods, and
+\fBimplements\fR.
+.TP
+.B Collections and closures
+List and map literals, subscripting, first\-class ranges, closures
+(\fB{ a, b -> ... }\fR, \fB{ -> ... }\fR, implicit \fBit\fR) with upvalue
+capture, GString interpolation, the closure\-driven GDK (\fBeach\fR,
+\fBcollect\fR, \fBfindAll\fR, \fBfind\fR, \fBinject\fR, \fBsum\fR, \fBsort\fR,
+\fBunique\fR, \fBmax\fR, \fBmin\fR, \fBgroupBy\fR, \fBjoin\fR) over lists and
+maps, and the spread operator \fB*.\fR for member access.
 .SH 3. SEMANTICS
 .TP
-.B Division
+.B Division and remainder
 Groovy divides two integers as BigDecimal: \fB7/2\fR is \fB3.5\fR; an exact
 division yields an integer (\fB4/2\fR is \fB2\fR). A decimal operand forces
-decimal division.
+decimal division. A zero divisor raises a catchable
+\fBjava.lang.ArithmeticException\fR: \fB/ by zero\fR for two Integers,
+\fBDivision by zero\fR (or \fBDivision undefined\fR when the dividend is zero
+too) when a BigDecimal is involved. A \fBdouble\fR operand stays on the IEEE
+path, where \fBx / 0.0\fR is an infinity and \fBx % 0.0\fR is \fBNaN\fR.
 .TP
 .B Plus
 \fB+\fR is string concatenation when either operand is a String, using Groovy's

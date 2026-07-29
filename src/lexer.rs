@@ -94,6 +94,7 @@ pub enum Tok {
     Arrow,       // `->` closure parameter separator
     Question,    // `?` ternary
     QuestionDot, // `?.` safe navigation
+    StarDot,     // `*.` spread — apply the member to every element
     Elvis,       // `?:` elvis / null-coalescing
     /// A significant newline (statement terminator at bracket depth 0).
     Nl,
@@ -459,6 +460,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             ".." => (Tok::DotDot, 2),
             "->" => (Tok::Arrow, 2),
             "?." => (Tok::QuestionDot, 2),
+            // The spread operator `*.` — unambiguous, because Groovy has no
+            // leading-dot decimal literal for a `*` to multiply by.
+            "*." => (Tok::StarDot, 2),
             "?:" => (Tok::Elvis, 2),
             "+=" => (Tok::PlusAssign, 2),
             "-=" => (Tok::MinusAssign, 2),

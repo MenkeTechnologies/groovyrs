@@ -17,9 +17,13 @@ reported as parse or compile errors, never silently mis-run.
   `"hi".toUpperCase()`, `map.k`, and chains on literals (`[1,2,3].size()`) route
   through a host GDK dispatch. A faithful subset is modeled: `size` (String
   chars / list / map), String `length`/`toUpperCase`/`toLowerCase`/`trim`/
-  `reverse`/`isEmpty`/`contains`, list `isEmpty`/`contains`/`get`/`reverse`,
-  map `isEmpty`/`containsKey`; property `.size`/`.length` and map key reads
-  (`m.k`). An unknown method/property faults rather than mis-running.
+  `reverse`/`isEmpty`/`contains`, list `isEmpty`/`contains`/`get`/`reverse`/
+  `join`, map `isEmpty`/`containsKey`; the `.size`/`.length` count properties on
+  a `String` or list. A **map**'s property access is only ever a key read
+  (`m.k` == `m['k']`, `null` when absent) — including the names that are
+  properties on every other value, so `[a:1].size` and `[a:1].class` are `null`
+  in Groovy while `[size: 9].size` is `9`. An unknown method/property faults
+  rather than mis-running.
 - **List and map literals.** `[1, 2, 3]`, `[]`, `[a: 1]`, `[:]` build a fusevm
   `Array` (list) and a host-heap insertion-ordered map, and print Groovy-style
   (`[1, 2, 3]`, `[a:1]`, `[:]`).
@@ -76,12 +80,53 @@ reported as parse or compile errors, never silently mis-run.
   parent dispatch), `super(args)` constructor chaining, inherited field
   initializers, `value instanceof Type` (user chain + built-in type names, with
   `null instanceof X` false), and `@Override` / other annotations parsed and
-  ignored. `implements` is still ignored (interfaces have no runtime effect).
-- **Closure-driven GDK iteration.** `each`, `eachWithIndex`, `collect`,
-  `findAll`, `find`, `inject` (both the `inject(init){…}` and seedless
-  `inject{…}` forms), and `sum` over lists (and over materialised ranges), e.g.
-  `[1,2,3].collect { it * 2 }` → `[2, 4, 6]` and `[1,2,3,4].findAll { it % 2 == 0 }`
-  → `[2, 4]`.
+  ignored. A leading `abstract`/`public`/`final` modifier on the declaration is
+  accepted and ignored.
+- **Interfaces.** `interface I { … }`, `class C implements A, B`, and an
+  interface's own multiple `extends A, B`. A method declared with no body is an
+  abstract declaration (it binds nothing, and a sibling `default` method may
+  still call it by bare name); a method declared *with* a body is a Java 8
+  `default` every implementor inherits, which a class definition overrides.
+  `instanceof` walks the whole type closure — superclasses and interfaces,
+  transitively — so `impl instanceof I` answers through a superclass that
+  implements `I` and through an interface that extends another. An interface
+  cannot be instantiated. `trait` is still not implemented.
+- **Closure-driven GDK iteration.** Over lists (and materialised ranges):
+  `each`, `eachWithIndex`, `collect`, `findAll`, `find`, `inject` (both the
+  `inject(init){…}` and seedless `inject{…}` forms), `sum` (bare, seeded, and
+  closure forms), `sort`, `unique`, `max`, `min`, `groupBy`, `join`, and
+  `reverse` — e.g. `[1,2,3].collect { it * 2 }` → `[2, 4, 6]` and
+  `[1,2,3,4].findAll { it % 2 == 0 }` → `[2, 4]`. A one-parameter closure
+  argument to `sort`/`unique`/`max`/`min` is Groovy's *key extractor*, a
+  two-parameter one a *comparator*, and the sort is stable, like
+  `Collections.sort`.
+  Over maps: `each`, `eachWithIndex`, `collect` (→ a list), `findAll` (→ a map),
+  `find` (→ a `Map.Entry`), `any`, `every`, `groupBy` (→ a map of sub-maps),
+  `inject`, `sort` (by key), `max`, `min`. A two-parameter closure receives
+  `(key, value)` and a one-parameter closure a `Map.Entry` (which prints `k=v`
+  and answers `key`/`value`/`getKey()`/`getValue()`) — the same rule Groovy uses.
+- **The spread operator `*.`.** `list*.member` and `list*.method(args)` apply the
+  member to every element and collect the results. It is exactly
+  `list.collect { it?.member }`, including the safe navigation, so a `null`
+  element spreads to `null`.
+- **`for (x in <collection>)`.** Beyond the range form, the loop walks a list's
+  elements, a map's `Map.Entry`s, a `String`'s characters, zero iterations for
+  `null`, and any other value exactly once — Groovy's own iteration rules. The
+  sequence is materialised once before the loop, so a body that mutates the
+  collection still walks the original elements.
+- **`getClass()` / the `.class` property.** Both answer a `java.lang.Class`
+  value that prints `class java.lang.Integer`, and whose `getName()`/`name`,
+  `getSimpleName()`/`simpleName`, and `getCanonicalName()` answer. `null` reports
+  `class org.codehaus.groovy.runtime.NullObject`, which is what Groovy's
+  `NullObject` gives.
+- **`String.toBigDecimal()`.** `new BigDecimal(text.trim())`, with the exact
+  scale (`"100.00"` → `100.00`) and with `BigDecimal`'s own character-level
+  `NumberFormatException` diagnostics: `Character x is neither a decimal digit
+  number, decimal point, nor "e" notation exponential mark.`, `Character array
+  contains more than one decimal point.`, `No digits found.`, `Not a digit.`,
+  `Too many nonzero exponent digits.`, `Exponent overflow.` — plus the two
+  message-*less* forms (an empty string, and an exponent mark with no digits
+  after it), where `e.getMessage()` is `null`.
 - **First-class ranges.** `0..5` (inclusive) and `0..<5` (half-open) build a
   Groovy list of the enumerated integers, so `.size()`, `.contains(x)`, `.each`,
   and `.collect` apply.
@@ -214,10 +259,17 @@ reported as parse or compile errors, never silently mis-run.
 
 ## Not implemented (errors today)
 
-- **`trait` / `implements` behavior.** `extends` (single inheritance) is
-  supported; `trait`s and interface method bodies are not, and `implements`
-  clauses are parsed and ignored (only `Comparable`'s `compareTo` matters, and
-  that is keyed off the method's presence, not the clause).
+- **`trait`.** `class`, `interface`, `extends` (single inheritance for a class,
+  multiple for an interface), `implements`, and interface `default` methods are
+  supported; `trait` is not, and a `trait` declaration is a parse error.
+- **A static type reference is not a value.** `Foo.class`, `Foo.name`, and
+  passing a class name where a value is expected do not resolve — a bare type
+  name is only meaningful in `new`, `instanceof`, a `catch` clause, and a
+  `switch` `case` label. `getClass()` on a *value* is what answers.
+- **A closure's `getClass()` names `groovy.lang.Closure`.** Groovy reports the
+  synthetic per-closure class (`Script1$_run_closure1`), whose name depends on
+  the enclosing script's name and the closure's position; groovyrs has no such
+  class to name.
 - **Method overloading by parameter type.** Methods (and a class's operator
   methods) are keyed by name only, so two same-named methods with different
   parameter types collapse to one (the last declared wins). Constructors *are*
@@ -228,20 +280,6 @@ reported as parse or compile errors, never silently mis-run.
   JIT). On a user-class instance they therefore dispatch `plus`/`minus`, not
   Groovy's `next`/`previous`. Call `x.next()` / `x.previous()` explicitly for
   those.
-- **`getClass()`.** There is no runtime class object, so `e.getClass().getName()`
-  raises `MissingMethodException` rather than naming the type. Use `instanceof`.
-- **`%` by zero.** `/` by zero raises a catchable `ArithmeticException` with
-  Groovy's exact message (`Division by zero`, or `Division undefined` when the
-  dividend is zero too), but `%` does not: an integer `x % 0` lowers to fusevm's
-  native `Op::Mod` and yields `0` where Groovy raises `ArithmeticException: /
-  by zero`, and a decimal `x % 0` raises through the numeric hook, which has no
-  pending-exception channel — so the message is right but the run aborts instead
-  of reaching a handler. Making either catchable costs `%`'s native/JIT path (the
-  way `/` already pays for `GDIV`) or a pending check after every arithmetic op.
-- **`String.toBigDecimal()`.** The other numeric conversions are modeled;
-  `toBigDecimal` is not, so it raises `MissingMethodException` where Groovy would
-  either convert or raise `NumberFormatException` with `BigDecimal`'s own
-  character-level message.
 - **`import`/`package`** are tolerated (skipped) but do nothing.
 - **Command-argument chains beyond one arg** (`println a, b`, `foo bar baz`).
 
@@ -278,11 +316,34 @@ reported as parse or compile errors, never silently mis-run.
   the read over the elements, so `[1,2,3].zork` reports the *element* type
   (`No such property: zork for class: java.lang.Integer`, wrapped in an
   `Exception evaluating property` message); groovyrs reports the list itself.
+  The explicit spread `list*.prop` **is** modeled.
+- **`String.toBigDecimal` accepts only the ASCII grammar.** `java.math`'s parser
+  additionally admits Unicode decimal digits (`Character.digit`); groovyrs
+  rejects those as ordinary unexpected characters, with the same
+  `Character … is neither a decimal digit number …` message Groovy gives for a
+  genuinely invalid character.
 - **The `NullPointerException` for a property *write* on `null` carries the
   JDK's helpful-NPE text** (`Cannot invoke "Object.getClass()" because "obj" is
   null`) rather than a groovyrs-authored message, since that is what Groovy
   surfaces. The wording is the JDK's, so it can change with the JVM version.
 
+- **`%` with a non-literal divisor costs its loop's trace eligibility.** Java's
+  `%` throws `ArithmeticException` on a zero divisor where fusevm's native
+  `Op::Mod` answers `0` — a silent wrong answer. The compiler therefore guards
+  the op with `Dup; LoadInt(0); NumEq; JumpIfFalse` and calls the `GMOD` builtin
+  only on the zero branch. The guard itself is four native ops, but the
+  never-taken `CallBuiltin` sits *inside* the loop body, and fusevm's trace
+  eligibility is a static scan of the region's opcodes, so the loop is
+  disqualified. Measured with `--tiers` on
+  `def d = 7; def t = 0; for (i in 0..500000) { t += i % d }; println(t)`:
+  `loop @10 trace-eligible=false`; the same program with the literal `7` in
+  place of `d` reports `loop @8 trace-eligible=true`.
+  A **literal non-zero divisor** (`i % 2`, `n % -3`) is proved safe at compile
+  time and emits nothing at all, so every constant-divisor loop is byte-identical
+  to before — and that is the shape hot loops actually take. Moving the zero
+  branch out of line (past the loop, like a deferred block) would recover
+  eligibility for the variable-divisor case; it needs a deferred-emission path
+  the compiler does not have yet.
 - **A condition whose type is not statically known costs one builtin call.**
   Groovy truthiness is exact everywhere, but where the compiler cannot prove the
   condition is already a number/boolean/list (`while (x)`, `if (m)`), it emits a
@@ -325,6 +386,18 @@ reported as parse or compile errors, never silently mis-run.
 - **`for (x in a..b)` iterates ascending only.** A descending literal range
   (`5..1`, which Groovy walks downward) runs zero times. The endpoint is
   evaluated once (a body that mutates it still iterates the original range).
+- **`sort()` / `unique()` write back only through a bare variable.** Groovy's
+  `List.sort()` and `List.unique()` mutate the receiver in place and return it.
+  A fusevm `Value::Array` is a value, not a reference, so the host can only
+  return a new list; the compiler stores that result back when the receiver is a
+  plain variable (`xs.sort(); println(xs)` is right), which is the shape scripts
+  write. A receiver reached through a field, a map entry, or a subscript
+  (`obj.items.sort()`) gets the sorted list as the call's *value* but leaves the
+  original untouched. `sort(false)` asks for a copy in Groovy too, so it never
+  writes back; `sort(true)` does. Everything else in the GDK is non-mutating in Groovy as well.
+- **`Map.Entry` is modeled only as far as the GDK needs.** It prints `k=v` and
+  answers `key`/`value`/`getKey()`/`getValue()`; `setValue` and the rest of the
+  interface are absent, and its key is always the map's `String` key.
 - **Types are not checked.** Declared types (`int`, `String`, `def`) are kept
   for diagnostics but do not gate execution — the runtime is dynamically typed on
   the fusevm value model.

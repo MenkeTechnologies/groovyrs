@@ -89,20 +89,20 @@ const CORPUS: &[(&str, &str, &str, &str)] = &[
     (
         "default",
         "Keyword",
-        "the `switch` section entered when no `case` label matched",
+        "the `switch` section entered when no `case` label matched; also marks an interface method with a body",
         "switch (9) { case 1: break; default: println(\"d\") }   // => d",
     ),
     (
         "for",
         "Keyword",
-        "C-style `for (init; cond; update)` or the `for (x in a..b)` range loop",
+        "C-style `for (init; cond; update)`, the `for (x in a..b)` range loop, or `for (x in collection)`",
         "for (i in 0..2) print(i)   // => 012",
     ),
     (
         "in",
         "Keyword",
-        "the `for (x in range)` iteration separator",
-        "for (n in 1..3) print(n)   // => 123",
+        "the `for (x in …)` iteration separator; walks a range, a list, a map's entries, or a String's characters",
+        "for (n in [1, 2, 3]) print(n)   // => 123",
     ),
     (
         "return",

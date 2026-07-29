@@ -92,35 +92,82 @@ while (i &lt; 3) i++
 println(i)   // =&gt; 3</code></pre>
         </article>
         <article class="doc-entry" id="doc-keyword-5">
-          <h3><a class="doc-anchor" href="#doc-keyword-5">#</a> <code>for</code></h3>
+          <h3><a class="doc-anchor" href="#doc-keyword-5">#</a> <code>assert</code></h3>
+          <p>raise an `AssertionError` when the condition is falsy, rendering each sub-expression's value</p>
+          <pre><code class="lang-groovy">assert 1 + 1 == 2   // passes silently</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-6">
+          <h3><a class="doc-anchor" href="#doc-keyword-6">#</a> <code>do</code></h3>
+          <p>`do { … } while (cond)`; the body runs before the first test</p>
+          <pre><code class="lang-groovy">def i = 0
+do { i++ } while (i &lt; 3)
+println(i)   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-7">
+          <h3><a class="doc-anchor" href="#doc-keyword-7">#</a> <code>switch</code></h3>
+          <p>multi-way branch on Groovy's `isCase` (constant, range, list, type, `~/…/`, closure)</p>
+          <pre><code class="lang-groovy">switch (5) { case 4..6: println("in"); break; default: println("out") }   // =&gt; in</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-8">
+          <h3><a class="doc-anchor" href="#doc-keyword-8">#</a> <code>case</code></h3>
+          <p>one `switch` label; sections fall through until a `break`</p>
+          <pre><code class="lang-groovy">switch (1) { case 1: println("one"); break }   // =&gt; one</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-9">
+          <h3><a class="doc-anchor" href="#doc-keyword-9">#</a> <code>default</code></h3>
+          <p>the `switch` section entered when no `case` label matched</p>
+          <pre><code class="lang-groovy">switch (9) { case 1: break; default: println("d") }   // =&gt; d</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-10">
+          <h3><a class="doc-anchor" href="#doc-keyword-10">#</a> <code>for</code></h3>
           <p>C-style `for (init; cond; update)` or the `for (x in a..b)` range loop</p>
           <pre><code class="lang-groovy">for (i in 0..2) print(i)   // =&gt; 012</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-6">
-          <h3><a class="doc-anchor" href="#doc-keyword-6">#</a> <code>in</code></h3>
+        <article class="doc-entry" id="doc-keyword-11">
+          <h3><a class="doc-anchor" href="#doc-keyword-11">#</a> <code>in</code></h3>
           <p>the `for (x in range)` iteration separator</p>
           <pre><code class="lang-groovy">for (n in 1..3) print(n)   // =&gt; 123</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-7">
-          <h3><a class="doc-anchor" href="#doc-keyword-7">#</a> <code>return</code></h3>
+        <article class="doc-entry" id="doc-keyword-12">
+          <h3><a class="doc-anchor" href="#doc-keyword-12">#</a> <code>return</code></h3>
           <p>end the script; a returned expression is evaluated for its effects</p>
           <pre><code class="lang-groovy">return   // ends the script here</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-8">
-          <h3><a class="doc-anchor" href="#doc-keyword-8">#</a> <code>break</code></h3>
-          <p>exit the nearest enclosing loop immediately</p>
+        <article class="doc-entry" id="doc-keyword-13">
+          <h3><a class="doc-anchor" href="#doc-keyword-13">#</a> <code>break</code></h3>
+          <p>exit the nearest enclosing loop or `switch`; `break label` exits the named one</p>
           <pre><code class="lang-groovy">for (i in 0..9) { if (i == 3) break; print(i) }   // =&gt; 012</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-9">
-          <h3><a class="doc-anchor" href="#doc-keyword-9">#</a> <code>continue</code></h3>
-          <p>skip to the next iteration of the nearest loop</p>
+        <article class="doc-entry" id="doc-keyword-14">
+          <h3><a class="doc-anchor" href="#doc-keyword-14">#</a> <code>continue</code></h3>
+          <p>skip to the next iteration of the nearest loop; `continue label` targets the named one</p>
           <pre><code class="lang-groovy">for (i in 0..3) { if (i == 1) continue; print(i) }   // =&gt; 023</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-10">
-          <h3><a class="doc-anchor" href="#doc-keyword-10">#</a> <code>new</code></h3>
+        <article class="doc-entry" id="doc-keyword-15">
+          <h3><a class="doc-anchor" href="#doc-keyword-15">#</a> <code>new</code></h3>
           <p>construct a class instance (`new Type(args)`)</p>
           <pre><code class="lang-groovy">class P { def x; P(v) { x = v } }
 println(new P(7).x)   // =&gt; 7</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-16">
+          <h3><a class="doc-anchor" href="#doc-keyword-16">#</a> <code>try</code></h3>
+          <p>run a block with `catch` handlers and/or a `finally` cleanup</p>
+          <pre><code class="lang-groovy">try { throw new Exception("x") } catch (Exception e) { println(e.message) }   // =&gt; x</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-17">
+          <h3><a class="doc-anchor" href="#doc-keyword-17">#</a> <code>catch</code></h3>
+          <p>handle a thrown exception of the named type (`catch (A | B e)` for several)</p>
+          <pre><code class="lang-groovy">try { 1 / 0 } catch (ArithmeticException e) { println(e.message) }   // =&gt; Division by zero</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-18">
+          <h3><a class="doc-anchor" href="#doc-keyword-18">#</a> <code>finally</code></h3>
+          <p>cleanup block; runs on every exit path out of the `try`, including a `return`</p>
+          <pre><code class="lang-groovy">try { println("body") } finally { println("cleanup") }   // =&gt; body\ncleanup</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-keyword-19">
+          <h3><a class="doc-anchor" href="#doc-keyword-19">#</a> <code>throw</code></h3>
+          <p>raise a throwable, unwinding to the innermost matching `catch`</p>
+          <pre><code class="lang-groovy">try { throw new IllegalStateException("bad") } catch (Exception e) { println(e) }</code></pre>
         </article>
       </section>
 

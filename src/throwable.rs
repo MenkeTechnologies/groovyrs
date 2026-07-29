@@ -65,6 +65,11 @@ const THROWABLES: &[(&str, &str, &str)] = &[
         "GroovyRuntimeException",
         "groovy.lang",
     ),
+    (
+        "PowerAssertionError",
+        "AssertionError",
+        "org.codehaus.groovy.runtime.powerassert",
+    ),
 ];
 
 /// Every modeled throwable as `(name, supertype, package)`, root first — so a

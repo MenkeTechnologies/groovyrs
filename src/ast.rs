@@ -146,6 +146,27 @@ pub enum StmtKind {
     /// `throw <expr>` — park the throwable as the pending exception and unwind to
     /// the innermost enclosing handler (or out of the program).
     Throw(Expr),
+    /// `assert cond [: message]`. `text` is the condition's verbatim source,
+    /// which Groovy's power-assert rendering prints above the recorded values;
+    /// the sub-expressions whose values it records are wrapped in
+    /// [`Expr::Recorded`] by the parser.
+    Assert {
+        cond: Expr,
+        message: Option<Expr>,
+        text: String,
+        /// The condition re-rendered the way Groovy's `Expression.getText()`
+        /// does — fully parenthesised, with implicit receivers and qualified
+        /// type names. The `assert cond : message` form quotes *this*, not the
+        /// source text `text` holds (see `parser::expr_text`).
+        ast_text: String,
+        /// The `(name, column)` of each bare-variable operand Groovy lists in
+        /// the *message* form's `Values:` clause, in source order. The column
+        /// is what pairs the name with its recorded value — a name can occur
+        /// more than once, and one name can be a prefix of another. Empty when
+        /// the condition has no bare-variable operand, which is when Groovy
+        /// omits the clause.
+        value_names: Vec<(String, u32)>,
+    },
 }
 
 /// One `case L:` / `default:` section of a [`StmtKind::Switch`], in source
@@ -227,6 +248,13 @@ pub enum Expr {
     Null,
     /// A bare identifier — a variable read.
     Var(String),
+    /// A sub-expression of an `assert` condition whose value the power-assert
+    /// renderer records, tagged with the 1-based source column Groovy prints it
+    /// under. Produced only inside an `assert`, so no other program pays for it.
+    Recorded {
+        col: u32,
+        inner: Box<Expr>,
+    },
     /// A unary operator applied to one operand (`-x`, `!b`).
     Unary {
         op: UnOp,

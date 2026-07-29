@@ -987,6 +987,13 @@ impl Compiler {
                 finally_body,
             } => self.try_stmt(body, catches, finally_body, s.line),
             StmtKind::Throw(e) => self.throw_stmt(e, s.line),
+            StmtKind::Assert {
+                cond,
+                message,
+                text,
+                ast_text,
+                value_names,
+            } => self.assert_stmt(cond, message.as_ref(), text, ast_text, value_names, s.line),
             StmtKind::Break(label) => self.break_stmt(label.as_deref()),
             StmtKind::Continue(label) => self.continue_stmt(label.as_deref()),
             StmtKind::Return { value } => {
@@ -1180,6 +1187,70 @@ impl Compiler {
         self.b.emit(Op::CallBuiltin(crate::host::GTHROW, 1), line);
         self.b.emit(Op::Pop, line);
         self.emit_unwind(line)?;
+        Ok(())
+    }
+
+    /// Lower `assert cond [: message]`.
+    ///
+    /// ```text
+    ///   GASSERT_START               ; clear the value recorder
+    ///   <cond>                      ; recorded sub-expressions call GASSERT_REC
+    ///   GTRUTH; JumpIfTrue ok
+    ///   <message or null>
+    ///   GASSERT_FAIL(text, names)   ; renders and parks the AssertionError
+    ///   <unwind>
+    /// ok:
+    /// ```
+    ///
+    /// The recorder is host-side because the rendering needs every value's
+    /// source column *and* its position in the line layout, which only the host
+    /// can compute once all of them are known.
+    fn assert_stmt(
+        &mut self,
+        cond: &Expr,
+        message: Option<&Expr>,
+        text: &str,
+        ast_text: &str,
+        value_names: &[(String, u32)],
+        line: u32,
+    ) -> Result<(), String> {
+        self.b
+            .emit(Op::CallBuiltin(crate::host::GASSERT_START, 0), line);
+        self.expr(cond)?;
+        self.b.emit(Op::CallBuiltin(crate::host::GTRUTH, 1), line);
+        let ok = self.b.emit(Op::JumpIfTrue(0), line);
+        match message {
+            Some(m) => self.expr(m)?,
+            None => {
+                self.b.emit(Op::LoadUndef, line);
+            }
+        }
+        let t = self.b.add_constant(Value::str(text.to_string()));
+        self.b.emit(Op::LoadConst(t), line);
+        let a = self.b.add_constant(Value::str(ast_text.to_string()));
+        self.b.emit(Op::LoadConst(a), line);
+        // The `Values:` clause names travel as one comma-joined constant, and
+        // their values as a parallel list read *here*, not from the power-assert
+        // recorder: Groovy reports a variable's current value even when `&&`
+        // short-circuited past the operand it sits in.
+        let joined = value_names
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>()
+            .join(",");
+        let n = self.b.add_constant(Value::str(joined));
+        self.b.emit(Op::LoadConst(n), line);
+        for (name, _) in value_names {
+            let get = self.load_op_for(name);
+            self.b.emit(get, line);
+        }
+        self.b.emit(Op::MakeArray(value_names.len() as u16), line);
+        self.b
+            .emit(Op::CallBuiltin(crate::host::GASSERT_FAIL, 0), line);
+        self.b.emit(Op::Pop, line);
+        self.emit_unwind(line)?;
+        let after = self.b.current_pos();
+        self.b.patch_jump(ok, after);
         Ok(())
     }
 
@@ -1612,6 +1683,14 @@ impl Compiler {
             }
             // A `~/…/` literal compiles at run time, through the host, because a
             // compiled pattern is a heap object with no fusevm representation.
+            // An `assert` sub-expression whose value the power-assert renderer
+            // shows: evaluate it, hand a copy to the recorder, keep the value.
+            Expr::Recorded { col, inner } => {
+                self.expr(inner)?;
+                self.b.emit(Op::LoadInt(*col as i64), self.cur_line);
+                self.b
+                    .emit(Op::CallBuiltin(crate::host::GASSERT_REC, 0), self.cur_line);
+            }
             Expr::Regex(src) => {
                 let c = self.b.add_constant(Value::str(src.clone()));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
@@ -2355,6 +2434,12 @@ fn free_in_stmt(
             }
         }
         StmtKind::Throw(e) => free_in_expr(e, bound, out, seen),
+        StmtKind::Assert { cond, message, .. } => {
+            free_in_expr(cond, bound, out, seen);
+            if let Some(m) = message {
+                free_in_expr(m, bound, out, seen);
+            }
+        }
         StmtKind::Break(_)
         | StmtKind::Continue(_)
         | StmtKind::Function { .. }
@@ -2370,6 +2455,7 @@ fn free_in_expr(
 ) {
     match e {
         Expr::Regex(_) => {}
+        Expr::Recorded { inner, .. } => free_in_expr(inner, bound, out, seen),
         Expr::Var(n) => note_free(n, bound, out, seen),
         Expr::PostIncDec { name, .. } | Expr::PreIncDec { name, .. } => {
             note_free(name, bound, out, seen)
@@ -2593,12 +2679,16 @@ fn body_uses_exceptions(body: &[Stmt]) -> bool {
                 })
         }
         StmtKind::Labeled { stmt, .. } => body_uses_exceptions(std::slice::from_ref(stmt)),
+        // An `assert` raises an `AssertionError`, so a program containing one
+        // needs the pending-exception checks even without a `throw`.
+        StmtKind::Assert { .. } => true,
         StmtKind::Break(_) | StmtKind::Continue(_) => false,
     })
 }
 
 fn expr_uses_exceptions(e: &Expr) -> bool {
     match e {
+        Expr::Recorded { inner, .. } => expr_uses_exceptions(inner),
         Expr::Closure { body, .. } => body_uses_exceptions(body),
         Expr::Unary { rhs, .. } => expr_uses_exceptions(rhs),
         Expr::Binary { lhs, rhs, .. } => expr_uses_exceptions(lhs) || expr_uses_exceptions(rhs),
@@ -2695,6 +2785,9 @@ fn body_has_ffi(body: &[Stmt]) -> bool {
                     .any(|c| c.label.as_ref().is_some_and(expr_has_ffi) || body_has_ffi(&c.body))
         }
         StmtKind::Labeled { stmt, .. } => body_has_ffi(std::slice::from_ref(stmt)),
+        StmtKind::Assert { cond, message, .. } => {
+            expr_has_ffi(cond) || message.as_ref().is_some_and(expr_has_ffi)
+        }
         StmtKind::Break(_) | StmtKind::Continue(_) => false,
     })
 }
@@ -2702,6 +2795,7 @@ fn body_has_ffi(body: &[Stmt]) -> bool {
 fn expr_has_ffi(e: &Expr) -> bool {
     match e {
         Expr::Regex(_) => false,
+        Expr::Recorded { inner, .. } => expr_has_ffi(inner),
         Expr::Call { name, args, .. } => name == RUST_COMPILE || args.iter().any(expr_has_ffi),
         Expr::Unary { rhs, .. } => expr_has_ffi(rhs),
         Expr::Binary { lhs, rhs, .. } => expr_has_ffi(lhs) || expr_has_ffi(rhs),

@@ -185,6 +185,18 @@ pub const GIS_CASE_TYPE: u16 = 738;
 /// pattern text; pushes the compiled pattern handle.
 pub const GREGEX: u16 = 739;
 
+/// Clear the power-assert value recorder, at the top of an `assert`.
+pub const GASSERT_START: u16 = 740;
+
+/// Record one `assert` sub-expression's value. Stack: the value (deepest), then
+/// its 1-based source column; the value is pushed back so it flows on.
+pub const GASSERT_REC: u16 = 741;
+
+/// Raise the `AssertionError` for a failed `assert`. Stack: the `: message`
+/// operand (`null` when absent), the condition's source text, then the
+/// comma-joined `Values:` variable names.
+pub const GASSERT_FAIL: u16 = 742;
+
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -230,6 +242,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GIS_CASE, b_is_case);
     vm.register_builtin(GIS_CASE_TYPE, b_is_case_type);
     vm.register_builtin(GREGEX, b_regex);
+    vm.register_builtin(GASSERT_START, b_assert_start);
+    vm.register_builtin(GASSERT_REC, b_assert_rec);
+    vm.register_builtin(GASSERT_FAIL, b_assert_fail);
     // A fresh VM install starts with an empty object heap: `Value::Obj` handles
     // are chunk-relative (a closure carries a name-pool index, an instance a
     // class id), so a handle from a prior run must never survive into a new
@@ -279,6 +294,10 @@ thread_local! {
     /// (a zero divisor) is only *thrown* while armed; unarmed it stays the hard
     /// fault it has always been, because nothing would ever look at it.
     static EXC_ARMED: Cell<bool> = const { Cell::new(false) };
+    /// The `(source column, value)` pairs recorded while evaluating the current
+    /// `assert` condition — what Groovy's power-assert rendering lays out under
+    /// the condition's source text. Cleared at each `assert`.
+    static ASSERT_VALUES: RefCell<Vec<(u32, Value)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Is an exception in flight? Host-side loops that drive user code (GDK
@@ -433,6 +452,16 @@ fn throwable_str(v: &Value) -> String {
     let Some(meta) = class_meta(inst.class) else {
         return groovy_str(v);
     };
+    // `PowerAssertionError` overrides `toString` to lead with a banner and
+    // surround the rendered layout with blank lines, rather than name itself.
+    if meta.name == "PowerAssertionError" {
+        let body = inst
+            .fields
+            .get("message")
+            .map(groovy_str)
+            .unwrap_or_default();
+        return format!("Assertion failed: \n\n{body}\n");
+    }
     let name = crate::throwable::qualified(&meta.name);
     match inst.fields.get("message") {
         Some(m) if !matches!(m, Value::Undef) => format!("{name}: {}", groovy_str(m)),
@@ -1401,6 +1430,198 @@ fn b_is_case(vm: &mut VM, _argc: u8) -> Value {
         return Value::bool(matches!(label, Value::Undef) && matches!(subject, Value::Undef));
     }
     Value::bool(values_equal(&label, &subject))
+}
+
+// ---------------------------------------------------------------------------
+// Power assert
+// ---------------------------------------------------------------------------
+
+/// `GASSERT_START`: begin an `assert`, discarding any values a previous one
+/// recorded.
+fn b_assert_start(vm: &mut VM, argc: u8) -> Value {
+    pop_args(vm, argc);
+    ASSERT_VALUES.with(|v| v.borrow_mut().clear());
+    Value::Undef
+}
+
+/// `GASSERT_REC`: record one sub-expression's value under its source column and
+/// push the value back, so recording is transparent to the surrounding
+/// expression. Stack: value (deepest), then the column.
+fn b_assert_rec(vm: &mut VM, _argc: u8) -> Value {
+    let col = vm.stack.pop().unwrap_or(Value::Undef).to_int() as u32;
+    let value = vm.stack.pop().unwrap_or(Value::Undef);
+    ASSERT_VALUES.with(|v| v.borrow_mut().push((col, value.clone())));
+    value
+}
+
+/// `GASSERT_FAIL`: raise the throwable a failed `assert` raises. With a `:`
+/// message Groovy throws a plain `java.lang.AssertionError` carrying that
+/// message plus the condition's AST text; without one it throws a
+/// `PowerAssertionError` whose message is the rendered value layout over the
+/// condition's *source* text.
+fn b_assert_fail(vm: &mut VM, _argc: u8) -> Value {
+    let pop_str = |vm: &mut VM| {
+        vm.stack
+            .pop()
+            .unwrap_or(Value::Undef)
+            .as_str_cow()
+            .into_owned()
+    };
+    let named_values = vm.stack.pop().unwrap_or(Value::Undef);
+    let names = pop_str(vm);
+    let ast_text = pop_str(vm);
+    let text = pop_str(vm);
+    let message = vm.stack.pop().unwrap_or(Value::Undef);
+    let values = ASSERT_VALUES.with(|v| std::mem::take(&mut *v.borrow_mut()));
+    let (class, message) = match message {
+        // `text` is the statement's verbatim source, which the recorded columns
+        // are 1-based over.
+        Value::Undef => ("PowerAssertionError", render_assertion(&text, values)),
+        m => (
+            "AssertionError",
+            plain_assertion(&groovy_str(&m), &ast_text, &names, &named_values),
+        ),
+    };
+    raise(vm, class, &message);
+    Value::Undef
+}
+
+/// The `: message` form's text: `<message>. Expression: (<text>)`, plus a
+/// `Values:` clause naming the condition's bare-variable operands when it has
+/// any. Verified against Apache Groovy 5.0.7.
+fn plain_assertion(message: &str, text: &str, names: &str, values: &Value) -> String {
+    // No parentheses here: `Expression.getText()` already brackets a binary, and
+    // a `!x` condition prints unbracketed.
+    let mut out = format!("{message}. Expression: {text}");
+    let empty = Vec::new();
+    let values = match values {
+        Value::Array(a) => a,
+        _ => &empty,
+    };
+    let named: Vec<String> = names
+        .split(',')
+        .filter(|n| !n.is_empty())
+        .zip(values)
+        .map(|(name, v)| format!("{name} = {}", groovy_str(v)))
+        .collect();
+    if !named.is_empty() {
+        out.push_str(&format!(". Values: {}", named.join(", ")));
+    }
+    out
+}
+
+/// Render a failed `assert` the way Groovy's power assert does: the condition's
+/// source text, then each recorded value placed under the column it came from,
+/// with `|` markers on the lines between.
+///
+/// This is a port of `org.codehaus.groovy.runtime.powerassert.AssertionRenderer`
+/// (Apache Groovy 5.0.7). The layout rule is subtle enough that paraphrasing it
+/// would not reproduce Groovy's output: values are placed right to left, each
+/// onto the first line whose existing content starts *after* the value would
+/// end, and every line it passes over on the way down gets a `|` marker.
+fn render_assertion(text: &str, mut values: Vec<(u32, Value)>) -> String {
+    // Right to left, and *stably*: where two expressions share a column the rule
+    // below keeps the last recorded, which is only well defined for a stable sort.
+    values.sort_by_key(|(col, _)| std::cmp::Reverse(*col));
+
+    let mut lines: Vec<Vec<char>> = vec![text.chars().collect(), Vec::new()];
+    // `starts[i]` is the first non-empty column of `lines[i]`; line 0 (the source
+    // text) and the empty marker line both start at 0, so no value can be placed
+    // on either and every value falls through to a line of its own or below.
+    let mut starts: Vec<usize> = vec![0, 0];
+
+    for i in 0..values.len() {
+        let (col, value) = &values[i];
+        let start_column = *col as usize;
+        if start_column < 1 {
+            continue;
+        }
+        // Where several expressions share a column, only the last recorded (the
+        // outermost) is shown — Groovy's GROOVY-4344 rule.
+        if values
+            .get(i + 1)
+            .is_some_and(|(c, _)| *c as usize == start_column)
+        {
+            continue;
+        }
+        let rendered = inspect_value(value);
+        let rows: Vec<&str> = rendered.split('\n').collect();
+        // A multi-line value never shares a line, so it always starts a new one.
+        let end_column = if rows.len() == 1 {
+            start_column + rendered.chars().count()
+        } else {
+            usize::MAX
+        };
+
+        let mut placed = false;
+        for j in 1..lines.len() {
+            if end_column < starts[j] {
+                place(&mut lines[j], &rendered, start_column);
+                starts[j] = start_column;
+                placed = true;
+                break;
+            }
+            place(&mut lines[j], "|", start_column);
+            // Line 1 is the marker line and must stay claimable by nothing, so
+            // its start column is left at 0.
+            if j > 1 {
+                starts[j] = start_column + 1;
+            }
+        }
+        if !placed {
+            for row in rows {
+                let mut line = Vec::new();
+                place(&mut line, row, start_column);
+                lines.push(line);
+                starts.push(start_column);
+            }
+        }
+    }
+
+    lines
+        .into_iter()
+        .map(|l| l.into_iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Write `s` into `line` starting at 1-based `column`, padding with spaces.
+fn place(line: &mut Vec<char>, s: &str, column: usize) {
+    while line.len() < column - 1 {
+        line.push(' ');
+    }
+    for (k, ch) in s.chars().enumerate() {
+        let at = column - 1 + k;
+        match line.get_mut(at) {
+            Some(slot) => *slot = ch,
+            None => line.push(ch),
+        }
+    }
+}
+
+/// Groovy's *verbose* value rendering (`FormatHelper.format(v, true)`), which
+/// the power-assert layout uses and `println` does not: a `String` is quoted,
+/// and a collection's elements — including a map's keys — are rendered the same
+/// way recursively. Everything else prints as it always does.
+fn inspect_value(v: &Value) -> String {
+    if let Some(entries) = as_omap(v) {
+        if entries.is_empty() {
+            return "[:]".to_string();
+        }
+        let items: Vec<String> = entries
+            .iter()
+            .map(|(k, val)| format!("'{k}':{}", inspect_value(val)))
+            .collect();
+        return format!("[{}]", items.join(", "));
+    }
+    match v {
+        Value::Str(s) => format!("'{s}'"),
+        Value::Array(a) => {
+            let items: Vec<String> = a.iter().map(inspect_value).collect();
+            format!("[{}]", items.join(", "))
+        }
+        other => groovy_str(other),
+    }
 }
 
 /// Groovy's value equality for a `switch` label: numeric operands compare

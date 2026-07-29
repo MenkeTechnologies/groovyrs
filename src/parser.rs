@@ -26,17 +26,27 @@ pub fn parse(src: &str) -> Result<Program, String> {
     let tokens = crate::lexer::lex(&src)?;
     let mut p = Parser {
         toks: tokens,
+        src,
         pos: 0,
         tmp: 0,
+        recording: None,
     };
     p.program()
 }
 
 struct Parser {
     toks: Vec<Token>,
+    /// The source the tokens came from, so an `assert` can slice its condition's
+    /// verbatim text and derive the columns its values render under.
+    src: String,
     pos: usize,
     /// Counter for synthetic temporaries (e.g. `for-in` range endpoints).
     tmp: usize,
+    /// While parsing an `assert` condition, the column of its `assert` keyword —
+    /// recorded columns are rebased onto it so the rendering reads as if the
+    /// statement began the line, which is what Groovy prints. `None` everywhere
+    /// else, so no other program pays for recording.
+    recording: Option<u32>,
 }
 
 impl Parser {
@@ -49,6 +59,29 @@ impl Parser {
             .get(self.pos + n)
             .map(|t| &t.kind)
             .unwrap_or(&Tok::Eof)
+    }
+
+    /// The 1-based source column of the token `n` ahead — characters since the
+    /// last newline, which is the column Groovy's power assert renders under.
+    fn col_at(&self, n: usize) -> u32 {
+        let offset = self
+            .toks
+            .get(self.pos + n)
+            .map_or(self.src.len(), |t| t.offset);
+        let line_start = self.src[..offset].rfind('\n').map_or(0, |i| i + 1);
+        1 + self.src[line_start..offset].chars().count() as u32
+    }
+
+    /// Wrap `e` for the power-assert value recorder when inside an `assert`
+    /// condition; a no-op otherwise.
+    fn record(&self, col: u32, e: Expr) -> Expr {
+        match self.recording {
+            Some(base) if col >= base => Expr::Recorded {
+                col: col - base + 1,
+                inner: Box::new(e),
+            },
+            _ => e,
+        }
     }
 
     fn line(&self) -> u32 {
@@ -181,6 +214,7 @@ impl Parser {
                 self.skip_newlines();
                 StmtKind::Throw(self.expression()?)
             }
+            Tok::Assert => self.assert_stmt()?,
             Tok::If => self.if_stmt()?,
             Tok::While => self.while_stmt()?,
             Tok::Do => self.do_while_stmt()?,
@@ -651,6 +685,48 @@ impl Parser {
         }
     }
 
+    /// `assert cond [: message]`.
+    ///
+    /// The condition is parsed in *recording* mode, so every sub-expression
+    /// Groovy's power assert prints a value for is wrapped in
+    /// [`Expr::Recorded`] with its source column, and its verbatim source text
+    /// is sliced out for the `assert <text>` line above those values.
+    fn assert_stmt(&mut self) -> Result<StmtKind, String> {
+        let keyword_col = self.col_at(0);
+        // Slice from the keyword, not the condition: Groovy reprints the
+        // statement's source verbatim, whitespace included.
+        let start = self.toks[self.pos].offset;
+        self.eat(&Tok::Assert)?;
+        self.recording = Some(keyword_col);
+        let cond = self.expression();
+        self.recording = None;
+        let cond = cond?;
+        // The condition's text ends where the next token begins; trailing
+        // whitespace and the `:` of the message form are trimmed off.
+        let end = self.toks[self.pos].offset.min(self.src.len());
+        // The renderer refuses a text with line breaks, so a condition wrapped
+        // across lines is joined back onto one. The `assert ` keyword the power
+        // form prints above the values is prepended host-side, because the
+        // `: message` form quotes the condition *without* it.
+        let text = self.src[start..end].trim_end().replace('\n', " ");
+        let message = if self.is(&Tok::Colon) {
+            self.advance();
+            self.skip_newlines();
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        let value_names = assert_value_names(&cond);
+        let ast_text = expr_text(&cond);
+        Ok(StmtKind::Assert {
+            cond,
+            message,
+            text,
+            ast_text,
+            value_names,
+        })
+    }
+
     /// `do { … } while (cond)`.
     fn do_while_stmt(&mut self) -> Result<StmtKind, String> {
         self.eat(&Tok::Do)?;
@@ -917,14 +993,19 @@ impl Parser {
     fn binary(&mut self, min_bp: u8) -> Result<Expr, String> {
         let mut lhs = self.unary()?;
         loop {
-            // `value instanceof Type` — relational precedence (binding power 4).
+            // `value instanceof Type` — relational precedence (binding power 4),
+            // recorded under the `instanceof` keyword's column.
             if 4 >= min_bp && matches!(self.peek(), Tok::Ident(k) if k == "instanceof") {
+                let col = self.col_at(0);
                 self.advance();
                 let class = self.ident()?;
-                lhs = Expr::InstanceOf {
-                    value: Box::new(lhs),
-                    class,
-                };
+                lhs = self.record(
+                    col,
+                    Expr::InstanceOf {
+                        value: Box::new(lhs),
+                        class,
+                    },
+                );
                 continue;
             }
             let Some((op, bp)) = binop(self.peek()) else {
@@ -933,33 +1014,36 @@ impl Parser {
             if bp < min_bp {
                 break;
             }
+            // Groovy records a binary result under its *operator's* column.
+            let col = self.col_at(0);
             self.advance();
             self.skip_newlines(); // a binary operator may continue on the next line
             let rhs = self.binary(bp + 1)?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            lhs = self.record(
+                col,
+                Expr::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+            );
         }
         Ok(lhs)
     }
 
     fn unary(&mut self) -> Result<Expr, String> {
         match self.peek() {
-            Tok::Minus => {
+            Tok::Minus | Tok::Not => {
+                let op = if matches!(self.peek(), Tok::Minus) {
+                    UnOp::Neg
+                } else {
+                    UnOp::Not
+                };
+                // Recorded under the operator's own column.
+                let col = self.col_at(0);
                 self.advance();
-                Ok(Expr::Unary {
-                    op: UnOp::Neg,
-                    rhs: Box::new(self.unary()?),
-                })
-            }
-            Tok::Not => {
-                self.advance();
-                Ok(Expr::Unary {
-                    op: UnOp::Not,
-                    rhs: Box::new(self.unary()?),
-                })
+                let rhs = Box::new(self.unary()?);
+                Ok(self.record(col, Expr::Unary { op, rhs }))
             }
             Tok::PlusPlus | Tok::MinusMinus => {
                 let inc = matches!(self.peek(), Tok::PlusPlus);
@@ -986,6 +1070,9 @@ impl Parser {
                 let safe = self.is(&Tok::QuestionDot);
                 let line = self.line();
                 self.advance();
+                // Groovy records a member access under the *member name's*
+                // column, not the receiver's.
+                let col = self.col_at(0);
                 let member = self.ident()?;
                 if self.is(&Tok::LParen) {
                     let mut args = self.call_args()?;
@@ -994,30 +1081,39 @@ impl Parser {
                     if self.is(&Tok::LBrace) {
                         args.push(self.closure_literal()?);
                     }
-                    e = Expr::MethodCall {
-                        recv: Box::new(e),
-                        method: member,
-                        args,
-                        line,
-                        safe,
-                    };
+                    e = self.record(
+                        col,
+                        Expr::MethodCall {
+                            recv: Box::new(e),
+                            method: member,
+                            args,
+                            line,
+                            safe,
+                        },
+                    );
                 } else if self.is(&Tok::LBrace) {
                     // Paren-less trailing-closure call: `list.each { it -> ... }`.
                     let clo = self.closure_literal()?;
-                    e = Expr::MethodCall {
-                        recv: Box::new(e),
-                        method: member,
-                        args: vec![clo],
-                        line,
-                        safe,
-                    };
+                    e = self.record(
+                        col,
+                        Expr::MethodCall {
+                            recv: Box::new(e),
+                            method: member,
+                            args: vec![clo],
+                            line,
+                            safe,
+                        },
+                    );
                 } else {
-                    e = Expr::Property {
-                        recv: Box::new(e),
-                        name: member,
-                        line,
-                        safe,
-                    };
+                    e = self.record(
+                        col,
+                        Expr::Property {
+                            recv: Box::new(e),
+                            name: member,
+                            line,
+                            safe,
+                        },
+                    );
                 }
             } else if self.is(&Tok::LParen) {
                 // Postfix call-application on a value: `f(a)(b)`, `getFn()(x)`.
@@ -1029,18 +1125,22 @@ impl Parser {
                     line,
                 };
             } else if self.is(&Tok::LBracket) {
-                // Subscript `recv[index]`.
+                // Subscript `recv[index]`, recorded under the `[` column.
                 let line = self.line();
+                let col = self.col_at(0);
                 self.advance();
                 self.skip_newlines();
                 let index = self.expression()?;
                 self.skip_newlines();
                 self.eat(&Tok::RBracket)?;
-                e = Expr::Index {
-                    recv: Box::new(e),
-                    index: Box::new(index),
-                    line,
-                };
+                e = self.record(
+                    col,
+                    Expr::Index {
+                        recv: Box::new(e),
+                        index: Box::new(index),
+                        line,
+                    },
+                );
             } else {
                 break;
             }
@@ -1139,12 +1239,15 @@ impl Parser {
                     return Ok(Expr::Super);
                 }
                 let line = self.line();
+                // A variable read and a call are both recorded under the
+                // identifier's own column.
+                let col = self.col_at(0);
                 self.advance();
                 // A call expression `name(args...)`: a user-defined function or an
                 // inline-Rust FFI export (the compiler resolves which).
                 if self.is(&Tok::LParen) {
                     let args = self.call_args()?;
-                    return Ok(Expr::Call { name, args, line });
+                    return Ok(self.record(col, Expr::Call { name, args, line }));
                 }
                 // Postfix `i++` / `i--` in expression position: yields the value
                 // before the update.
@@ -1153,7 +1256,7 @@ impl Parser {
                     self.advance();
                     return Ok(Expr::PostIncDec { name, inc });
                 }
-                Ok(Expr::Var(name))
+                Ok(self.record(col, Expr::Var(name)))
             }
             other => Err(format!(
                 "groovyrs: unexpected token {other} in expression on line {}",
@@ -1417,6 +1520,190 @@ fn binop(t: &Tok) -> Option<(BinOp, u8)> {
     })
 }
 
+/// Strip the power-assert recording wrapper off an expression.
+fn unrecorded(e: &Expr) -> &Expr {
+    match e {
+        Expr::Recorded { inner, .. } => unrecorded(inner),
+        other => other,
+    }
+}
+
+/// The variables Groovy lists in the *message* form's `Values:` clause, with the
+/// column each was recorded at.
+///
+/// The rule, read off Apache Groovy 5.0.7: a variable is listed when it is a
+/// direct operand of a binary expression — which in Groovy's AST includes the
+/// subscript `l[0]` and `instanceof` — or of a `!`, recursively and left to
+/// right. A variable reached any other way is not listed, so `s.length() == 9`
+/// (a method-call receiver) and `-x == 1` (a unary-minus operand) report no
+/// values while `l[0] == 9` and `x % 2 == 9` report `l` and `x`.
+fn assert_value_names(cond: &Expr) -> Vec<(String, u32)> {
+    fn walk(e: &Expr, out: &mut Vec<(String, u32)>) {
+        // An operand that is a bare variable is what the clause names.
+        if let Expr::Recorded { col, inner } = e {
+            if let Expr::Var(n) = &**inner {
+                out.push((n.clone(), *col));
+                return;
+            }
+        }
+        match unrecorded(e) {
+            Expr::Binary { lhs, rhs, .. } => {
+                walk(lhs, out);
+                walk(rhs, out);
+            }
+            Expr::Index { recv, index, .. } => {
+                walk(recv, out);
+                walk(index, out);
+            }
+            Expr::InstanceOf { value, .. } => walk(value, out),
+            Expr::Unary { op: UnOp::Not, rhs } => walk(rhs, out),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(cond, &mut out);
+    out
+}
+
+/// Render `e` the way Groovy's `Expression.getText()` does — the canonical AST
+/// text the `assert cond : message` form quotes, which is *not* the source: every
+/// binary and `instanceof` is fully parenthesised, a unary wraps its operand, a
+/// bare call gets its implicit `this` receiver, and a type name is qualified.
+/// Verified against Apache Groovy 5.0.7.
+fn expr_text(e: &Expr) -> String {
+    let args_text = |args: &[Expr]| args.iter().map(expr_text).collect::<Vec<_>>().join(", ");
+    match unrecorded(e) {
+        Expr::Int(n) => n.to_string(),
+        Expr::Float(f) => crate::decimal::format_double(*f),
+        Expr::Dec(text) => text.clone(),
+        // A `String` constant renders unquoted here, unlike the power form.
+        Expr::Str(s) => s.clone(),
+        Expr::GString(parts) => parts
+            .iter()
+            .map(|p| match p {
+                GStringPart::Text(t) => t.clone(),
+                GStringPart::Expr(inner) => format!("${}", expr_text(inner)),
+            })
+            .collect(),
+        Expr::Bool(b) => b.to_string(),
+        Expr::Null => "null".to_string(),
+        Expr::Var(n) => n.clone(),
+        Expr::Unary { op, rhs } => {
+            let sym = match op {
+                UnOp::Neg => "-",
+                UnOp::Not => "!",
+            };
+            format!("{sym}({})", expr_text(rhs))
+        }
+        Expr::Binary { op, lhs, rhs } => {
+            format!(
+                "({} {} {})",
+                expr_text(lhs),
+                binop_text(*op),
+                expr_text(rhs)
+            )
+        }
+        Expr::InstanceOf { value, class } => {
+            format!(
+                "({} instanceof {})",
+                expr_text(value),
+                qualified_type(class)
+            )
+        }
+        Expr::Index { recv, index, .. } => format!("{}[{}]", expr_text(recv), expr_text(index)),
+        Expr::Property { recv, name, .. } => format!("{}.{name}", expr_text(recv)),
+        Expr::MethodCall {
+            recv, method, args, ..
+        } => format!("{}.{method}({})", expr_text(recv), args_text(args)),
+        // A bare call is a method on the script, so Groovy prints its receiver.
+        Expr::Call { name, args, .. } => format!("this.{name}({})", args_text(args)),
+        Expr::CallValue { callee, args, .. } => {
+            format!("{}({})", expr_text(callee), args_text(args))
+        }
+        Expr::List(items) => format!("[{}]", args_text(items)),
+        Expr::Map(entries) if entries.is_empty() => "[:]".to_string(),
+        Expr::Map(entries) => format!(
+            "[{}]",
+            entries
+                .iter()
+                .map(|(k, v)| format!("{}:{}", expr_text(k), expr_text(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Expr::Range {
+            start,
+            end,
+            inclusive,
+        } => format!(
+            "({}{}{})",
+            expr_text(start),
+            if *inclusive { ".." } else { "..<" },
+            expr_text(end)
+        ),
+        // The condition is wrapped once here and again by its own `getText`
+        // when it is a binary, which is where Groovy's doubled parens come from.
+        Expr::Ternary { cond, then, els } => format!(
+            "({}) ? {} : {}",
+            expr_text(cond),
+            expr_text(then),
+            expr_text(els)
+        ),
+        Expr::Elvis { lhs, rhs } => {
+            format!("({0}) ? {0} : {1}", expr_text(lhs), expr_text(rhs))
+        }
+        Expr::PostIncDec { name, inc } => {
+            format!("({name}{})", if *inc { "++" } else { "--" })
+        }
+        Expr::PreIncDec { name, inc } => {
+            format!("({}{name})", if *inc { "++" } else { "--" })
+        }
+        Expr::New { class, args, .. } => format!("new {class}({})", args_text(args)),
+        Expr::This => "this".to_string(),
+        Expr::Super => "super".to_string(),
+        Expr::Regex(src) => format!("~/{src}/"),
+        other => format!("{other:?}"),
+    }
+}
+
+/// The operator's source spelling, for [`expr_text`].
+fn binop_text(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Mod => "%",
+        BinOp::Eq => "==",
+        BinOp::Ne => "!=",
+        BinOp::Lt => "<",
+        BinOp::Gt => ">",
+        BinOp::Le => "<=",
+        BinOp::Ge => ">=",
+        BinOp::Cmp => "<=>",
+        BinOp::And => "&&",
+        BinOp::Or => "||",
+    }
+}
+
+/// The fully-qualified name Groovy prints for a type in an `instanceof`. A name
+/// it does not recognise — a script-declared class — stays bare, which is what
+/// Groovy does for a class in the default package.
+fn qualified_type(name: &str) -> String {
+    let pkg = match name {
+        "String" | "CharSequence" | "Integer" | "Long" | "Short" | "Byte" | "Double" | "Float"
+        | "Boolean" | "Number" | "Object" | "Character" => "java.lang",
+        "List" | "ArrayList" | "Map" | "LinkedHashMap" | "HashMap" | "Collection" | "Iterable"
+        | "Set" => "java.util",
+        "BigDecimal" | "BigInteger" => "java.math",
+        "GString" => "groovy.lang",
+        _ if crate::throwable::is_builtin(name) => {
+            return crate::throwable::qualified(name);
+        }
+        _ => return name.to_string(),
+    };
+    format!("{pkg}.{name}")
+}
+
 /// Parse the source of one `${ … }` / `$name` placeholder into an expression.
 /// It runs the same lexer and expression grammar as the enclosing script, so an
 /// interpolation is not a second, weaker language.
@@ -1424,8 +1711,12 @@ fn parse_interpolation(src: &str) -> Result<Expr, String> {
     let tokens = crate::lexer::lex(src)?;
     let mut p = Parser {
         toks: tokens,
+        src: src.to_string(),
         pos: 0,
         tmp: 0,
+        // A placeholder is lexed on its own, so its columns are relative to the
+        // placeholder rather than the script — see BUGS.md.
+        recording: None,
     };
     p.skip_newlines();
     let e = p.expression()?;

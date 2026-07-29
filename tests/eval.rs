@@ -1763,3 +1763,156 @@ fn a_break_naming_no_enclosing_loop_is_a_compile_error() {
     let (_out, ok) = run("for (i in 0..2) { break nope }");
     assert!(!ok, "a label with no matching loop must not compile");
 }
+
+// ── assert (power assert) ───────────────────────────────────────────────────
+
+#[test]
+fn a_failing_assert_renders_groovys_power_assert_layout() {
+    // The statement's own source, then each recorded value under the column it
+    // came from, with `|` markers on the lines between. Byte-verified against
+    // Apache Groovy 5.0.7.
+    let src = r#"
+x = 3
+try { assert x + 1 == 5 } catch (AssertionError e) { println(e.getMessage()) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "assert x + 1 == 5\n       | |   |\n       3 4   false\n"
+    );
+}
+
+#[test]
+fn a_value_too_wide_to_share_a_line_is_pushed_down_one() {
+    // `'hi'` would overlap the `2` recorded at the next column, so it moves to a
+    // new line and leaves a `|` marker behind — the layout rule that makes the
+    // renderer worth porting rather than approximating.
+    let src = r#"
+s = "hi"
+try { assert s.length() == 3 } catch (AssertionError e) { println(e.getMessage()) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "assert s.length() == 3\n       | |        |\n       | 2        false\n       'hi'\n"
+    );
+}
+
+#[test]
+fn power_assert_values_use_groovys_verbose_rendering() {
+    // Unlike `println`, the layout quotes strings and a map's keys.
+    let src = r#"
+l = ["a", "b"]
+m = [k: "v"]
+try { assert l == 1 } catch (AssertionError e) { println(e.getMessage()) }
+try { assert m == 1 } catch (AssertionError e) { println(e.getMessage()) }
+println(l)
+println(m)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "assert l == 1\n       | |\n       | false\n       ['a', 'b']\n\
+         assert m == 1\n       | |\n       | false\n       ['k':'v']\n\
+         [a, b]\n[k:v]\n"
+    );
+}
+
+#[test]
+fn a_unary_operator_is_recorded_under_its_own_column() {
+    let src = r#"
+x = 3
+try { assert !x } catch (AssertionError e) { println(e.getMessage()) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "assert !x\n       ||\n       |3\n       false\n");
+}
+
+#[test]
+fn the_message_form_raises_a_plain_assertion_error() {
+    // With `: message` Groovy throws `java.lang.AssertionError` and quotes the
+    // condition's canonical AST text — fully parenthesised, with qualified type
+    // names — not the source text the power form prints.
+    let src = r#"
+x = 3
+s = "hi"
+def p(c) { try { c() } catch (AssertionError e) { println(e.getMessage()) } }
+p({ assert x == 5 : "custom" })
+p({ assert s.length() == 9 : "len bad" })
+p({ assert x instanceof String : "type" })
+p({ assert (x + 1) * 2 == 9 : "math" })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "custom. Expression: (x == 5). Values: x = 3\n\
+         len bad. Expression: (s.length() == 9)\n\
+         type. Expression: (x instanceof java.lang.String). Values: x = 3\n\
+         math. Expression: (((x + 1) * 2) == 9). Values: x = 3\n"
+    );
+}
+
+#[test]
+fn the_values_clause_reads_variables_at_failure_time() {
+    // Groovy reports a named variable's current value even when `&&`
+    // short-circuited past the operand it sits in, so the clause cannot be built
+    // from the power-assert recorder alone.
+    let src = r#"
+x = 3
+try { assert x == 1 && x == 2 : "M" } catch (AssertionError e) { println(e.getMessage()) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "M. Expression: ((x == 1) && (x == 2)). Values: x = 3, x = 3\n"
+    );
+}
+
+#[test]
+fn a_power_assertion_error_prints_groovys_banner() {
+    let src = r#"
+x = 3
+try { assert x == 5 } catch (Throwable t) { println("[" + t.toString() + "]") }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[Assertion failed: \n\nassert x == 5\n       | |\n       3 false\n]\n"
+    );
+}
+
+#[test]
+fn an_assert_is_an_ordinary_throwable_that_unwinds() {
+    let src = r#"
+def check(v) {
+    try { assert v < 2 : "too big"; return "ok " + v } finally { println("fin " + v) }
+}
+for (i in 1..2) {
+    try { println(check(i)) } catch (AssertionError e) { println("caught " + e.getMessage()) }
+}
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "fin 1\nok 1\nfin 2\ncaught too big. Expression: (v < 2). Values: v = 2\n"
+    );
+}
+
+#[test]
+fn a_passing_assert_is_silent_and_an_uncaught_one_exits_nonzero() {
+    let (out, ok) = run("x = 3\nassert x == 3\nprintln(\"after\")");
+    assert!(ok);
+    assert_eq!(out, "after\n");
+
+    let (out, ok) = run("x = 3\nprintln(\"a\")\nassert x == 5\nprintln(\"b\")");
+    assert!(!ok, "an uncaught assert must exit non-zero");
+    assert_eq!(out, "a\n");
+}

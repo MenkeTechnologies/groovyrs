@@ -99,6 +99,7 @@ enum Mode {
     Exceptions,
     Faults,
     Switch,
+    Asserts,
     Mixed,
 }
 
@@ -115,6 +116,7 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Exceptions => "exceptions",
         Mode::Faults => "faults",
         Mode::Switch => "switch",
+        Mode::Asserts => "asserts",
         Mode::Mixed => "mixed",
     }
 }
@@ -132,6 +134,7 @@ fn mode_from(s: &str) -> Option<Mode> {
         "exceptions" => Mode::Exceptions,
         "faults" => Mode::Faults,
         "switch" => Mode::Switch,
+        "asserts" => Mode::Asserts,
         "mixed" => Mode::Mixed,
         _ => return None,
     })
@@ -740,6 +743,75 @@ fn gen_switch(rng: &mut Rng) -> Vec<String> {
     out
 }
 
+/// Condition shapes the `assert` generator renders, each exercising a different
+/// corner of the power-assert layout: a bare variable, a nested binary (two
+/// recorded columns on one line), a method call (whose receiver is pushed down a
+/// line because its value is too wide to share one), a subscript (recorded under
+/// the `[`), a unary operator, an `instanceof`, and a short-circuit chain.
+const ASSERT_CONDITIONS: &[&str] = &[
+    "x == LIT",
+    "x + 1 == LIT",
+    "x * 2 - 1 == LIT",
+    "s.length() == LIT",
+    "s.toUpperCase().length() == LIT",
+    "l[0] == LIT",
+    "l[x - 2] == LIT",
+    "!x",
+    "-x == LIT",
+    "x > 1 && x > LIT",
+    "x > LIT || x > 8",
+    "l.isEmpty()",
+    "s.contains(\"z\")",
+    "l == [LIT]",
+    "m.a == LIT",
+    "x instanceof String",
+    "l.size() + s.length() == LIT",
+    "(x + 1) == LIT",
+];
+
+/// An `assert` program. Half the cases are written to pass (nothing printed,
+/// exit 0) and half to fail, which is where the power-assert layout — the
+/// verbatim source line, the `|` markers, and every recorded value under its own
+/// source column — has to match Groovy byte for byte. Both the bare form
+/// (a `PowerAssertionError` carrying the layout) and the `: message` form (a
+/// plain `AssertionError` with the `Expression:` / `Values:` clauses) are
+/// generated, caught and printed as well as left to escape.
+fn gen_asserts(rng: &mut Rng) -> Vec<String> {
+    let x = rng.range_i(0, 4);
+    let cond = pick(rng, ASSERT_CONDITIONS)
+        // A literal that usually misses, so most cases exercise the failure
+        // rendering; sometimes it hits and the assert is silent.
+        .replace("LIT", &rng.range_i(0, 6).to_string());
+    let mut out = vec![
+        format!("x = {x}"),
+        "s = \"hi\"".to_string(),
+        "l = [1, 2]".to_string(),
+        "m = [a: 1]".to_string(),
+        "println(\"before\")".to_string(),
+    ];
+    // A `: message` condition must stay a plain binary, since that is the only
+    // shape Groovy's `Values:` clause reports on.
+    let with_message = rng.chance(1, 3) && cond.contains("==");
+    let stmt = if with_message {
+        format!("assert {cond} : \"boom\"")
+    } else {
+        format!("assert {cond}")
+    };
+    match rng.below(3) {
+        // Caught, with the rendered message printed.
+        0 | 1 => {
+            out.push("try {".to_string());
+            out.push(format!("  {stmt}"));
+            out.push("  println(\"passed\")".to_string());
+            out.push("} catch (AssertionError e) { println(e.getMessage()) }".to_string());
+        }
+        // Uncaught: stdout stops at the assert and the exit status is non-zero.
+        _ => out.push(stmt),
+    }
+    out.push("println(\"after\")".to_string());
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Statement / program generators
 // ---------------------------------------------------------------------------
@@ -837,6 +909,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::Exceptions,
                 Mode::Faults,
                 Mode::Switch,
+                Mode::Asserts,
             ],
         )
     } else {
@@ -850,6 +923,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
         Mode::Exceptions => gen_exceptions(&mut rng),
         Mode::Faults => gen_faults(&mut rng),
         Mode::Switch => gen_switch(&mut rng),
+        Mode::Asserts => gen_asserts(&mut rng),
         _ => {
             let n = rng.range_i(1, 5) as usize;
             (0..n)
@@ -870,6 +944,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         | Mode::Exceptions
                         | Mode::Faults
                         | Mode::Switch
+                        | Mode::Asserts
                         | Mode::Mixed => unreachable!(),
                     };
                     println_of(expr)

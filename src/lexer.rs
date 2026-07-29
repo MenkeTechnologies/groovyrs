@@ -23,6 +23,10 @@ use std::fmt;
 pub struct Token {
     pub kind: Tok,
     pub line: u32,
+    /// Byte offset of the token's first character in the source. `assert` needs
+    /// it twice: to slice the condition's verbatim source text, and to derive
+    /// the source *column* a power-assert value is rendered under.
+    pub offset: usize,
 }
 
 /// One piece of a `GString`: either literal text or the *source text* of an
@@ -148,6 +152,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
 
     while i < bytes.len() {
         let c = bytes[i] as char;
+        // Where this iteration's token starts. Whitespace and comments `continue`
+        // before any push, so every token pushed below begins here.
+        let tok_start = i;
 
         // newline: significant at depth 0 (statement terminator), else skipped.
         if c == '\n' {
@@ -157,6 +164,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 out.push(Token {
                     kind: Tok::Nl,
                     line,
+                    offset: tok_start,
                 });
             }
             continue;
@@ -206,6 +214,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             out.push(Token {
                 kind: keyword_or_ident(word),
                 line,
+                offset: tok_start,
             });
             continue;
         }
@@ -276,6 +285,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 out.push(Token {
                     kind: Tok::Float(v),
                     line,
+                    offset: tok_start,
                 });
             } else if is_float {
                 // Validated at lex time so a malformed literal is a lex error,
@@ -288,6 +298,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 out.push(Token {
                     kind: Tok::Dec(text.to_string()),
                     line,
+                    offset: tok_start,
                 });
             } else {
                 let v: i64 = text.parse().map_err(|_| {
@@ -296,6 +307,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 out.push(Token {
                     kind: Tok::Int(v),
                     line,
+                    offset: tok_start,
                 });
             }
             continue;
@@ -367,7 +379,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 }
                 Tok::GStr(parts)
             };
-            out.push(Token { kind, line });
+            out.push(Token {
+                kind,
+                line,
+                offset: tok_start,
+            });
             continue;
         }
 
@@ -404,6 +420,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             out.push(Token {
                 kind: Tok::Regex(pattern),
                 line,
+                offset: tok_start,
             });
             i = j;
             continue;
@@ -419,6 +436,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             out.push(Token {
                 kind: Tok::DotDotLt,
                 line,
+                offset: tok_start,
             });
             i += 3;
             continue;
@@ -427,6 +445,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             out.push(Token {
                 kind: Tok::Spaceship,
                 line,
+                offset: tok_start,
             });
             i += 3;
             continue;
@@ -496,13 +515,18 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 }
             },
         };
-        out.push(Token { kind, line });
+        out.push(Token {
+            kind,
+            line,
+            offset: tok_start,
+        });
         i += adv;
     }
 
     out.push(Token {
         kind: Tok::Eof,
         line,
+        offset: bytes.len(),
     });
     Ok(out)
 }

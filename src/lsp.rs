@@ -63,6 +63,12 @@ const CORPUS: &[(&str, &str, &str, &str)] = &[
         "def i = 0\nwhile (i < 3) i++\nprintln(i)   // => 3",
     ),
     (
+        "assert",
+        "Keyword",
+        "raise an `AssertionError` when the condition is falsy, rendering each sub-expression's value",
+        "assert 1 + 1 == 2   // passes silently",
+    ),
+    (
         "do",
         "Keyword",
         "`do { … } while (cond)`; the body runs before the first test",

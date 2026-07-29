@@ -194,6 +194,24 @@ reported as parse or compile errors, never silently mis-run.
   binds to the frame it precedes; `break label` naming no enclosing frame is a
   compile error rather than a silent no-op.
 
+- **`assert`, with Groovy's power-assert rendering.** A failing bare `assert`
+  raises `org.codehaus.groovy.runtime.powerassert.PowerAssertionError` whose
+  message is the statement's own source text followed by every sub-expression's
+  value placed under the column it came from, `|` markers filling the lines
+  between — a port of Groovy's `AssertionRenderer` layout, including the rule
+  that a value too wide to share a line moves down one and leaves a marker
+  behind. Values render *verbose* (a `String` is quoted, a map's keys too), which
+  is not how `println` renders them. Recorded shapes: variables, binary
+  operators (under the operator's column), unary `!`/`-`, `instanceof`, method
+  calls and property reads (under the member name's column), subscripts (under
+  the `[`), and calls. The `assert cond : message` form instead raises a plain
+  `java.lang.AssertionError` reading `<message>. Expression: <canonical text>`,
+  plus a `Values:` clause naming the condition's bare-variable operands — where
+  the canonical text is Groovy's `Expression.getText()` (fully parenthesised,
+  implicit `this` on a bare call, qualified type names), *not* the source. The
+  values in that clause are read at failure time, so a variable `&&` short-
+  circuited past still reports.
+
 ## Not implemented (errors today)
 
 - **`trait` / `implements` behavior.** `extends` (single inheritance) is
@@ -210,7 +228,6 @@ reported as parse or compile errors, never silently mis-run.
   JIT). On a user-class instance they therefore dispatch `plus`/`minus`, not
   Groovy's `next`/`previous`. Call `x.next()` / `x.previous()` explicitly for
   those.
-- **`assert`.**
 - **`getClass()`.** There is no runtime class object, so `e.getClass().getName()`
   raises `MissingMethodException` rather than naming the type. Use `instanceof`.
 - **`%` by zero.** `/` by zero raises a catchable `ArithmeticException` with
@@ -237,6 +254,11 @@ reported as parse or compile errors, never silently mis-run.
   cleanup lines under groovyrs and omits them under `groovy`. An *unlabeled*
   `break`/`continue`, and a labeled one naming the loop the `try` is directly
   inside, run the `finally` in both.
+- **A power assert does not record inside a `GString`.** A placeholder is lexed
+  on its own, so its columns are relative to the placeholder rather than the
+  script and recording it would put values under the wrong column. `assert
+  "v=${x}" == "no"` therefore shows the `==` result but not `x`, where Groovy
+  shows both.
 - **`~/…/` uses `fancy-regex`, not `java.util.regex`.** The shared syntax —
   classes, quantifiers, groups, alternation, anchors, lookaround,
   backreferences — behaves the same, but Java-only constructs (possessive

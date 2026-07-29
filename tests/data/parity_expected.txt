@@ -1,3 +1,72 @@
+==== Assert.groovy ====
+assert x == 5
+       | |
+       3 false
+--
+assert x + 1 == 5
+       | |   |
+       3 4   false
+--
+assert s.length() == 3
+       | |        |
+       | 2        false
+       'hi'
+--
+assert l[0] == 9
+       ||   |
+       |1   false
+       [1, 2]
+--
+assert !x
+       ||
+       |3
+       false
+--
+assert -x == 3
+       || |
+       |3 false
+       -3
+--
+assert x > 1 && x > 9
+       | |   |  | |
+       3 true|  3 false
+             false
+--
+assert l.isEmpty()
+       | |
+       | false
+       [1, 2]
+--
+assert m.a == 2
+       | | |
+       | 1 false
+       ['a':1]
+--
+assert s.toUpperCase().length() == 9
+       | |             |        |
+       | 'HI'          2        false
+       'hi'
+--
+assert 1 == 2
+         |
+         false
+--
+passed
+custom. Expression: (x == 5). Values: x = 3
+--
+len bad. Expression: (s.length() == 9)
+--
+type. Expression: (x instanceof java.lang.String). Values: x = 3
+--
+true
+true
+false
+fin 0
+ok 0
+fin 1
+ok 1
+fin 2
+caught too big. Expression: (v < 2). Values: v = 2
 ==== Classes.groovy ====
 Rectangle(3x4)
 area = 12

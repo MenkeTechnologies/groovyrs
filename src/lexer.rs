@@ -197,7 +197,29 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     i += 1;
                 }
             }
-            // integer/long/float/double/BigDecimal suffixes are accepted and dropped
+            // Exponent part: `2.5e7`, `9.999e-4`, `1E+3`. Groovy allows an
+            // exponent with or without a fractional part, and it makes the
+            // literal a decimal either way. The `e` is only consumed when a
+            // valid exponent actually follows, so an identifier starting with
+            // `e` is left alone.
+            if i < bytes.len() && matches!(bytes[i], b'e' | b'E') {
+                let mut j = i + 1;
+                if j < bytes.len() && matches!(bytes[j], b'+' | b'-') {
+                    j += 1;
+                }
+                if j < bytes.len() && (bytes[j] as char).is_ascii_digit() {
+                    is_float = true;
+                    i = j;
+                    while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
+                        i += 1;
+                    }
+                }
+            }
+            // integer/long/float/double/BigDecimal suffixes are accepted and
+            // dropped. The slice ends here rather than being alpha-trimmed,
+            // because trimming trailing letters would also eat an exponent's
+            // own `e`.
+            let num_end = i;
             if i < bytes.len()
                 && matches!(
                     bytes[i],
@@ -209,7 +231,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 }
                 i += 1;
             }
-            let text = src[start..i].trim_end_matches(|ch: char| ch.is_ascii_alphabetic());
+            let text = &src[start..num_end];
             if is_float {
                 let v: f64 = text.parse().map_err(|_| {
                     format!("groovyrs: bad decimal literal `{text}` on line {line}")

@@ -116,7 +116,7 @@ pub const GMAKE_MAP: u16 = 715;
 /// handle instead of growing the heap. See [`crate::decimal`].
 pub const GDEC: u16 = 720;
 /// Builtin id for Groovy truthiness. Pops one value and pushes the `Boolean`
-/// [`groovy_truthy`] computes for it. Emitted only in front of a condition whose
+/// `groovy_truthy` computes for it. Emitted only in front of a condition whose
 /// static shape could be a value fusevm's own `is_truthy` gets wrong — a heap
 /// handle (`BigDecimal`, ordered map, closure, instance) or a `String`. A
 /// comparison-shaped condition (`i < n`) is statically a `Boolean` and stays on

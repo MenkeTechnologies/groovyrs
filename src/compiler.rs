@@ -18,10 +18,10 @@
 //!
 //! * the Groovy-truthiness call is emitted only where a condition's static shape
 //!   could be a value fusevm's own truth test reads differently (see
-//!   [`needs_truth`]) — a comparison-shaped loop guard stays on the native op
+//!   `needs_truth`) — a comparison-shaped loop guard stays on the native op
 //!   the JIT traces;
 //! * every exception op is gated on the program containing `try`/`throw` (see
-//!   [`body_uses_exceptions`]).
+//!   `body_uses_exceptions`).
 
 use crate::ast::*;
 use fusevm::{Chunk, ChunkBuilder, Op, Value};

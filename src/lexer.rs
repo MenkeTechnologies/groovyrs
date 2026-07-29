@@ -1,10 +1,14 @@
 //! A hand-written Groovy lexer.
 //!
-//! Produces the token stream the parser consumes. Covers the slice-1 surface:
-//! identifiers/keywords, integer/decimal/string/char literals, the operators and
-//! punctuation used by declarations, expressions, and control statements, plus
-//! the `..`/`..<` range operators. Line/block comments and a leading `#!`
-//! shebang are skipped.
+//! Produces the token stream the parser consumes: identifiers/keywords,
+//! integer/decimal/string literals, the operators and punctuation used by
+//! declarations, expressions, and control statements, plus the `..`/`..<` range
+//! operators. Line/block comments and a leading `#!` shebang are skipped.
+//!
+//! A double-quoted literal containing a `$` placeholder lexes to a
+//! [`Tok::GStr`] carrying its parts — the `${ … }` bodies as raw source, which
+//! the parser re-parses with the ordinary expression grammar. A literal with no
+//! placeholder, and every single-quoted literal, stays a plain [`Tok::Str`].
 //!
 //! **Newlines are significant.** Groovy uses newlines as statement terminators
 //! (semicolons are optional), so a [`Tok::Nl`] is emitted at each line break at
@@ -21,6 +25,15 @@ pub struct Token {
     pub line: u32,
 }
 
+/// One piece of a `GString`: either literal text or the *source text* of an
+/// embedded expression, which the parser re-parses (so `${a + b}` and `$a.b`
+/// reuse the ordinary expression grammar rather than a second one).
+#[derive(Debug, Clone, PartialEq)]
+pub enum GPart {
+    Text(String),
+    Expr(String),
+}
+
 /// Token kinds.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
@@ -34,6 +47,11 @@ pub enum Tok {
     /// value and no `f64` can carry it. See [`crate::decimal`].
     Dec(String),
     Str(String),
+    /// An interpolating (double-quoted) string that actually contains a `$`
+    /// placeholder — a Groovy `GString`. A double-quoted literal with no
+    /// placeholder stays a plain [`Tok::Str`], so nothing about existing
+    /// programs changes.
+    GStr(Vec<GPart>),
     Ident(String),
     // keywords
     Def,
@@ -92,6 +110,8 @@ pub enum Tok {
     AndAnd,
     OrOr,
     Not,
+    /// `|` — only meaningful in a multi-catch type list (`catch (A | B e)`).
+    Pipe,
     At, // `@` annotation marker (e.g. `@Override`)
     Eof,
 }
@@ -274,26 +294,57 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             continue;
         }
 
-        // string literals (single- and double-quoted; GString interpolation is
-        // not evaluated in slice 1 — the raw text is kept)
+        // String literals. A single-quoted literal is inert text; a
+        // double-quoted one interpolates `$name` / `$a.b` / `${ expr }` and
+        // becomes a `GStr` — but only when a placeholder is actually present, so
+        // an ordinary `"text"` stays a plain `Str`.
         if c == '"' || c == '\'' {
             let quote = bytes[i];
+            let interpolating = quote == b'"';
             i += 1;
             let mut s = String::new();
+            let mut parts: Vec<GPart> = Vec::new();
             while i < bytes.len() && bytes[i] != quote {
                 if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    // `\$` is a literal dollar, so an escape never interpolates.
                     i += 1;
                     s.push(unescape(bytes[i] as char));
                     i += 1;
-                } else {
-                    // Decode a full UTF-8 char so multibyte literals survive.
-                    let ch = src[i..].chars().next().unwrap();
-                    if ch == '\n' {
-                        line += 1;
-                    }
-                    s.push(ch);
-                    i += ch.len_utf8();
+                    continue;
                 }
+                if interpolating && bytes[i] == b'$' && i + 1 < bytes.len() {
+                    // `${ expression }` — balanced braces, skipping nested
+                    // string literals so `${ c ? "a" : "b" }` scans correctly.
+                    if bytes[i + 1] == b'{' {
+                        let (inner, next) = scan_braced(src, i + 2, line)?;
+                        line += src[i..next].matches('\n').count() as u32;
+                        if !s.is_empty() {
+                            parts.push(GPart::Text(std::mem::take(&mut s)));
+                        }
+                        parts.push(GPart::Expr(inner));
+                        i = next;
+                        continue;
+                    }
+                    // `$name`, `$a.b.c` — a dotted *property* path. Groovy stops
+                    // at anything else, so `"$n.toString()"` reads the property
+                    // `n.toString` and leaves `()` as literal text.
+                    if is_ident_start(bytes[i + 1]) {
+                        let (path, next) = scan_dotted_path(src, i + 1);
+                        if !s.is_empty() {
+                            parts.push(GPart::Text(std::mem::take(&mut s)));
+                        }
+                        parts.push(GPart::Expr(path));
+                        i = next;
+                        continue;
+                    }
+                }
+                // Decode a full UTF-8 char so multibyte literals survive.
+                let ch = src[i..].chars().next().unwrap();
+                if ch == '\n' {
+                    line += 1;
+                }
+                s.push(ch);
+                i += ch.len_utf8();
             }
             if i >= bytes.len() {
                 return Err(format!(
@@ -301,10 +352,15 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 ));
             }
             i += 1; // closing quote
-            out.push(Token {
-                kind: Tok::Str(s),
-                line,
-            });
+            let kind = if parts.is_empty() {
+                Tok::Str(s)
+            } else {
+                if !s.is_empty() {
+                    parts.push(GPart::Text(s));
+                }
+                Tok::GStr(parts)
+            };
+            out.push(Token { kind, line });
             continue;
         }
 
@@ -386,6 +442,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 '>' => (Tok::Gt, 1),
                 '?' => (Tok::Question, 1),
                 '!' => (Tok::Not, 1),
+                '|' => (Tok::Pipe, 1),
                 '@' => (Tok::At, 1),
                 other => {
                     return Err(format!(
@@ -403,6 +460,72 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         line,
     });
     Ok(out)
+}
+
+/// Can this byte begin an interpolation placeholder's identifier? `$` is a legal
+/// Java identifier character but never starts or continues one *inside* a
+/// GString placeholder — Groovy reads `"$a$a"` as two placeholders, not as the
+/// single name `a$a` (verified against Apache Groovy 5.0.7).
+fn is_ident_start(b: u8) -> bool {
+    (b as char).is_ascii_alphabetic() || b == b'_'
+}
+
+/// Can this byte continue one?
+fn is_ident_part(b: u8) -> bool {
+    (b as char).is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Scan the body of a `${ … }` placeholder, starting just past the `{`. Returns
+/// the inner source and the index just past the matching `}`. Braces inside a
+/// nested string literal do not count, so `${ "}" }` and `${ list.collect { it }
+/// }` both scan correctly.
+fn scan_braced(src: &str, start: usize, line: u32) -> Result<(String, usize), String> {
+    let bytes = src.as_bytes();
+    let mut i = start;
+    let mut depth = 1usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((src[start..i].to_string(), i + 1));
+                }
+            }
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Err(format!(
+        "groovyrs: unterminated `${{` interpolation on line {line}"
+    ))
+}
+
+/// Scan a `$name` / `$a.b.c` placeholder, starting at the first identifier
+/// character. Returns the path source and the index just past it. A `.` only
+/// continues the path when an identifier character follows it.
+fn scan_dotted_path(src: &str, start: usize) -> (String, usize) {
+    let bytes = src.as_bytes();
+    let mut i = start;
+    while i < bytes.len() && is_ident_part(bytes[i]) {
+        i += 1;
+    }
+    loop {
+        if i + 1 < bytes.len() && bytes[i] == b'.' && is_ident_start(bytes[i + 1]) {
+            i += 1;
+            while i < bytes.len() && is_ident_part(bytes[i]) {
+                i += 1;
+            }
+        } else {
+            return (src[start..i].to_string(), i);
+        }
+    }
 }
 
 fn keyword_or_ident(word: &str) -> Tok {

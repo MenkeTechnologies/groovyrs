@@ -7,10 +7,11 @@
 //! `parity-fuzz --seed <N> --once`.
 //!
 //! **Scope invariant.** The generator only emits constructs groovyrs actually
-//! implements (arithmetic, comparisons, `&&`/`||`, string `+` concatenation,
-//! `if`/`while`/`for`-`in` ranges, `break`/`continue`, `println`/`print`). It
-//! never emits methods, closures, GStrings, or collections — groovyrs rejects
-//! those, and a mutual error teaches nothing.
+//! implements: arithmetic, comparisons, `&&`/`||`, string `+` concatenation,
+//! `if`/`while`/`for`-`in` ranges, `break`/`continue`, `println`/`print`,
+//! Groovy truthiness over every value shape, closures and the closure-driven
+//! GDK, `GString` interpolation, and `try`/`catch`/`finally`/`throw`. It stays
+//! out of constructs groovyrs rejects — a mutual error teaches nothing.
 //!
 //! **Determinism invariant.** Every case has output that is identical on any
 //! correct runtime. The generator stays clear of the two *documented*
@@ -92,6 +93,10 @@ enum Mode {
     Strings,
     Control,
     Format,
+    Truth,
+    Closures,
+    Gstring,
+    Exceptions,
     Mixed,
 }
 
@@ -102,6 +107,10 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Strings => "strings",
         Mode::Control => "control",
         Mode::Format => "format",
+        Mode::Truth => "truth",
+        Mode::Closures => "closures",
+        Mode::Gstring => "gstring",
+        Mode::Exceptions => "exceptions",
         Mode::Mixed => "mixed",
     }
 }
@@ -113,6 +122,10 @@ fn mode_from(s: &str) -> Option<Mode> {
         "strings" => Mode::Strings,
         "control" => Mode::Control,
         "format" => Mode::Format,
+        "truth" => Mode::Truth,
+        "closures" => Mode::Closures,
+        "gstring" => Mode::Gstring,
+        "exceptions" => Mode::Exceptions,
         "mixed" => Mode::Mixed,
         _ => return None,
     })
@@ -296,6 +309,215 @@ fn gen_format_value(rng: &mut Rng) -> String {
     }
 }
 
+/// A value of *any* Groovy shape, chosen for its truthiness behaviour: numbers
+/// (including a zero `BigDecimal`, which fusevm's own truth test gets wrong),
+/// strings (including `""` and `"0"`, which fusevm reads shell-style), `null`,
+/// booleans, and empty / non-empty lists and maps.
+///
+/// Ranges are deliberately absent: groovyrs materialises a range value to a list
+/// (a *documented* simplification — see BUGS.md), so `println(0..2)` prints
+/// `[0, 1, 2]` where Groovy prints `0..2`. Emitting one here would report that
+/// known gap instead of a truthiness one.
+fn gen_truthy_value(rng: &mut Rng) -> String {
+    const VALUES: &[&str] = &[
+        "0", "1", "-3", "0.0", "0.00", "1.50", "-2.5", "0.0d", "2.5d", "0e0", "\"\"", "\"0\"",
+        "\"x\"", "null", "true", "false", "[]", "[1, 2]", "[:]", "[a: 1]",
+    ];
+    (*pick(rng, VALUES)).to_string()
+}
+
+/// A truthiness program. Every case is a **self-contained one-liner**: the
+/// binding and the observation share a statement, so the shrinker cannot delete
+/// a declaration and leave an unbound reference behind (which would report the
+/// unrelated undefined-variable gap instead of a truthiness one).
+///
+/// This is the mode that pins `if (0.0)` and `if ("0")`, the boolean-valued
+/// `&&`/`||`, and the operand-valued Elvis — and, through the counted loop, that
+/// a comparison-shaped guard still behaves after the truthiness change.
+fn gen_truth(rng: &mut Rng) -> Vec<String> {
+    let mut out = Vec::new();
+    let n = rng.range_i(1, 3) as usize;
+    for k in 0..n {
+        let v = gen_truthy_value(rng);
+        // Half the cases test the value through a variable (which is where the
+        // Groovy-truthiness builtin is emitted) and half inline (where the
+        // compiler may know the type statically).
+        let (bind, name) = if rng.chance(1, 2) {
+            (format!("def v{k} = {v}; "), format!("v{k}"))
+        } else {
+            (String::new(), v)
+        };
+        out.push(match rng.below(6) {
+            0 => format!("{bind}if ({name}) println(\"T{k}\") else println(\"F{k}\")"),
+            1 => format!("{bind}println({name} ? \"t{k}\" : \"f{k}\")"),
+            2 => format!("{bind}println({name} ?: \"elvis{k}\")"),
+            3 => format!("{bind}println({name} && true)"),
+            4 => format!("{bind}println({name} || false)"),
+            _ => format!("{bind}println(!{name})"),
+        });
+    }
+    // A counted loop over a comparison-shaped guard — the native/JIT condition
+    // path the truthiness fix deliberately leaves untouched. `for`-`in` binds its
+    // own variable, so this line stands alone too.
+    let hi = rng.range_i(0, 3);
+    out.push(format!("for (c in 0..<{hi}) {{ println(\"w\" + c) }}"));
+    out
+}
+
+/// A closure program: a list run through the closure-driven GDK, plus the
+/// first-class forms (direct call, `.call`, currying, a factory closure, and the
+/// explicit zero-parameter `{ -> … }`).
+fn gen_closures(rng: &mut Rng) -> Vec<String> {
+    let mut out = Vec::new();
+    let len = rng.range_i(0, 4) as usize;
+    let items: Vec<String> = (0..len).map(|_| rng.range_i(-5, 9).to_string()).collect();
+    out.push(format!("def xs = [{}]", items.join(", ")));
+    let k = rng.range_i(1, 4);
+    match rng.below(8) {
+        0 => out.push(format!("println(xs.collect {{ it * {k} }})")),
+        1 => out.push(format!("println(xs.findAll {{ it % {k} == 0 }})")),
+        2 => out.push(format!("println(xs.find {{ it > {k} }})")),
+        3 => out.push("println(xs.inject(0) { a, v -> a + v })".to_string()),
+        4 => out.push(format!("xs.each {{ println(\"e\" + (it + {k})) }}")),
+        5 => out.push("xs.eachWithIndex { v, i -> println(i + \":\" + v) }".to_string()),
+        6 => out.push("println(xs.sum())".to_string()),
+        _ => out.push(format!("println(xs.collect {{ it }}.size() + {k})")),
+    }
+    match rng.below(5) {
+        0 => {
+            out.push(format!("def f = {{ it + {k} }}"));
+            out.push("println(f(10))".to_string());
+            out.push("println(f.call(1))".to_string());
+        }
+        1 => {
+            out.push("def g = { a, b -> a * b }".to_string());
+            out.push(format!("println(g({k}, 6))"));
+        }
+        2 => {
+            out.push("def curry = { x -> { y -> x + y } }".to_string());
+            out.push(format!("println(curry({k})(9))"));
+        }
+        3 => {
+            out.push("def make(n) { return { it + n } }".to_string());
+            out.push(format!("println(make({k})(4))"));
+        }
+        _ => {
+            out.push(format!("def z = {{ -> {k} * 3 }}"));
+            out.push("println(z())".to_string());
+        }
+    }
+    out
+}
+
+/// A `GString` program: literal text interleaved with `$name` paths and
+/// `${ expr }` placeholders over bound values of several shapes.
+fn gen_gstring(rng: &mut Rng) -> Vec<String> {
+    let mut out = Vec::new();
+    out.push(format!("def a = {}", gen_truthy_value(rng)));
+    out.push(format!("def n = {}", rng.range_i(-9, 20)));
+    out.push("def m = [b: 7, c: 3]".to_string());
+    let n = rng.range_i(1, 4) as usize;
+    for k in 0..n {
+        let body = match rng.below(8) {
+            0 => "$a".to_string(),
+            1 => "${a}".to_string(),
+            2 => format!("${{n + {}}}", rng.range_i(1, 9)),
+            3 => "$m.b".to_string(),
+            4 => "${m}".to_string(),
+            5 => "$a$n".to_string(),
+            6 => format!("${{ n > {} ? \"big\" : \"small\" }}", rng.range_i(0, 10)),
+            _ => "${ [1, 2].collect { it * 2 } }".to_string(),
+        };
+        out.push(format!("println(\"p{k} {body} q\")"));
+    }
+    // A `$` that is escaped, and a single-quoted string, must stay inert.
+    out.push("println('lit $a')".to_string());
+    out.push("println(\"esc \\$a\")".to_string());
+    out
+}
+
+/// The throwable types the exception generator throws and catches. Pairing a
+/// thrown type with a *non*-matching catch type is deliberate: the exception
+/// then escapes, which exercises the uncaught path (stdout up to the throw, plus
+/// a non-zero exit) as well as the caught one.
+const EXC_TYPES: &[&str] = &[
+    "Exception",
+    "RuntimeException",
+    "IllegalStateException",
+    "IllegalArgumentException",
+    "NumberFormatException",
+    "ArithmeticException",
+    "IOException",
+];
+
+/// An exception program: a function whose body throws under a data-dependent
+/// guard, wrapped in `try`/`catch`/`finally`, driven over a range. Covers the
+/// caught path, the `finally` on both exits, an early `return` out of a `try`
+/// with a `finally`, a rethrow from a handler, and the uncaught escape.
+fn gen_exceptions(rng: &mut Rng) -> Vec<String> {
+    let mut out = Vec::new();
+    let hi = rng.range_i(1, 3);
+    let trip = rng.range_i(0, hi);
+    let thrown = *pick(rng, EXC_TYPES);
+    // A catch of the thrown type, of a supertype, or of an unrelated type.
+    let caught = match rng.below(4) {
+        0 => thrown,
+        1 | 2 => "Exception",
+        _ => *pick(rng, EXC_TYPES),
+    };
+    let with_finally = rng.chance(3, 5);
+    match rng.below(4) {
+        // A throwing function called from a guarded loop.
+        0 | 1 => {
+            out.push("def f(i) {".to_string());
+            out.push("  try {".to_string());
+            out.push(format!(
+                "    if (i == {trip}) throw new {thrown}(\"boom\" + i)"
+            ));
+            out.push("    return \"ok\" + i".to_string());
+            out.push(format!("  }} catch ({caught} e) {{"));
+            out.push("    return \"c:\" + e.message".to_string());
+            out.push("  }".to_string());
+            if with_finally {
+                out.push("  finally { println(\"fin\" + i) }".to_string());
+            }
+            out.push("}".to_string());
+            out.push(format!("for (i in 0..{hi}) println(f(i))"));
+        }
+        // A top-level try whose handler rethrows.
+        2 => {
+            out.push("try {".to_string());
+            out.push("  try {".to_string());
+            out.push(format!("    throw new {thrown}(\"inner\")"));
+            out.push(format!("  }} catch ({caught} e) {{"));
+            out.push("    throw new IllegalStateException(\"re:\" + e.message)".to_string());
+            out.push("  }".to_string());
+            if with_finally {
+                out.push("  finally { println(\"f1\") }".to_string());
+            }
+            out.push("} catch (Exception e) { println(\"outer \" + e.message) }".to_string());
+        }
+        // A zero divisor, which Groovy raises as a catchable ArithmeticException.
+        _ => {
+            let d = if rng.chance(1, 2) {
+                0
+            } else {
+                rng.range_i(1, 5)
+            };
+            out.push(format!("def q = {}", rng.range_i(0, 40)));
+            out.push("try {".to_string());
+            out.push(format!("  println(q / {d})"));
+            out.push(format!("}} catch ({caught} e) {{"));
+            out.push("  println(\"div \" + e.message)".to_string());
+            out.push("}".to_string());
+            if with_finally {
+                out.push("println(\"done\")".to_string());
+            }
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Statement / program generators
 // ---------------------------------------------------------------------------
@@ -387,6 +609,10 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::Strings,
                 Mode::Control,
                 Mode::Format,
+                Mode::Truth,
+                Mode::Closures,
+                Mode::Gstring,
+                Mode::Exceptions,
             ],
         )
     } else {
@@ -394,6 +620,10 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
     };
     match mode {
         Mode::Control => gen_control(&mut rng),
+        Mode::Truth => gen_truth(&mut rng),
+        Mode::Closures => gen_closures(&mut rng),
+        Mode::Gstring => gen_gstring(&mut rng),
+        Mode::Exceptions => gen_exceptions(&mut rng),
         _ => {
             let n = rng.range_i(1, 5) as usize;
             (0..n)
@@ -407,7 +637,12 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         Mode::Logic => gen_bool(&mut rng, 4),
                         Mode::Strings => gen_string(&mut rng, 4),
                         Mode::Format => gen_format_value(&mut rng),
-                        Mode::Control | Mode::Mixed => unreachable!(),
+                        Mode::Control
+                        | Mode::Truth
+                        | Mode::Closures
+                        | Mode::Gstring
+                        | Mode::Exceptions
+                        | Mode::Mixed => unreachable!(),
                     };
                     println_of(expr)
                 })
@@ -668,7 +903,7 @@ fn parse_args() -> Args {
                     mode = m;
                 } else {
                     eprintln!(
-                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|mixed)"
+                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|mixed)"
                     );
                     std::process::exit(2);
                 }
@@ -679,7 +914,7 @@ fn parse_args() -> Args {
                      options:\n  \
                      -c, --count N        cases to run (default 1000)\n  \
                      -s, --seed N         base seed (default 1)\n  \
-                     -m, --mode M         arith|logic|strings|control|format|mixed (default mixed)\n  \
+                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                                          gstring|exceptions|mixed (default mixed)\n  \
                      -j, --jobs N         parallel workers (default = cores)\n  \
                      --once               replay a single --seed, minimize, dump both sides\n  \
                      --timeout-ms N       per-run timeout (default 15000; groovy boots the JVM)\n  \

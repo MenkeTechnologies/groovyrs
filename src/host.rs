@@ -114,6 +114,60 @@ pub const GMAKE_MAP: u16 = 715;
 /// Literals are interned by text, so re-evaluating one in a loop reuses the same
 /// handle instead of growing the heap. See [`crate::decimal`].
 pub const GDEC: u16 = 720;
+/// Builtin id for Groovy truthiness. Pops one value and pushes the `Boolean`
+/// [`groovy_truthy`] computes for it. Emitted only in front of a condition whose
+/// static shape could be a value fusevm's own `is_truthy` gets wrong — a heap
+/// handle (`BigDecimal`, ordered map, closure, instance) or a `String`. A
+/// comparison-shaped condition (`i < n`) is statically a `Boolean` and stays on
+/// the native/JIT path with no builtin at all (see `compiler::needs_truth`).
+pub const GTRUTH: u16 = 721;
+/// Builtin id for Groovy truthiness that *keeps* its operand: peeks the top of
+/// the stack and pushes the `Boolean` above it. Used by `&&`/`||`/Elvis, which
+/// must yield the deciding operand itself rather than its truth value.
+pub const GTRUTH_KEEP: u16 = 722;
+/// Builtin id for building a `GString`. The stack holds the rendered parts
+/// (literal text and evaluated placeholder values, in source order) with the
+/// part count on top; the builtin renders each with the `println` rules — so an
+/// embedded object goes through its `toString()` — and returns the joined
+/// `String`.
+pub const GSTRING: u16 = 723;
+
+// ── Exceptions (`throw` / `try` / `catch` / `finally`) ──────────────────────
+//
+// fusevm has no unwind opcode. groovyrs models the in-flight exception the way
+// the sibling frontends do: a host-side pending value plus two compiler-side
+// pieces — inside a frame an unwind is a `Jump` to the innermost handler, and
+// across a frame boundary it is a return followed by a pending-exception check
+// at the call site. Every one of these builtins is emitted only by a program
+// that actually uses `try`/`throw`, so an exception-free program's bytecode is
+// byte-for-byte what it was.
+
+/// Arm exception handling for this run. `argc == 0`, emitted once at the top of
+/// a program that uses `try`/`throw`. While armed, a runtime error that Groovy
+/// raises as a `Throwable` (a zero divisor) parks a catchable exception instead
+/// of aborting the run.
+pub const GEXC_ARM: u16 = 730;
+/// `throw e` — stack `[throwable]`, `argc == 1`. Parks the value as the pending
+/// exception; the compiler emits the jump to the handler right after.
+pub const GTHROW: u16 = 731;
+/// Is an exception in flight? `argc == 0`; pushes a `Bool`. Emitted after every
+/// call site that can re-enter the VM.
+pub const GEXC_PENDING: u16 = 732;
+/// Take the pending exception, clearing it. `argc == 0`; pushes the throwable.
+/// Emitted at the top of a handler.
+pub const GEXC_TAKE: u16 = 733;
+/// The current value-stack depth. `argc == 0`; pushes an `Int`. Recorded on
+/// entry to a `try` so the handler can discard the operands of the expression
+/// the throw abandoned.
+pub const GEXC_DEPTH: u16 = 734;
+/// Truncate the value stack to a depth recorded by [`GEXC_DEPTH`]. Stack
+/// `[depth]`, `argc == 1`.
+pub const GEXC_CUT: u16 = 735;
+/// Report an uncaught exception and halt. `argc == 0`. Formats Groovy's
+/// `Caught: <qualified class>: <message>` line and faults, so the process exits
+/// non-zero exactly as `groovy` does.
+pub const GEXC_ABORT: u16 = 736;
+
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -146,6 +200,16 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GSUPER_CTOR, b_super_ctor);
     vm.register_builtin(GINSTANCEOF, b_instanceof);
     vm.register_builtin(GDEC, b_dec);
+    vm.register_builtin(GTRUTH, b_truth);
+    vm.register_builtin(GTRUTH_KEEP, b_truth_keep);
+    vm.register_builtin(GSTRING, b_gstring);
+    vm.register_builtin(GEXC_ARM, b_exc_arm);
+    vm.register_builtin(GTHROW, b_throw);
+    vm.register_builtin(GEXC_PENDING, b_exc_pending);
+    vm.register_builtin(GEXC_TAKE, b_exc_take);
+    vm.register_builtin(GEXC_DEPTH, b_exc_depth);
+    vm.register_builtin(GEXC_CUT, b_exc_cut);
+    vm.register_builtin(GEXC_ABORT, b_exc_abort);
     // A fresh VM install starts with an empty object heap: `Value::Obj` handles
     // are chunk-relative (a closure carries a name-pool index, an instance a
     // class id), so a handle from a prior run must never survive into a new
@@ -184,6 +248,178 @@ thread_local! {
     /// A literal inside a loop is pushed once per iteration; interning keeps
     /// that from appending a heap entry every time. Cleared with the heap.
     static DEC_LITERALS: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
+    /// The exception in flight, if any. Set by [`GTHROW`], cleared by
+    /// [`GEXC_TAKE`] when a handler claims it. It lives here rather than on the
+    /// value stack because it has to survive the returns that unwind every frame
+    /// between the `throw` and its handler.
+    static PENDING: RefCell<Option<Value>> = const { RefCell::new(None) };
+    /// True once [`GEXC_ARM`] has run — i.e. the program uses `try`/`throw`, so
+    /// the compiler emitted the pending-exception checks that make a parked
+    /// exception observable. A runtime error Groovy models as a `Throwable`
+    /// (a zero divisor) is only *thrown* while armed; unarmed it stays the hard
+    /// fault it has always been, because nothing would ever look at it.
+    static EXC_ARMED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Is an exception in flight? Host-side loops that drive user code (GDK
+/// iteration, constructor field initializers) must stop as soon as one is.
+fn pending_exc() -> bool {
+    PENDING.with(|p| p.borrow().is_some())
+}
+
+/// Park `exc` as the pending exception. The compiler emits the jump to the
+/// handler (or the frame exit) immediately after the `throw` site; a host-raised
+/// throwable relies on the caller's post-call pending check instead.
+fn set_pending(exc: Value) {
+    PENDING.with(|p| *p.borrow_mut() = Some(exc));
+}
+
+/// Raise a Groovy `Throwable` from inside a builtin. While exception handling is
+/// armed this parks a catchable exception; otherwise it degrades to the hard
+/// `groovyrs:` fault the same condition has always produced, so an
+/// exception-free program's behaviour is unchanged.
+fn raise(vm: &mut VM, class: &str, message: &str) {
+    if EXC_ARMED.with(|a| a.get()) {
+        set_pending(new_throwable(class, message));
+    } else {
+        fault(vm, format!("groovyrs: {message}"));
+    }
+}
+
+/// Allocate a built-in throwable instance with `message` on the host heap.
+fn new_throwable(class: &str, message: &str) -> Value {
+    let cid = find_class(class).unwrap_or(0);
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("message".to_string(), Value::str(message.to_string()));
+    heap_push(HeapObj::Instance(Instance { class: cid, fields }))
+}
+
+/// Register the built-in throwable hierarchy (`Exception`, `IOException`, …) as
+/// ordinary classes, so `new`, `instanceof`, `catch` matching, and a user
+/// `class MyEx extends Exception` all run through the one class registry. The
+/// root carries the `message` field, which [`class_chain`] then materialises on
+/// every descendant.
+fn register_throwables() {
+    CLASSES.with(|c| {
+        let mut c = c.borrow_mut();
+        for (name, superclass, _) in crate::throwable::all() {
+            c.push(ClassMeta {
+                name: name.to_string(),
+                superclass: superclass.map(str::to_string),
+                field_names: if superclass.is_none() {
+                    vec!["message".to_string()]
+                } else {
+                    Vec::new()
+                },
+                field_inits: Vec::new(),
+                methods: std::collections::HashMap::new(),
+                ctors: std::collections::HashMap::new(),
+            });
+        }
+    });
+}
+
+/// True when `class` (a registry id) descends from the built-in `Throwable`.
+fn is_throwable_class(class: u32) -> bool {
+    class_chain(class)
+        .first()
+        .and_then(|id| class_meta(*id))
+        .is_some_and(|m| m.name == "Throwable")
+}
+
+/// Render a throwable the way `Throwable.toString()` does: the qualified class
+/// name (bare for a script-declared subclass), plus `": " + message` when a
+/// message was supplied. Verified against Apache Groovy 5.0.7.
+fn throwable_str(v: &Value) -> String {
+    let Some(inst) = as_instance(v) else {
+        return groovy_str(v);
+    };
+    let Some(meta) = class_meta(inst.class) else {
+        return groovy_str(v);
+    };
+    let name = crate::throwable::qualified(&meta.name);
+    match inst.fields.get("message") {
+        Some(m) if !matches!(m, Value::Undef) => format!("{name}: {}", groovy_str(m)),
+        _ => name,
+    }
+}
+
+/// `GEXC_ARM`: arm exception handling for this run (see [`EXC_ARMED`]).
+fn b_exc_arm(vm: &mut VM, argc: u8) -> Value {
+    pop_args(vm, argc);
+    EXC_ARMED.with(|a| a.set(true));
+    Value::Undef
+}
+
+/// `GTHROW`: park the throwable as the pending exception.
+fn b_throw(vm: &mut VM, argc: u8) -> Value {
+    let exc = pop_args(vm, argc)
+        .into_iter()
+        .next()
+        .unwrap_or(Value::Undef);
+    set_pending(exc);
+    Value::Undef
+}
+
+/// `GEXC_PENDING`: true while an exception is in flight (the post-call check).
+fn b_exc_pending(vm: &mut VM, argc: u8) -> Value {
+    pop_args(vm, argc);
+    Value::bool(pending_exc())
+}
+
+/// `GEXC_TAKE`: claim the pending exception for a handler, clearing it.
+fn b_exc_take(vm: &mut VM, argc: u8) -> Value {
+    pop_args(vm, argc);
+    PENDING
+        .with(|p| p.borrow_mut().take())
+        .unwrap_or(Value::Undef)
+}
+
+/// `GEXC_DEPTH`: the value-stack depth at `try` entry.
+fn b_exc_depth(vm: &mut VM, argc: u8) -> Value {
+    pop_args(vm, argc);
+    Value::int(vm.stack.len() as i64)
+}
+
+/// `GEXC_CUT`: discard everything the abandoned expression left on the value
+/// stack, back to the depth [`GEXC_DEPTH`] recorded at `try` entry. Frames
+/// between the throw and the handler clean themselves (a return truncates to the
+/// frame base), but the operands of the half-evaluated expression *inside* the
+/// handler's own frame would otherwise pile up — once per throw, forever, in a
+/// loop.
+fn b_exc_cut(vm: &mut VM, argc: u8) -> Value {
+    let depth = pop_args(vm, argc)
+        .first()
+        .map(|v| v.to_int())
+        .unwrap_or(0)
+        .max(0) as usize;
+    if depth <= vm.stack.len() {
+        vm.stack.truncate(depth);
+    }
+    Value::Undef
+}
+
+/// `GEXC_ABORT`: an exception that reached the end of the script. Reports it the
+/// way `groovy` does (`Caught: java.lang.Foo: message`) and faults, so the
+/// process exits non-zero.
+fn b_exc_abort(vm: &mut VM, argc: u8) -> Value {
+    pop_args(vm, argc);
+    let exc = PENDING
+        .with(|p| p.borrow_mut().take())
+        .unwrap_or(Value::Undef);
+    let msg = format!("Caught: {}", throwable_str(&exc));
+    fault(vm, msg);
+    Value::Undef
+}
+
+/// Pop `argc` arguments off the value stack in source order.
+fn pop_args(vm: &mut VM, argc: u8) -> Vec<Value> {
+    let mut args = Vec::with_capacity(argc as usize);
+    for _ in 0..argc {
+        args.push(vm.stack.pop().unwrap_or(Value::Undef));
+    }
+    args.reverse();
+    args
 }
 
 /// Publish the running VM so the numeric hook can re-enter it for operator
@@ -276,6 +512,11 @@ fn reset_heap() {
     HEAP.with(|h| h.borrow_mut().clear());
     CLASSES.with(|c| c.borrow_mut().clear());
     DEC_LITERALS.with(|d| d.borrow_mut().clear());
+    PENDING.with(|p| *p.borrow_mut() = None);
+    EXC_ARMED.with(|a| a.set(false));
+    // The built-in throwables occupy the first registry ids of every run; a
+    // program's own `class` declarations append after them.
+    register_throwables();
 }
 
 /// Push an object onto the heap and return its `Value::Obj` handle.
@@ -346,6 +587,83 @@ fn b_dec(vm: &mut VM, _argc: u8) -> Value {
         DEC_LITERALS.with(|d| d.borrow_mut().insert(text, id));
     }
     value
+}
+
+// ── Groovy truthiness ───────────────────────────────────────────────────────
+//
+// fusevm's `Value::is_truthy` is shell/awk-flavoured and differs from Groovy in
+// two places: every `Value::Obj` handle is true (so a zero `BigDecimal` and an
+// empty ordered map are both true), and the string `"0"` is false. Groovy's rule
+// is: `null` false; `Boolean` itself; a number non-zero; a `String`/`GString`
+// non-empty; a `Collection`/`Map` non-empty; any other object true unless its
+// class defines `asBoolean()`.
+//
+// The compiler emits [`GTRUTH`] only where the condition's static type could be
+// one of the values fusevm gets wrong, so a comparison-shaped loop guard keeps
+// the native op and the JIT trace (see `compiler::needs_truth`).
+
+/// Groovy truthiness of `v`. Needs the VM because a class instance may define
+/// `asBoolean()`, which is a user method and so re-enters the VM.
+fn groovy_truthy(vm: &mut VM, v: &Value) -> bool {
+    match v {
+        // Groovy: a String is truthy when non-empty. fusevm additionally treats
+        // "0" as false (a shell convention), which Groovy does not.
+        Value::Str(s) => !s.is_empty(),
+        Value::Obj(_) => {
+            if let Some(d) = as_dec(v) {
+                return !decimal::cmp(&d, &decimal::from_i64(0)).is_eq();
+            }
+            if let Some(entries) = as_omap(v) {
+                return !entries.is_empty();
+            }
+            // A closure handle is an object: always true.
+            if closure_meta(v).is_some() {
+                return true;
+            }
+            // A class instance: `asBoolean()` decides when the class defines it,
+            // else an object is true.
+            match call_user_method(vm, v, "asBoolean", &[]) {
+                Some(Ok(r)) => r.is_truthy(),
+                Some(Err(e)) => {
+                    fault(vm, e);
+                    false
+                }
+                None => true,
+            }
+        }
+        _ => v.is_truthy(),
+    }
+}
+
+/// `GTRUTH`: pop a value, push its Groovy truth.
+fn b_truth(vm: &mut VM, _argc: u8) -> Value {
+    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    Value::bool(groovy_truthy(vm, &v))
+}
+
+/// `GSTRING`: pop the part count and that many rendered parts, then join them.
+/// Rendering goes through [`render_value`], so an embedded class instance uses
+/// its `toString()` — which is what a Groovy `GString` does and what plain `+`
+/// concatenation of the pieces would not.
+fn b_gstring(vm: &mut VM, _argc: u8) -> Value {
+    let n = vm.stack.pop().unwrap_or(Value::Undef).to_int().max(0) as usize;
+    let mut vals = Vec::with_capacity(n);
+    for _ in 0..n {
+        vals.push(vm.stack.pop().unwrap_or(Value::Undef));
+    }
+    vals.reverse();
+    let mut out = String::new();
+    for v in &vals {
+        out.push_str(&render_value(vm, v));
+    }
+    Value::str(out)
+}
+
+/// `GTRUTH_KEEP`: push the Groovy truth of the top of the stack *above* it,
+/// leaving the operand in place for `&&`/`||`/Elvis to yield.
+fn b_truth_keep(vm: &mut VM, _argc: u8) -> Value {
+    let v = vm.stack.last().cloned().unwrap_or(Value::Undef);
+    Value::bool(groovy_truthy(vm, &v))
 }
 
 /// Clone the entries of an ordered-map handle, if `v` is one.
@@ -687,6 +1005,9 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
         for (fname, init_idx) in &m.field_inits {
             match invoke_sub(vm, *init_idx, &[]) {
                 Ok(v) => {
+                    if pending_exc() {
+                        return Value::Undef;
+                    }
                     set_instance_field(&handle, fname, v);
                 }
                 Err(e) => {
@@ -702,6 +1023,15 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
     // is an error; a subclass with no ctors at all gets Groovy's implicit default
     // constructor, which chains to the superclass's no-arg ctor.
     let meta = class_meta(cid).unwrap();
+    // A throwable with no matching script-declared constructor uses the modeled
+    // JDK pair `T()` / `T(String message)`, which is what a Groovy script means
+    // by `new Exception("boom")` or `class Plain extends RuntimeException {}`.
+    if !meta.ctors.contains_key(&argc) && is_throwable_class(cid) && argc <= 1 {
+        if let Some(m) = args.first() {
+            set_instance_field(&handle, "message", Value::str(groovy_str(m)));
+        }
+        return handle;
+    }
     if let Some(ctor_idx) = meta.ctors.get(&argc) {
         let mut pushes = Vec::with_capacity(n + 1);
         pushes.push(handle.clone());
@@ -831,6 +1161,14 @@ fn b_super_ctor(vm: &mut VM, argc: u8) -> Value {
         return Value::Undef;
     };
     let Some(idx) = class_meta(super_id).and_then(|m| m.ctors.get(&argc).copied()) else {
+        // `super(message)` into the built-in throwable chain — the modeled
+        // `Throwable(String)` constructor, which a user exception class calls.
+        if is_throwable_class(super_id) && argc <= 1 {
+            if let Some(m) = args.first() {
+                set_instance_field(&this, "message", Value::str(groovy_str(m)));
+            }
+            return Value::Undef;
+        }
         fault(
             vm,
             format!("groovyrs: no constructor for {super_name} taking {argc} argument(s)"),
@@ -926,6 +1264,21 @@ fn dispatch_instance_method(
             let v = args.first().cloned().unwrap_or(Value::Undef);
             set_instance_field(recv, &key, v);
             return Some(Ok(Value::Undef));
+        }
+    }
+    // The `Throwable` methods a script actually calls, for the modeled built-in
+    // hierarchy (a user override was already found by `lookup_method` above).
+    if is_throwable_class(inst.class) {
+        match method {
+            "toString" => return Some(Ok(Value::str(throwable_str(recv)))),
+            "getLocalizedMessage" => {
+                return Some(Ok(inst
+                    .fields
+                    .get("message")
+                    .cloned()
+                    .unwrap_or(Value::Undef)))
+            }
+            _ => {}
         }
     }
     Some(Err(format!(
@@ -1255,6 +1608,11 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             }
         };
     }
+    // `x.toString()` on a value with no user `toString` renders it the way
+    // `println` does (`[1, 2, 3]`, `[a:1]`, `1.50`, `java.lang.Exception: boom`).
+    if method == "toString" && args.is_empty() {
+        return Value::str(render_value(vm, &recv));
+    }
     // Closure-consuming list/range iteration (`each`/`collect`/`findAll`/…).
     if let Value::Array(items) = &recv {
         if let Some(res) = dispatch_iteration(vm, items, method, &args) {
@@ -1297,6 +1655,11 @@ fn dispatch_iteration(
                 if let Err(e) = invoke_closure(vm, clo, std::slice::from_ref(it)) {
                     return Some(Err(e));
                 }
+                // A `throw` inside the closure unwound out of its body; stop
+                // iterating so the exception reaches the caller's handler.
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
             }
             Some(Ok(Value::array(items.to_vec())))
         }
@@ -1308,6 +1671,9 @@ fn dispatch_iteration(
                 let call_args = [it.clone(), Value::int(i as i64)];
                 if let Err(e) = invoke_closure(vm, clo, &call_args) {
                     return Some(Err(e));
+                }
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
                 }
             }
             Some(Ok(Value::array(items.to_vec())))
@@ -1322,6 +1688,9 @@ fn dispatch_iteration(
                     Ok(v) => out.push(v),
                     Err(e) => return Some(Err(e)),
                 }
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
             }
             Some(Ok(Value::array(out)))
         }
@@ -1332,8 +1701,14 @@ fn dispatch_iteration(
             let mut out = Vec::new();
             for it in items {
                 match invoke_closure(vm, clo, std::slice::from_ref(it)) {
-                    Ok(v) if v.is_truthy() => out.push(it.clone()),
-                    Ok(_) => {}
+                    Ok(v) => {
+                        if pending_exc() {
+                            return Some(Ok(Value::Undef));
+                        }
+                        if groovy_truthy(vm, &v) {
+                            out.push(it.clone());
+                        }
+                    }
                     Err(e) => return Some(Err(e)),
                 }
             }
@@ -1345,8 +1720,14 @@ fn dispatch_iteration(
             closure_meta(clo)?;
             for it in items {
                 match invoke_closure(vm, clo, std::slice::from_ref(it)) {
-                    Ok(v) if v.is_truthy() => return Some(Ok(it.clone())),
-                    Ok(_) => {}
+                    Ok(v) => {
+                        if pending_exc() {
+                            return Some(Ok(Value::Undef));
+                        }
+                        if groovy_truthy(vm, &v) {
+                            return Some(Ok(it.clone()));
+                        }
+                    }
                     Err(e) => return Some(Err(e)),
                 }
             }
@@ -1372,6 +1753,9 @@ fn dispatch_iteration(
                     Ok(v) => acc = v,
                     Err(e) => return Some(Err(e)),
                 }
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
             }
             Some(Ok(acc))
         }
@@ -1383,7 +1767,12 @@ fn dispatch_iteration(
             for it in items {
                 let v = match clo {
                     Some(c) => match invoke_closure(vm, c, std::slice::from_ref(it)) {
-                        Ok(v) => v,
+                        Ok(v) => {
+                            if pending_exc() {
+                                return Some(Ok(Value::Undef));
+                            }
+                            v
+                        }
                         Err(e) => return Some(Err(e)),
                     },
                     None => it.clone(),
@@ -1612,7 +2001,17 @@ fn print_args(vm: &mut VM, argc: u8, newline: bool) -> Value {
     vals.reverse();
     // Render each value; a class instance prints through its `toString()` when
     // the class defines one (Groovy's `println` calls `toString`).
+    // A `toString()` that threw leaves an exception in flight and a placeholder
+    // rendering; printing that would emit a spurious `null` before the handler
+    // runs, so the write is skipped and the caller's post-call check picks the
+    // exception up. An exception that was *already* in flight means this
+    // `println` is inside a `finally` running on the unwind path — that output
+    // is real and must still appear.
+    let already_unwinding = pending_exc();
     let rendered: Vec<String> = vals.iter().map(|v| render_value(vm, v)).collect();
+    if !already_unwinding && pending_exc() {
+        return Value::Undef;
+    }
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
     for s in &rendered {
@@ -1662,7 +2061,10 @@ fn b_div(vm: &mut VM, _argc: u8) -> Value {
         (Some(x), Some(y)) => match decimal::divide(&x, &y) {
             Some(q) => dec_value(q),
             None => {
-                fault(vm, DIVISION_BY_ZERO.to_string());
+                // Groovy raises `java.lang.ArithmeticException: Division by
+                // zero`, which a script can catch; unarmed this degrades to the
+                // hard fault it has always been (see [`raise`]).
+                raise(vm, "ArithmeticException", DIVISION_BY_ZERO);
                 Value::Undef
             }
         },
@@ -1752,7 +2154,7 @@ fn as_f64(v: &Value) -> f64 {
 /// whose class defines no `toString`.
 fn render_value(vm: &mut VM, v: &Value) -> String {
     if let Some(inst) = as_instance(v) {
-        return instance_to_string(vm, v).unwrap_or_else(|| default_instance_str(&inst));
+        return instance_to_string(vm, v).unwrap_or_else(|| instance_default_str(v, &inst));
     }
     if let Some(entries) = as_omap(v) {
         if entries.is_empty() {
@@ -1801,6 +2203,16 @@ fn default_instance_str(inst: &Instance) -> String {
     class_meta(inst.class)
         .map(|m| m.name)
         .unwrap_or_else(|| "Object".to_string())
+}
+
+/// Render an instance that defines no `toString`: a throwable prints
+/// `java.lang.Exception: boom` (Groovy's `Throwable.toString`), any other object
+/// its class name.
+fn instance_default_str(v: &Value, inst: &Instance) -> String {
+    if is_throwable_class(inst.class) {
+        return throwable_str(v);
+    }
+    default_instance_str(inst)
 }
 
 /// Render a value with Groovy's `println`/`toString` rules (as opposed to
@@ -1853,7 +2265,7 @@ pub fn groovy_str(v: &Value) -> String {
 /// The fault Groovy raises for a zero divisor (`java.lang.ArithmeticException:
 /// Division by zero`), which aborts the script exactly as an uncaught exception
 /// does.
-const DIVISION_BY_ZERO: &str = "groovyrs: division by zero";
+const DIVISION_BY_ZERO: &str = "Division by zero";
 
 /// Groovy arithmetic and comparison when a `BigDecimal` is involved. Returns
 /// `None` when the operation is not decimal arithmetic — no decimal operand, or
@@ -1967,7 +2379,13 @@ fn groovy_add(a: &Value, b: &Value) -> Value {
         }
         return heap_push(HeapObj::OrderedMap(entries));
     }
-    Value::str(format!("{}{}", groovy_str(a), groovy_str(b)))
+    // String concatenation renders each side the way `println` does, so a class
+    // instance operand goes through its `toString()`. Both operands are cloned
+    // before the VM re-entry that dispatch needs (see [`with_vm`]).
+    let (x, y) = (a.clone(), b.clone());
+    let joined = with_vm(|vm| format!("{}{}", render_value(vm, &x), render_value(vm, &y)))
+        .unwrap_or_else(|| format!("{}{}", groovy_str(a), groovy_str(b)));
+    Value::str(joined)
 }
 
 /// The Groovy method a binary/unary arithmetic operator dispatches to on a

@@ -1106,3 +1106,338 @@ fn decimal_division_by_zero_aborts() {
     assert!(!ok);
     assert_eq!(out, "");
 }
+
+// ── Groovy truthiness ───────────────────────────────────────────────────────
+//
+// fusevm's own truth test reads every heap handle as true and the string "0" as
+// false. Each expectation below is byte-verified against Apache Groovy 5.0.7.
+
+#[test]
+fn zero_decimal_is_false_but_nonzero_is_true() {
+    // The bug this suite exists to pin: `0.0` is a host-heap BigDecimal, and a
+    // naive handle-is-true rule takes the then-branch here.
+    let src = r#"
+if (0.0) println("t0") else println("f0")
+if (0.00) println("t1") else println("f1")
+if (0e0) println("t2") else println("f2")
+if (1.50) println("t3") else println("f3")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "f0\nf1\nf2\nt3\n");
+}
+
+#[test]
+fn empty_map_is_false_and_string_zero_is_true() {
+    // `[:]` is a host-heap ordered map (handle-is-true would take `t`), and
+    // `"0"` is a non-empty string (a shell-flavoured rule would take `f`).
+    let src = r#"
+if ([:]) println("t0") else println("f0")
+if ([a: 1]) println("t1") else println("f1")
+if ("0") println("t2") else println("f2")
+if ("") println("t3") else println("f3")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "f0\nt1\nt2\nf3\n");
+}
+
+#[test]
+fn unary_not_uses_groovy_truth() {
+    let (out, ok) = run(r#"println(!0.00); println(!"0"); println(![:]); println(![1])"#);
+    assert!(ok);
+    assert_eq!(out, "true\nfalse\ntrue\nfalse\n");
+}
+
+#[test]
+fn logical_operators_are_boolean_valued_but_elvis_is_operand_valued() {
+    // Groovy's `&&`/`||` yield a Boolean; only Elvis yields the deciding operand.
+    let src = r#"
+println(5 && 3)
+println(0 || 7)
+println(0.0 ?: "fallback")
+println(1.50 ?: "fallback")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "true\ntrue\nfallback\n1.50\n");
+}
+
+#[test]
+fn a_class_decides_its_own_truth_with_as_boolean() {
+    let src = r#"
+class Tank { def n; Tank(v) { n = v }; boolean asBoolean() { return n > 0 } }
+if (new Tank(0)) println("t0") else println("f0")
+if (new Tank(2)) println("t1") else println("f1")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "f0\nt1\n");
+}
+
+#[test]
+fn comparison_conditions_emit_no_truthiness_builtin() {
+    // The perf contract of the truthiness fix: a comparison-shaped guard is
+    // statically a Boolean, so it must still compile to the native `NumLt` +
+    // `JumpIfFalse` pair the JIT traces — no host call in the loop condition.
+    let disasm = groovyrs::disassemble("def n = 3\ndef i = 0\nwhile (i < n) { i++ }").unwrap();
+    assert!(
+        disasm.contains("NumLt"),
+        "expected a native comparison, got:\n{disasm}"
+    );
+    assert!(
+        !disasm.contains("CallBuiltin"),
+        "a comparison-shaped `while` guard must emit no builtin call:\n{disasm}"
+    );
+}
+
+// ── Exceptions ──────────────────────────────────────────────────────────────
+
+#[test]
+fn catch_matches_the_supertype_chain_and_finally_always_runs() {
+    let src = r#"
+def f(n) {
+    try {
+        if (n == 0) throw new IllegalStateException("zero")
+        return "ok " + n
+    } catch (RuntimeException e) {
+        return "caught " + e.message
+    } finally {
+        println("fin " + n)
+    }
+}
+println(f(1))
+println(f(0))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "fin 1\nok 1\nfin 0\ncaught zero\n");
+}
+
+#[test]
+fn a_throwable_prints_as_its_qualified_name_and_message() {
+    let src = r#"
+println(new Exception("boom"))
+println(new IOException("disk"))
+println(new Exception())
+println(new NumberFormatException("n") instanceof IllegalArgumentException)
+println(new IOException("i") instanceof RuntimeException)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "java.lang.Exception: boom\njava.io.IOException: disk\njava.lang.Exception\ntrue\nfalse\n"
+    );
+}
+
+#[test]
+fn a_script_class_can_extend_a_builtin_throwable() {
+    let src = r#"
+class ParseFailed extends Exception { ParseFailed(String m) { super(m) } }
+try { throw new ParseFailed("line 7") } catch (Exception e) { println(e); println(e.message) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "ParseFailed: line 7\nline 7\n");
+}
+
+#[test]
+fn finally_runs_before_an_early_return_out_of_a_loop() {
+    // The escape path javac duplicates the cleanup block for: the `return` jumps
+    // past the try's own normal exit, so the compiler must emit the `finally`
+    // inline ahead of it.
+    let src = r#"
+def first(xs) {
+    for (i in 0..<xs.size()) {
+        try { if (xs[i] > 1) return "found " + xs[i] } finally { println("visit " + xs[i]) }
+    }
+    return "none"
+}
+println(first([1, 2, 3]))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "visit 1\nvisit 2\nfound 2\n");
+}
+
+#[test]
+fn a_rethrow_from_a_handler_still_runs_the_finally() {
+    let src = r#"
+try {
+    try { throw new Exception("inner") }
+    catch (Exception e) { throw new IllegalStateException("re:" + e.message) }
+    finally { println("cleanup") }
+} catch (Exception e) { println(e.message) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "cleanup\nre:inner\n");
+}
+
+#[test]
+fn a_throw_out_of_a_closure_reaches_the_callers_handler() {
+    // The closure body runs in a nested VM re-entry, so the host iteration loop
+    // has to notice the pending exception and stop rather than keep iterating.
+    let src = r#"
+try {
+    [1, 2, 3].each { if (it == 2) throw new IllegalStateException("stop"); println("saw " + it) }
+} catch (Exception e) { println("escaped " + e.message) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "saw 1\nescaped stop\n");
+}
+
+#[test]
+fn a_zero_divisor_raises_a_catchable_arithmetic_exception() {
+    let (out, ok) = run(
+        r#"try { println(1 / 0) } catch (ArithmeticException e) { println("d " + e.message) }"#,
+    );
+    assert!(ok);
+    assert_eq!(out, "d Division by zero\n");
+}
+
+#[test]
+fn an_unmatched_exception_escapes_with_a_nonzero_exit() {
+    let src = r#"
+println("before")
+try { throw new Exception("x") } catch (IllegalStateException e) { println("no") }
+println("unreachable")
+"#;
+    let (out, ok) = run(src);
+    assert!(!ok, "an uncaught exception must exit non-zero");
+    assert_eq!(out, "before\n");
+}
+
+#[test]
+fn a_program_without_exceptions_emits_no_exception_ops() {
+    // The gate that keeps exception support free: no `try`/`throw` in the source
+    // means none of the exception builtins are emitted at all.
+    let disasm = groovyrs::disassemble("def s = 0\nfor (i in 1..3) s += i\nprintln s").unwrap();
+    for id in ["730", "731", "732", "733", "734", "735", "736"] {
+        assert!(
+            !disasm.contains(&format!("CallBuiltin({id}")),
+            "exception builtin {id} leaked into an exception-free program:\n{disasm}"
+        );
+    }
+}
+
+// ── GStrings ────────────────────────────────────────────────────────────────
+
+#[test]
+fn gstring_interpolates_names_paths_and_expressions() {
+    let src = r#"
+def name = "world"
+def n = 7
+def m = [b: 3, inner: [deep: 9]]
+println("hello $name")
+println("braced ${name}")
+println("expr ${n * 6}")
+println("path $m.b")
+println("deep $m.inner.deep")
+println("adjacent $name$n")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "hello world\nbraced world\nexpr 42\npath 3\ndeep 9\nadjacent world7\n"
+    );
+}
+
+#[test]
+fn gstring_placeholders_nest_braces_and_quotes() {
+    let src = r#"
+def n = 7
+println("a ${ n > 5 ? "big" : "small" } b")
+println("c ${ [1, 2].collect { it * 2 } } d")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "a big b\nc [2, 4] d\n");
+}
+
+#[test]
+fn a_dollar_is_inert_when_escaped_or_single_quoted() {
+    let src = "def a = 1\nprintln(\"esc \\$a\")\nprintln('lit $a')";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "esc $a\nlit $a\n");
+}
+
+#[test]
+fn an_interpolated_object_renders_through_its_to_string() {
+    // Plain handle formatting would print an opaque id here; a GString (and `+`
+    // concatenation) must dispatch the class's own toString.
+    let src = r#"
+class P { def x; P(v) { x = v }; String toString() { return "P<" + x + ">" } }
+def p = new P(4)
+println("obj $p")
+println("cat " + p)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "obj P<4>\ncat P<4>\n");
+}
+
+#[test]
+fn a_double_quoted_string_without_a_placeholder_stays_a_plain_constant() {
+    // The compile-time gate: no `$` means no GString builtin, so ordinary string
+    // literals keep the bytecode they always had.
+    let disasm = groovyrs::disassemble(r#"println("plain text")"#).unwrap();
+    assert!(
+        !disasm.contains("CallBuiltin(723"),
+        "a placeholder-free literal must not build a GString:\n{disasm}"
+    );
+}
+
+// ── Closures ────────────────────────────────────────────────────────────────
+
+#[test]
+fn an_explicit_empty_parameter_list_takes_no_implicit_it() {
+    let (out, ok) = run("def z = { -> 7 * 3 }\nprintln(z())\nprintln(z.call())");
+    assert!(ok);
+    assert_eq!(out, "21\n21\n");
+}
+
+#[test]
+fn a_closure_body_that_is_a_try_returns_the_taken_branch() {
+    // Groovy's implicit return reaches through a trailing `try`.
+    let src = r#"println([1, 2, 3].collect { try { if (it == 2) throw new Exception("s"); it } catch (Exception e) { 99 } })"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[1, 99, 3]\n");
+}
+
+#[test]
+fn an_exception_from_every_re_entrant_dispatch_path_reaches_the_handler() {
+    // Each of these runs user code through a nested VM re-entry (a constructor,
+    // `toString` during `println`, a property getter, `getAt`, an operator
+    // overload, `asBoolean`, a closure call, a GString placeholder). A path that
+    // skipped its post-call check would resume with a placeholder value instead
+    // of unwinding — and `println` would emit a spurious `null`.
+    let src = r#"
+class B { def n; B(x) { if (x < 0) throw new IllegalArgumentException("neg"); n = x } }
+class C { String toString() { throw new IllegalStateException("ts") } }
+class D { def getX() { throw new IllegalStateException("gx") } }
+class E { def getAt(i) { throw new IllegalStateException("ga") } }
+class F { def n = 1; def plus(o) { throw new IllegalStateException("pl") } }
+class G { def asBoolean() { throw new IllegalStateException("ab") } }
+try { println(new B(-1).n) } catch (Exception e) { println("ctor " + e.message) }
+try { println(new C()) } catch (Exception e) { println("tostr " + e.message) }
+try { println(new D().x) } catch (Exception e) { println("get " + e.message) }
+try { println(new E()[0]) } catch (Exception e) { println("at " + e.message) }
+try { println(new F() + new F()) } catch (Exception e) { println("plus " + e.message) }
+try { if (new G()) println("y") else println("n") } catch (Exception e) { println("bool " + e.message) }
+def h = { throw new IllegalStateException("clo") }
+try { h(1) } catch (Exception e) { println("clo " + e.message) }
+try { println("x ${ [1].collect { throw new IllegalStateException('gs') } }") } catch (Exception e) { println("gstr " + e.message) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "ctor neg\ntostr ts\nget gx\nat ga\nplus pl\nbool ab\nclo clo\ngstr gs\n"
+    );
+}

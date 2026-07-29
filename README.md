@@ -153,7 +153,8 @@ Implemented and checked against Apache Groovy:
 - **Method / property dispatch** — `s.length()`, `list.size()`,
   `"hi".toUpperCase()`, `map.k`, chains on literals (`[1,2,3].size()`), over a
   faithful GDK subset routed through a host dispatch. An unknown member faults.
-- **Closures** — `{ a, b -> … }` and the implicit `{ it }` form as first-class
+- **Closures** — `{ a, b -> … }`, the explicit zero-parameter `{ -> … }`, and
+   the implicit `{ it }` form as first-class
   callable values, invoked with `.call(args)` or directly (`def f = { it * 2 };
   f(21)`). A closure captures its enclosing script scope, and a closure nested in
   a function/closure captures that frame's locals as upvalues, so a curried
@@ -173,8 +174,8 @@ Implemented and checked against Apache Groovy:
 - **Comments** — `//` line, `/* … */` block.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
-overloading by parameter type, `++`/`--` not calling `next`/`previous`, GStrings,
-by-reference upvalue capture).
+overloading by parameter type, `++`/`--` not calling `next`/`previous`, `switch`,
+`assert`, by-reference upvalue capture).
 
 ---
 
@@ -251,10 +252,11 @@ overloading (`plus`/`minus`/`multiply`/`div`/`remainder`/`power`/`negative`/
 `compareTo`/`equals` driving `+`/`-`/`*`/`/`/`%`/`**`/unary `-`/`<`/`>`/`<=>`/`==`),
 insertion-ordered maps, first-class ranges (`0..5` / `0..<5`), arithmetic /
 comparison / logic, `BigDecimal`-style division, ternary / Elvis /
-safe-navigation, `if` / `while` / `for` / range `for-in` / `break` / `continue` /
-`return`, list/map literals, subscripting, method/property dispatch over a GDK
-subset, `println`/`print`, string concatenation — verified against Apache Groovy
-by the frozen example replay and the differential fuzzer. The editor tooling is
+safe-navigation, Groovy truthiness, GString interpolation, `try` / `catch` /
+`finally` / `throw`, `if` / `while` / `for` / range `for-in` / `break` /
+`continue` / `return`, list/map literals, subscripting, method/property dispatch
+over a GDK subset, `println`/`print`, string concatenation — verified against
+Apache Groovy by the frozen example replay and the differential fuzzer. The editor tooling is
 shipped: a bytecode disassembler (`--disasm`), a Language Server (`--lsp`), and a
 Debug Adapter (`--dap`).
 
@@ -262,15 +264,15 @@ Next waves, in priority order:
 
 1. **By-reference upvalue capture** — boxed cells so a closure sees a mutation of
    an outer frame local made after capture (capture is by value today).
-2. **Method overloading by parameter type** — today methods and operator methods
+2. **Catchable runtime faults** — `throw` and a zero divisor raise real
+   exceptions today, but an unknown method/property still aborts the run where
+   Groovy raises a catchable `MissingMethodException` / `NullPointerException`.
+3. **Method overloading by parameter type** — today methods and operator methods
    are keyed by name only, so same-named overloads collapse to the last declared.
-3. **`trait`s and interface bodies** — `implements` is parsed but has no runtime
+4. **`trait`s and interface bodies** — `implements` is parsed but has no runtime
    effect beyond `Comparable`'s `compareTo`.
-4. **Interpolation & standard library** — GString `"$name"` / `"${expr}"`;
-   `Math`, broader `java.util`/GDK collection methods.
-5. **Groovy truth for host-heap values** — a zero `BigDecimal` and an empty map
-   are truthy today (fusevm treats every object handle as true), where Groovy
-   reads them as false.
+5. **`switch`, `assert`, `do`/`while`, labeled `break`** and a broader standard
+   library (`Math`, more `java.util`/GDK collection methods).
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
 
@@ -293,7 +295,8 @@ from the documented simplifications (32-bit integer overflow, zero divisors), so
 every divergence it reports is a real parity gap — the class of bug the slice-1
 `continue`-codegen fix was. Decimal literals, scales, and exponent forms are
 generated without restriction now that the `BigDecimal` model is exact. Modes:
-`arith`, `logic`, `strings`, `control`, `format`, `mixed`.
+`arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
+`gstring`, `exceptions`, `mixed`.
 
 All three need `groovy` on PATH and never run in CI; the CI-safe replay is the
 frozen `tests/parity.rs` (snapshot in `tests/data/parity_expected.txt`,

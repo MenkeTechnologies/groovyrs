@@ -98,6 +98,30 @@ const CORPUS: &[(&str, &str, &str, &str)] = &[
         "construct a class instance (`new Type(args)`)",
         "class P { def x; P(v) { x = v } }\nprintln(new P(7).x)   // => 7",
     ),
+    (
+        "try",
+        "Keyword",
+        "run a block with `catch` handlers and/or a `finally` cleanup",
+        "try { throw new Exception(\"x\") } catch (Exception e) { println(e.message) }   // => x",
+    ),
+    (
+        "catch",
+        "Keyword",
+        "handle a thrown exception of the named type (`catch (A | B e)` for several)",
+        "try { 1 / 0 } catch (ArithmeticException e) { println(e.message) }   // => Division by zero",
+    ),
+    (
+        "finally",
+        "Keyword",
+        "cleanup block; runs on every exit path out of the `try`, including a `return`",
+        "try { println(\"body\") } finally { println(\"cleanup\") }   // => body\\ncleanup",
+    ),
+    (
+        "throw",
+        "Keyword",
+        "raise a throwable, unwinding to the innermost matching `catch`",
+        "try { throw new IllegalStateException(\"bad\") } catch (Exception e) { println(e) }",
+    ),
     // ── Literal ──
     (
         "true",

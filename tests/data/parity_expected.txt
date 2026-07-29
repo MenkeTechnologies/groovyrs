@@ -34,6 +34,33 @@ total: 0.3
 3.5
 2
 half of 9 is 4.5
+==== Exceptions.groovy ====
+  checked 4
+ok 25
+  checked 0
+other: zero
+  checked -2
+bad-arg: negative -2
+java.lang.Exception: boom
+java.io.IOException: disk
+rt
+null
+true
+true
+false
+ParseFailed: line 7
+caught? true
+multi: nf
+untyped: bare
+  visited 1
+  visited 3
+  visited 6
+found 6
+  cleanup
+wrapped: inner
+div: Division by zero
+  saw 1
+escaped: stop at 2
 ==== Fib.groovy ====
 0
 1
@@ -61,6 +88,25 @@ Fizz
 13
 14
 FizzBuzz
+==== GStrings.groovy ====
+hello world
+braced world
+expr 42
+path 3
+deep path 9
+adjacent world7
+escaped $name
+single $name
+nested quotes big
+closure inside [2, 4, 6]
+collection [count:3, inner:[deep:9]]
+list [1, 2, 3]
+8
+HI WORLD
+true
+point (2, 5) and (2, 5)
+concat (2, 5)
+price 19.90 total 59.70
 ==== Hello.groovy ====
 Hello from groovyrs — Groovy on fusevm
 ==== Inheritance.groovy ====
@@ -99,3 +145,27 @@ sum 1..5 = 15
 1
 4
 9
+==== Truthiness.groovy ====
+0 -> false
+1 -> true
+0.0 -> false
+0.00 -> false
+1.50 -> true
+0.0d -> false
+"" -> false
+"0" -> true
+"x" -> true
+null -> false
+[] -> false
+[1, 2] -> true
+[:] -> false
+[a:1] -> true
+true
+true
+fallback
+1.50
+fallback
+[1]
+Tank(0) -> false
+Tank(3) -> true
+total = 2

@@ -1,15 +1,20 @@
 //! A recursive-descent parser with precedence-climbing for expressions.
 //!
-//! Grammar (slice 1): a `.groovy` file is a sequence of top-level statements —
-//! the Groovy *script* model, with no enclosing class or `main`. Statements are
-//! separated by newlines or `;` (both optional-semicolon and explicit forms).
-//! Covered: `def`/typed local declarations, script-binding assignments,
-//! `if`/`while`, the C-style `for (;;)` and the `for (x in a..b)` range loop,
-//! `break`/`continue`, and the `println`/`print` command calls (with or without
-//! parentheses).
+//! Grammar: a `.groovy` file is a sequence of top-level statements — the Groovy
+//! *script* model, with no enclosing class or `main`. Statements are separated
+//! by newlines or `;` (both optional-semicolon and explicit forms). Covered:
+//! `def`/typed local declarations, script-binding assignments, functions and
+//! classes, `if`/`while`, the C-style `for (;;)` and the `for (x in a..b)` range
+//! loop, `break`/`continue`, `try`/`catch`/`finally`/`throw`, closures, and the
+//! `println`/`print` command calls (with or without parentheses).
+//!
+//! `try`, `catch`, `finally`, `throw`, `class`, `extends`, and `instanceof` are
+//! *contextual* keywords: the lexer emits them as identifiers and the parser
+//! recognises them by position, so a program that uses one as a variable name
+//! only breaks where the construct is actually ambiguous.
 
 use crate::ast::*;
-use crate::lexer::{Tok, Token};
+use crate::lexer::{GPart, Tok, Token};
 
 /// Parse Groovy `src` into a [`Program`].
 ///
@@ -166,6 +171,16 @@ impl Parser {
         let line = self.line();
         let kind = match self.peek() {
             Tok::Ident(w) if w == "class" => self.class_decl()?,
+            // `try`/`throw` are contextual keywords (the lexer emits them as
+            // identifiers); a `try` is only a statement when a block follows.
+            Tok::Ident(w) if w == "try" && matches!(self.peek_at(1), Tok::LBrace) => {
+                self.try_stmt()?
+            }
+            Tok::Ident(w) if w == "throw" => {
+                self.advance();
+                self.skip_newlines();
+                StmtKind::Throw(self.expression()?)
+            }
             Tok::If => self.if_stmt()?,
             Tok::While => self.while_stmt()?,
             Tok::For => self.for_stmt()?,
@@ -523,6 +538,75 @@ impl Parser {
         Ok(StmtKind::If { cond, then, els })
     }
 
+    /// Parse `try { … } catch (T e) { … }* [finally { … }]`. The `try`
+    /// identifier is the current token. A `catch` may name several types
+    /// (`catch (A | B e)`) or none at all (`catch (e)`, which Groovy reads as
+    /// `Exception`). Groovy requires at least one `catch` or a `finally`.
+    fn try_stmt(&mut self) -> Result<StmtKind, String> {
+        let line = self.line();
+        self.advance(); // `try`
+        self.skip_newlines();
+        self.eat(&Tok::LBrace)?;
+        let body = self.block()?;
+        let mut catches = Vec::new();
+        let mut finally_body = Vec::new();
+        loop {
+            let save = self.pos;
+            self.skip_newlines();
+            match self.peek() {
+                Tok::Ident(w) if w == "catch" => {
+                    self.advance();
+                    self.eat(&Tok::LParen)?;
+                    // `Type [| Type]* name`, or a bare `name`.
+                    let mut words = vec![self.ident()?];
+                    while self.is(&Tok::Pipe) {
+                        self.advance();
+                        words.push(self.ident()?);
+                    }
+                    let (types, name) = if self.is(&Tok::RParen) {
+                        // `catch (e)` — untyped, catches every Exception.
+                        (vec!["Exception".to_string()], words.remove(0))
+                    } else {
+                        let name = self.ident()?;
+                        (words, name)
+                    };
+                    self.eat(&Tok::RParen)?;
+                    self.skip_newlines();
+                    self.eat(&Tok::LBrace)?;
+                    let cbody = self.block()?;
+                    catches.push(CatchArm {
+                        types,
+                        name,
+                        body: cbody,
+                    });
+                }
+                Tok::Ident(w) if w == "finally" => {
+                    self.advance();
+                    self.skip_newlines();
+                    self.eat(&Tok::LBrace)?;
+                    finally_body = self.block()?;
+                    break;
+                }
+                _ => {
+                    // Not a clause of this `try` — put the newlines back so the
+                    // next statement still sees its terminator.
+                    self.pos = save;
+                    break;
+                }
+            }
+        }
+        if catches.is_empty() && finally_body.is_empty() {
+            return Err(format!(
+                "groovyrs: `try` needs a `catch` or a `finally` on line {line}"
+            ));
+        }
+        Ok(StmtKind::Try {
+            body,
+            catches,
+            finally_body,
+        })
+    }
+
     fn while_stmt(&mut self) -> Result<StmtKind, String> {
         self.eat(&Tok::While)?;
         self.eat(&Tok::LParen)?;
@@ -875,6 +959,19 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Str(s))
             }
+            // A `GString`: each embedded placeholder carries its own source
+            // text, re-parsed here through the ordinary expression grammar.
+            Tok::GStr(parts) => {
+                self.advance();
+                let mut out = Vec::with_capacity(parts.len());
+                for part in &parts {
+                    out.push(match part {
+                        GPart::Text(t) => GStringPart::Text(t.clone()),
+                        GPart::Expr(src) => GStringPart::Expr(parse_interpolation(src)?),
+                    });
+                }
+                Ok(Expr::GString(out))
+            }
             Tok::True => {
                 self.advance();
                 Ok(Expr::Bool(true))
@@ -1058,8 +1155,20 @@ impl Parser {
     fn closure_literal(&mut self) -> Result<Expr, String> {
         self.eat(&Tok::LBrace)?;
         self.skip_newlines();
-        let params = if self.has_closure_arrow() {
+        let explicit_params = self.has_closure_arrow();
+        let params = if explicit_params {
             let mut params = Vec::new();
+            // `{ -> … }` declares an empty parameter list: no `it` is supplied.
+            if self.is(&Tok::Arrow) {
+                self.advance();
+                self.skip_newlines();
+                let body = self.block()?;
+                return Ok(Expr::Closure {
+                    params,
+                    body,
+                    explicit_params,
+                });
+            }
             loop {
                 // An optional type in front of the parameter (`int a`) — a
                 // second identifier follows, so skip the type name.
@@ -1082,7 +1191,11 @@ impl Parser {
             Vec::new()
         };
         let body = self.block()?;
-        Ok(Expr::Closure { params, body })
+        Ok(Expr::Closure {
+            params,
+            body,
+            explicit_params,
+        })
     }
 
     /// Lookahead at statement start: is the current `{` a closure with an
@@ -1189,4 +1302,25 @@ fn binop(t: &Tok) -> Option<(BinOp, u8)> {
         Tok::Percent => (BinOp::Mod, 6),
         _ => return None,
     })
+}
+
+/// Parse the source of one `${ … }` / `$name` placeholder into an expression.
+/// It runs the same lexer and expression grammar as the enclosing script, so an
+/// interpolation is not a second, weaker language.
+fn parse_interpolation(src: &str) -> Result<Expr, String> {
+    let tokens = crate::lexer::lex(src)?;
+    let mut p = Parser {
+        toks: tokens,
+        pos: 0,
+        tmp: 0,
+    };
+    p.skip_newlines();
+    let e = p.expression()?;
+    p.skip_newlines();
+    if !p.is(&Tok::Eof) {
+        return Err(format!(
+            "groovyrs: trailing input in string interpolation `{src}`"
+        ));
+    }
+    Ok(e)
 }

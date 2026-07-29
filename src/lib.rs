@@ -19,6 +19,7 @@ pub mod lexer;
 pub mod lsp;
 pub mod parser;
 pub mod rust_ffi;
+pub mod throwable;
 
 pub use banner::version_banner;
 use fusevm::{VMResult, Value, VM};

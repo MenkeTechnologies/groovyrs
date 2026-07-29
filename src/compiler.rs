@@ -7,9 +7,21 @@
 //! `+` concatenation, and Groovy's `BigDecimal`-promoting `/` lowers to the
 //! `GDIV` builtin (integer `7/2` is `3.5`, not `3`).
 //!
-//! Locals are addressed by name through `GetVar`/`SetVar` (slice 1 has a single
-//! script frame with no lexical scopes), so this stays a direct, readable
-//! lowering. `break`/`continue` are backpatched through a loop-context stack.
+//! Locals are addressed by name through `GetVar`/`SetVar` at script level (a
+//! single frame with no lexical scopes) and by frame slot inside a function,
+//! closure, or method, so this stays a direct, readable lowering.
+//! `break`/`continue` are backpatched through a loop-context stack, and an
+//! exception unwind through a parallel `try`-context stack.
+//!
+//! Two lowerings are deliberately *conditional*, so a program that does not use
+//! the feature keeps exactly the bytecode it had:
+//!
+//! * the Groovy-truthiness call is emitted only where a condition's static shape
+//!   could be a value fusevm's own truth test reads differently (see
+//!   [`needs_truth`]) — a comparison-shaped loop guard stays on the native op
+//!   the JIT traces;
+//! * every exception op is gated on the program containing `try`/`throw` (see
+//!   [`body_uses_exceptions`]).
 
 use crate::ast::*;
 use fusevm::{Chunk, ChunkBuilder, Op, Value};
@@ -27,6 +39,33 @@ const RUST_COMPILE: &str = "__rust_compile";
 struct FnScope {
     vars: HashMap<String, u16>,
     next_slot: u16,
+}
+
+/// One enclosing `try` block's pending unwind jumps. A `throw` (or a post-call
+/// pending-exception check) inside the block emits a `Jump` and parks its index
+/// here; the jumps are backpatched to the handler once its position is known.
+/// The scope is popped before the `catch` arms are lowered, so a `throw` from a
+/// handler targets the *enclosing* `try` — Groovy's rule.
+struct TryScope {
+    unwind_ops: Vec<usize>,
+}
+
+/// One enclosing `try`'s `finally` body, kept so an early exit out of the block
+/// (`return`, `break`, `continue`, or an unwind from a `catch` arm) can emit the
+/// cleanup inline before it leaves. `javac` duplicates a `finally` body per exit
+/// path for exactly this reason, and so does groovyrs.
+struct FinallyFrame {
+    body: Vec<Stmt>,
+    /// `Compiler::loops.len()` at `try` entry — a `break`/`continue` runs the
+    /// frames at or above the depth of the loop it targets.
+    loop_depth: usize,
+    /// `Compiler::tries.len()` at `try` entry, *after* its own `TryScope` was
+    /// pushed. While the `try` body is being lowered this equals the current
+    /// depth (so an unwind goes to the handler, which runs the `finally`
+    /// itself); once the scope is popped for the `catch` arms it exceeds the
+    /// current depth, which is how an unwind out of a handler knows to run the
+    /// cleanup on its way out.
+    try_depth: usize,
 }
 
 /// One enclosing loop's backpatch targets.
@@ -85,6 +124,22 @@ struct Compiler {
     pending_closures: VecDeque<PendingClosure>,
     /// Monotonic id for synthetic closure names (`$closure_0`, `$closure_1`, …).
     closures_seen: u32,
+    /// True when the program contains `try` or `throw`. Only then is a call site
+    /// followed by a pending-exception check, so an exception-free program's
+    /// bytecode is exactly what it was before exceptions landed.
+    has_exceptions: bool,
+    /// True when the program uses exceptions *and* declares a class — the only
+    /// combination in which a native arithmetic op can re-enter the VM (an
+    /// operator-overload method on a user instance, dispatched by the strict
+    /// numeric hook) and so can leave an exception in flight. Gating on it keeps
+    /// arithmetic native for every other program.
+    exc_after_arith: bool,
+    /// The enclosing `try` blocks of the frame being lowered.
+    tries: Vec<TryScope>,
+    /// The enclosing `finally` bodies of the frame being lowered.
+    finallys: Vec<FinallyFrame>,
+    /// Monotonic id for compiler-minted temporaries (`$exc_…`).
+    temps_seen: u32,
 }
 
 /// A declared class's inheritance-relevant shape: its direct superclass and the
@@ -171,7 +226,23 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         class_index,
         pending_closures: VecDeque::new(),
         closures_seen: 0,
+        has_exceptions: body_uses_exceptions(&prog.body),
+        exc_after_arith: body_uses_exceptions(&prog.body)
+            && prog
+                .body
+                .iter()
+                .any(|s| matches!(s.kind, StmtKind::Class { .. })),
+        tries: Vec::new(),
+        finallys: Vec::new(),
+        temps_seen: 0,
     };
+    // Arm the host's exception machinery for this run. Emitted only by a program
+    // that uses `try`/`throw`, and it is what lets a runtime `Throwable` (a zero
+    // divisor) become catchable instead of aborting.
+    if c.has_exceptions {
+        c.b.emit(Op::CallBuiltin(crate::host::GEXC_ARM, 0), 0);
+        c.b.emit(Op::Pop, 0);
+    }
     // Register every class before running the body so `new C()` and method
     // dispatch resolve regardless of source order (like function forward refs).
     for stmt in &prog.body {
@@ -237,6 +308,17 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     let exit_ops = std::mem::take(&mut c.exit_ops);
     for op in exit_ops {
         c.b.patch_jump(op, end);
+    }
+    // An exception no handler claimed reaches here: report it Groovy-style and
+    // exit non-zero. Both the fall-through jump and every script-level exit land
+    // on this check, so an unwind out of the top level always finds it.
+    if c.has_exceptions {
+        c.b.emit(Op::CallBuiltin(crate::host::GEXC_PENDING, 0), 0);
+        let jf = c.b.emit(Op::JumpIfFalse(0), 0);
+        c.b.emit(Op::CallBuiltin(crate::host::GEXC_ABORT, 0), 0);
+        c.b.emit(Op::Pop, 0);
+        let after = c.b.current_pos();
+        c.b.patch_jump(jf, after);
     }
     Ok(c.b.build())
 }
@@ -307,6 +389,10 @@ impl Compiler {
             vars,
             next_slot: params.len() as u16,
         });
+        // A `try` in the caller must never catch a throw from this body: the
+        // unwind leaves the frame and the caller's post-call check re-raises it.
+        let prev_tries = std::mem::take(&mut self.tries);
+        let prev_finallys = std::mem::take(&mut self.finallys);
         self.cur_line = line;
 
         // Prologue: the caller pushed args left-to-right (param0 deepest,
@@ -323,6 +409,8 @@ impl Compiler {
         self.b.emit(Op::ReturnValue, self.cur_line);
 
         self.scope = prev;
+        self.tries = prev_tries;
+        self.finallys = prev_finallys;
         Ok(())
     }
 
@@ -353,6 +441,8 @@ impl Compiler {
         });
         let prev_fields = std::mem::replace(&mut self.cur_class_fields, pc.class_fields);
         let prev_methods = std::mem::replace(&mut self.cur_class_methods, pc.class_methods);
+        let prev_tries = std::mem::take(&mut self.tries);
+        let prev_finallys = std::mem::take(&mut self.finallys);
         let saved_line = self.cur_line;
         self.cur_line = pc.line;
 
@@ -370,6 +460,8 @@ impl Compiler {
         self.scope = prev;
         self.cur_class_fields = prev_fields;
         self.cur_class_methods = prev_methods;
+        self.tries = prev_tries;
+        self.finallys = prev_finallys;
         self.cur_line = saved_line;
         Ok(())
     }
@@ -549,6 +641,8 @@ impl Compiler {
         });
         let prev_fields = self.cur_class_fields.replace(field_set.clone());
         let prev_methods = self.cur_class_methods.replace(method_set.clone());
+        let prev_tries = std::mem::take(&mut self.tries);
+        let prev_finallys = std::mem::take(&mut self.finallys);
         let saved_line = self.cur_line;
         self.cur_line = line;
 
@@ -563,6 +657,8 @@ impl Compiler {
         self.scope = prev;
         self.cur_class_fields = prev_fields;
         self.cur_class_methods = prev_methods;
+        self.tries = prev_tries;
+        self.finallys = prev_finallys;
         self.cur_line = saved_line;
         Ok(())
     }
@@ -586,6 +682,8 @@ impl Compiler {
         });
         let prev_fields = self.cur_class_fields.take();
         let prev_methods = self.cur_class_methods.take();
+        let prev_tries = std::mem::take(&mut self.tries);
+        let prev_finallys = std::mem::take(&mut self.finallys);
         let saved_line = self.cur_line;
         self.cur_line = line;
         self.expr(init)?;
@@ -593,6 +691,8 @@ impl Compiler {
         self.scope = prev;
         self.cur_class_fields = prev_fields;
         self.cur_class_methods = prev_methods;
+        self.tries = prev_tries;
+        self.finallys = prev_finallys;
         self.cur_line = saved_line;
         Ok(())
     }
@@ -653,12 +753,11 @@ impl Compiler {
 
     /// Emit a read of the current instance's field `name` (`this.field`):
     /// `this` through the property builtin.
-    fn emit_field_get(&mut self, name: &str) {
+    fn emit_field_get(&mut self, name: &str) -> Result<(), String> {
         self.emit_this();
         let c = self.b.add_constant(Value::str(name.to_string()));
         self.b.emit(Op::LoadConst(c), self.cur_line);
-        self.b
-            .emit(Op::CallBuiltin(crate::host::GPROP, 0), self.cur_line);
+        self.emit_call_builtin(crate::host::GPROP, 0, self.cur_line)
     }
 
     /// Lower an assignment to a bare field inside a method: `field <op>= value`
@@ -672,21 +771,19 @@ impl Compiler {
                 self.expr(value)?;
             }
             AssignOp::Div => {
-                self.emit_field_get(name);
+                self.emit_field_get(name)?;
                 self.expr(value)?;
-                self.b
-                    .emit(Op::CallBuiltin(crate::host::GDIV, 2), self.cur_line);
+                self.emit_call_builtin(crate::host::GDIV, 2, self.cur_line)?;
             }
             _ => {
-                self.emit_field_get(name);
+                self.emit_field_get(name)?;
                 self.expr(value)?;
                 self.b.emit(compound_op(op), self.cur_line);
             }
         }
         let c = self.b.add_constant(Value::str(name.to_string()));
         self.b.emit(Op::LoadConst(c), self.cur_line);
-        self.b
-            .emit(Op::CallBuiltin(crate::host::GSETPROP, 0), self.cur_line);
+        self.emit_call_builtin(crate::host::GSETPROP, 0, self.cur_line)?;
         self.b.emit(Op::Pop, self.cur_line);
         Ok(())
     }
@@ -711,6 +808,20 @@ impl Compiler {
                 self.cur_line = last.line;
                 self.expr(e)?;
                 self.b.emit(Op::ReturnValue, last.line);
+            }
+            // Groovy's implicit return reaches through a trailing `if` or `try`:
+            // the value is the last expression of whichever branch runs. Rewrite
+            // that expression into an explicit `return` so the ordinary return
+            // path — including the `finally` bodies it must run first — applies.
+            StmtKind::If { .. } | StmtKind::Try { .. } => {
+                match tail_return(std::slice::from_ref(last)) {
+                    Some(rewritten) => {
+                        for s in &rewritten {
+                            self.stmt(s)?;
+                        }
+                    }
+                    None => self.stmt(last)?,
+                }
             }
             _ => self.stmt(last)?,
         }
@@ -756,8 +867,7 @@ impl Compiler {
                         let get = self.load_op_for(name);
                         self.b.emit(get, self.cur_line);
                         self.expr(value)?;
-                        self.b
-                            .emit(Op::CallBuiltin(crate::host::GDIV, 2), self.cur_line);
+                        self.emit_call_builtin(crate::host::GDIV, 2, self.cur_line)?;
                     }
                     _ => {
                         // `x <op>= e` → x = x <op> e
@@ -777,8 +887,7 @@ impl Compiler {
                 self.expr(value)?;
                 let c = self.b.add_constant(Value::str(name.clone()));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
-                self.b
-                    .emit(Op::CallBuiltin(crate::host::GSETPROP, 0), self.cur_line);
+                self.emit_call_builtin(crate::host::GSETPROP, 0, self.cur_line)?;
                 self.b.emit(Op::Pop, self.cur_line);
                 Ok(())
             }
@@ -812,7 +921,16 @@ impl Compiler {
                 update,
                 body,
             } => self.for_stmt(init, cond, update, body),
+            StmtKind::Try {
+                body,
+                catches,
+                finally_body,
+            } => self.try_stmt(body, catches, finally_body, s.line),
+            StmtKind::Throw(e) => self.throw_stmt(e, s.line),
             StmtKind::Break => {
+                // Any `finally` entered inside the loop being left runs first.
+                let depth = self.loops.len();
+                self.emit_finallys(|f| f.loop_depth >= depth)?;
                 let op = self.b.emit(Op::Jump(0), self.cur_line);
                 match self.loops.last_mut() {
                     Some(l) => l.break_ops.push(op),
@@ -821,6 +939,8 @@ impl Compiler {
                 Ok(())
             }
             StmtKind::Continue => {
+                let depth = self.loops.len();
+                self.emit_finallys(|f| f.loop_depth >= depth)?;
                 let op = self.b.emit(Op::Jump(0), self.cur_line);
                 self.loops
                     .last_mut()
@@ -830,21 +950,19 @@ impl Compiler {
                 Ok(())
             }
             StmtKind::Return { value } => {
+                // Evaluate the returned expression *before* the cleanup, so a
+                // `finally` that mutates a variable cannot change the value
+                // already computed — Java/Groovy's rule.
+                if let Some(e) = value {
+                    self.expr(e)?;
+                }
+                self.emit_finallys(|_| true)?;
                 if self.scope.is_some() {
-                    // In a function: carry the value out (a bare `return` → null).
-                    match value {
-                        Some(e) => self.expr(e)?,
-                        None => {
-                            self.b.emit(Op::LoadUndef, self.cur_line);
-                        }
+                    if value.is_none() {
+                        self.b.emit(Op::LoadUndef, self.cur_line);
                     }
                     self.b.emit(Op::ReturnValue, self.cur_line);
                 } else {
-                    // Top-level: the value (if any) becomes the script result;
-                    // end the script by jumping past the remaining statements.
-                    if let Some(e) = value {
-                        self.expr(e)?;
-                    }
                     let op = self.b.emit(Op::Jump(0), self.cur_line);
                     self.exit_ops.push(op);
                 }
@@ -856,8 +974,299 @@ impl Compiler {
         }
     }
 
-    fn if_stmt(&mut self, cond: &Expr, then: &[Stmt], els: &[Stmt]) -> Result<(), String> {
+    /// Lower a condition: the expression, followed by the Groovy-truthiness
+    /// builtin **only when the expression's static shape could be a value
+    /// fusevm's own truth test gets wrong** (a heap handle — `BigDecimal`,
+    /// ordered map, closure, instance — or a `String`, which fusevm reads
+    /// shell-style so `"0"` is false).
+    ///
+    /// This is what keeps the fix free for the loops that matter: a
+    /// comparison-shaped guard (`i < n`, `x != 0`, `!done`) is statically a
+    /// `Boolean`, so it emits exactly the ops it did before — a native
+    /// `NumLt`/`JumpIfFalse` pair the JIT still traces. Only a condition whose
+    /// type is not statically known (`while (x)`, `if (m)`) pays one builtin
+    /// call, and that is precisely the case where the answer was wrong before.
+    fn cond_expr(&mut self, cond: &Expr) -> Result<(), String> {
         self.expr(cond)?;
+        if needs_truth(cond) {
+            self.emit_call_builtin(crate::host::GTRUTH, 0, self.cur_line)?;
+        }
+        Ok(())
+    }
+
+    /// Lower a condition that must *keep* its operand as the expression's value
+    /// — the Elvis operator, whose result is the deciding operand itself
+    /// (`0 ?: "x"` is `"x"`, `5 ?: "x"` is `5`). Leaves the operand on the stack
+    /// with its truth value pushed above it, so a `JumpIf*` consumes only the
+    /// truth value. When the operand is statically fusevm-truth-compatible
+    /// nothing extra is emitted and the caller uses the `…Keep` jump instead.
+    ///
+    /// Returns `true` when the truth value was pushed (so the caller must use the
+    /// plain `JumpIfTrue`/`JumpIfFalse` form).
+    fn cond_expr_keep(&mut self, cond: &Expr) -> Result<bool, String> {
+        self.expr(cond)?;
+        if needs_truth(cond) {
+            self.emit_call_builtin(crate::host::GTRUTH_KEEP, 0, self.cur_line)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Lower an expression to a strict `Boolean`, for `&&`/`||` — whose *value*
+    /// in Groovy is a `Boolean`, not the deciding operand (`5 && 3` is `true`,
+    /// not `3`). An operand that is already statically a `Boolean` (a comparison,
+    /// `!x`, `instanceof`, a nested `&&`/`||`) emits nothing extra, so
+    /// `i < n && j < m` keeps its native ops.
+    fn bool_expr(&mut self, e: &Expr) -> Result<(), String> {
+        self.expr(e)?;
+        if !is_static_bool(e) {
+            self.emit_call_builtin(crate::host::GTRUTH, 0, self.cur_line)?;
+        }
+        Ok(())
+    }
+
+    // ── exceptions (`throw` / `try` / `catch` / `finally`) ──────────────────
+    //
+    // fusevm has no unwind opcode, so an in-flight exception is a host-side
+    // pending value ([`crate::host::GTHROW`]) plus two compiler-side pieces:
+    //
+    //   * inside a frame, an unwind is a `Jump` to the innermost enclosing
+    //     handler, backpatched through [`Compiler::tries`];
+    //   * across a frame boundary it is `LoadUndef; ReturnValue`, and every call
+    //     site is followed by a pending-exception check that repeats the unwind
+    //     in the caller. `Op::ReturnValue` truncates the value stack to the
+    //     frame base, so the abandoned operands of the callee cost nothing.
+    //
+    // Only the second piece has a runtime cost, and only in a program that uses
+    // exceptions at all ([`Compiler::has_exceptions`]).
+
+    /// A fresh compiler-minted temporary name (a frame slot inside a function, a
+    /// script binding at top level). The `$` prefix keeps it unnameable in
+    /// Groovy source.
+    fn fresh_temp(&mut self, tag: &str) -> String {
+        let n = self.temps_seen;
+        self.temps_seen += 1;
+        format!("$exc_{tag}_{n}")
+    }
+
+    fn emit_temp_set(&mut self, name: &str) {
+        let op = self.store_op_for_decl(name);
+        self.b.emit(op, self.cur_line);
+    }
+
+    fn emit_temp_get(&mut self, name: &str) {
+        let op = self.load_op_for(name);
+        self.b.emit(op, self.cur_line);
+    }
+
+    /// Emit a builtin call followed by the pending-exception check. Used for
+    /// every builtin that can re-enter the VM to run user code (method and
+    /// closure dispatch, `new`, property get/set, subscripting, `/`, `<=>`,
+    /// `println`'s `toString`, the truthiness `asBoolean`). A no-op beyond the
+    /// call itself in a program without exceptions.
+    fn emit_call_builtin(&mut self, id: u16, argc: u8, line: u32) -> Result<(), String> {
+        self.b.emit(Op::CallBuiltin(id, argc), line);
+        self.emit_exc_check(line)
+    }
+
+    /// Emit the post-call check: if the call left an exception in flight, unwind.
+    /// Must follow *every* call that can re-enter the VM — a path that skips it
+    /// swallows the exception and resumes with a placeholder value.
+    fn emit_exc_check(&mut self, line: u32) -> Result<(), String> {
+        if !self.has_exceptions {
+            return Ok(());
+        }
+        self.b
+            .emit(Op::CallBuiltin(crate::host::GEXC_PENDING, 0), line);
+        let jf = self.b.emit(Op::JumpIfFalse(0), line);
+        self.emit_unwind(line)?;
+        let after = self.b.current_pos();
+        self.b.patch_jump(jf, after);
+        Ok(())
+    }
+
+    /// Abandon the current computation: run any `finally` bodies this exit
+    /// skips, then jump to the innermost handler in this frame — or leave the
+    /// frame so the caller's post-call check picks the exception up. At script
+    /// top level it jumps to the program exit, where the uncaught report runs.
+    fn emit_unwind(&mut self, line: u32) -> Result<(), String> {
+        // A `finally` whose `try` scope has already been popped (we are inside
+        // its `catch` arms) is skipped by the jump below, so run it here.
+        let depth = self.tries.len();
+        self.emit_finallys(|f| f.try_depth > depth)?;
+        if !self.tries.is_empty() {
+            let op = self.b.emit(Op::Jump(0), line);
+            self.tries.last_mut().unwrap().unwind_ops.push(op);
+        } else if self.scope.is_some() {
+            // A function/method/closure frame: return a placeholder so the frame
+            // is popped and the stack rebalanced. The caller acts on the pending
+            // exception, not on this value.
+            self.b.emit(Op::LoadUndef, line);
+            self.b.emit(Op::ReturnValue, line);
+        } else {
+            let op = self.b.emit(Op::Jump(0), line);
+            self.exit_ops.push(op);
+        }
+        Ok(())
+    }
+
+    /// Emit, innermost first, the `finally` bodies of the enclosing frames that
+    /// `keep` selects — the cleanup an early exit would otherwise skip. Each
+    /// body is lowered with the frame stack emptied, so a `return` inside a
+    /// `finally` cannot re-emit its own cleanup forever.
+    fn emit_finallys(&mut self, keep: impl Fn(&FinallyFrame) -> bool) -> Result<(), String> {
+        let selected: Vec<usize> = (0..self.finallys.len())
+            .rev()
+            .filter(|&i| keep(&self.finallys[i]))
+            .collect();
+        if selected.is_empty() {
+            return Ok(());
+        }
+        let saved = std::mem::take(&mut self.finallys);
+        let mut result = Ok(());
+        for &i in &selected {
+            for s in &saved[i].body {
+                result = result.and(self.stmt(s));
+            }
+        }
+        self.finallys = saved;
+        result
+    }
+
+    /// Lower `throw <expr>`: evaluate the throwable, park it as the pending
+    /// exception, then unwind.
+    fn throw_stmt(&mut self, e: &Expr, line: u32) -> Result<(), String> {
+        self.expr(e)?;
+        self.b.emit(Op::CallBuiltin(crate::host::GTHROW, 1), line);
+        self.b.emit(Op::Pop, line);
+        self.emit_unwind(line)?;
+        Ok(())
+    }
+
+    /// Lower `try { … } catch (T e) { … }* [finally { … }]`.
+    ///
+    /// ```text
+    ///   depth = GEXC_DEPTH          ; so the handler can drop abandoned operands
+    ///   <try body>                  ; unwinds inside it jump to `handler`
+    ///   Jump normal
+    /// handler:
+    ///   GEXC_CUT(depth); exc = GEXC_TAKE
+    ///   if (exc instanceof E1) { e1 = exc; <catch 1>; Jump normal }
+    ///   …
+    ///   <finally>                   ; unmatched: the cleanup still runs …
+    ///   GTHROW(exc); <unwind>       ; … then the exception continues outward
+    /// normal:
+    ///   <finally>
+    /// ```
+    ///
+    /// The `finally` body is emitted once per exit path rather than shared
+    /// through a subroutine, because a shared copy would need a return address
+    /// and fusevm's frames are for calls, not local jumps — the same duplication
+    /// `javac` performs.
+    fn try_stmt(
+        &mut self,
+        body: &[Stmt],
+        catches: &[CatchArm],
+        finally_body: &[Stmt],
+        line: u32,
+    ) -> Result<(), String> {
+        // Record the stack depth so the handler can discard whatever the
+        // abandoned expression had already pushed.
+        let depth_t = self.fresh_temp("depth");
+        self.b
+            .emit(Op::CallBuiltin(crate::host::GEXC_DEPTH, 0), line);
+        self.emit_temp_set(&depth_t);
+
+        self.tries.push(TryScope {
+            unwind_ops: Vec::new(),
+        });
+        let has_finally = !finally_body.is_empty();
+        if has_finally {
+            self.finallys.push(FinallyFrame {
+                body: finally_body.to_vec(),
+                loop_depth: self.loops.len(),
+                try_depth: self.tries.len(),
+            });
+        }
+        for s in body {
+            self.stmt(s)?;
+        }
+        let scope = self.tries.pop().unwrap();
+        let to_normal = self.b.emit(Op::Jump(0), line);
+
+        // ── handler ──
+        let handler = self.b.current_pos();
+        for op in scope.unwind_ops {
+            self.b.patch_jump(op, handler);
+        }
+        self.emit_temp_get(&depth_t);
+        self.b.emit(Op::CallBuiltin(crate::host::GEXC_CUT, 1), line);
+        self.b.emit(Op::Pop, line);
+        let exc_t = self.fresh_temp("exc");
+        self.b
+            .emit(Op::CallBuiltin(crate::host::GEXC_TAKE, 0), line);
+        self.emit_temp_set(&exc_t);
+
+        // `catch` arms in source order — the first type match wins.
+        let mut matched_jumps = Vec::new();
+        for arm in catches {
+            // `exc instanceof T` for each caught type, OR-ed for a multi-catch.
+            let mut type_hits = Vec::new();
+            for (i, ty) in arm.types.iter().enumerate() {
+                if i > 0 {
+                    self.b.emit(Op::Pop, line);
+                }
+                self.emit_temp_get(&exc_t);
+                let c = self.b.add_constant(Value::str(ty.clone()));
+                self.b.emit(Op::LoadConst(c), line);
+                self.b
+                    .emit(Op::CallBuiltin(crate::host::GINSTANCEOF, 0), line);
+                if i + 1 < arm.types.len() {
+                    type_hits.push(self.b.emit(Op::JumpIfTrueKeep(0), line));
+                }
+            }
+            let tested = self.b.current_pos();
+            for op in type_hits {
+                self.b.patch_jump(op, tested);
+            }
+            let jf = self.b.emit(Op::JumpIfFalse(0), line);
+            self.emit_temp_get(&exc_t);
+            self.emit_temp_set(&arm.name);
+            for s in &arm.body {
+                self.stmt(s)?;
+            }
+            matched_jumps.push(self.b.emit(Op::Jump(0), line));
+            let next = self.b.current_pos();
+            self.b.patch_jump(jf, next);
+        }
+        // Past the arms the `finally` is no longer this block's responsibility —
+        // both remaining paths emit it inline.
+        if has_finally {
+            self.finallys.pop();
+        }
+        // No arm matched: run `finally`, then let the exception continue outward.
+        for s in finally_body {
+            self.stmt(s)?;
+        }
+        self.emit_temp_get(&exc_t);
+        self.b.emit(Op::CallBuiltin(crate::host::GTHROW, 1), line);
+        self.b.emit(Op::Pop, line);
+        self.emit_unwind(line)?;
+
+        // ── normal completion (the body fell through, or an arm finished) ──
+        let normal = self.b.current_pos();
+        self.b.patch_jump(to_normal, normal);
+        for op in matched_jumps {
+            self.b.patch_jump(op, normal);
+        }
+        for s in finally_body {
+            self.stmt(s)?;
+        }
+        Ok(())
+    }
+
+    fn if_stmt(&mut self, cond: &Expr, then: &[Stmt], els: &[Stmt]) -> Result<(), String> {
+        self.cond_expr(cond)?;
         let jf = self.b.emit(Op::JumpIfFalse(0), self.cur_line);
         for s in then {
             self.stmt(s)?;
@@ -880,7 +1289,7 @@ impl Compiler {
 
     fn while_stmt(&mut self, cond: &Expr, body: &[Stmt]) -> Result<(), String> {
         let top = self.b.current_pos();
-        self.expr(cond)?;
+        self.cond_expr(cond)?;
         let jf = self.b.emit(Op::JumpIfFalse(0), self.cur_line);
         self.loops.push(Loop {
             continue_ops: Vec::new(),
@@ -916,7 +1325,7 @@ impl Compiler {
         let top = self.b.current_pos();
         let jf = match cond {
             Some(c) => {
-                self.expr(c)?;
+                self.cond_expr(c)?;
                 Some(self.b.emit(Op::JumpIfFalse(0), self.cur_line))
             }
             None => None,
@@ -979,7 +1388,7 @@ impl Compiler {
         } else {
             crate::host::GPRINT
         };
-        self.b.emit(Op::CallBuiltin(id, n), self.cur_line);
+        self.emit_call_builtin(id, n, self.cur_line)?;
         Ok(())
     }
 
@@ -1006,6 +1415,22 @@ impl Compiler {
                 let c = self.b.add_constant(Value::str(s.clone()));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
             }
+            // A `GString` pushes each rendered part and joins them through the
+            // host builtin, which renders an object through its `toString()` —
+            // lowering to `+` instead would miss that dispatch.
+            Expr::GString(parts) => {
+                for part in parts {
+                    match part {
+                        GStringPart::Text(t) => {
+                            let c = self.b.add_constant(Value::str(t.clone()));
+                            self.b.emit(Op::LoadConst(c), self.cur_line);
+                        }
+                        GStringPart::Expr(e) => self.expr(e)?,
+                    }
+                }
+                self.b.emit(Op::LoadInt(parts.len() as i64), self.cur_line);
+                self.emit_call_builtin(crate::host::GSTRING, 0, self.cur_line)?;
+            }
             Expr::Bool(b) => {
                 self.b
                     .emit(if *b { Op::LoadTrue } else { Op::LoadFalse }, self.cur_line);
@@ -1017,7 +1442,7 @@ impl Compiler {
             Expr::Var(name) => {
                 // A bare field name inside a method/constructor is `this.field`.
                 if self.is_field(name) {
-                    self.emit_field_get(name);
+                    self.emit_field_get(name)?;
                 } else {
                     let get = self.load_op_for(name);
                     self.b.emit(get, self.cur_line);
@@ -1041,10 +1466,7 @@ impl Compiler {
                 let sname = self.cur_class_super.clone().unwrap_or_default();
                 let sidx = self.b.add_constant(Value::str(sname));
                 self.b.emit(Op::LoadConst(sidx), *line);
-                self.b.emit(
-                    Op::CallBuiltin(crate::host::GSUPER_CTOR, args.len() as u8),
-                    *line,
-                );
+                self.emit_call_builtin(crate::host::GSUPER_CTOR, args.len() as u8, *line)?;
             }
             Expr::InstanceOf { value, class } => {
                 // `value instanceof Class` — stack: [value, classname].
@@ -1061,14 +1483,13 @@ impl Compiler {
                 }
                 let c = self.b.add_constant(Value::str(class.clone()));
                 self.b.emit(Op::LoadConst(c), *line);
-                self.b
-                    .emit(Op::CallBuiltin(crate::host::GNEW, args.len() as u8), *line);
+                self.emit_call_builtin(crate::host::GNEW, args.len() as u8, *line)?;
             }
             Expr::Index { recv, index, line } => {
                 // `recv[index]` — stack: recv (deepest), index.
                 self.expr(recv)?;
                 self.expr(index)?;
-                self.b.emit(Op::CallBuiltin(crate::host::GINDEX, 0), *line);
+                self.emit_call_builtin(crate::host::GINDEX, 0, *line)?;
             }
             Expr::CallValue { callee, args, line } => {
                 // Invoke the value of `callee` with `args` — the postfix
@@ -1080,22 +1501,24 @@ impl Compiler {
                 }
                 let nidx = self.b.add_constant(Value::str("<closure>".to_string()));
                 self.b.emit(Op::LoadConst(nidx), *line);
-                self.b.emit(
-                    Op::CallBuiltin(crate::host::GCLOSURE_CALL, args.len() as u8),
-                    *line,
-                );
+                self.emit_call_builtin(crate::host::GCLOSURE_CALL, args.len() as u8, *line)?;
             }
-            Expr::Unary { op, rhs } => {
-                self.expr(rhs)?;
-                match op {
-                    UnOp::Neg => {
-                        self.b.emit(Op::Negate, self.cur_line);
-                    }
-                    UnOp::Not => {
-                        self.b.emit(Op::LogNot, self.cur_line);
+            Expr::Unary { op, rhs } => match op {
+                UnOp::Neg => {
+                    self.expr(rhs)?;
+                    self.b.emit(Op::Negate, self.cur_line);
+                    if self.exc_after_arith {
+                        self.emit_exc_check(self.cur_line)?;
                     }
                 }
-            }
+                // `!x` negates Groovy truth, so its operand goes through the
+                // same condition lowering `if`/`while` use — otherwise `!0.0`
+                // and `!"0"` would read the raw fusevm truth of the operand.
+                UnOp::Not => {
+                    self.cond_expr(rhs)?;
+                    self.b.emit(Op::LogNot, self.cur_line);
+                }
+            },
             Expr::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs)?,
             // Println/PostIncDec in value position: the print builtin leaves its
             // `null` return value on the stack.
@@ -1156,10 +1579,7 @@ impl Compiler {
                     let sname = self.cur_class_super.clone().unwrap_or_default();
                     let sidx = self.b.add_constant(Value::str(sname));
                     self.b.emit(Op::LoadConst(sidx), *line);
-                    self.b.emit(
-                        Op::CallBuiltin(crate::host::GSUPER_METHOD, args.len() as u8),
-                        *line,
-                    );
+                    self.emit_call_builtin(crate::host::GSUPER_METHOD, args.len() as u8, *line)?;
                 } else {
                     // Stack: [recv, arg0..argN-1, methodname]; the GDK dispatch
                     // builtin pops the name, the N args, then the receiver. The
@@ -1176,7 +1596,7 @@ impl Compiler {
                     } else {
                         crate::host::GMETHOD
                     };
-                    self.b.emit(Op::CallBuiltin(id, args.len() as u8), *line);
+                    self.emit_call_builtin(id, args.len() as u8, *line)?;
                 }
             }
             Expr::Property {
@@ -1194,9 +1614,13 @@ impl Compiler {
                 } else {
                     crate::host::GPROP
                 };
-                self.b.emit(Op::CallBuiltin(id, 0), *line);
+                self.emit_call_builtin(id, 0, *line)?;
             }
-            Expr::Closure { params, body } => self.closure(params, body)?,
+            Expr::Closure {
+                params,
+                body,
+                explicit_params,
+            } => self.closure(params, body, *explicit_params)?,
             Expr::Range {
                 start,
                 end,
@@ -1215,7 +1639,7 @@ impl Compiler {
             }
             Expr::Ternary { cond, then, els } => {
                 // `cond ? then : els` — branch on Groovy truthiness.
-                self.expr(cond)?;
+                self.cond_expr(cond)?;
                 let jf = self.b.emit(Op::JumpIfFalse(0), self.cur_line);
                 self.expr(then)?;
                 let jend = self.b.emit(Op::Jump(0), self.cur_line);
@@ -1227,9 +1651,19 @@ impl Compiler {
             }
             Expr::Elvis { lhs, rhs } => {
                 // `lhs ?: rhs` — keep `lhs` when Groovy-truthy, else evaluate
-                // `rhs`. `JumpIfTrueKeep` leaves the deciding `lhs` on the stack.
-                self.expr(lhs)?;
-                let jt = self.b.emit(Op::JumpIfTrueKeep(0), self.cur_line);
+                // `rhs`. With a statically-`Boolean` `lhs`, `JumpIfTrueKeep`
+                // leaves the deciding value itself; otherwise the truth builtin
+                // pushes the decision above it and a plain `JumpIfTrue` consumes
+                // only that, again leaving `lhs`.
+                let pushed = self.cond_expr_keep(lhs)?;
+                let jt = self.b.emit(
+                    if pushed {
+                        Op::JumpIfTrue(0)
+                    } else {
+                        Op::JumpIfTrueKeep(0)
+                    },
+                    self.cur_line,
+                );
                 self.b.emit(Op::Pop, self.cur_line);
                 self.expr(rhs)?;
                 let end = self.b.current_pos();
@@ -1244,8 +1678,15 @@ impl Compiler {
     /// handle carries the synthetic name-pool index (which resolves to the body
     /// entry via `Chunk::find_sub` at call time) and the parameter count. An
     /// implicit-`it` closure (no explicit parameters) has one parameter, `it`.
-    fn closure(&mut self, params: &[String], body: &[Stmt]) -> Result<(), String> {
-        let effective: Vec<String> = if params.is_empty() {
+    fn closure(
+        &mut self,
+        params: &[String],
+        body: &[Stmt],
+        explicit_params: bool,
+    ) -> Result<(), String> {
+        // No parameter list at all means Groovy's single implicit `it`; an
+        // explicit list — even the empty `{ -> … }` — is taken as written.
+        let effective: Vec<String> = if params.is_empty() && !explicit_params {
             vec!["it".to_string()]
         } else {
             params.to_vec()
@@ -1336,6 +1777,7 @@ impl Compiler {
             }
             let nidx = self.b.add_name(name);
             self.b.emit(Op::Call(nidx, args.len() as u8), line);
+            self.emit_exc_check(line)?;
             return Ok(());
         }
         // Unknown callee. With a `rust { ... }` block present it may be an FFI
@@ -1362,10 +1804,7 @@ impl Compiler {
             }
             let midx = self.b.add_constant(Value::str(name.to_string()));
             self.b.emit(Op::LoadConst(midx), line);
-            self.b.emit(
-                Op::CallBuiltin(crate::host::GMETHOD, args.len() as u8),
-                line,
-            );
+            self.emit_call_builtin(crate::host::GMETHOD, args.len() as u8, line)?;
             return Ok(());
         }
         // Otherwise `name(args)` is a call through a variable — a closure invoked
@@ -1379,30 +1818,30 @@ impl Compiler {
         }
         let nidx = self.b.add_constant(Value::str(name.to_string()));
         self.b.emit(Op::LoadConst(nidx), line);
-        self.b.emit(
-            Op::CallBuiltin(crate::host::GCLOSURE_CALL, args.len() as u8),
-            line,
-        );
+        self.emit_call_builtin(crate::host::GCLOSURE_CALL, args.len() as u8, line)?;
         Ok(())
     }
 
     fn binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<(), String> {
-        // `&&` / `||` short-circuit: keep the deciding operand as the result.
+        // `&&` / `||` short-circuit and evaluate to a `Boolean` (Groovy's
+        // logical operators are boolean-valued: `5 && 3` is `true`, `0 || 7` is
+        // `true`). Both operands lower through `bool_expr`, so the kept deciding
+        // value is already the `Boolean` result.
         match op {
             BinOp::And => {
-                self.expr(lhs)?;
+                self.bool_expr(lhs)?;
                 let jf = self.b.emit(Op::JumpIfFalseKeep(0), self.cur_line);
                 self.b.emit(Op::Pop, self.cur_line);
-                self.expr(rhs)?;
+                self.bool_expr(rhs)?;
                 let end = self.b.current_pos();
                 self.b.patch_jump(jf, end);
                 return Ok(());
             }
             BinOp::Or => {
-                self.expr(lhs)?;
+                self.bool_expr(lhs)?;
                 let jt = self.b.emit(Op::JumpIfTrueKeep(0), self.cur_line);
                 self.b.emit(Op::Pop, self.cur_line);
-                self.expr(rhs)?;
+                self.bool_expr(rhs)?;
                 let end = self.b.current_pos();
                 self.b.patch_jump(jt, end);
                 return Ok(());
@@ -1414,16 +1853,14 @@ impl Compiler {
         // Groovy `/` is not a native op — it lowers to the GDIV builtin so
         // integer division promotes to a decimal (`7/2 → 3.5`).
         if let BinOp::Div = op {
-            self.b
-                .emit(Op::CallBuiltin(crate::host::GDIV, 2), self.cur_line);
+            self.emit_call_builtin(crate::host::GDIV, 2, self.cur_line)?;
             return Ok(());
         }
         // Groovy `<=>` is not a native op — it lowers to the GCMP builtin, which
         // dispatches a user `compareTo` on an instance operand or yields the
         // primitive sign (`-1`/`0`/`1`).
         if let BinOp::Cmp = op {
-            self.b
-                .emit(Op::CallBuiltin(crate::host::GCMP, 2), self.cur_line);
+            self.emit_call_builtin(crate::host::GCMP, 2, self.cur_line)?;
             return Ok(());
         }
         let vop = match op {
@@ -1441,7 +1878,90 @@ impl Compiler {
             BinOp::And | BinOp::Or => unreachable!("handled above"),
         };
         self.b.emit(vop, self.cur_line);
+        // A user-class operand routes this op through the strict numeric hook,
+        // which re-enters the VM to run an operator-overload method — the one
+        // native op that can leave an exception in flight. Only a program that
+        // both uses exceptions and declares a class pays the check.
+        if self.exc_after_arith {
+            self.emit_exc_check(self.cur_line)?;
+        }
         Ok(())
+    }
+}
+
+// ── Static condition typing (Groovy truthiness) ─────────────────────────────
+
+/// Does a condition of this shape need the Groovy-truthiness builtin?
+///
+/// `false` means the expression's runtime value is guaranteed to be one of the
+/// fusevm variants whose native `is_truthy` already matches Groovy — `Int`,
+/// `Float`, `Bool`, `Undef` (`null`), `Array` (a list), `Hash`. Those conditions
+/// emit no builtin at all, so `while (i < n)` / `for (…; i < n; …)` keep the
+/// native `NumLt`+`JumpIfFalse` pair and stay JIT-traceable.
+///
+/// `true` (the conservative default) covers the two families fusevm reads
+/// differently from Groovy:
+///
+/// * a `Value::Obj` heap handle — a `BigDecimal` (so `if (0.0)` is false),
+///   an ordered map (`if ([:])`), a closure, a class instance (`asBoolean()`);
+/// * a `String`, which fusevm reads shell-style, making `"0"` false where
+///   Groovy makes every non-empty string true.
+fn needs_truth(e: &Expr) -> bool {
+    match e {
+        // Statically a number / boolean / null.
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Null => false,
+        // A list literal and a materialised range are both `Value::Array`.
+        Expr::List(_) | Expr::Range { .. } => false,
+        // Comparisons and `instanceof` yield a `Boolean`; `<=>` an `Integer`;
+        // `&&`/`||` are boolean-valued in Groovy (see `Compiler::binary`).
+        Expr::Binary {
+            op:
+                BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Gt
+                | BinOp::Le
+                | BinOp::Ge
+                | BinOp::Cmp
+                | BinOp::And
+                | BinOp::Or,
+            ..
+        } => false,
+        // `!x` is a `Boolean`; unary `-` can be a decimal.
+        Expr::Unary { op: UnOp::Not, .. } => false,
+        Expr::InstanceOf { .. } => false,
+        // A conditional yields one of its arms.
+        Expr::Ternary { then, els, .. } => needs_truth(then) || needs_truth(els),
+        Expr::Elvis { lhs, rhs } => needs_truth(lhs) || needs_truth(rhs),
+        // Everything else — a variable, call, property, arithmetic, string,
+        // decimal literal, map/closure literal, `new` — could be a handle.
+        _ => true,
+    }
+}
+
+/// Is this expression's value statically a `Boolean`? Used by `&&`/`||`, whose
+/// Groovy result is a `Boolean` rather than the deciding operand — an operand
+/// that already is one needs no conversion, so `i < n && j < m` compiles to the
+/// same native ops it did before.
+fn is_static_bool(e: &Expr) -> bool {
+    match e {
+        Expr::Bool(_) => true,
+        Expr::Unary { op: UnOp::Not, .. } => true,
+        Expr::InstanceOf { .. } => true,
+        Expr::Binary { op, .. } => matches!(
+            op,
+            BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Gt
+                | BinOp::Le
+                | BinOp::Ge
+                | BinOp::And
+                | BinOp::Or
+        ),
+        Expr::Ternary { then, els, .. } => is_static_bool(then) && is_static_bool(els),
+        Expr::Elvis { lhs, rhs } => is_static_bool(lhs) && is_static_bool(rhs),
+        _ => false,
     }
 }
 
@@ -1477,6 +1997,18 @@ fn collect_bound_stmts(body: &[Stmt], bound: &mut HashSet<String>) {
                 collect_bound_stmts(els, bound);
             }
             StmtKind::While { body, .. } => collect_bound_stmts(body, bound),
+            StmtKind::Try {
+                body,
+                catches,
+                finally_body,
+            } => {
+                collect_bound_stmts(body, bound);
+                collect_bound_stmts(finally_body, bound);
+                for arm in catches {
+                    bound.insert(arm.name.clone());
+                    collect_bound_stmts(&arm.body, bound);
+                }
+            }
             StmtKind::For {
                 init, update, body, ..
             } => {
@@ -1565,6 +2097,25 @@ fn free_in_stmt(
             free_in_expr(recv, bound, out, seen);
             free_in_expr(value, bound, out, seen);
         }
+        StmtKind::Try {
+            body,
+            catches,
+            finally_body,
+        } => {
+            for s in body.iter().chain(finally_body) {
+                free_in_stmt(s, bound, out, seen);
+            }
+            for arm in catches {
+                // The caught binding is local to its arm.
+                let mut inner = bound.clone();
+                inner.insert(arm.name.clone());
+                collect_bound_stmts(&arm.body, &mut inner);
+                for s in &arm.body {
+                    free_in_stmt(s, &inner, out, seen);
+                }
+            }
+        }
+        StmtKind::Throw(e) => free_in_expr(e, bound, out, seen),
         StmtKind::Break
         | StmtKind::Continue
         | StmtKind::Function { .. }
@@ -1635,11 +2186,15 @@ fn free_in_expr(
                 free_in_expr(a, bound, out, seen);
             }
         }
-        Expr::Closure { params, body } => {
+        Expr::Closure {
+            params,
+            body,
+            explicit_params,
+        } => {
             // Descend with the nested closure's own bindings added, so a name
             // free in the inner closure but not bound here still surfaces.
             let mut inner = bound.clone();
-            if params.is_empty() {
+            if params.is_empty() && !*explicit_params {
                 inner.insert("it".to_string());
             }
             for p in params {
@@ -1653,6 +2208,13 @@ fn free_in_expr(
         Expr::Range { start, end, .. } => {
             free_in_expr(start, bound, out, seen);
             free_in_expr(end, bound, out, seen);
+        }
+        Expr::GString(parts) => {
+            for p in parts {
+                if let GStringPart::Expr(e) = p {
+                    free_in_expr(e, bound, out, seen);
+                }
+            }
         }
         Expr::Ternary { cond, then, els } => {
             free_in_expr(cond, bound, out, seen);
@@ -1679,6 +2241,146 @@ fn free_in_expr(
         | Expr::Str(_)
         | Expr::Bool(_)
         | Expr::Null => {}
+    }
+}
+
+// ── Implicit return through a trailing `if` / `try` ─────────────────────────
+
+/// Rewrite a body's trailing value expression into an explicit `return`,
+/// descending into a trailing `if` (both branches) and a trailing `try` (the
+/// block and every `catch` arm — never the `finally`, whose value Groovy
+/// discards). Returns `None` when the body has no trailing value expression to
+/// carry out, in which case the caller keeps its original lowering.
+fn tail_return(body: &[Stmt]) -> Option<Vec<Stmt>> {
+    let (last, init) = body.split_last()?;
+    let new_last = match &last.kind {
+        // `println`/`print` are void — no implicit return value.
+        StmtKind::Expr(Expr::Println { .. }) => return None,
+        StmtKind::Expr(e) => Stmt::new(
+            last.line,
+            StmtKind::Return {
+                value: Some(e.clone()),
+            },
+        ),
+        StmtKind::If { cond, then, els } => Stmt::new(
+            last.line,
+            StmtKind::If {
+                cond: cond.clone(),
+                then: tail_return(then).unwrap_or_else(|| then.to_vec()),
+                els: tail_return(els).unwrap_or_else(|| els.to_vec()),
+            },
+        ),
+        StmtKind::Try {
+            body: tbody,
+            catches,
+            finally_body,
+        } => Stmt::new(
+            last.line,
+            StmtKind::Try {
+                body: tail_return(tbody).unwrap_or_else(|| tbody.to_vec()),
+                catches: catches
+                    .iter()
+                    .map(|a| CatchArm {
+                        types: a.types.clone(),
+                        name: a.name.clone(),
+                        body: tail_return(&a.body).unwrap_or_else(|| a.body.clone()),
+                    })
+                    .collect(),
+                finally_body: finally_body.clone(),
+            },
+        ),
+        _ => return None,
+    };
+    let mut out = init.to_vec();
+    out.push(new_last);
+    Some(out)
+}
+
+// ── Exception detection (does the program use `try`/`throw`?) ──────────────
+
+/// True when any statement in `body` (recursively, including class members and
+/// closure bodies) is a `try` or a `throw`. Gates every exception-related op the
+/// compiler emits, so an exception-free program's bytecode is unchanged.
+fn body_uses_exceptions(body: &[Stmt]) -> bool {
+    body.iter().any(|s| match &s.kind {
+        StmtKind::Try { .. } | StmtKind::Throw(_) => true,
+        StmtKind::Local { init, .. } => init.as_ref().is_some_and(expr_uses_exceptions),
+        StmtKind::Assign { value, .. } => expr_uses_exceptions(value),
+        StmtKind::Expr(e) => expr_uses_exceptions(e),
+        StmtKind::If { cond, then, els } => {
+            expr_uses_exceptions(cond) || body_uses_exceptions(then) || body_uses_exceptions(els)
+        }
+        StmtKind::While { cond, body } => expr_uses_exceptions(cond) || body_uses_exceptions(body),
+        StmtKind::For {
+            init,
+            cond,
+            update,
+            body,
+        } => {
+            init.as_deref()
+                .is_some_and(|s| body_uses_exceptions(std::slice::from_ref(s)))
+                || cond.as_ref().is_some_and(expr_uses_exceptions)
+                || update
+                    .as_deref()
+                    .is_some_and(|s| body_uses_exceptions(std::slice::from_ref(s)))
+                || body_uses_exceptions(body)
+        }
+        StmtKind::Return { value } => value.as_ref().is_some_and(expr_uses_exceptions),
+        StmtKind::Function { body, .. } => body_uses_exceptions(body),
+        StmtKind::SetProperty { recv, value, .. } => {
+            expr_uses_exceptions(recv) || expr_uses_exceptions(value)
+        }
+        StmtKind::Class {
+            fields,
+            ctors,
+            methods,
+            ..
+        } => {
+            fields
+                .iter()
+                .any(|f| f.init.as_ref().is_some_and(expr_uses_exceptions))
+                || ctors.iter().any(|c| body_uses_exceptions(&c.body))
+                || methods.iter().any(|m| body_uses_exceptions(&m.body))
+        }
+        StmtKind::Break | StmtKind::Continue => false,
+    })
+}
+
+fn expr_uses_exceptions(e: &Expr) -> bool {
+    match e {
+        Expr::Closure { body, .. } => body_uses_exceptions(body),
+        Expr::Unary { rhs, .. } => expr_uses_exceptions(rhs),
+        Expr::Binary { lhs, rhs, .. } => expr_uses_exceptions(lhs) || expr_uses_exceptions(rhs),
+        Expr::Println { arg, .. } => arg.as_deref().is_some_and(expr_uses_exceptions),
+        Expr::Call { args, .. } | Expr::New { args, .. } | Expr::SuperCtor { args, .. } => {
+            args.iter().any(expr_uses_exceptions)
+        }
+        Expr::CallValue { callee, args, .. } => {
+            expr_uses_exceptions(callee) || args.iter().any(expr_uses_exceptions)
+        }
+        Expr::List(elems) => elems.iter().any(expr_uses_exceptions),
+        Expr::Map(entries) => entries
+            .iter()
+            .any(|(k, v)| expr_uses_exceptions(k) || expr_uses_exceptions(v)),
+        Expr::MethodCall { recv, args, .. } => {
+            expr_uses_exceptions(recv) || args.iter().any(expr_uses_exceptions)
+        }
+        Expr::Property { recv, .. } | Expr::InstanceOf { value: recv, .. } => {
+            expr_uses_exceptions(recv)
+        }
+        Expr::Index { recv, index, .. } => {
+            expr_uses_exceptions(recv) || expr_uses_exceptions(index)
+        }
+        Expr::Range { start, end, .. } => expr_uses_exceptions(start) || expr_uses_exceptions(end),
+        Expr::GString(parts) => parts.iter().any(|p| match p {
+            GStringPart::Expr(e) => expr_uses_exceptions(e),
+            GStringPart::Text(_) => false,
+        }),
+        Expr::Ternary { cond, then, els } => {
+            expr_uses_exceptions(cond) || expr_uses_exceptions(then) || expr_uses_exceptions(els)
+        }
+        Expr::Elvis { lhs, rhs } => expr_uses_exceptions(lhs) || expr_uses_exceptions(rhs),
+        _ => false,
     }
 }
 
@@ -1724,6 +2426,16 @@ fn body_has_ffi(body: &[Stmt]) -> bool {
                 || ctors.iter().any(|c| body_has_ffi(&c.body))
                 || methods.iter().any(|m| body_has_ffi(&m.body))
         }
+        StmtKind::Try {
+            body,
+            catches,
+            finally_body,
+        } => {
+            body_has_ffi(body)
+                || body_has_ffi(finally_body)
+                || catches.iter().any(|c| body_has_ffi(&c.body))
+        }
+        StmtKind::Throw(e) => expr_has_ffi(e),
         StmtKind::Break | StmtKind::Continue => false,
     })
 }
@@ -1742,6 +2454,10 @@ fn expr_has_ffi(e: &Expr) -> bool {
         Expr::Property { recv, .. } => expr_has_ffi(recv),
         Expr::Closure { body, .. } => body_has_ffi(body),
         Expr::Range { start, end, .. } => expr_has_ffi(start) || expr_has_ffi(end),
+        Expr::GString(parts) => parts.iter().any(|p| match p {
+            GStringPart::Expr(e) => expr_has_ffi(e),
+            GStringPart::Text(_) => false,
+        }),
         Expr::Ternary { cond, then, els } => {
             expr_has_ffi(cond) || expr_has_ffi(then) || expr_has_ffi(els)
         }

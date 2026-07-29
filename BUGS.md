@@ -1,9 +1,9 @@
 # Known gaps
 
-An honest list of what groovyrs does **not** do yet. Slice 1 is the Groovy
-*script* subset — top-level statements, arithmetic/logic, control flow, and the
-`println`/`print` commands. Unsupported constructs are reported as parse or
-compile errors, never silently mis-run.
+An honest list of what groovyrs does **not** do yet. The target is the Groovy
+*script* model — top-level statements, functions, classes, closures, control
+flow, exceptions, and the `println`/`print` commands. Unsupported constructs are
+reported as parse or compile errors, never silently mis-run.
 
 ## Implemented
 
@@ -20,12 +20,14 @@ compile errors, never silently mis-run.
   `reverse`/`isEmpty`/`contains`, list `isEmpty`/`contains`/`get`/`reverse`,
   map `isEmpty`/`containsKey`; property `.size`/`.length` and map key reads
   (`m.k`). An unknown method/property faults rather than mis-running.
-- **List and map literals.** `[1, 2, 3]`, `[]`, `[a: 1]`, `[:]` build fusevm
-  `Array`/`Hash` values and print Groovy-style (`[1, 2, 3]`, `[a:1]`, `[:]`).
+- **List and map literals.** `[1, 2, 3]`, `[]`, `[a: 1]`, `[:]` build a fusevm
+  `Array` (list) and a host-heap insertion-ordered map, and print Groovy-style
+  (`[1, 2, 3]`, `[a:1]`, `[:]`).
 - **`++`/`--` in expression position.** Both postfix (`i++`, value before
   update) and prefix (`++i`, value after update), in addition to the statement
   forms.
-- **Closures.** `{ a, b -> … }` and the implicit `{ it }` single-parameter form
+- **Closures.** `{ a, b -> … }`, the explicit zero-parameter `{ -> … }`, and the
+  implicit `{ it }` single-parameter form
   are first-class callable values: a closure lowers to a fusevm subroutine
   region and a runtime handle, invoked through the native `Op::Call` frame ABI
   via `.call(args)` or direct call (`def f = { it * 2 }; f(21)`). A closure
@@ -95,10 +97,56 @@ compile errors, never silently mis-run.
   `max(precision) + 10` significant digits clamped to `max(scale, 10)` fraction
   digits, so `1/3` is `0.3333333333`), `%` follows `BigDecimal.remainder`
   including the `BigDecimal % Double` case Groovy keeps exact, and a zero divisor
-  faults as Groovy's `ArithmeticException` aborts. Magnitude is unbounded
+  raises Groovy's `ArithmeticException` (catchable in a program that uses
+  `try`/`catch`, otherwise a hard fault that aborts the run as Groovy's uncaught
+  exception does). Magnitude is unbounded
   (`1.5e300 * 1.5e300` is `2.25E+600`). A `d`/`f`-suffixed literal stays an IEEE
   double with `Double.toString` rules (`2.5e7d` → `2.5E7`, `5.0d/0.0d` →
   `Infinity`). Value model in `src/decimal.rs`.
+- **Groovy truthiness.** `null`, `0`, a zero `BigDecimal` (`0.0`, `0.00`, `0e0`),
+  `""`, an empty list, an empty map, and `false` are false; every other value is
+  true, and a class decides its own truth with `asBoolean()`. `!x`, `if`,
+  `while`, `for`, the ternary, `?:`, `&&`, `||`, and the GDK's `find`/`findAll`
+  all use it. `&&`/`||` are boolean-*valued* (`5 && 3` is `true`, not `3`);
+  Elvis yields the deciding operand (`0.0 ?: "d"` is `"d"`, `1.50 ?: "d"` is
+  `1.50`). **The truth test is emitted only where the condition's static shape
+  could be a value fusevm reads differently** — a heap handle or a `String`. A
+  comparison-shaped guard (`i < n`, `x != 0`, `!done`, `a < b && c > d`) is
+  statically a `Boolean`, so `while`/`for` conditions still compile to the same
+  native `NumLt`+`JumpIfFalse` pair and stay JIT-traceable (see
+  `compiler::needs_truth` / `is_static_bool`).
+- **GStrings.** A double-quoted string interpolates `$name`, the dotted property
+  path `$a.b.c` (Groovy stops at the path, so `"$n.toString()"` reads the
+  property `n.toString`), and `${ expr }` with nested braces and nested string
+  literals (`"${ c ? "a" : "b" }"`). `\$` is a literal dollar and a
+  single-quoted string never interpolates. Placeholders are re-parsed with the
+  ordinary expression grammar, and each part renders the way `println` does — so
+  an embedded object goes through its `toString()`. A double-quoted literal with
+  no placeholder stays a plain string and compiles exactly as before.
+- **Exceptions.** `throw`, `try` / `catch` / `finally`, multi-catch
+  `catch (A | B e)`, and the untyped `catch (e)` (which Groovy reads as
+  `Exception`). The built-in throwable hierarchy is pre-registered as ordinary
+  classes — `Throwable`, `Exception`, `Error`, `RuntimeException`,
+  `IllegalArgumentException`, `NumberFormatException`, `IllegalStateException`,
+  `ArithmeticException`, `NullPointerException`, `IndexOutOfBoundsException` (+
+  the array/string forms), `UnsupportedOperationException`, `ClassCastException`,
+  `InterruptedException`, `CloneNotSupportedException`, `AssertionError`,
+  `IOException`, `FileNotFoundException`, `NoSuchElementException`,
+  `ConcurrentModificationException`, `GroovyRuntimeException` — so `catch`
+  matching, `instanceof`, and `class MyEx extends Exception { MyEx(String m) {
+  super(m) } }` all run through the one class registry. A throwable prints as
+  `java.lang.Exception: boom` (bare class name for a script-declared subclass),
+  and `getMessage()` / `.message` / `toString()` work. `finally` runs on every
+  exit path: fall-through, a matched handler, an unmatched rethrow, and an early
+  `return` / `break` / `continue` out of the block. Groovy's implicit return
+  reaches through a trailing `try` (and a trailing `if`), so a closure whose body
+  is a `try` yields the taken branch's value. A zero divisor raises a catchable
+  `java.lang.ArithmeticException: Division by zero`; an uncaught exception
+  reports on stderr and exits 1, matching `groovy`'s exit status.
+  **Mechanism:** fusevm has no unwind opcode, so an in-flight exception is a
+  host-side pending value plus compiler-emitted jumps to the innermost handler,
+  and a post-call check at every site that can re-enter the VM. **A program with
+  no `try`/`throw` emits none of those ops**, so its bytecode is unchanged.
 
 ## Not implemented (errors today)
 
@@ -116,22 +164,43 @@ compile errors, never silently mis-run.
   JIT). On a user-class instance they therefore dispatch `plus`/`minus`, not
   Groovy's `next`/`previous`. Call `x.next()` / `x.previous()` explicitly for
   those.
-- **GStrings / interpolation.** `"$name"` / `"${expr}"` are lexed as literal
-  text — the `${…}` is **not** evaluated. Use `+` concatenation.
-- **`switch`, `do/while`, labeled break.**
-- **`try`/`catch`/`finally`, exceptions, `throw`, `assert`.**
+- **`switch`, `do/while`, labeled break, `assert`.**
+- **Catchable runtime faults.** Only `throw` and a zero divisor produce a
+  catchable exception. Every other groovyrs runtime fault — an unknown method or
+  property, a method call on `null`, indexing a non-collection — still aborts the
+  run with a `groovyrs:` message on stderr, where Groovy raises a catchable
+  `MissingMethodException` / `NullPointerException`. So `try { m.k.length() }
+  catch (Exception e) { … }` does not reach its handler.
 - **`import`/`package`** are tolerated (skipped) but do nothing.
 - **Command-argument chains beyond one arg** (`println a, b`, `foo bar baz`).
 
 ## Modeled with a documented simplification
 
-- **A decimal is truthy even when it is zero.** A `BigDecimal` is a host-heap
-  value behind fusevm's opaque `Value::Obj` handle, and fusevm treats every
-  handle as true, so `if (0.0)` takes the then-branch where Groovy takes the
-  else. The same already applies to an empty ordered map (`if ([:])`). Numeric
-  conditions written as comparisons (`if (x != 0)`, `while (i < n)`) are exact;
-  those also stay on the JIT's native fast path, which is why the conditions are
-  not routed through a truthiness builtin.
+- **A condition whose type is not statically known costs one builtin call.**
+  Groovy truthiness is exact everywhere, but where the compiler cannot prove the
+  condition is already a number/boolean/list (`while (x)`, `if (m)`), it emits a
+  host call that aborts a JIT trace through that condition. Comparison-shaped
+  guards — the loop conditions that matter — are unaffected. This is the
+  deliberate trade: correctness where the type is unknown, the old native path
+  where it is known.
+- **An exception thrown out of an operator-overload method needs a class in the
+  program.** A user instance operand routes a native arithmetic op through the
+  strict numeric hook, which re-enters the VM. groovyrs emits the post-call check
+  after arithmetic only when the program *both* uses exceptions and declares a
+  class; that gate keeps arithmetic native everywhere else, and it is exactly the
+  condition under which the re-entry can happen.
+- **A `finally` body is emitted once per exit path.** Fall-through, each handler,
+  the rethrow, and every early `return`/`break`/`continue` each get their own
+  copy of the block rather than sharing one through a subroutine — fusevm's
+  frames are for calls, not local jumps. This is what `javac` does; it costs code
+  size, not semantics.
+- **`{ -> … }` does not reject extra arguments.** An explicit empty parameter
+  list is honoured (`def z = { -> 7 }; z()` works), but a call that passes
+  arguments anyway drops them instead of failing the way Groovy's arity check
+  does.
+- **Implicit return does not reach through a trailing loop or assignment.** It
+  reaches through a trailing expression, `if`, and `try`; a body ending in a
+  `for`/`while` or a bare assignment still returns `null`.
 - **Every decimal operation allocates a heap slot that is never reclaimed.**
   Decimal literals are interned (a literal inside a loop allocates once), but each
   arithmetic *result* takes a new slot in the host heap, which has no collector.
@@ -153,7 +222,7 @@ compile errors, never silently mis-run.
   for diagnostics but do not gate execution — the runtime is dynamically typed on
   the fusevm value model.
 - **`==` compares by value.** This matches Groovy (`==` is `.equals`, not
-  reference identity) for the string/number/boolean operands slice 1 supports.
+  reference identity) for the string/number/boolean operands modeled here.
   Cross-type comparisons that Groovy would coerce (`"5" == 5 → false`) are not
   yet distinguished — both sides compare by their printed form.
 - **Upvalue capture of a frame local is by value, not by reference.** A closure
@@ -169,7 +238,10 @@ compile errors, never silently mis-run.
 - **Range values materialise ascending only.** `0..5` / `0..<5` enumerate to a
   list; a descending literal range (`5..0`) yields an empty list rather than the
   reverse sequence. `println` of a range value therefore shows the list form.
-- **Uninitialized locals are unbound** and read back as `null`.
+- **An unbound name reads as `null` instead of raising.** A declared-but-
+  uninitialized local (`def x` then `println x`) and an entirely undeclared name
+  both yield `null`; Groovy defaults the former to `null` too but raises
+  `groovy.lang.MissingPropertyException` for the latter.
 - **The paren-less `println <expr>` command form is more permissive** than
   Groovy's command-expression grammar. groovyrs parses the whole following
   expression as the single argument, so `println -42` prints `-42`. Real Groovy

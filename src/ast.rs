@@ -4,13 +4,14 @@
 //! top-level statements (no enclosing class or `main` — Groovy synthesises those
 //! itself). The subset covers `def`/typed local declarations and functions,
 //! script-binding assignments, arithmetic / comparison / logic expressions,
-//! ternary / Elvis / safe-navigation, closures (`{ a, b -> … }` / implicit
-//! `{ it }`) with the closure-driven GDK and nested-closure upvalue capture,
-//! first-class ranges, `if`/`while`, the C-style and `for (x in a..b)` range
-//! loops, `break`/`continue`, subscripting (`recv[i]`), the `println`/`print`
-//! command calls, and classes (fields, constructors, methods, `this`, property
-//! get/set with auto getter/setter, `new`). GStrings are not modeled yet (see
-//! `BUGS.md`); the AST is shaped to grow into them.
+//! ternary / Elvis / safe-navigation, closures (`{ a, b -> … }` / `{ -> … }` /
+//! implicit `{ it }`) with the closure-driven GDK and nested-closure upvalue
+//! capture, first-class ranges, `GString` interpolation, `if`/`while`, the
+//! C-style and `for (x in a..b)` range loops, `break`/`continue`,
+//! `try`/`catch`/`finally`/`throw`, subscripting (`recv[i]`), the
+//! `println`/`print` command calls, and classes (fields, constructors, methods,
+//! `this`, property get/set with auto getter/setter, `new`). See `BUGS.md` for
+//! what is still missing.
 
 /// A parsed script: the ordered top-level statements.
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +117,29 @@ pub enum StmtKind {
         name: String,
         value: Expr,
     },
+    /// `try { … } catch (T e) { … }* [finally { … }]`. At least one `catch` or a
+    /// `finally` is required (Groovy rejects a bare `try`). See
+    /// `compiler::try_stmt` for the lowering — fusevm has no unwind opcode, so an
+    /// in-flight exception is a host-side pending value plus compiler-emitted
+    /// jumps to the innermost handler.
+    Try {
+        body: Vec<Stmt>,
+        catches: Vec<CatchArm>,
+        finally_body: Vec<Stmt>,
+    },
+    /// `throw <expr>` — park the throwable as the pending exception and unwind to
+    /// the innermost enclosing handler (or out of the program).
+    Throw(Expr),
+}
+
+/// One `catch (T e) { … }` arm. `types` holds the caught type names — more than
+/// one for Java/Groovy's multi-catch `catch (A | B e)`; an untyped `catch (e)`
+/// records `Exception`, which is what Groovy means by it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatchArm {
+    pub types: Vec<String>,
+    pub name: String,
+    pub body: Vec<Stmt>,
 }
 
 /// A class field: `def x` / `Type x [= init]`. The declared type is ignored at
@@ -165,6 +189,10 @@ pub enum Expr {
     /// exact source text (see [`crate::decimal`]).
     Dec(String),
     Str(String),
+    /// An interpolating string — Groovy's `GString`. The parts render in order
+    /// and concatenate; an embedded object renders through its `toString()`,
+    /// which is why this is not simply lowered to `+`.
+    GString(Vec<GStringPart>),
     Bool(bool),
     /// The `null` literal.
     Null,
@@ -259,6 +287,11 @@ pub enum Expr {
     Closure {
         params: Vec<String>,
         body: Vec<Stmt>,
+        /// True when the literal wrote an explicit parameter list — including
+        /// the empty one, `{ -> … }`, which takes no arguments at all. Without a
+        /// list (`{ it * 2 }`) Groovy supplies the single implicit parameter
+        /// `it`, which is what `false` selects.
+        explicit_params: bool,
     },
     /// A first-class integer range `start..end` (inclusive) or `start..<end`
     /// (half-open). Materialised to a Groovy list of the enumerated integers, so
@@ -315,6 +348,13 @@ pub enum Expr {
         index: Box<Expr>,
         line: u32,
     },
+}
+
+/// One piece of a [`Expr::GString`]: literal text, or an embedded expression.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GStringPart {
+    Text(String),
+    Expr(Expr),
 }
 
 /// Unary operators.

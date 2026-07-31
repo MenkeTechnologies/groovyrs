@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="groovyrs — Builtin reference. Keywords, literals, and script commands recognized by the current groovyrs build. MIT licensed.">
-  <title>groovyrs &mdash; Builtin Reference</title>
+  <meta name="description" content="groovyrs — Language reference. Every reserved word, literal form, contextual keyword, operator, script command, GDK method, property, class-member hook, throwable, and built-in type name the current groovyrs build recognizes. MIT licensed.">
+  <title>groovyrs &mdash; Language Reference</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
@@ -35,11 +35,11 @@
     <header class="tutorial-header">
       <div class="tutorial-header-inner">
         <div>
-          <h1 class="tutorial-brand">// GROOVYRS — BUILTIN REFERENCE</h1>
+          <h1 class="tutorial-brand">// GROOVYRS — LANGUAGE REFERENCE</h1>
           <nav class="tutorial-crumbs" aria-label="Breadcrumb">
             <a href="index.html">Docs</a>
             <span class="sep">/</span>
-            <span class="current">Builtin Reference</span>
+            <span class="current">Language Reference</span>
             <span class="sep">/</span>
             <a href="https://github.com/MenkeTechnologies/groovyrs" target="_blank" rel="noopener noreferrer">GitHub</a>
           </nav>
@@ -63,145 +63,1578 @@
     </div>
 
     <main class="tutorial-main">
-      <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>BUILTIN REFERENCE</h2>
-      <p class="tutorial-subtitle">Every reserved keyword, literal, and script command the current groovyrs build recognizes, grouped by keyword then literal then command. This page is generated from the language-server corpus (<code>src/lsp.rs</code>) by the <code>gen-docs</code> binary, so it stays in sync with what the runtime and editor tooling actually know about. Keywords/literals mirror <code>lexer.rs</code>; each command mirrors a real print builtin in <code>src/host.rs</code>.</p>
+      <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>LANGUAGE REFERENCE</h2>
+      <p class="tutorial-subtitle">Every name the current groovyrs build recognizes — reserved words, literal forms, contextual keywords, operators, the script print commands, every dispatched GDK method, every readable property, the class-member hooks the runtime calls by name, the modeled throwable hierarchy, and the built-in type names <code>instanceof</code> answers for — each with a signature, a description, and a runnable example. This page is generated from the language-server corpus (<code>src/lsp.rs</code>) by the <code>gen-docs</code> binary, so it stays in sync with what the runtime and editor tooling actually know about. Reserved words and literal forms mirror <code>lexer.rs</code>, contextual keywords and operators mirror <code>parser.rs</code> and <code>compiler.rs</code>, and every method, property, hook, throwable, and type name mirrors a real dispatch arm in <code>src/host.rs</code> or a real table in <code>src/throwable.rs</code> / <code>src/compiler.rs</code>. Where groovyrs diverges from Apache Groovy the entry says so.</p>
 
-      <section class="tutorial-section" id="ch-keyword">
-        <h2>Keyword</h2>
-        <article class="doc-entry" id="doc-keyword-1">
-          <h3><a class="doc-anchor" href="#doc-keyword-1">#</a> <code>def</code></h3>
-          <p>declare a dynamically-typed local variable (or a script binding)</p>
+      <section class="tutorial-section" id="ch-reserved-words">
+        <h2>Reserved Words</h2>
+        <article class="doc-entry" id="doc-reserved-words-1">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-1">#</a> <code>def</code></h3>
+          <pre><code class="lang-groovy">def name [= expr]</code></pre>
+          <p>Declare a dynamically-typed local variable, or a script binding at top level. An unassigned `def` reads as `null`.</p>
           <pre><code class="lang-groovy">def x = 5
 println(x)   // =&gt; 5</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-2">
-          <h3><a class="doc-anchor" href="#doc-keyword-2">#</a> <code>if</code></h3>
-          <p>conditional branch; runs the block when the condition is truthy</p>
+        <article class="doc-entry" id="doc-reserved-words-2">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-2">#</a> <code>if</code></h3>
+          <pre><code class="lang-groovy">if (cond) stmt</code></pre>
+          <p>Conditional branch. The condition goes through Groovy truth (`host::groovy_truthy`), so an empty string, an empty list, `0`, and `null` are all false.</p>
           <pre><code class="lang-groovy">if (1 &lt; 2) println("yes")   // =&gt; yes</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-3">
-          <h3><a class="doc-anchor" href="#doc-keyword-3">#</a> <code>else</code></h3>
-          <p>fallback branch of an `if`</p>
+        <article class="doc-entry" id="doc-reserved-words-3">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-3">#</a> <code>else</code></h3>
+          <pre><code class="lang-groovy">if (cond) stmt else stmt</code></pre>
+          <p>The fallback branch of an `if`. Binds to the nearest unmatched `if`.</p>
           <pre><code class="lang-groovy">if (false) println("a") else println("b")   // =&gt; b</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-4">
-          <h3><a class="doc-anchor" href="#doc-keyword-4">#</a> <code>while</code></h3>
-          <p>loop while the condition is truthy</p>
+        <article class="doc-entry" id="doc-reserved-words-4">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-4">#</a> <code>while</code></h3>
+          <pre><code class="lang-groovy">while (cond) stmt</code></pre>
+          <p>Loop while the condition is Groovy-truthy; the test runs before the first iteration.</p>
           <pre><code class="lang-groovy">def i = 0
 while (i &lt; 3) i++
 println(i)   // =&gt; 3</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-5">
-          <h3><a class="doc-anchor" href="#doc-keyword-5">#</a> <code>assert</code></h3>
-          <p>raise an `AssertionError` when the condition is falsy, rendering each sub-expression's value</p>
-          <pre><code class="lang-groovy">assert 1 + 1 == 2   // passes silently</code></pre>
-        </article>
-        <article class="doc-entry" id="doc-keyword-6">
-          <h3><a class="doc-anchor" href="#doc-keyword-6">#</a> <code>do</code></h3>
-          <p>`do { … } while (cond)`; the body runs before the first test</p>
+        <article class="doc-entry" id="doc-reserved-words-5">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-5">#</a> <code>do</code></h3>
+          <pre><code class="lang-groovy">do stmt while (cond)</code></pre>
+          <p>Post-tested loop: the body runs once before the condition is evaluated.</p>
           <pre><code class="lang-groovy">def i = 0
 do { i++ } while (i &lt; 3)
 println(i)   // =&gt; 3</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-7">
-          <h3><a class="doc-anchor" href="#doc-keyword-7">#</a> <code>switch</code></h3>
-          <p>multi-way branch on Groovy's `isCase` (constant, range, list, type, `~/…/`, closure)</p>
-          <pre><code class="lang-groovy">switch (5) { case 4..6: println("in"); break; default: println("out") }   // =&gt; in</code></pre>
-        </article>
-        <article class="doc-entry" id="doc-keyword-8">
-          <h3><a class="doc-anchor" href="#doc-keyword-8">#</a> <code>case</code></h3>
-          <p>one `switch` label; sections fall through until a `break`</p>
-          <pre><code class="lang-groovy">switch (1) { case 1: println("one"); break }   // =&gt; one</code></pre>
-        </article>
-        <article class="doc-entry" id="doc-keyword-9">
-          <h3><a class="doc-anchor" href="#doc-keyword-9">#</a> <code>default</code></h3>
-          <p>the `switch` section entered when no `case` label matched; also marks an interface method with a body</p>
-          <pre><code class="lang-groovy">switch (9) { case 1: break; default: println("d") }   // =&gt; d</code></pre>
-        </article>
-        <article class="doc-entry" id="doc-keyword-10">
-          <h3><a class="doc-anchor" href="#doc-keyword-10">#</a> <code>for</code></h3>
-          <p>C-style `for (init; cond; update)`, the `for (x in a..b)` range loop, or `for (x in collection)`</p>
+        <article class="doc-entry" id="doc-reserved-words-6">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-6">#</a> <code>for</code></h3>
+          <pre><code class="lang-groovy">for (init; cond; update) stmt | for (name in iterable) stmt</code></pre>
+          <p>C-style three-clause loop, or the `in` form over a range, list, map, or String. The `in` form materialises its subject through `host::GITER` first.</p>
           <pre><code class="lang-groovy">for (i in 0..2) print(i)   // =&gt; 012</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-11">
-          <h3><a class="doc-anchor" href="#doc-keyword-11">#</a> <code>in</code></h3>
-          <p>the `for (x in …)` iteration separator; walks a range, a list, a map's entries, or a String's characters</p>
+        <article class="doc-entry" id="doc-reserved-words-7">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-7">#</a> <code>in</code></h3>
+          <pre><code class="lang-groovy">for (name in iterable)</code></pre>
+          <p>The iteration separator of a `for` loop. Walks a range's integers, a list's elements, a map's entries, or a String's characters.</p>
           <pre><code class="lang-groovy">for (n in [1, 2, 3]) print(n)   // =&gt; 123</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-12">
-          <h3><a class="doc-anchor" href="#doc-keyword-12">#</a> <code>return</code></h3>
-          <p>end the script; a returned expression is evaluated for its effects</p>
-          <pre><code class="lang-groovy">return   // ends the script here</code></pre>
+        <article class="doc-entry" id="doc-reserved-words-8">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-8">#</a> <code>switch</code></h3>
+          <pre><code class="lang-groovy">switch (subject) { case label: … default: … }</code></pre>
+          <p>Multi-way branch. Each label is tested with Groovy's `isCase` (`host::GIS_CASE`), so a constant, a range, a list, a type name, a `~/…/` pattern, or a closure all work as labels.</p>
+          <pre><code class="lang-groovy">switch (5) { case 4..6: println("in"); break; default: println("out") }   // =&gt; in</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-13">
-          <h3><a class="doc-anchor" href="#doc-keyword-13">#</a> <code>break</code></h3>
-          <p>exit the nearest enclosing loop or `switch`; `break label` exits the named one</p>
+        <article class="doc-entry" id="doc-reserved-words-9">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-9">#</a> <code>case</code></h3>
+          <pre><code class="lang-groovy">case label:</code></pre>
+          <p>One `switch` label. Sections fall through to the next one until a `break`, exactly as in Java.</p>
+          <pre><code class="lang-groovy">switch (1) { case 1: println("one"); break }   // =&gt; one</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-reserved-words-10">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-10">#</a> <code>default</code></h3>
+          <pre><code class="lang-groovy">default: | default ReturnType method(params) { … }</code></pre>
+          <p>The `switch` section entered when no `case` label matched; a duplicate `default` is a parse error. Inside an `interface` body it instead marks a method that carries an implementation.</p>
+          <pre><code class="lang-groovy">switch (9) { case 1: break; default: println("d") }   // =&gt; d</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-reserved-words-11">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-11">#</a> <code>assert</code></h3>
+          <pre><code class="lang-groovy">assert cond [ : message ]</code></pre>
+          <p>Raise `PowerAssertionError` when the condition is falsy, printing the source text with each recorded sub-expression's value under the column it occupied. The `: message` form instead raises a plain `AssertionError` whose text is `&lt;message&gt;. Expression: &lt;condition&gt;`, with a `Values:` clause naming the condition's bare-variable operands.</p>
+          <pre><code class="lang-groovy">assert 1 + 1 == 2   // passes silently</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-reserved-words-12">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-12">#</a> <code>return</code></h3>
+          <pre><code class="lang-groovy">return [expr]</code></pre>
+          <p>Return from the enclosing method, closure, or constructor; at script level it ends the script. A method with no `return` yields its last expression.</p>
+          <pre><code class="lang-groovy">def f() { return 7 }
+println(f())   // =&gt; 7</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-reserved-words-13">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-13">#</a> <code>break</code></h3>
+          <pre><code class="lang-groovy">break [label]</code></pre>
+          <p>Exit the nearest enclosing loop or `switch`. `break label` exits the loop carrying that label; an unknown label is a compile error.</p>
           <pre><code class="lang-groovy">for (i in 0..9) { if (i == 3) break; print(i) }   // =&gt; 012</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-14">
-          <h3><a class="doc-anchor" href="#doc-keyword-14">#</a> <code>continue</code></h3>
-          <p>skip to the next iteration of the nearest loop; `continue label` targets the named one</p>
+        <article class="doc-entry" id="doc-reserved-words-14">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-14">#</a> <code>continue</code></h3>
+          <pre><code class="lang-groovy">continue [label]</code></pre>
+          <p>Skip to the next iteration of the nearest enclosing loop, or of the labeled one.</p>
           <pre><code class="lang-groovy">for (i in 0..3) { if (i == 1) continue; print(i) }   // =&gt; 023</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-15">
-          <h3><a class="doc-anchor" href="#doc-keyword-15">#</a> <code>new</code></h3>
-          <p>construct a class instance (`new Type(args)`)</p>
+        <article class="doc-entry" id="doc-reserved-words-15">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-15">#</a> <code>new</code></h3>
+          <pre><code class="lang-groovy">new Type([args])</code></pre>
+          <p>Construct an instance. Fields across the whole superclass chain are materialised to `null`, initialisers run superclass-first, then the most-derived constructor of matching arity runs (`host::GNEW`).</p>
           <pre><code class="lang-groovy">class P { def x; P(v) { x = v } }
 println(new P(7).x)   // =&gt; 7</code></pre>
         </article>
-        <article class="doc-entry" id="doc-keyword-16">
-          <h3><a class="doc-anchor" href="#doc-keyword-16">#</a> <code>try</code></h3>
-          <p>run a block with `catch` handlers and/or a `finally` cleanup</p>
-          <pre><code class="lang-groovy">try { throw new Exception("x") } catch (Exception e) { println(e.message) }   // =&gt; x</code></pre>
-        </article>
-        <article class="doc-entry" id="doc-keyword-17">
-          <h3><a class="doc-anchor" href="#doc-keyword-17">#</a> <code>catch</code></h3>
-          <p>handle a thrown exception of the named type (`catch (A | B e)` for several)</p>
-          <pre><code class="lang-groovy">try { 1 / 0 } catch (ArithmeticException e) { println(e.message) }   // =&gt; Division by zero</code></pre>
-        </article>
-        <article class="doc-entry" id="doc-keyword-18">
-          <h3><a class="doc-anchor" href="#doc-keyword-18">#</a> <code>finally</code></h3>
-          <p>cleanup block; runs on every exit path out of the `try`, including a `return`</p>
-          <pre><code class="lang-groovy">try { println("body") } finally { println("cleanup") }   // =&gt; body\ncleanup</code></pre>
-        </article>
-        <article class="doc-entry" id="doc-keyword-19">
-          <h3><a class="doc-anchor" href="#doc-keyword-19">#</a> <code>throw</code></h3>
-          <p>raise a throwable, unwinding to the innermost matching `catch`</p>
-          <pre><code class="lang-groovy">try { throw new IllegalStateException("bad") } catch (Exception e) { println(e) }</code></pre>
-        </article>
       </section>
 
-      <section class="tutorial-section" id="ch-literal">
-        <h2>Literal</h2>
-        <article class="doc-entry" id="doc-literal-1">
-          <h3><a class="doc-anchor" href="#doc-literal-1">#</a> <code>true</code></h3>
-          <p>the boolean true value</p>
+      <section class="tutorial-section" id="ch-literals-and-literal-forms">
+        <h2>Literals and Literal Forms</h2>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-1">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-1">#</a> <code>true</code></h3>
+          <pre><code class="lang-groovy">true</code></pre>
+          <p>The boolean true value, lexed as a reserved word.</p>
           <pre><code class="lang-groovy">println(true)   // =&gt; true</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literal-2">
-          <h3><a class="doc-anchor" href="#doc-literal-2">#</a> <code>false</code></h3>
-          <p>the boolean false value</p>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-2">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-2">#</a> <code>false</code></h3>
+          <pre><code class="lang-groovy">false</code></pre>
+          <p>The boolean false value.</p>
           <pre><code class="lang-groovy">println(1 &gt; 2)   // =&gt; false</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literal-3">
-          <h3><a class="doc-anchor" href="#doc-literal-3">#</a> <code>null</code></h3>
-          <p>the null reference; an unassigned `def` reads as null</p>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-3">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-3">#</a> <code>null</code></h3>
+          <pre><code class="lang-groovy">null</code></pre>
+          <p>The null reference. A method call on `null` answers only `toString`, `equals`, and `getClass`; anything else raises `NullPointerException`.</p>
           <pre><code class="lang-groovy">def x
 println(x)   // =&gt; null</code></pre>
         </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-4">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-4">#</a> <code>42</code></h3>
+          <pre><code class="lang-groovy">&lt;digits&gt;</code></pre>
+          <p>An integer literal — a 64-bit `Value::Int`. A literal that does not fit is a lex error, not a silent wrap.</p>
+          <pre><code class="lang-groovy">println(42 + 1)   // =&gt; 43</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-5">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-5">#</a> <code>42L</code></h3>
+          <pre><code class="lang-groovy">&lt;digits&gt;L | &lt;digits&gt;l</code></pre>
+          <p>A long-suffixed integer literal. groovyrs holds every integer as an i64, so the suffix is accepted and consumed but does not change the value's type.</p>
+          <pre><code class="lang-groovy">println(42L)   // =&gt; 42</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-6">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-6">#</a> <code>1.50</code></h3>
+          <pre><code class="lang-groovy">&lt;digits&gt;.&lt;digits&gt; [g|G]</code></pre>
+          <p>An unsuffixed decimal literal — a `java.math.BigDecimal`, kept as its exact source text so the literal's own scale survives. `1.50` prints with both fraction digits, which no `f64` could preserve.</p>
+          <pre><code class="lang-groovy">println(1.50)   // =&gt; 1.50</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-7">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-7">#</a> <code>1.5d</code></h3>
+          <pre><code class="lang-groovy">&lt;digits&gt;.&lt;digits&gt; d|D|f|F</code></pre>
+          <p>A `d`/`f`-suffixed literal — an IEEE double (`Value::Float`). This is the only literal form that is *not* a `BigDecimal`. The `instanceof` table classifies by value shape rather than by literal form, so groovyrs answers `1.5d instanceof BigDecimal` true and `1.5 instanceof BigDecimal` false — Apache Groovy answers the opposite for both.</p>
+          <pre><code class="lang-groovy">println(1.5d / 0.0d)   // =&gt; Infinity</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-8">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-8">#</a> <code>2.5e7</code></h3>
+          <pre><code class="lang-groovy">&lt;digits&gt;[.&lt;digits&gt;]e[+|-]&lt;digits&gt;</code></pre>
+          <p>An exponent literal. The exponent makes the literal a decimal with or without a fractional part, and the result is a `BigDecimal` unless a `d`/`f` suffix follows.</p>
+          <pre><code class="lang-groovy">println(2.5e7)   // =&gt; 2.5E+7</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-9">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-9">#</a> <code>'text'</code></h3>
+          <pre><code class="lang-groovy">'…'</code></pre>
+          <p>A single-quoted String — inert text. Backslash escapes are decoded, but `$` never interpolates.</p>
+          <pre><code class="lang-groovy">println('a$b')   // =&gt; a$b</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-10">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-10">#</a> <code>"text"</code></h3>
+          <pre><code class="lang-groovy">"… $name … ${ expr } …"</code></pre>
+          <p>A double-quoted String. With no placeholder it lexes as a plain String; with one it becomes a GString whose parts render through `toString()` at runtime (`host::GSTRING`). `$name` takes a dotted *property* path only, so `"$n.toString()"` reads the property `n.toString` and leaves `()` as text.</p>
+          <pre><code class="lang-groovy">def n = 5
+println("n=$n and ${n + 1}")   // =&gt; n=5 and 6</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-11">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-11">#</a> <code>~/pattern/</code></h3>
+          <pre><code class="lang-groovy">~/…/</code></pre>
+          <p>A regex literal — a pattern handle built by `host::GREGEX`. Only `\/` is special inside the delimiters; every other backslash escape passes through to the pattern. Modeled far enough to drive a `switch` label, whose `isCase` is a *full* match.</p>
+          <pre><code class="lang-groovy">switch ("abc") { case ~/a.c/: println("m"); break }   // =&gt; m</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-12">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-12">#</a> <code>[a, b]</code></h3>
+          <pre><code class="lang-groovy">[expr, …]</code></pre>
+          <p>A list literal. Lists are `Value::Array` and print with Groovy's `[1, 2, 3]` rendering.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3])   // =&gt; [1, 2, 3]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-13">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-13">#</a> <code>[]</code></h3>
+          <pre><code class="lang-groovy">[]</code></pre>
+          <p>The empty list. Falsy under Groovy truth, so `if ([])` does not run.</p>
+          <pre><code class="lang-groovy">if (![]) println("empty")   // =&gt; empty</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-14">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-14">#</a> <code>[k: v]</code></h3>
+          <pre><code class="lang-groovy">[key: expr, …] | [(expr): expr, …]</code></pre>
+          <p>A map literal, built by `host::GMAKE_MAP` into an insertion-ordered map. A bare identifier key is the string of its own name; parenthesise the key to compute it.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2])   // =&gt; [a:1, b:2]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-15">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-15">#</a> <code>[:]</code></h3>
+          <pre><code class="lang-groovy">[:]</code></pre>
+          <p>The empty map — the form that distinguishes an empty map from the empty list `[]`.</p>
+          <pre><code class="lang-groovy">println([:].isEmpty())   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-16">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-16">#</a> <code>{ a, b -&gt; … }</code></h3>
+          <pre><code class="lang-groovy">{ param, … -&gt; body }</code></pre>
+          <p>A closure literal with an explicit parameter list, including the zero-parameter form `{ -&gt; … }`. It lowers to a subroutine region plus a runtime closure handle and captures the enclosing script bindings.</p>
+          <pre><code class="lang-groovy">def add = { a, b -&gt; a + b }
+println(add(2, 3))   // =&gt; 5</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-17">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-17">#</a> <code>{ it }</code></h3>
+          <pre><code class="lang-groovy">{ body }</code></pre>
+          <p>A closure literal with no parameter list: Groovy supplies the single implicit parameter `it`.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3].collect { it * 2 })   // =&gt; [2, 4, 6]</code></pre>
+        </article>
       </section>
 
-      <section class="tutorial-section" id="ch-command">
-        <h2>Command</h2>
-        <article class="doc-entry" id="doc-command-1">
-          <h3><a class="doc-anchor" href="#doc-command-1">#</a> <code>println</code></h3>
-          <p>print a Groovy-formatted value and a trailing newline</p>
-          <pre><code class="lang-groovy">println("hi")   // prints hi\n</code></pre>
+      <section class="tutorial-section" id="ch-contextual-keywords">
+        <h2>Contextual Keywords</h2>
+        <article class="doc-entry" id="doc-contextual-keywords-1">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-1">#</a> <code>try</code></h3>
+          <pre><code class="lang-groovy">try { … } catch (T e) { … } [finally { … }]</code></pre>
+          <p>Run a block with `catch` handlers and/or a `finally` cleanup. Recognised at statement start when followed by `{`; a `try` with neither a `catch` nor a `finally` is a parse error.</p>
+          <pre><code class="lang-groovy">try { throw new Exception("x") } catch (Exception e) { println(e.message) }   // =&gt; x</code></pre>
         </article>
-        <article class="doc-entry" id="doc-command-2">
-          <h3><a class="doc-anchor" href="#doc-command-2">#</a> <code>print</code></h3>
-          <p>print a Groovy-formatted value with no trailing newline</p>
-          <pre><code class="lang-groovy">print("a"); print("b")   // prints ab</code></pre>
+        <article class="doc-entry" id="doc-contextual-keywords-2">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-2">#</a> <code>catch</code></h3>
+          <pre><code class="lang-groovy">catch (Type [| Type…] name) { … }</code></pre>
+          <p>Handle a thrown value whose class chain reaches the named type. The multi-catch form `catch (A | B e)` tests each alternative in turn.</p>
+          <pre><code class="lang-groovy">try { 1 / 0 } catch (ArithmeticException e) { println(e.message) }   // =&gt; Division by zero</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-3">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-3">#</a> <code>finally</code></h3>
+          <pre><code class="lang-groovy">finally { … }</code></pre>
+          <p>Cleanup block. Runs on every exit path out of the `try` — normal completion, a caught throwable, an uncaught one, and a `return`.</p>
+          <pre><code class="lang-groovy">try { println("body") } finally { println("cleanup") }   // =&gt; body then cleanup</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-4">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-4">#</a> <code>throw</code></h3>
+          <pre><code class="lang-groovy">throw expr</code></pre>
+          <p>Raise a throwable (`host::GTHROW`), unwinding to the innermost `catch` whose type matches. groovyrs has no unwind opcode: the throw parks the value and the compiler-emitted guards cut the stack back.</p>
+          <pre><code class="lang-groovy">try { throw new IllegalStateException("bad") } catch (Exception e) { println(e) }   // =&gt; java.lang.IllegalStateException: bad</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-5">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-5">#</a> <code>class</code></h3>
+          <pre><code class="lang-groovy">[modifiers] class Name [extends S] [implements I, …] { … }</code></pre>
+          <p>Declare a class. Registration is a `host::GCLASS` call carrying the superclass, interfaces, field names, initialisers, methods, and constructors.</p>
+          <pre><code class="lang-groovy">class P { def x = 1 }
+println(new P().x)   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-6">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-6">#</a> <code>interface</code></h3>
+          <pre><code class="lang-groovy">[modifiers] interface Name [extends I, …] { … }</code></pre>
+          <p>Declare an interface. `new` on one faults; its `default` methods are reachable from an implementing class through the interface closure.</p>
+          <pre><code class="lang-groovy">interface Greet { default def hi() { "hi" } }
+class A implements Greet {}
+println(new A().hi())   // =&gt; hi</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-7">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-7">#</a> <code>extends</code></h3>
+          <pre><code class="lang-groovy">class Name extends Superclass</code></pre>
+          <p>Name the direct superclass in a class header (or the supertype list in an interface header). Method lookup walks this chain most-derived first.</p>
+          <pre><code class="lang-groovy">class A { def f() { 1 } }
+class B extends A {}
+println(new B().f())   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-8">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-8">#</a> <code>implements</code></h3>
+          <pre><code class="lang-groovy">class Name implements Iface, …</code></pre>
+          <p>Name the interfaces a class implements. They participate in `instanceof` and in `catch` matching through the interface closure.</p>
+          <pre><code class="lang-groovy">interface I {}
+class A implements I {}
+println(new A() instanceof I)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-9">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-9">#</a> <code>instanceof</code></h3>
+          <pre><code class="lang-groovy">value instanceof Type</code></pre>
+          <p>Runtime type test (`host::GINSTANCEOF`) at relational precedence. Answers for declared classes, the 25 modeled throwables, and the 22 built-in type names. `null instanceof X` is always false.</p>
+          <pre><code class="lang-groovy">println("x" instanceof String)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-10">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-10">#</a> <code>package</code></h3>
+          <pre><code class="lang-groovy">package name.path</code></pre>
+          <p>A leading package declaration. Parsed and skipped — groovyrs has no package namespace, so the line has no runtime effect.</p>
+          <pre><code class="lang-groovy">package demo
+println(1)   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-11">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-11">#</a> <code>import</code></h3>
+          <pre><code class="lang-groovy">import name.path[.*]</code></pre>
+          <p>A leading import. Parsed and skipped: the built-in type and throwable names resolve without one, and there is no classpath to import from.</p>
+          <pre><code class="lang-groovy">import java.util.List
+println([1].size())   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-12">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-12">#</a> <code>public</code></h3>
+          <pre><code class="lang-groovy">public …</code></pre>
+          <p>Access modifier on a type declaration or class member. Accepted and skipped — groovyrs enforces no access control.</p>
+          <pre><code class="lang-groovy">class A { public def f() { 1 } }
+println(new A().f())   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-13">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-13">#</a> <code>private</code></h3>
+          <pre><code class="lang-groovy">private …</code></pre>
+          <p>Access modifier. Accepted and skipped: a `private` member is reachable from anywhere, which is a deliberate divergence from Groovy.</p>
+          <pre><code class="lang-groovy">class A { private def x = 1 }
+println(new A().x)   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-14">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-14">#</a> <code>protected</code></h3>
+          <pre><code class="lang-groovy">protected …</code></pre>
+          <p>Access modifier. Accepted and skipped, like `private`.</p>
+          <pre><code class="lang-groovy">class A { protected def x = 2 }
+println(new A().x)   // =&gt; 2</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-15">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-15">#</a> <code>static</code></h3>
+          <pre><code class="lang-groovy">static …</code></pre>
+          <p>Member modifier. Accepted and skipped — groovyrs has no static storage, so a `static` field is an ordinary per-instance field.</p>
+          <pre><code class="lang-groovy">class A { static def f() { 3 } }
+println(new A().f())   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-16">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-16">#</a> <code>final</code></h3>
+          <pre><code class="lang-groovy">final …</code></pre>
+          <p>Immutability modifier. Accepted and skipped; groovyrs does not reject a later write.</p>
+          <pre><code class="lang-groovy">class A { final def x = 4 }
+println(new A().x)   // =&gt; 4</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-17">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-17">#</a> <code>abstract</code></h3>
+          <pre><code class="lang-groovy">abstract …</code></pre>
+          <p>Abstractness modifier. Accepted and skipped: groovyrs does not refuse `new` on an `abstract` class the way it refuses it on an `interface`.</p>
+          <pre><code class="lang-groovy">abstract class A { def f() { 5 } }
+println(new A().f())   // =&gt; 5</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-18">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-18">#</a> <code>synchronized</code></h3>
+          <pre><code class="lang-groovy">synchronized …</code></pre>
+          <p>Member modifier. Accepted and skipped — a groovyrs script runs on one thread, so there is nothing to synchronise.</p>
+          <pre><code class="lang-groovy">class A { synchronized def f() { 6 } }
+println(new A().f())   // =&gt; 6</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-19">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-19">#</a> <code>transient</code></h3>
+          <pre><code class="lang-groovy">transient …</code></pre>
+          <p>Serialization modifier. Accepted and skipped; groovyrs has no serialization.</p>
+          <pre><code class="lang-groovy">class A { transient def x = 7 }
+println(new A().x)   // =&gt; 7</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-20">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-20">#</a> <code>volatile</code></h3>
+          <pre><code class="lang-groovy">volatile …</code></pre>
+          <p>Memory-visibility modifier. Accepted and skipped, like `synchronized`.</p>
+          <pre><code class="lang-groovy">class A { volatile def x = 8 }
+println(new A().x)   // =&gt; 8</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-21">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-21">#</a> <code>this</code></h3>
+          <pre><code class="lang-groovy">this[.member]</code></pre>
+          <p>The receiver inside a class member. A bare field or method name inside a class body already resolves through `this`, so the explicit form is rarely needed.</p>
+          <pre><code class="lang-groovy">class A { def x = 1; def f() { this.x } }
+println(new A().f())   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-22">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-22">#</a> <code>super</code></h3>
+          <pre><code class="lang-groovy">super(args) | super.method(args)</code></pre>
+          <p>Invoke the superclass constructor (`host::GSUPER_CTOR`, valid as the first statement of a constructor) or a superclass method non-virtually (`host::GSUPER_METHOD`).</p>
+          <pre><code class="lang-groovy">class A { def f() { "A" } }
+class B extends A { def f() { super.f() + "B" } }
+println(new B().f())   // =&gt; AB</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-contextual-keywords-23">
+          <h3><a class="doc-anchor" href="#doc-contextual-keywords-23">#</a> <code>it</code></h3>
+          <pre><code class="lang-groovy">it</code></pre>
+          <p>The implicit single parameter of a closure written without a parameter list. It is an ordinary binding, so a closure with explicit parameters has no `it`.</p>
+          <pre><code class="lang-groovy">println([1, 2].collect { it + 1 })   // =&gt; [2, 3]</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-operators">
+        <h2>Operators</h2>
+        <article class="doc-entry" id="doc-operators-1">
+          <h3><a class="doc-anchor" href="#doc-operators-1">#</a> <code>+</code></h3>
+          <pre><code class="lang-groovy">a + b</code></pre>
+          <p>Addition. Two integers stay integral, a decimal operand keeps `BigDecimal` scale, a `double` operand promotes to a double, a String operand concatenates (rendering the other side through `toString()`), a list operand appends, and a map operand merges. On a class instance it dispatches `plus`.</p>
+          <pre><code class="lang-groovy">println(1 + 2)
+println("a" + 1)   // =&gt; 3 then a1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-2">
+          <h3><a class="doc-anchor" href="#doc-operators-2">#</a> <code>-</code></h3>
+          <pre><code class="lang-groovy">a - b</code></pre>
+          <p>Subtraction over the same numeric tower as `+`. On a class instance it dispatches `minus`.</p>
+          <pre><code class="lang-groovy">println(5 - 2)   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-3">
+          <h3><a class="doc-anchor" href="#doc-operators-3">#</a> <code>*</code></h3>
+          <pre><code class="lang-groovy">a * b</code></pre>
+          <p>Multiplication. On a class instance it dispatches `multiply`.</p>
+          <pre><code class="lang-groovy">println(3 * 4)   // =&gt; 12</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-4">
+          <h3><a class="doc-anchor" href="#doc-operators-4">#</a> <code>/</code></h3>
+          <pre><code class="lang-groovy">a / b</code></pre>
+          <p>Division, lowered to the `GDIV` builtin rather than a VM opcode. Two integers that divide exactly yield an integer; anything else yields a `BigDecimal` — never a double, unless an operand already is one. A zero divisor raises `ArithmeticException`. On a class instance it dispatches `div`.</p>
+          <pre><code class="lang-groovy">println(7 / 2)
+println(4 / 2)   // =&gt; 3.5 then 2</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-5">
+          <h3><a class="doc-anchor" href="#doc-operators-5">#</a> <code>%</code></h3>
+          <pre><code class="lang-groovy">a % b</code></pre>
+          <p>Remainder. The compiler emits a bare opcode when it can prove the divisor non-zero and a guarded builtin call otherwise. On a class instance it dispatches `remainder`, which is Groovy's mapping — not `mod`.</p>
+          <pre><code class="lang-groovy">println(5 % 3)   // =&gt; 2</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-6">
+          <h3><a class="doc-anchor" href="#doc-operators-6">#</a> <code>- (unary)</code></h3>
+          <pre><code class="lang-groovy">-a</code></pre>
+          <p>Arithmetic negation. On a class instance it dispatches `negative`.</p>
+          <pre><code class="lang-groovy">println(-(-3))   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-7">
+          <h3><a class="doc-anchor" href="#doc-operators-7">#</a> <code>!</code></h3>
+          <pre><code class="lang-groovy">!a</code></pre>
+          <p>Logical negation of the operand's Groovy truth, so `![]`, `!""`, `!0`, and `!null` are all true.</p>
+          <pre><code class="lang-groovy">println(!false)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-8">
+          <h3><a class="doc-anchor" href="#doc-operators-8">#</a> <code>==</code></h3>
+          <pre><code class="lang-groovy">a == b</code></pre>
+          <p>Equality. Groovy's `==` is value equality, not identity, and it is null-safe. On a class instance it uses `compareTo(…) == 0` when the class defines `compareTo`, a user `equals` otherwise, and heap identity with neither.</p>
+          <pre><code class="lang-groovy">println([1, 2] == [1, 2])   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-9">
+          <h3><a class="doc-anchor" href="#doc-operators-9">#</a> <code>!=</code></h3>
+          <pre><code class="lang-groovy">a != b</code></pre>
+          <p>The negation of `==`, resolved through the same instance rules.</p>
+          <pre><code class="lang-groovy">println(1 != 2)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-10">
+          <h3><a class="doc-anchor" href="#doc-operators-10">#</a> <code>&lt;</code></h3>
+          <pre><code class="lang-groovy">a &lt; b</code></pre>
+          <p>Less-than. On a class instance it dispatches `compareTo`; a class without one falls back to comparing the rendered strings.</p>
+          <pre><code class="lang-groovy">println(1 &lt; 2)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-11">
+          <h3><a class="doc-anchor" href="#doc-operators-11">#</a> <code>&gt;</code></h3>
+          <pre><code class="lang-groovy">a &gt; b</code></pre>
+          <p>Greater-than, resolved like `&lt;`.</p>
+          <pre><code class="lang-groovy">println(3 &gt; 2)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-12">
+          <h3><a class="doc-anchor" href="#doc-operators-12">#</a> <code>&lt;=</code></h3>
+          <pre><code class="lang-groovy">a &lt;= b</code></pre>
+          <p>Less-than-or-equal, resolved like `&lt;`.</p>
+          <pre><code class="lang-groovy">println(2 &lt;= 2)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-13">
+          <h3><a class="doc-anchor" href="#doc-operators-13">#</a> <code>&gt;=</code></h3>
+          <pre><code class="lang-groovy">a &gt;= b</code></pre>
+          <p>Greater-than-or-equal, resolved like `&lt;`.</p>
+          <pre><code class="lang-groovy">println(2 &gt;= 3)   // =&gt; false</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-14">
+          <h3><a class="doc-anchor" href="#doc-operators-14">#</a> <code>&lt;=&gt;</code></h3>
+          <pre><code class="lang-groovy">a &lt;=&gt; b</code></pre>
+          <p>The spaceship operator — `compareTo`, lowered to the `GCMP` builtin. Yields a negative number, zero, or a positive number.</p>
+          <pre><code class="lang-groovy">println(5 &lt;=&gt; 3)   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-15">
+          <h3><a class="doc-anchor" href="#doc-operators-15">#</a> <code>&amp;&amp;</code></h3>
+          <pre><code class="lang-groovy">a &amp;&amp; b</code></pre>
+          <p>Short-circuiting logical and. Both operands go through Groovy truth; the result is a `Boolean`, not the operand.</p>
+          <pre><code class="lang-groovy">println(1 &amp;&amp; "x")   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-16">
+          <h3><a class="doc-anchor" href="#doc-operators-16">#</a> <code>||</code></h3>
+          <pre><code class="lang-groovy">a || b</code></pre>
+          <p>Short-circuiting logical or, with the same truth rules as `&amp;&amp;`.</p>
+          <pre><code class="lang-groovy">println(0 || 3)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-17">
+          <h3><a class="doc-anchor" href="#doc-operators-17">#</a> <code>?:</code></h3>
+          <pre><code class="lang-groovy">a ?: b</code></pre>
+          <p>The Elvis operator. Evaluates the left side once and yields it when Groovy-truthy, otherwise the right side. Unlike `||` it yields the *operand*, not a `Boolean`.</p>
+          <pre><code class="lang-groovy">println(null ?: "d")
+println("" ?: "d")   // =&gt; d then d</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-18">
+          <h3><a class="doc-anchor" href="#doc-operators-18">#</a> <code>? :</code></h3>
+          <pre><code class="lang-groovy">cond ? a : b</code></pre>
+          <p>The ternary conditional. The condition goes through Groovy truth.</p>
+          <pre><code class="lang-groovy">println(true ? 1 : 2)   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-19">
+          <h3><a class="doc-anchor" href="#doc-operators-19">#</a> <code>?.</code></h3>
+          <pre><code class="lang-groovy">recv?.member | recv?.method(args)</code></pre>
+          <p>Safe navigation. Yields `null` without dispatching when the receiver is `null`, so a chain of `?.` never raises `NullPointerException`.</p>
+          <pre><code class="lang-groovy">def x
+println(x?.size())   // =&gt; null</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-20">
+          <h3><a class="doc-anchor" href="#doc-operators-20">#</a> <code>*.</code></h3>
+          <pre><code class="lang-groovy">recv*.member | recv*.method(args)</code></pre>
+          <p>The spread-dot operator. Desugars to `recv.collect { it?.member }` — including the safe navigation, which is why a `null` element spreads to `null` rather than raising.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3]*.toString())   // =&gt; [1, 2, 3]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-21">
+          <h3><a class="doc-anchor" href="#doc-operators-21">#</a> <code>[ ]</code></h3>
+          <pre><code class="lang-groovy">recv[index]</code></pre>
+          <p>Subscript, lowered to the `GINDEX` builtin. A list index past the end yields `null` and a negative index counts from the end; a String subscript yields a one-character String and raises past the end; a map subscript is a key read. On a class instance it dispatches `getAt`.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3][-1])
+println("hello"[1])   // =&gt; 3 then e</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-22">
+          <h3><a class="doc-anchor" href="#doc-operators-22">#</a> <code>..</code></h3>
+          <pre><code class="lang-groovy">a..b</code></pre>
+          <p>An inclusive range. groovyrs materialises a range to a plain list at lowering time, so `(0..3).class.simpleName` is `ArrayList` where Groovy answers `IntRange` — and printing one shows `[0, 1, 2, 3]` where Groovy shows `0..3`.</p>
+          <pre><code class="lang-groovy">println(0..3)   // =&gt; [0, 1, 2, 3]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-23">
+          <h3><a class="doc-anchor" href="#doc-operators-23">#</a> <code>..&lt;</code></h3>
+          <pre><code class="lang-groovy">a..&lt;b</code></pre>
+          <p>A half-open range: the endpoint is decremented before the range is materialised.</p>
+          <pre><code class="lang-groovy">println(0..&lt;3)   // =&gt; [0, 1, 2]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-24">
+          <h3><a class="doc-anchor" href="#doc-operators-24">#</a> <code>++</code></h3>
+          <pre><code class="lang-groovy">x++ | ++x</code></pre>
+          <p>Increment. Postfix yields the value before the update, prefix the value after. On a class instance it dispatches `plus` — not Groovy's `next`, which is a deliberate divergence.</p>
+          <pre><code class="lang-groovy">def i = 0
+println(i++)
+println(i)   // =&gt; 0 then 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-25">
+          <h3><a class="doc-anchor" href="#doc-operators-25">#</a> <code>--</code></h3>
+          <pre><code class="lang-groovy">x-- | --x</code></pre>
+          <p>Decrement, mirroring `++`; on a class instance it dispatches `minus` rather than Groovy's `previous`.</p>
+          <pre><code class="lang-groovy">def i = 2
+println(--i)   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-26">
+          <h3><a class="doc-anchor" href="#doc-operators-26">#</a> <code>=</code></h3>
+          <pre><code class="lang-groovy">target = expr</code></pre>
+          <p>Assignment to a local, a script binding, a field, a property (`GSETPROP`), or a subscript. A property write to a name the class chain never declared raises `MissingPropertyException` rather than growing the object.</p>
+          <pre><code class="lang-groovy">def x = 1
+x = 2
+println(x)   // =&gt; 2</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-27">
+          <h3><a class="doc-anchor" href="#doc-operators-27">#</a> <code>+=</code></h3>
+          <pre><code class="lang-groovy">target += expr</code></pre>
+          <p>Compound addition — the `+` lowering with a load before and a store after. Inside a class body a bare field target routes through the property builtins.</p>
+          <pre><code class="lang-groovy">def x = 1
+x += 2
+println(x)   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-28">
+          <h3><a class="doc-anchor" href="#doc-operators-28">#</a> <code>-=</code></h3>
+          <pre><code class="lang-groovy">target -= expr</code></pre>
+          <p>Compound subtraction.</p>
+          <pre><code class="lang-groovy">def x = 5
+x -= 2
+println(x)   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-29">
+          <h3><a class="doc-anchor" href="#doc-operators-29">#</a> <code>*=</code></h3>
+          <pre><code class="lang-groovy">target *= expr</code></pre>
+          <p>Compound multiplication.</p>
+          <pre><code class="lang-groovy">def x = 3
+x *= 4
+println(x)   // =&gt; 12</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-30">
+          <h3><a class="doc-anchor" href="#doc-operators-30">#</a> <code>/=</code></h3>
+          <pre><code class="lang-groovy">target /= expr</code></pre>
+          <p>Compound division. Reuses the `GDIV` builtin, so `7 /= 2` yields a `BigDecimal`.</p>
+          <pre><code class="lang-groovy">def x = 7
+x /= 2
+println(x)   // =&gt; 3.5</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-31">
+          <h3><a class="doc-anchor" href="#doc-operators-31">#</a> <code>%=</code></h3>
+          <pre><code class="lang-groovy">target %= expr</code></pre>
+          <p>Compound remainder, reusing the guarded `%` lowering.</p>
+          <pre><code class="lang-groovy">def x = 7
+x %= 3
+println(x)   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-32">
+          <h3><a class="doc-anchor" href="#doc-operators-32">#</a> <code>.</code></h3>
+          <pre><code class="lang-groovy">recv.member | recv.method(args)</code></pre>
+          <p>Member access. A call routes through the `GMETHOD` builtin and a read through `GPROP`; on a class instance a read prefers a user `getX()` getter over the raw field.</p>
+          <pre><code class="lang-groovy">println("abc".size())   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-33">
+          <h3><a class="doc-anchor" href="#doc-operators-33">#</a> <code>-&gt;</code></h3>
+          <pre><code class="lang-groovy">{ params -&gt; body }</code></pre>
+          <p>The closure parameter separator. Its presence — even with an empty list — is what makes the parameter list explicit and suppresses the implicit `it`.</p>
+          <pre><code class="lang-groovy">println([1, 2].collect { n -&gt; n * 10 })   // =&gt; [10, 20]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-34">
+          <h3><a class="doc-anchor" href="#doc-operators-34">#</a> <code>|</code></h3>
+          <pre><code class="lang-groovy">catch (A | B name)</code></pre>
+          <p>The multi-catch alternative separator. This is its only meaning: groovyrs has no bitwise-or operator.</p>
+          <pre><code class="lang-groovy">try { 1 / 0 } catch (IOException | ArithmeticException e) { println("caught") }   // =&gt; caught</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-35">
+          <h3><a class="doc-anchor" href="#doc-operators-35">#</a> <code>@</code></h3>
+          <pre><code class="lang-groovy">@Name</code></pre>
+          <p>The annotation marker. Annotations are lexed and skipped before a class or member declaration; groovyrs attaches no meaning to any of them.</p>
+          <pre><code class="lang-groovy">class A { @Override def toString() { "A" } }
+println(new A())   // =&gt; A</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-36">
+          <h3><a class="doc-anchor" href="#doc-operators-36">#</a> <code>label:</code></h3>
+          <pre><code class="lang-groovy">name: loop</code></pre>
+          <p>A statement label. Only a loop is a useful target, and only `break label` / `continue label` read it; naming a label no enclosing loop carries is a compile error.</p>
+          <pre><code class="lang-groovy">outer: for (i in 0..3) { if (i == 1) break outer; print(i) }   // =&gt; 0</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-script-commands">
+        <h2>Script Commands</h2>
+        <article class="doc-entry" id="doc-script-commands-1">
+          <h3><a class="doc-anchor" href="#doc-script-commands-1">#</a> <code>println</code></h3>
+          <pre><code class="lang-groovy">println([value])</code></pre>
+          <p>Print a Groovy-formatted value and a trailing newline, then yield `null`. Parentheses are optional. A class instance renders through its `toString()`; a list renders as `[1, 2, 3]` and a map as `[a:1]`.</p>
+          <pre><code class="lang-groovy">println("hi")
+println([a: 1])   // =&gt; hi then [a:1]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-script-commands-2">
+          <h3><a class="doc-anchor" href="#doc-script-commands-2">#</a> <code>print</code></h3>
+          <pre><code class="lang-groovy">print([value])</code></pre>
+          <p>Print a Groovy-formatted value with no trailing newline, then yield `null`.</p>
+          <pre><code class="lang-groovy">print("a"); print("b")   // =&gt; ab</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-gdk-any-receiver">
+        <h2>GDK — Any Receiver</h2>
+        <article class="doc-entry" id="doc-gdk-any-receiver-1">
+          <h3><a class="doc-anchor" href="#doc-gdk-any-receiver-1">#</a> <code>size</code></h3>
+          <pre><code class="lang-groovy">value.size() -&gt; Integer</code></pre>
+          <p>The element count: characters for a String, elements for a list, entries for a map. groovyrs answers `size()` on *every* receiver and yields `0` for a scalar, where Groovy raises `MissingMethodException` on, say, an `Integer`.</p>
+          <pre><code class="lang-groovy">println("ab".size())
+println([1, 2, 3].size())   // =&gt; 2 then 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-any-receiver-2">
+          <h3><a class="doc-anchor" href="#doc-gdk-any-receiver-2">#</a> <code>getClass</code></h3>
+          <pre><code class="lang-groovy">value.getClass() -&gt; Class</code></pre>
+          <p>The `java.lang.Class` handle for the receiver, answered before the per-type table so it works on everything. `null.getClass()` answers `NullObject`'s class rather than raising, as in Groovy.</p>
+          <pre><code class="lang-groovy">println(1.5.getClass().getName())   // =&gt; java.math.BigDecimal</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-any-receiver-3">
+          <h3><a class="doc-anchor" href="#doc-gdk-any-receiver-3">#</a> <code>toString</code></h3>
+          <pre><code class="lang-groovy">value.toString() -&gt; String</code></pre>
+          <p>The receiver rendered the way `println` renders it. A class instance uses its own `toString()` when it declares one; a throwable renders as `qualified.Name: message`.</p>
+          <pre><code class="lang-groovy">println([1, 2].toString())   // =&gt; [1, 2]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-any-receiver-4">
+          <h3><a class="doc-anchor" href="#doc-gdk-any-receiver-4">#</a> <code>equals</code></h3>
+          <pre><code class="lang-groovy">value.equals(other) -&gt; Boolean</code></pre>
+          <p>Value equality. Modeled explicitly only on a `null` receiver (`null.equals(null)` is true); on a class instance a user `equals` is dispatched, and on other receivers it is the `==` comparison.</p>
+          <pre><code class="lang-groovy">def x
+println(x.equals(null))   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-any-receiver-5">
+          <h3><a class="doc-anchor" href="#doc-gdk-any-receiver-5">#</a> <code>call</code></h3>
+          <pre><code class="lang-groovy">closure.call([args]) -&gt; Object</code></pre>
+          <p>Invoke a closure explicitly. `clo(args)` and `clo.call(args)` reach the same code path; calling `call` on a non-closure falls through to ordinary GDK dispatch.</p>
+          <pre><code class="lang-groovy">def f = { a -&gt; a * 2 }
+println(f.call(4))   // =&gt; 8</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-gdk-string">
+        <h2>GDK — String</h2>
+        <article class="doc-entry" id="doc-gdk-string-1">
+          <h3><a class="doc-anchor" href="#doc-gdk-string-1">#</a> <code>length</code></h3>
+          <pre><code class="lang-groovy">string.length() -&gt; Integer</code></pre>
+          <p>The character count of a String — Unicode characters, not bytes.</p>
+          <pre><code class="lang-groovy">println("héllo".length())   // =&gt; 5</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-string-2">
+          <h3><a class="doc-anchor" href="#doc-gdk-string-2">#</a> <code>toUpperCase</code></h3>
+          <pre><code class="lang-groovy">string.toUpperCase() -&gt; String</code></pre>
+          <p>The receiver uppercased. Uses Rust's Unicode-aware case mapping rather than a JDK locale.</p>
+          <pre><code class="lang-groovy">println("abc".toUpperCase())   // =&gt; ABC</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-string-3">
+          <h3><a class="doc-anchor" href="#doc-gdk-string-3">#</a> <code>toLowerCase</code></h3>
+          <pre><code class="lang-groovy">string.toLowerCase() -&gt; String</code></pre>
+          <p>The receiver lowercased.</p>
+          <pre><code class="lang-groovy">println("ABC".toLowerCase())   // =&gt; abc</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-string-4">
+          <h3><a class="doc-anchor" href="#doc-gdk-string-4">#</a> <code>trim</code></h3>
+          <pre><code class="lang-groovy">string.trim() -&gt; String</code></pre>
+          <p>The receiver with leading and trailing whitespace removed.</p>
+          <pre><code class="lang-groovy">println("  x  ".trim() + "!")   // =&gt; x!</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-string-5">
+          <h3><a class="doc-anchor" href="#doc-gdk-string-5">#</a> <code>reverse</code></h3>
+          <pre><code class="lang-groovy">string.reverse() -&gt; String</code></pre>
+          <p>The receiver's characters in reverse order.</p>
+          <pre><code class="lang-groovy">println("abc".reverse())   // =&gt; cba</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-string-6">
+          <h3><a class="doc-anchor" href="#doc-gdk-string-6">#</a> <code>isEmpty</code></h3>
+          <pre><code class="lang-groovy">string.isEmpty() -&gt; Boolean</code></pre>
+          <p>True when the String has no characters. This is a length test, not a whitespace test.</p>
+          <pre><code class="lang-groovy">println("".isEmpty())   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-string-7">
+          <h3><a class="doc-anchor" href="#doc-gdk-string-7">#</a> <code>contains</code></h3>
+          <pre><code class="lang-groovy">string.contains(needle) -&gt; Boolean</code></pre>
+          <p>True when the rendered argument occurs as a substring. The argument is rendered first, so a non-String argument is compared by its printed form — where Apache Groovy raises `MissingMethodException` for one.</p>
+          <pre><code class="lang-groovy">println("abc".contains("bc"))   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-string-8">
+          <h3><a class="doc-anchor" href="#doc-gdk-string-8">#</a> <code>toInteger</code></h3>
+          <pre><code class="lang-groovy">string.toInteger() -&gt; Integer</code></pre>
+          <p>Parse the *trimmed* text as an integer, range-checked to 32 bits. A failed parse — including one that overflows `Integer` — raises `NumberFormatException` naming the text.</p>
+          <pre><code class="lang-groovy">println("42".toInteger() + 1)   // =&gt; 43</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-string-9">
+          <h3><a class="doc-anchor" href="#doc-gdk-string-9">#</a> <code>toLong</code></h3>
+          <pre><code class="lang-groovy">string.toLong() -&gt; Long</code></pre>
+          <p>Parse the trimmed text as a 64-bit integer. Unlike `toInteger` it accepts values outside the 32-bit range.</p>
+          <pre><code class="lang-groovy">println("2147483648".toLong())   // =&gt; 2147483648</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-string-10">
+          <h3><a class="doc-anchor" href="#doc-gdk-string-10">#</a> <code>toDouble</code></h3>
+          <pre><code class="lang-groovy">string.toDouble() -&gt; Double</code></pre>
+          <p>Parse the text the way `Double.parseDouble` does: surrounding whitespace and a trailing `d`/`f` are allowed, as are `Infinity` and `NaN` — but not Rust's extra `inf`/`nan` spellings or a hex literal.</p>
+          <pre><code class="lang-groovy">println("1.5".toDouble() * 2)   // =&gt; 3.0</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-string-11">
+          <h3><a class="doc-anchor" href="#doc-gdk-string-11">#</a> <code>toFloat</code></h3>
+          <pre><code class="lang-groovy">string.toFloat() -&gt; Float</code></pre>
+          <p>Identical to `toDouble` — groovyrs has one IEEE type, so there is no narrowing to 32-bit precision.</p>
+          <pre><code class="lang-groovy">println("0.25".toFloat())   // =&gt; 0.25</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-string-12">
+          <h3><a class="doc-anchor" href="#doc-gdk-string-12">#</a> <code>toBigDecimal</code></h3>
+          <pre><code class="lang-groovy">string.toBigDecimal() -&gt; BigDecimal</code></pre>
+          <p>`new BigDecimal(text.trim())`. The failure carries `BigDecimal`'s own character-level diagnostics, including the message-less `NumberFormatException` an empty string produces.</p>
+          <pre><code class="lang-groovy">println("1.50".toBigDecimal())   // =&gt; 1.50</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-gdk-list">
+        <h2>GDK — List</h2>
+        <article class="doc-entry" id="doc-gdk-list-1">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-1">#</a> <code>isEmpty</code></h3>
+          <pre><code class="lang-groovy">list.isEmpty() -&gt; Boolean</code></pre>
+          <p>True when the list has no elements.</p>
+          <pre><code class="lang-groovy">println([].isEmpty())   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-2">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-2">#</a> <code>contains</code></h3>
+          <pre><code class="lang-groovy">list.contains(value) -&gt; Boolean</code></pre>
+          <p>True when some element matches. groovyrs compares the *rendered* forms, so `[1, 2].contains("1")` is true where Groovy's `equals`-based test is false.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3].contains(2))   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-3">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-3">#</a> <code>get</code></h3>
+          <pre><code class="lang-groovy">list.get(index) -&gt; Object</code></pre>
+          <p>The element at `index`. Unlike the `[i]` subscript this is the raw JDK call: any out-of-range index raises `IndexOutOfBoundsException` instead of yielding `null`, and a negative index does not wrap.</p>
+          <pre><code class="lang-groovy">println([10, 20].get(1))   // =&gt; 20</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-4">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-4">#</a> <code>reverse</code></h3>
+          <pre><code class="lang-groovy">list.reverse() -&gt; List</code></pre>
+          <p>A new list with the elements in reverse order. The receiver is not mutated.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3].reverse())   // =&gt; [3, 2, 1]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-5">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-5">#</a> <code>join</code></h3>
+          <pre><code class="lang-groovy">list.join([separator]) -&gt; String</code></pre>
+          <p>Render each element the way `println` does and join them with the separator, which defaults to the empty string.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3].join("-"))   // =&gt; 1-2-3</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-gdk-list-closure-methods">
+        <h2>GDK — List Closure Methods</h2>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-1">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-1">#</a> <code>each</code></h3>
+          <pre><code class="lang-groovy">list.each { it -&gt; … } -&gt; List</code></pre>
+          <p>Run the closure once per element for its side effects and yield the receiver. A `throw` inside the closure stops the iteration so the exception reaches the caller's handler.</p>
+          <pre><code class="lang-groovy">[1, 2].each { print(it) }   // =&gt; 12</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-2">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-2">#</a> <code>eachWithIndex</code></h3>
+          <pre><code class="lang-groovy">list.eachWithIndex { it, i -&gt; … } -&gt; List</code></pre>
+          <p>Like `each`, but the closure also receives the element's 0-based index.</p>
+          <pre><code class="lang-groovy">[9, 8].eachWithIndex { v, i -&gt; println("$i:$v") }   // =&gt; 0:9 then 1:8</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-3">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-3">#</a> <code>collect</code></h3>
+          <pre><code class="lang-groovy">list.collect { it -&gt; … } -&gt; List</code></pre>
+          <p>Map each element through the closure into a new list of the same length.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3].collect { it * 2 })   // =&gt; [2, 4, 6]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-4">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-4">#</a> <code>findAll</code></h3>
+          <pre><code class="lang-groovy">list.findAll { it -&gt; … } -&gt; List</code></pre>
+          <p>Keep the elements for which the closure's result is Groovy-truthy.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3].findAll { it &gt; 1 })   // =&gt; [2, 3]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-5">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-5">#</a> <code>find</code></h3>
+          <pre><code class="lang-groovy">list.find { it -&gt; … } -&gt; Object</code></pre>
+          <p>The first element the closure accepts, or `null` when none does.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3].find { it &gt; 1 })   // =&gt; 2</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-6">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-6">#</a> <code>inject</code></h3>
+          <pre><code class="lang-groovy">list.inject([seed]) { acc, val -&gt; … } -&gt; Object</code></pre>
+          <p>Fold left. With a seed the fold starts there; without one it seeds with the first element and starts at the second. An empty list with no seed yields `null`.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3].inject(0) { a, b -&gt; a + b })   // =&gt; 6</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-7">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-7">#</a> <code>sum</code></h3>
+          <pre><code class="lang-groovy">list.sum([seed]) | list.sum { it -&gt; … } -&gt; Object</code></pre>
+          <p>Add the elements, or the closure's results, using the `+` numeric tower — so a String element concatenates and a list element appends. An empty list with no seed yields `null`.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3].sum())
+println([1, 2, 3].sum { it * 2 })   // =&gt; 6 then 12</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-8">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-8">#</a> <code>sort</code></h3>
+          <pre><code class="lang-groovy">list.sort([true]) | list.sort { it -&gt; key } | list.sort { a, b -&gt; … } -&gt; List</code></pre>
+          <p>Order the elements naturally, by a one-parameter key closure, or by a two-parameter comparator. The call always builds a new list; when the receiver is a plain variable the compiler writes the result back, which is what makes it look in-place. `sort(false)` asks for a copy and suppresses the write-back.</p>
+          <pre><code class="lang-groovy">println([3, 1, 2].sort())   // =&gt; [1, 2, 3]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-9">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-9">#</a> <code>unique</code></h3>
+          <pre><code class="lang-groovy">list.unique([true]) | list.unique { it -&gt; key } -&gt; List</code></pre>
+          <p>Drop later duplicates, keeping source order. Comparison is the same natural-or-closure ordering `sort` uses, and it writes back to a variable receiver the same way.</p>
+          <pre><code class="lang-groovy">println([1, 1, 2].unique())   // =&gt; [1, 2]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-10">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-10">#</a> <code>max</code></h3>
+          <pre><code class="lang-groovy">list.max([{ it -&gt; key }]) -&gt; Object</code></pre>
+          <p>The greatest element, by natural order or by the closure's key.</p>
+          <pre><code class="lang-groovy">println([3, 1, 2].max())   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-11">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-11">#</a> <code>min</code></h3>
+          <pre><code class="lang-groovy">list.min([{ it -&gt; key }]) -&gt; Object</code></pre>
+          <p>The least element, by natural order or by the closure's key.</p>
+          <pre><code class="lang-groovy">println([3, 1, 2].min())   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-12">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-12">#</a> <code>groupBy</code></h3>
+          <pre><code class="lang-groovy">list.groupBy { it -&gt; key } -&gt; Map</code></pre>
+          <p>A map from each closure result to the sublist of elements that produced it, with keys in first-seen order. The key is the rendered form of the closure's result.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3].groupBy { it % 2 })   // =&gt; [1:[1, 3], 0:[2]]</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-gdk-map">
+        <h2>GDK — Map</h2>
+        <article class="doc-entry" id="doc-gdk-map-1">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-1">#</a> <code>isEmpty</code></h3>
+          <pre><code class="lang-groovy">map.isEmpty() -&gt; Boolean</code></pre>
+          <p>True when the map has no entries.</p>
+          <pre><code class="lang-groovy">println([:].isEmpty())   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-2">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-2">#</a> <code>containsKey</code></h3>
+          <pre><code class="lang-groovy">map.containsKey(key) -&gt; Boolean</code></pre>
+          <p>True when the map holds the rendered key.</p>
+          <pre><code class="lang-groovy">println([a: 1].containsKey("a"))   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-3">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-3">#</a> <code>get</code></h3>
+          <pre><code class="lang-groovy">map.get(key) -&gt; Object</code></pre>
+          <p>The value stored under the rendered key, or `null` when absent. Unlike `List.get` this never raises.</p>
+          <pre><code class="lang-groovy">println([a: 1].get("a"))   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-4">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-4">#</a> <code>keySet</code></h3>
+          <pre><code class="lang-groovy">map.keySet() -&gt; List</code></pre>
+          <p>The keys in insertion order. groovyrs yields a plain list rather than a `Set` view, so it is ordered and allows subscripting.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].keySet())   // =&gt; [a, b]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-5">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-5">#</a> <code>keys</code></h3>
+          <pre><code class="lang-groovy">map.keys() -&gt; List</code></pre>
+          <p>A groovyrs synonym for `keySet`. Apache Groovy has no `Map.keys()` — this is an extension, not a port.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].keys())   // =&gt; [a, b]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-6">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-6">#</a> <code>values</code></h3>
+          <pre><code class="lang-groovy">map.values() -&gt; List</code></pre>
+          <p>The values in insertion order, as a plain list.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].values())   // =&gt; [1, 2]</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-gdk-map-closure-methods">
+        <h2>GDK — Map Closure Methods</h2>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-1">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-1">#</a> <code>each</code></h3>
+          <pre><code class="lang-groovy">map.each { k, v -&gt; … } | map.each { entry -&gt; … } -&gt; Map</code></pre>
+          <p>Run the closure once per entry and yield the receiver. A two-parameter closure receives `(key, value)`; a one-parameter closure receives one `Map.Entry` — the closure's declared parameter count decides, as in Groovy.</p>
+          <pre><code class="lang-groovy">[a: 1, b: 2].each { k, v -&gt; println("$k$v") }   // =&gt; a1 then b2</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-2">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-2">#</a> <code>eachWithIndex</code></h3>
+          <pre><code class="lang-groovy">map.eachWithIndex { k, v, i -&gt; … } -&gt; Map</code></pre>
+          <p>Like `each`, with the entry's 0-based index appended to the closure's arguments.</p>
+          <pre><code class="lang-groovy">[a: 1].eachWithIndex { k, v, i -&gt; print("$i:$k") }   // =&gt; 0:a</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-3">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-3">#</a> <code>collect</code></h3>
+          <pre><code class="lang-groovy">map.collect { k, v -&gt; … } -&gt; List</code></pre>
+          <p>Map each entry through the closure. The result is a *list* of the closure's results, not a map — matching Groovy.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].collect { k, v -&gt; k + v })   // =&gt; [a1, b2]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-4">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-4">#</a> <code>findAll</code></h3>
+          <pre><code class="lang-groovy">map.findAll { k, v -&gt; … } -&gt; Map</code></pre>
+          <p>Keep the entries the closure accepts, as a new map in source order.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].findAll { k, v -&gt; v &gt; 1 })   // =&gt; [b:2]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-5">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-5">#</a> <code>find</code></h3>
+          <pre><code class="lang-groovy">map.find { k, v -&gt; … } -&gt; Map.Entry</code></pre>
+          <p>The first accepted entry as a `Map.Entry` (which prints as `key=value`), or `null` when none matches.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].find { k, v -&gt; v &gt; 1 })   // =&gt; b=2</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-6">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-6">#</a> <code>any</code></h3>
+          <pre><code class="lang-groovy">map.any { k, v -&gt; … } -&gt; Boolean</code></pre>
+          <p>True when the closure accepts at least one entry; stops at the first acceptance. Map-only: Apache Groovy also defines `any` on a list, and groovyrs does not — a list receiver raises `MissingMethodException`.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].any { k, v -&gt; v &gt; 1 })   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-7">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-7">#</a> <code>every</code></h3>
+          <pre><code class="lang-groovy">map.every { k, v -&gt; … } -&gt; Boolean</code></pre>
+          <p>True when the closure accepts every entry; stops at the first rejection. Map-only, like `any`, and missing from lists for the same reason.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].every { k, v -&gt; v &gt; 0 })   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-8">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-8">#</a> <code>groupBy</code></h3>
+          <pre><code class="lang-groovy">map.groupBy { k, v -&gt; key } -&gt; Map</code></pre>
+          <p>A map from each closure result to the *sub-map* of entries that produced it, keys in first-seen order.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].groupBy { k, v -&gt; v % 2 })   // =&gt; [1:[a:1], 0:[b:2]]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-9">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-9">#</a> <code>inject</code></h3>
+          <pre><code class="lang-groovy">map.inject(seed) { acc, entry -&gt; … } -&gt; Object</code></pre>
+          <p>Fold over the entries, passing the accumulator and one `Map.Entry`. Unlike the list form the seed is required here.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].inject(0) { a, e -&gt; a + e.value })   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-10">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-10">#</a> <code>sort</code></h3>
+          <pre><code class="lang-groovy">map.sort([{ entry -&gt; key }]) -&gt; Map</code></pre>
+          <p>A new map ordered by key, or by the closure's key over each entry. Unlike `List.sort` this never mutates or writes back to the receiver, which is also Groovy's behaviour.</p>
+          <pre><code class="lang-groovy">println([b: 1, a: 2].sort())   // =&gt; [a:2, b:1]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-11">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-11">#</a> <code>max</code></h3>
+          <pre><code class="lang-groovy">map.max { entry -&gt; key } -&gt; Map.Entry</code></pre>
+          <p>The entry whose closure key is greatest, as a `Map.Entry`. The closure is required.</p>
+          <pre><code class="lang-groovy">println([a: 2, b: 1].max { it.value })   // =&gt; a=2</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-12">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-12">#</a> <code>min</code></h3>
+          <pre><code class="lang-groovy">map.min { entry -&gt; key } -&gt; Map.Entry</code></pre>
+          <p>The entry whose closure key is least, as a `Map.Entry`.</p>
+          <pre><code class="lang-groovy">println([a: 2, b: 1].min { it.value })   // =&gt; b=1</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-gdk-bigdecimal">
+        <h2>GDK — BigDecimal</h2>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-1">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-1">#</a> <code>toString</code></h3>
+          <pre><code class="lang-groovy">decimal.toString() -&gt; String</code></pre>
+          <p>The decimal rendered with its own scale preserved, so `1.50` keeps both fraction digits and `2.5e7` prints as `2.5E+7`.</p>
+          <pre><code class="lang-groovy">println(1.50.toString())   // =&gt; 1.50</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-2">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-2">#</a> <code>abs</code></h3>
+          <pre><code class="lang-groovy">decimal.abs() -&gt; BigDecimal</code></pre>
+          <p>The magnitude, keeping the receiver's scale.</p>
+          <pre><code class="lang-groovy">println((-1.5).abs())   // =&gt; 1.5</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-3">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-3">#</a> <code>negate</code></h3>
+          <pre><code class="lang-groovy">decimal.negate() -&gt; BigDecimal</code></pre>
+          <p>The receiver with its sign flipped.</p>
+          <pre><code class="lang-groovy">println(1.5.negate())   // =&gt; -1.5</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-4">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-4">#</a> <code>toBigDecimal</code></h3>
+          <pre><code class="lang-groovy">decimal.toBigDecimal() -&gt; BigDecimal</code></pre>
+          <p>The receiver itself — the identity conversion, provided so a script can call it uniformly on a String or a decimal.</p>
+          <pre><code class="lang-groovy">println(1.50.toBigDecimal())   // =&gt; 1.50</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-5">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-5">#</a> <code>intValue</code></h3>
+          <pre><code class="lang-groovy">decimal.intValue() -&gt; Integer</code></pre>
+          <p>Truncate toward zero to an integer. This discards the fraction rather than rounding it.</p>
+          <pre><code class="lang-groovy">println(1.99.intValue())   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-6">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-6">#</a> <code>longValue</code></h3>
+          <pre><code class="lang-groovy">decimal.longValue() -&gt; Long</code></pre>
+          <p>Truncate toward zero to a 64-bit integer — the same value `intValue` yields, since groovyrs holds one integer width.</p>
+          <pre><code class="lang-groovy">println(1.99.longValue())   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-7">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-7">#</a> <code>toInteger</code></h3>
+          <pre><code class="lang-groovy">decimal.toInteger() -&gt; Integer</code></pre>
+          <p>A truncating conversion, identical to `intValue`.</p>
+          <pre><code class="lang-groovy">println(2.9.toInteger())   // =&gt; 2</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-8">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-8">#</a> <code>toLong</code></h3>
+          <pre><code class="lang-groovy">decimal.toLong() -&gt; Long</code></pre>
+          <p>A truncating conversion, identical to `longValue`.</p>
+          <pre><code class="lang-groovy">println(2.9.toLong())   // =&gt; 2</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-9">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-9">#</a> <code>round</code></h3>
+          <pre><code class="lang-groovy">decimal.round() -&gt; Integer</code></pre>
+          <p>Round to the nearest integer — the one conversion here that does not truncate.</p>
+          <pre><code class="lang-groovy">println(1.50.round())   // =&gt; 2</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-10">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-10">#</a> <code>doubleValue</code></h3>
+          <pre><code class="lang-groovy">decimal.doubleValue() -&gt; Double</code></pre>
+          <p>Convert to an IEEE double, giving up the exact decimal scale.</p>
+          <pre><code class="lang-groovy">println(1.50.doubleValue())   // =&gt; 1.5</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-11">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-11">#</a> <code>toDouble</code></h3>
+          <pre><code class="lang-groovy">decimal.toDouble() -&gt; Double</code></pre>
+          <p>Identical to `doubleValue`.</p>
+          <pre><code class="lang-groovy">println(0.25.toDouble())   // =&gt; 0.25</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-12">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-12">#</a> <code>floatValue</code></h3>
+          <pre><code class="lang-groovy">decimal.floatValue() -&gt; Float</code></pre>
+          <p>Identical to `doubleValue` — groovyrs has one IEEE width, so there is no narrowing to 32-bit precision.</p>
+          <pre><code class="lang-groovy">println(1.25.floatValue())   // =&gt; 1.25</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-bigdecimal-13">
+          <h3><a class="doc-anchor" href="#doc-gdk-bigdecimal-13">#</a> <code>toFloat</code></h3>
+          <pre><code class="lang-groovy">decimal.toFloat() -&gt; Float</code></pre>
+          <p>Identical to `floatValue`.</p>
+          <pre><code class="lang-groovy">println(1.25.toFloat())   // =&gt; 1.25</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-gdk-java-lang-class">
+        <h2>GDK — java.lang.Class</h2>
+        <article class="doc-entry" id="doc-gdk-java-lang-class-1">
+          <h3><a class="doc-anchor" href="#doc-gdk-java-lang-class-1">#</a> <code>getName</code></h3>
+          <pre><code class="lang-groovy">clazz.getName() -&gt; String</code></pre>
+          <p>The fully-qualified class name. A script-declared class answers its bare name, as in Groovy's default package.</p>
+          <pre><code class="lang-groovy">println("x".getClass().getName())   // =&gt; java.lang.String</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-java-lang-class-2">
+          <h3><a class="doc-anchor" href="#doc-gdk-java-lang-class-2">#</a> <code>getTypeName</code></h3>
+          <pre><code class="lang-groovy">clazz.getTypeName() -&gt; String</code></pre>
+          <p>The qualified name — the same string `getName` yields.</p>
+          <pre><code class="lang-groovy">println([1].getClass().getTypeName())   // =&gt; java.util.ArrayList</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-java-lang-class-3">
+          <h3><a class="doc-anchor" href="#doc-gdk-java-lang-class-3">#</a> <code>getCanonicalName</code></h3>
+          <pre><code class="lang-groovy">clazz.getCanonicalName() -&gt; String</code></pre>
+          <p>The qualified name again. groovyrs models no nested or array classes, the two cases where the JDK's canonical name differs from `getName`.</p>
+          <pre><code class="lang-groovy">println(1.getClass().getCanonicalName())   // =&gt; java.lang.Integer</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-java-lang-class-4">
+          <h3><a class="doc-anchor" href="#doc-gdk-java-lang-class-4">#</a> <code>getSimpleName</code></h3>
+          <pre><code class="lang-groovy">clazz.getSimpleName() -&gt; String</code></pre>
+          <p>The last dot-separated segment of the qualified name.</p>
+          <pre><code class="lang-groovy">println("x".getClass().getSimpleName())   // =&gt; String</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-gdk-map-entry">
+        <h2>GDK — Map.Entry</h2>
+        <article class="doc-entry" id="doc-gdk-map-entry-1">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-entry-1">#</a> <code>getKey</code></h3>
+          <pre><code class="lang-groovy">entry.getKey() -&gt; String</code></pre>
+          <p>The entry's key. Map keys are held as strings, so this always yields a String.</p>
+          <pre><code class="lang-groovy">println([a: 1].find { k, v -&gt; true }.getKey())   // =&gt; a</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-entry-2">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-entry-2">#</a> <code>getValue</code></h3>
+          <pre><code class="lang-groovy">entry.getValue() -&gt; Object</code></pre>
+          <p>The entry's value, of whatever type the map holds.</p>
+          <pre><code class="lang-groovy">println([a: 1].find { k, v -&gt; true }.getValue())   // =&gt; 1</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-properties">
+        <h2>Properties</h2>
+        <article class="doc-entry" id="doc-properties-1">
+          <h3><a class="doc-anchor" href="#doc-properties-1">#</a> <code>size</code></h3>
+          <pre><code class="lang-groovy">value.size -&gt; Integer</code></pre>
+          <p>The count property on a String, list, or map. On a map this rule is *not* reached: a map's property access is only a key read, so `[a: 1].size` is `null` while `[size: 9].size` is `9`.</p>
+          <pre><code class="lang-groovy">println([1, 2].size)
+println([a: 1].size)   // =&gt; 2 then null</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-properties-2">
+          <h3><a class="doc-anchor" href="#doc-properties-2">#</a> <code>length</code></h3>
+          <pre><code class="lang-groovy">value.length -&gt; Integer</code></pre>
+          <p>A synonym of the `size` property, with the same map exception.</p>
+          <pre><code class="lang-groovy">println("abc".length)   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-properties-3">
+          <h3><a class="doc-anchor" href="#doc-properties-3">#</a> <code>class</code></h3>
+          <pre><code class="lang-groovy">value.class -&gt; Class</code></pre>
+          <p>The `getClass()` property, available on every value but a map — where it is a key read like any other name. On a class instance a declared field named `class` still wins.</p>
+          <pre><code class="lang-groovy">println("a".class.simpleName)   // =&gt; String</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-properties-4">
+          <h3><a class="doc-anchor" href="#doc-properties-4">#</a> <code>name</code></h3>
+          <pre><code class="lang-groovy">clazz.name -&gt; String</code></pre>
+          <p>The qualified name of a `java.lang.Class` handle, through Groovy's getter-to-property rule.</p>
+          <pre><code class="lang-groovy">println(1.5.class.name)   // =&gt; java.math.BigDecimal</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-properties-5">
+          <h3><a class="doc-anchor" href="#doc-properties-5">#</a> <code>typeName</code></h3>
+          <pre><code class="lang-groovy">clazz.typeName -&gt; String</code></pre>
+          <p>The qualified name of a class handle — the property form of `getTypeName()`.</p>
+          <pre><code class="lang-groovy">println("x".class.typeName)   // =&gt; java.lang.String</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-properties-6">
+          <h3><a class="doc-anchor" href="#doc-properties-6">#</a> <code>canonicalName</code></h3>
+          <pre><code class="lang-groovy">clazz.canonicalName -&gt; String</code></pre>
+          <p>The qualified name of a class handle — the property form of `getCanonicalName()`.</p>
+          <pre><code class="lang-groovy">println([1].class.canonicalName)   // =&gt; java.util.ArrayList</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-properties-7">
+          <h3><a class="doc-anchor" href="#doc-properties-7">#</a> <code>simpleName</code></h3>
+          <pre><code class="lang-groovy">clazz.simpleName -&gt; String</code></pre>
+          <p>The last segment of a class handle's qualified name.</p>
+          <pre><code class="lang-groovy">println([1].class.simpleName)   // =&gt; ArrayList</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-properties-8">
+          <h3><a class="doc-anchor" href="#doc-properties-8">#</a> <code>key</code></h3>
+          <pre><code class="lang-groovy">entry.key -&gt; String</code></pre>
+          <p>The key of a `Map.Entry`, the property form of `getKey()`.</p>
+          <pre><code class="lang-groovy">println([a: 1].find { k, v -&gt; true }.key)   // =&gt; a</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-properties-9">
+          <h3><a class="doc-anchor" href="#doc-properties-9">#</a> <code>value</code></h3>
+          <pre><code class="lang-groovy">entry.value -&gt; Object</code></pre>
+          <p>The value of a `Map.Entry`, the property form of `getValue()`.</p>
+          <pre><code class="lang-groovy">println([a: 1].max { it.value }.value)   // =&gt; 1</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-class-member-hooks">
+        <h2>Class Member Hooks</h2>
+        <article class="doc-entry" id="doc-class-member-hooks-1">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-1">#</a> <code>toString</code></h3>
+          <pre><code class="lang-groovy">def toString() { … }</code></pre>
+          <p>Declare it and `println`, string concatenation, GString interpolation, and `list.join` all render the instance through it.</p>
+          <pre><code class="lang-groovy">class P { def x = 1; String toString() { "P($x)" } }
+println(new P())   // =&gt; P(1)</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-2">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-2">#</a> <code>equals</code></h3>
+          <pre><code class="lang-groovy">def equals(other) { … }</code></pre>
+          <p>Decides `==` and `!=` for instances of the class — but only when the class does not also define `compareTo`, which takes precedence.</p>
+          <pre><code class="lang-groovy">class P { def equals(o) { true } }
+println(new P() == new P())   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-3">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-3">#</a> <code>compareTo</code></h3>
+          <pre><code class="lang-groovy">def compareTo(other) { … }</code></pre>
+          <p>Models `Comparable`. It drives `&lt;`, `&gt;`, `&lt;=`, `&gt;=`, `&lt;=&gt;`, `sort`, `unique`, `max`, `min` — and equality too, where `==` becomes `compareTo(…) == 0`.</p>
+          <pre><code class="lang-groovy">class P { def n = 1; def compareTo(o) { 0 } }
+println(new P() == new P())   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-4">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-4">#</a> <code>asBoolean</code></h3>
+          <pre><code class="lang-groovy">def asBoolean() { … }</code></pre>
+          <p>Defines the instance's Groovy truth for `if`, `while`, `&amp;&amp;`, `||`, `?:`, and `findAll`. An instance whose class does not declare it is always truthy.</p>
+          <pre><code class="lang-groovy">class P { def asBoolean() { false } }
+if (new P()) println("t") else println("f")   // =&gt; f</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-5">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-5">#</a> <code>getAt</code></h3>
+          <pre><code class="lang-groovy">def getAt(index) { … }</code></pre>
+          <p>Defines the `[…]` subscript on the instance. The subscript is reported as a missing `getAt` when the class does not declare one.</p>
+          <pre><code class="lang-groovy">class P { def getAt(i) { i * 2 } }
+println(new P()[4])   // =&gt; 8</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-6">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-6">#</a> <code>plus</code></h3>
+          <pre><code class="lang-groovy">def plus(other) { … }</code></pre>
+          <p>The `+` operator on the instance. `++` also dispatches here — groovyrs does not model Groovy's `next`.</p>
+          <pre><code class="lang-groovy">class P { def plus(o) { 42 } }
+println(new P() + 1)   // =&gt; 42</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-7">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-7">#</a> <code>minus</code></h3>
+          <pre><code class="lang-groovy">def minus(other) { … }</code></pre>
+          <p>The `-` operator on the instance, and the operator `--` dispatches to.</p>
+          <pre><code class="lang-groovy">class P { def minus(o) { 7 } }
+println(new P() - 1)   // =&gt; 7</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-8">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-8">#</a> <code>multiply</code></h3>
+          <pre><code class="lang-groovy">def multiply(other) { … }</code></pre>
+          <p>The `*` operator on the instance.</p>
+          <pre><code class="lang-groovy">class P { def multiply(o) { 6 } }
+println(new P() * 2)   // =&gt; 6</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-9">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-9">#</a> <code>div</code></h3>
+          <pre><code class="lang-groovy">def div(other) { … }</code></pre>
+          <p>The `/` operator on the instance. It is resolved inside the `GDIV` builtin rather than through the numeric hook the other operators use.</p>
+          <pre><code class="lang-groovy">class P { def div(o) { 9 } }
+println(new P() / 1)   // =&gt; 9</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-10">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-10">#</a> <code>remainder</code></h3>
+          <pre><code class="lang-groovy">def remainder(other) { … }</code></pre>
+          <p>The `%` operator on the instance. Groovy maps `%` to `remainder`, not to `mod` — verified against Apache Groovy 5.0.7.</p>
+          <pre><code class="lang-groovy">class P { def remainder(o) { 3 } }
+println(new P() % 2)   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-11">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-11">#</a> <code>negative</code></h3>
+          <pre><code class="lang-groovy">def negative() { … }</code></pre>
+          <p>Unary `-` on the instance.</p>
+          <pre><code class="lang-groovy">class P { def negative() { -5 } }
+println(-new P())   // =&gt; -5</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-12">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-12">#</a> <code>power</code></h3>
+          <pre><code class="lang-groovy">def power(other) { … }</code></pre>
+          <p>Groovy's `**` operator method. The mapping exists in the runtime, but groovyrs's lexer has no `**` token, so nothing can reach this hook today.</p>
+          <pre><code class="lang-groovy">class P { def power(o) { 8 } }
+println(new P().power(3))   // =&gt; 8</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-13">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-13">#</a> <code>get&lt;Name&gt;</code></h3>
+          <pre><code class="lang-groovy">def getName() { … }</code></pre>
+          <p>A getter. Reading the property `obj.name` prefers this method over the raw field, and calling `obj.getName()` falls back to the field when no such method exists. Note that a getter which reads its own backing field re-enters itself in the current build, so the body must not name the field it fronts.</p>
+          <pre><code class="lang-groovy">class P { def x = 1; def getX() { 99 } }
+println(new P().x)   // =&gt; 99</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-class-member-hooks-14">
+          <h3><a class="doc-anchor" href="#doc-class-member-hooks-14">#</a> <code>set&lt;Name&gt;</code></h3>
+          <pre><code class="lang-groovy">def setName(value) { … }</code></pre>
+          <p>A setter. Writing `obj.name = v` prefers this method over the raw field write. As with the getter, assigning to the backing field of the same name re-enters the setter in the current build, so write through a differently-named field.</p>
+          <pre><code class="lang-groovy">class P { def y = 0; def setX(v) { y = v * 2 } }
+def p = new P()
+p.x = 5
+println(p.y)   // =&gt; 10</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-throwables">
+        <h2>Throwables</h2>
+        <article class="doc-entry" id="doc-throwables-1">
+          <h3><a class="doc-anchor" href="#doc-throwables-1">#</a> <code>Throwable</code></h3>
+          <pre><code class="lang-groovy">new Throwable([String message]) — java.lang</code></pre>
+          <p>The root of the modeled hierarchy and the only type that declares the `message` field; every descendant inherits it. `catch (Throwable e)` matches everything a script can throw.</p>
+          <pre><code class="lang-groovy">try { throw new Throwable("t") } catch (Throwable e) { println(e) }   // =&gt; java.lang.Throwable: t</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-2">
+          <h3><a class="doc-anchor" href="#doc-throwables-2">#</a> <code>Exception</code></h3>
+          <pre><code class="lang-groovy">new Exception([String message]) — java.lang</code></pre>
+          <p>The checked-exception root, directly under `Throwable`. It does not match an `Error`, so `catch (Exception e)` will not catch an `AssertionError`.</p>
+          <pre><code class="lang-groovy">try { throw new Exception("x") } catch (Exception e) { println(e.message) }   // =&gt; x</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-3">
+          <h3><a class="doc-anchor" href="#doc-throwables-3">#</a> <code>Error</code></h3>
+          <pre><code class="lang-groovy">new Error([String message]) — java.lang</code></pre>
+          <p>The unrecoverable-condition root, the sibling of `Exception` under `Throwable`. `AssertionError` lives beneath it.</p>
+          <pre><code class="lang-groovy">try { throw new Error("e") } catch (Throwable t) { println(t) }   // =&gt; java.lang.Error: e</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-4">
+          <h3><a class="doc-anchor" href="#doc-throwables-4">#</a> <code>RuntimeException</code></h3>
+          <pre><code class="lang-groovy">new RuntimeException([String message]) — java.lang</code></pre>
+          <p>The unchecked-exception root under `Exception`; most of the throwables the runtime raises itself descend from it.</p>
+          <pre><code class="lang-groovy">try { throw new RuntimeException("r") } catch (Exception e) { println(e) }   // =&gt; java.lang.RuntimeException: r</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-5">
+          <h3><a class="doc-anchor" href="#doc-throwables-5">#</a> <code>IllegalArgumentException</code></h3>
+          <pre><code class="lang-groovy">new IllegalArgumentException([String message]) — java.lang</code></pre>
+          <p>An argument outside a method's contract. Its one modeled subtype is `NumberFormatException`.</p>
+          <pre><code class="lang-groovy">try { throw new IllegalArgumentException("bad") } catch (RuntimeException e) { println(e.message) }   // =&gt; bad</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-6">
+          <h3><a class="doc-anchor" href="#doc-throwables-6">#</a> <code>NumberFormatException</code></h3>
+          <pre><code class="lang-groovy">new NumberFormatException([String message]) — java.lang</code></pre>
+          <p>Raised by `String.toInteger`, `toLong`, `toDouble`, `toFloat`, and `toBigDecimal` when the text does not parse. The `toBigDecimal` path can raise the message-less form, which prints with no `: message` suffix.</p>
+          <pre><code class="lang-groovy">try { "x".toInteger() } catch (NumberFormatException e) { println(e.message) }   // =&gt; For input string: "x"</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-7">
+          <h3><a class="doc-anchor" href="#doc-throwables-7">#</a> <code>IllegalStateException</code></h3>
+          <pre><code class="lang-groovy">new IllegalStateException([String message]) — java.lang</code></pre>
+          <p>An operation attempted in the wrong state. groovyrs never raises it itself; it is here for scripts to throw.</p>
+          <pre><code class="lang-groovy">try { throw new IllegalStateException("bad") } catch (Exception e) { println(e) }   // =&gt; java.lang.IllegalStateException: bad</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-8">
+          <h3><a class="doc-anchor" href="#doc-throwables-8">#</a> <code>ArithmeticException</code></h3>
+          <pre><code class="lang-groovy">new ArithmeticException([String message]) — java.lang</code></pre>
+          <p>Raised by division and remainder with a zero divisor. The message is `Division by zero` for a decimal divisor, `/ by zero` for an integer one, and `Division undefined` for `0/0`.</p>
+          <pre><code class="lang-groovy">try { 1 / 0 } catch (ArithmeticException e) { println(e.message) }   // =&gt; Division by zero</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-9">
+          <h3><a class="doc-anchor" href="#doc-throwables-9">#</a> <code>NullPointerException</code></h3>
+          <pre><code class="lang-groovy">new NullPointerException([String message]) — java.lang</code></pre>
+          <p>Raised by a method call, property read, or property write on `null` — except `toString`, `equals`, and `getClass`, which `null` answers.</p>
+          <pre><code class="lang-groovy">try { null.foo() } catch (NullPointerException e) { println(e.message) }   // =&gt; Cannot invoke method foo() on null object</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-10">
+          <h3><a class="doc-anchor" href="#doc-throwables-10">#</a> <code>IndexOutOfBoundsException</code></h3>
+          <pre><code class="lang-groovy">new IndexOutOfBoundsException([String message]) — java.lang</code></pre>
+          <p>Raised by `List.get` for any index outside the list. The `[i]` subscript does not raise it — a list subscript past the end yields `null`.</p>
+          <pre><code class="lang-groovy">try { [1].get(5) } catch (IndexOutOfBoundsException e) { println(e.message) }   // =&gt; Index 5 out of bounds for length 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-11">
+          <h3><a class="doc-anchor" href="#doc-throwables-11">#</a> <code>ArrayIndexOutOfBoundsException</code></h3>
+          <pre><code class="lang-groovy">new ArrayIndexOutOfBoundsException([String message]) — java.lang</code></pre>
+          <p>Raised by a negative subscript whose magnitude exceeds the receiver's length, on a list or a String.</p>
+          <pre><code class="lang-groovy">try { [1][-5] } catch (ArrayIndexOutOfBoundsException e) { println(e.message) }   // =&gt; Negative array index [-5] too large for array size 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-12">
+          <h3><a class="doc-anchor" href="#doc-throwables-12">#</a> <code>StringIndexOutOfBoundsException</code></h3>
+          <pre><code class="lang-groovy">new StringIndexOutOfBoundsException([String message]) — java.lang</code></pre>
+          <p>Raised by a String subscript past the end, naming the half-open range it tried to read.</p>
+          <pre><code class="lang-groovy">try { "ab"[9] } catch (StringIndexOutOfBoundsException e) { println(e.message) }   // =&gt; Range [9, 10) out of bounds for length 2</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-13">
+          <h3><a class="doc-anchor" href="#doc-throwables-13">#</a> <code>UnsupportedOperationException</code></h3>
+          <pre><code class="lang-groovy">new UnsupportedOperationException([String message]) — java.lang</code></pre>
+          <p>An operation a type does not support. Registered for scripts to throw; the runtime does not raise it.</p>
+          <pre><code class="lang-groovy">try { throw new UnsupportedOperationException("no") } catch (RuntimeException e) { println(e.message) }   // =&gt; no</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-14">
+          <h3><a class="doc-anchor" href="#doc-throwables-14">#</a> <code>ClassCastException</code></h3>
+          <pre><code class="lang-groovy">new ClassCastException([String message]) — java.lang</code></pre>
+          <p>A bad cast. groovyrs has no cast operator, so only a script raises this.</p>
+          <pre><code class="lang-groovy">try { throw new ClassCastException("c") } catch (Exception e) { println(e) }   // =&gt; java.lang.ClassCastException: c</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-15">
+          <h3><a class="doc-anchor" href="#doc-throwables-15">#</a> <code>InterruptedException</code></h3>
+          <pre><code class="lang-groovy">new InterruptedException([String message]) — java.lang</code></pre>
+          <p>Thread interruption, directly under `Exception`. A groovyrs script runs on one thread, so this exists for hierarchy fidelity.</p>
+          <pre><code class="lang-groovy">try { throw new InterruptedException("i") } catch (Exception e) { println(e) }   // =&gt; java.lang.InterruptedException: i</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-16">
+          <h3><a class="doc-anchor" href="#doc-throwables-16">#</a> <code>CloneNotSupportedException</code></h3>
+          <pre><code class="lang-groovy">new CloneNotSupportedException([String message]) — java.lang</code></pre>
+          <p>Registered so the checked-exception branch under `Exception` matches the JDK's shape; groovyrs models no `clone`.</p>
+          <pre><code class="lang-groovy">try { throw new CloneNotSupportedException("c") } catch (Exception e) { println(e) }   // =&gt; java.lang.CloneNotSupportedException: c</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-17">
+          <h3><a class="doc-anchor" href="#doc-throwables-17">#</a> <code>AssertionError</code></h3>
+          <pre><code class="lang-groovy">new AssertionError([String message]) — java.lang</code></pre>
+          <p>Raised by the `assert cond : message` form. It sits under `Error`, so `catch (Exception e)` does not catch it.</p>
+          <pre><code class="lang-groovy">try { assert false : "nope" } catch (AssertionError e) { println(e.message) }   // =&gt; nope. Expression: false</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-18">
+          <h3><a class="doc-anchor" href="#doc-throwables-18">#</a> <code>IOException</code></h3>
+          <pre><code class="lang-groovy">new IOException([String message]) — java.io</code></pre>
+          <p>The I/O root. groovyrs performs no file I/O, so only a script raises it.</p>
+          <pre><code class="lang-groovy">try { throw new IOException("x") } catch (Exception e) { println(e) }   // =&gt; java.io.IOException: x</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-19">
+          <h3><a class="doc-anchor" href="#doc-throwables-19">#</a> <code>FileNotFoundException</code></h3>
+          <pre><code class="lang-groovy">new FileNotFoundException([String message]) — java.io</code></pre>
+          <p>A missing file, under `IOException`.</p>
+          <pre><code class="lang-groovy">try { throw new FileNotFoundException("f") } catch (IOException e) { println(e) }   // =&gt; java.io.FileNotFoundException: f</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-20">
+          <h3><a class="doc-anchor" href="#doc-throwables-20">#</a> <code>NoSuchElementException</code></h3>
+          <pre><code class="lang-groovy">new NoSuchElementException([String message]) — java.util</code></pre>
+          <p>An exhausted iterator or an absent element, under `RuntimeException`.</p>
+          <pre><code class="lang-groovy">try { throw new NoSuchElementException("n") } catch (RuntimeException e) { println(e) }   // =&gt; java.util.NoSuchElementException: n</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-21">
+          <h3><a class="doc-anchor" href="#doc-throwables-21">#</a> <code>ConcurrentModificationException</code></h3>
+          <pre><code class="lang-groovy">new ConcurrentModificationException([String message]) — java.util</code></pre>
+          <p>A collection mutated during iteration. groovyrs iterates over a materialised copy and so never raises it itself.</p>
+          <pre><code class="lang-groovy">try { throw new ConcurrentModificationException("c") } catch (RuntimeException e) { println(e) }   // =&gt; java.util.ConcurrentModificationException: c</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-22">
+          <h3><a class="doc-anchor" href="#doc-throwables-22">#</a> <code>GroovyRuntimeException</code></h3>
+          <pre><code class="lang-groovy">new GroovyRuntimeException([String message]) — groovy.lang</code></pre>
+          <p>The root of Groovy's own runtime failures, under `RuntimeException`. Both dispatch failures below descend from it.</p>
+          <pre><code class="lang-groovy">try { throw new GroovyRuntimeException("g") } catch (RuntimeException e) { println(e) }   // =&gt; groovy.lang.GroovyRuntimeException: g</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-23">
+          <h3><a class="doc-anchor" href="#doc-throwables-23">#</a> <code>MissingMethodException</code></h3>
+          <pre><code class="lang-groovy">new MissingMethodException([String message]) — groovy.lang</code></pre>
+          <p>Raised whenever a `recv.method(args)` combination falls outside the modeled GDK, rather than mis-running. The message names the method, the receiver's class, and the argument types.</p>
+          <pre><code class="lang-groovy">try { "".bar() } catch (MissingMethodException e) { println(e.message) }</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-24">
+          <h3><a class="doc-anchor" href="#doc-throwables-24">#</a> <code>MissingPropertyException</code></h3>
+          <pre><code class="lang-groovy">new MissingPropertyException([String message]) — groovy.lang</code></pre>
+          <p>Raised by a read of an unmodeled property, and by a write to a field the class chain never declared — groovyrs does not grow an object on assignment.</p>
+          <pre><code class="lang-groovy">try { 5.zz } catch (MissingPropertyException e) { println(e.message) }   // =&gt; No such property: zz for class: java.lang.Integer</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-25">
+          <h3><a class="doc-anchor" href="#doc-throwables-25">#</a> <code>PowerAssertionError</code></h3>
+          <pre><code class="lang-groovy">new PowerAssertionError([String message]) — org.codehaus.groovy.runtime.powerassert</code></pre>
+          <p>What a bare `assert` raises. It overrides `toString` to print `Assertion failed:` followed by the source text with each recorded sub-expression's value laid out under the column it occupied.</p>
+          <pre><code class="lang-groovy">try { assert 1 == 2 } catch (AssertionError e) { println(e.getClass().simpleName) }   // =&gt; PowerAssertionError</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-type-names">
+        <h2>Type Names</h2>
+        <article class="doc-entry" id="doc-type-names-1">
+          <h3><a class="doc-anchor" href="#doc-type-names-1">#</a> <code>Object</code></h3>
+          <pre><code class="lang-groovy">value instanceof Object</code></pre>
+          <p>True for every non-null value. A qualified name is matched on its last segment, so `java.lang.Object` behaves identically.</p>
+          <pre><code class="lang-groovy">println(1 instanceof Object)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-2">
+          <h3><a class="doc-anchor" href="#doc-type-names-2">#</a> <code>GroovyObject</code></h3>
+          <pre><code class="lang-groovy">value instanceof GroovyObject</code></pre>
+          <p>True for every non-null value — groovyrs treats it as a synonym of `Object`. Apache Groovy restricts it to objects that implement the interface, and answers false for a `String`.</p>
+          <pre><code class="lang-groovy">println("x" instanceof GroovyObject)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-3">
+          <h3><a class="doc-anchor" href="#doc-type-names-3">#</a> <code>String</code></h3>
+          <pre><code class="lang-groovy">value instanceof String</code></pre>
+          <p>True for a String value.</p>
+          <pre><code class="lang-groovy">println("x" instanceof String)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-4">
+          <h3><a class="doc-anchor" href="#doc-type-names-4">#</a> <code>CharSequence</code></h3>
+          <pre><code class="lang-groovy">value instanceof CharSequence</code></pre>
+          <p>True for a String value — the same test `String` performs.</p>
+          <pre><code class="lang-groovy">println("x" instanceof CharSequence)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-5">
+          <h3><a class="doc-anchor" href="#doc-type-names-5">#</a> <code>GString</code></h3>
+          <pre><code class="lang-groovy">value instanceof GString</code></pre>
+          <p>True for a String value. An interpolated literal collapses to an ordinary String at runtime, so groovyrs cannot distinguish a GString from a plain one here.</p>
+          <pre><code class="lang-groovy">def n = 1
+println("$n" instanceof GString)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-6">
+          <h3><a class="doc-anchor" href="#doc-type-names-6">#</a> <code>Integer</code></h3>
+          <pre><code class="lang-groovy">value instanceof Integer</code></pre>
+          <p>True for an integer value. groovyrs holds one 64-bit integer type, so this does not range-check to 32 bits.</p>
+          <pre><code class="lang-groovy">println(1 instanceof Integer)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-7">
+          <h3><a class="doc-anchor" href="#doc-type-names-7">#</a> <code>Long</code></h3>
+          <pre><code class="lang-groovy">value instanceof Long</code></pre>
+          <p>True for an integer value — indistinguishable from `Integer` in groovyrs, where Apache Groovy answers false because an integer literal is an `Integer`.</p>
+          <pre><code class="lang-groovy">println(1 instanceof Long)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-8">
+          <h3><a class="doc-anchor" href="#doc-type-names-8">#</a> <code>Short</code></h3>
+          <pre><code class="lang-groovy">value instanceof Short</code></pre>
+          <p>True for an integer value, with no width check; Apache Groovy answers false because an integer literal is an `Integer`.</p>
+          <pre><code class="lang-groovy">println(1 instanceof Short)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-9">
+          <h3><a class="doc-anchor" href="#doc-type-names-9">#</a> <code>Byte</code></h3>
+          <pre><code class="lang-groovy">value instanceof Byte</code></pre>
+          <p>True for an integer value, with no width check; Apache Groovy answers false because an integer literal is an `Integer`.</p>
+          <pre><code class="lang-groovy">println(1 instanceof Byte)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-10">
+          <h3><a class="doc-anchor" href="#doc-type-names-10">#</a> <code>BigDecimal</code></h3>
+          <pre><code class="lang-groovy">value instanceof BigDecimal</code></pre>
+          <p>True for an IEEE double value. This is coarser than the value model: a decimal literal such as `1.5` lives on the host heap and is *not* matched here, while the `d`-suffixed `1.5d` is — the exact inverse of what Apache Groovy answers for the same two literals.</p>
+          <pre><code class="lang-groovy">println(1.5d instanceof BigDecimal)
+println(1.5 instanceof BigDecimal)   // =&gt; true then false</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-11">
+          <h3><a class="doc-anchor" href="#doc-type-names-11">#</a> <code>Double</code></h3>
+          <pre><code class="lang-groovy">value instanceof Double</code></pre>
+          <p>True for an IEEE double value.</p>
+          <pre><code class="lang-groovy">println(1.5d instanceof Double)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-12">
+          <h3><a class="doc-anchor" href="#doc-type-names-12">#</a> <code>Float</code></h3>
+          <pre><code class="lang-groovy">value instanceof Float</code></pre>
+          <p>True for an IEEE double value — groovyrs has one IEEE width.</p>
+          <pre><code class="lang-groovy">println(1.5d instanceof Float)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-13">
+          <h3><a class="doc-anchor" href="#doc-type-names-13">#</a> <code>BigInteger</code></h3>
+          <pre><code class="lang-groovy">value instanceof BigInteger</code></pre>
+          <p>True for an IEEE double value. groovyrs models no arbitrary-precision integer, so this name resolves with the other floating types rather than with `Integer` — Apache Groovy answers false for a double.</p>
+          <pre><code class="lang-groovy">println(1.5d instanceof BigInteger)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-14">
+          <h3><a class="doc-anchor" href="#doc-type-names-14">#</a> <code>Number</code></h3>
+          <pre><code class="lang-groovy">value instanceof Number</code></pre>
+          <p>True for an integer or an IEEE double value.</p>
+          <pre><code class="lang-groovy">println(1 instanceof Number)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-15">
+          <h3><a class="doc-anchor" href="#doc-type-names-15">#</a> <code>Boolean</code></h3>
+          <pre><code class="lang-groovy">value instanceof Boolean</code></pre>
+          <p>True for a boolean value.</p>
+          <pre><code class="lang-groovy">println(true instanceof Boolean)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-16">
+          <h3><a class="doc-anchor" href="#doc-type-names-16">#</a> <code>List</code></h3>
+          <pre><code class="lang-groovy">value instanceof List</code></pre>
+          <p>True for a list value — including a materialised range, since a range is a list.</p>
+          <pre><code class="lang-groovy">println([1] instanceof List)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-17">
+          <h3><a class="doc-anchor" href="#doc-type-names-17">#</a> <code>ArrayList</code></h3>
+          <pre><code class="lang-groovy">value instanceof ArrayList</code></pre>
+          <p>True for a list value. `ArrayList` is also the class name a list reports from `getClass()`.</p>
+          <pre><code class="lang-groovy">println((0..2) instanceof ArrayList)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-18">
+          <h3><a class="doc-anchor" href="#doc-type-names-18">#</a> <code>Collection</code></h3>
+          <pre><code class="lang-groovy">value instanceof Collection</code></pre>
+          <p>True for a list value. groovyrs models no `Set`, so `Collection` and `List` answer identically.</p>
+          <pre><code class="lang-groovy">println([1] instanceof Collection)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-19">
+          <h3><a class="doc-anchor" href="#doc-type-names-19">#</a> <code>Iterable</code></h3>
+          <pre><code class="lang-groovy">value instanceof Iterable</code></pre>
+          <p>True for a list value. Note that a String and a map are both iterable in a `for (x in …)` loop yet do not answer true here.</p>
+          <pre><code class="lang-groovy">println([1] instanceof Iterable)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-20">
+          <h3><a class="doc-anchor" href="#doc-type-names-20">#</a> <code>Map</code></h3>
+          <pre><code class="lang-groovy">value instanceof Map</code></pre>
+          <p>True for a map value, whether it is a fusevm hash or an insertion-ordered host map.</p>
+          <pre><code class="lang-groovy">println([a: 1] instanceof Map)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-21">
+          <h3><a class="doc-anchor" href="#doc-type-names-21">#</a> <code>LinkedHashMap</code></h3>
+          <pre><code class="lang-groovy">value instanceof LinkedHashMap</code></pre>
+          <p>True for a map value — and the accurate one, since every groovyrs map preserves insertion order.</p>
+          <pre><code class="lang-groovy">println([a: 1] instanceof LinkedHashMap)   // =&gt; true</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-type-names-22">
+          <h3><a class="doc-anchor" href="#doc-type-names-22">#</a> <code>HashMap</code></h3>
+          <pre><code class="lang-groovy">value instanceof HashMap</code></pre>
+          <p>True for a map value, even though groovyrs never produces an unordered map.</p>
+          <pre><code class="lang-groovy">println([a: 1] instanceof HashMap)   // =&gt; true</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-inline-rust">
+        <h2>Inline Rust</h2>
+        <article class="doc-entry" id="doc-inline-rust-1">
+          <h3><a class="doc-anchor" href="#doc-inline-rust-1">#</a> <code>rust</code></h3>
+          <pre><code class="lang-groovy">rust { … }</code></pre>
+          <p>An inline Rust block. The parser rewrites it to a `__rust_compile("&lt;base64&gt;", line)` call, which hands the body to fusevm's FFI at run time: it is compiled to a cdylib once and cached on disk under `FUSEVM_FFI_DIR`, so a second run of the same block is a cache hit.</p>
+          <pre><code class="lang-groovy">rust {
+    #[no_mangle]
+    pub extern "C" fn add(a: i64, b: i64) -&gt; i64 { a + b }
+}
+println(add(2, 3))   // =&gt; 5</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-inline-rust-2">
+          <h3><a class="doc-anchor" href="#doc-inline-rust-2">#</a> <code>__rust_compile</code></h3>
+          <pre><code class="lang-groovy">__rust_compile(base64Body, line)</code></pre>
+          <p>The desugar target a `rust { … }` block lowers to — the `GFFI_COMPILE` builtin. It is not meant to be written by hand; a script that does so is calling the FFI compiler directly.</p>
+          <pre><code class="lang-groovy">// emitted by the parser for every `rust { … }` block</code></pre>
         </article>
       </section>
 

@@ -134,7 +134,9 @@ Print the lexer token stream / parsed AST and exit.
 .B \-\-lsp
 A Language Server over stdio: diagnostics come from the runtime's own parser (a
 syntax error maps to its reported line); completion and hover draw on the
-keyword / literal / command corpus that also generates
+language\-surface corpus (reserved words, literal forms, contextual keywords,
+operators, GDK methods and properties, class\-member hooks, throwables, and
+built\-in type names) that also generates
 .IR docs/reference.html .
 .TP
 .B \-\-dap

@@ -236,9 +236,12 @@ Both editor servers ship in the same binary and speak their protocol over stdio:
 
 - **`--lsp`** — a Language Server. Diagnostics come from the runtime's own
   parser (a syntax error maps to its reported line); completion and hover draw on
-  the keyword / literal / command corpus in `src/lsp.rs`, which also generates
-  `docs/reference.html` via `cargo run --bin gen-docs` (so the page never drifts
-  from what the server knows).
+  the language-surface corpus in `src/lsp.rs` — reserved words, literal forms,
+  contextual keywords, operators, script commands, every dispatched GDK method
+  and property, the class-member hooks, the modeled throwables, and the built-in
+  type names, each with a signature, a description, and a runnable example. The
+  same corpus generates `docs/reference.html` via `cargo run --bin gen-docs`, so
+  the page never drifts from what the server knows.
 - **`--dap`** — a Debug Adapter. The script is compiled with per-statement line
   markers and run without the tracing JIT so every marker fires; source-line
   breakpoints, stepping (`next` / `stepIn` / `stepOut` over the single script

@@ -1,27 +1,31 @@
-//! Offline generator for `docs/reference.html` — the keyword / command / literal
-//! reference page, rendered with the same cyberpunk HUD chrome as
-//! `docs/index.html`. Run before publishing GitHub Pages:
+//! Offline generator for `docs/reference.html` — the language reference page,
+//! rendered with the same cyberpunk HUD chrome as `docs/index.html`. Run before
+//! publishing GitHub Pages:
 //!
 //! ```sh
 //! cargo run --bin gen-docs
 //! ```
 //!
-//! Source of truth: the LSP corpus in `groovyrs::lsp` (`corpus()`), the exact
-//! `(name, chapter, doc, example)` table the editor completion/hover path
-//! renders from. The static page and the language server therefore never drift
-//! — a name is documented here only if the runtime actually recognizes it in
-//! `lexer.rs` (keywords/literals) or lowers it as a print command in `host.rs`.
+//! Source of truth: the corpus in `groovyrs::lsp` (`corpus()`), the exact
+//! `(name, chapter, signature, doc, example)` table the editor
+//! completion/hover path renders from. The static page and the language server
+//! therefore never drift — a name is documented here only if the runtime
+//! actually recognizes it, in `lexer.rs` (reserved words, literal forms),
+//! `parser.rs` (contextual keywords), `compiler.rs` (operator lowering, the
+//! built-in type names), or `host.rs` / `throwable.rs` (script commands, GDK
+//! methods, properties, class-member hooks, throwables).
 //!
 //! Chapters are the corpus's own grouping (`entry.1`), rendered in first-seen
 //! order, one `<section>` per chapter, one `<article class="doc-entry">` per
-//! name with a runnable usage example.
+//! name carrying an anchored heading, a signature, a description, and a
+//! runnable usage example.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 fn main() {
     let corpus = groovyrs::lsp::corpus();
-    let chapters: BTreeSet<&str> = corpus.iter().map(|(_, c, _, _)| *c).collect();
+    let chapters: BTreeSet<&str> = corpus.iter().map(|(_, c, _, _, _)| *c).collect();
 
     let page = format!(
         "{head}{body}{foot}",
@@ -44,11 +48,12 @@ fn main() {
     );
 }
 
-/// A reference-corpus entry: (name, chapter, doc, example).
-type CEntry<'a> = (&'a str, &'a str, &'a str, &'a str);
+/// A reference-corpus entry: (name, chapter, signature, doc, example).
+type CEntry<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str);
 
 /// Render one `<section>` per chapter, each holding one `<article class="doc-entry">`
-/// per name: name heading, one-line description, and a runnable usage example.
+/// per name: anchored name heading, the signature in a fenced code block, a
+/// one-or-two-sentence description, and a runnable usage example.
 fn build_body(corpus: &[CEntry]) -> String {
     // Ordered list of chapters (first-seen) plus each chapter's entries.
     let mut chapters: Vec<(&str, Vec<&CEntry>)> = Vec::new();
@@ -70,17 +75,19 @@ fn build_body(corpus: &[CEntry]) -> String {
             slug = slugify(chapter),
             title = html_escape(chapter),
         );
-        for (idx, (name, _chapter, doc, example)) in entries.iter().enumerate() {
+        for (idx, (name, _chapter, sig, doc, example)) in entries.iter().enumerate() {
             let anchor = format!("doc-{}-{}", slugify(chapter), idx + 1);
             let _ = write!(
                 out,
                 "        <article class=\"doc-entry\" id=\"{anchor}\">\n\
                  \x20         <h3><a class=\"doc-anchor\" href=\"#{anchor}\">#</a> <code>{name}</code></h3>\n\
+                 \x20         <pre><code class=\"lang-groovy\">{sig}</code></pre>\n\
                  \x20         <p>{doc}</p>\n\
                  \x20         <pre><code class=\"lang-groovy\">{example}</code></pre>\n\
                  \x20       </article>\n",
                 anchor = anchor,
                 name = html_escape(name),
+                sig = html_escape(sig),
                 doc = html_escape(doc),
                 example = html_escape(example),
             );
@@ -118,8 +125,8 @@ const HEAD: &str = r#"<!DOCTYPE html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="description" content="groovyrs — Builtin reference. Keywords, literals, and script commands recognized by the current groovyrs build. MIT licensed.">
-  <title>groovyrs &mdash; Builtin Reference</title>
+  <meta name="description" content="groovyrs — Language reference. Every reserved word, literal form, contextual keyword, operator, script command, GDK method, property, class-member hook, throwable, and built-in type name the current groovyrs build recognizes. MIT licensed.">
+  <title>groovyrs &mdash; Language Reference</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
@@ -149,11 +156,11 @@ const HEAD: &str = r#"<!DOCTYPE html>
     <header class="tutorial-header">
       <div class="tutorial-header-inner">
         <div>
-          <h1 class="tutorial-brand">// GROOVYRS — BUILTIN REFERENCE</h1>
+          <h1 class="tutorial-brand">// GROOVYRS — LANGUAGE REFERENCE</h1>
           <nav class="tutorial-crumbs" aria-label="Breadcrumb">
             <a href="index.html">Docs</a>
             <span class="sep">/</span>
-            <span class="current">Builtin Reference</span>
+            <span class="current">Language Reference</span>
             <span class="sep">/</span>
             <a href="https://github.com/MenkeTechnologies/groovyrs" target="_blank" rel="noopener noreferrer">GitHub</a>
           </nav>
@@ -177,8 +184,8 @@ const HEAD: &str = r#"<!DOCTYPE html>
     </div>
 
     <main class="tutorial-main">
-      <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>BUILTIN REFERENCE</h2>
-      <p class="tutorial-subtitle">Every reserved keyword, literal, and script command the current groovyrs build recognizes, grouped by keyword then literal then command. This page is generated from the language-server corpus (<code>src/lsp.rs</code>) by the <code>gen-docs</code> binary, so it stays in sync with what the runtime and editor tooling actually know about. Keywords/literals mirror <code>lexer.rs</code>; each command mirrors a real print builtin in <code>src/host.rs</code>.</p>
+      <h2 class="tutorial-title"><span class="step-hash">&gt;_</span>LANGUAGE REFERENCE</h2>
+      <p class="tutorial-subtitle">Every name the current groovyrs build recognizes — reserved words, literal forms, contextual keywords, operators, the script print commands, every dispatched GDK method, every readable property, the class-member hooks the runtime calls by name, the modeled throwable hierarchy, and the built-in type names <code>instanceof</code> answers for — each with a signature, a description, and a runnable example. This page is generated from the language-server corpus (<code>src/lsp.rs</code>) by the <code>gen-docs</code> binary, so it stays in sync with what the runtime and editor tooling actually know about. Reserved words and literal forms mirror <code>lexer.rs</code>, contextual keywords and operators mirror <code>parser.rs</code> and <code>compiler.rs</code>, and every method, property, hook, throwable, and type name mirrors a real dispatch arm in <code>src/host.rs</code> or a real table in <code>src/throwable.rs</code> / <code>src/compiler.rs</code>. Where groovyrs diverges from Apache Groovy the entry says so.</p>
 "#;
 
 const FOOT: &str = r#"

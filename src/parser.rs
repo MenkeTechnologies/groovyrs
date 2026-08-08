@@ -441,7 +441,7 @@ impl Parser {
                     name,
                     init: Some(Expr::Index {
                         recv: Box::new(Expr::Var(tmp.clone())),
-                        index: Box::new(Expr::Int(i as i64)),
+                        index: Box::new(Expr::Int(i as i64, IntWidth::Int)),
                         line,
                     }),
                 },
@@ -1169,7 +1169,7 @@ impl Parser {
             ),
         );
         let loop_for = StmtKind::For {
-            init: Some(Box::new(local(&idx, Expr::Int(0)))),
+            init: Some(Box::new(local(&idx, Expr::Int(0, IntWidth::Int)))),
             cond: Some(Expr::Binary {
                 op: BinOp::Lt,
                 lhs: Box::new(Expr::Var(idx.clone())),
@@ -1504,9 +1504,9 @@ impl Parser {
     /// list/map literal — the base a [`Parser::primary`] postfix chain builds on.
     fn atom(&mut self) -> Result<Expr, String> {
         match self.peek().clone() {
-            Tok::Int(n) => {
+            Tok::Int(n, width) => {
                 self.advance();
-                Ok(Expr::Int(n))
+                Ok(Expr::Int(n, width))
             }
             Tok::Float(f) => {
                 self.advance();
@@ -2000,7 +2000,7 @@ fn assert_value_names(cond: &Expr) -> Vec<(String, u32)> {
 fn expr_text(e: &Expr) -> String {
     let args_text = |args: &[Expr]| args.iter().map(expr_text).collect::<Vec<_>>().join(", ");
     match unrecorded(e) {
-        Expr::Int(n) => n.to_string(),
+        Expr::Int(n, _) => n.to_string(),
         Expr::Float(f) => crate::decimal::format_double(*f),
         Expr::Dec(text) => text.clone(),
         // A `String` constant renders unquoted here, unlike the power form.

@@ -26,7 +26,7 @@ use bigdecimal::{BigDecimal, Zero};
 use fancy_regex::Regex;
 use fusevm::{Frame, NumOp, VMResult, Value, VM};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Builtin id for `println` (one Groovy-formatted arg + newline).
 pub const GPRINTLN: u16 = 700;
@@ -256,6 +256,10 @@ pub const GSPRINTF: u16 = 754;
 /// enumerates characters for single-character string endpoints.
 pub const GRANGE: u16 = 755;
 
+/// Builtin id for `getClass()` / `.class` on a receiver the compiler knows is a
+/// `Long`. Stack: the value. See [`b_class_long`].
+pub const GCLASS_LONG: u16 = 756;
+
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -267,6 +271,11 @@ pub const DBG_LINE: u16 = 799;
 /// single install choke point later waves (methods, `String`/list objects, the
 /// GDK) grow into.
 pub fn install(vm: &mut VM) {
+    // Groovy's default integer is a 32-bit `Integer`, so arithmetic that leaves
+    // that range is the interesting case and has to reach the host — see the
+    // `Integer` width commentary further down. Arithmetic that stays inside it
+    // (all of it, in the ordinary program) never consults this.
+    vm.set_fixnum_range(i64::from(i32::MIN), i64::from(i32::MAX));
     vm.register_builtin(GPRINTLN, b_println);
     vm.register_builtin(GPRINT, b_print);
     vm.register_builtin(GDIV, b_div);
@@ -315,6 +324,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GCLASSREF, b_classref);
     vm.register_builtin(GSETINDEX, b_setindex);
     vm.register_builtin(GRANGE, b_range);
+    vm.register_builtin(GCLASS_LONG, b_class_long);
     vm.register_builtin(GPRINTF, b_printf);
     vm.register_builtin(GSPRINTF, b_sprintf);
     // A fresh VM install starts with an empty object heap: `Value::Obj` handles
@@ -379,6 +389,158 @@ thread_local! {
     /// this slot instead: the GDK arm stores them, and the writeback op that the
     /// compiler emits for a variable receiver takes them back out.
     static MUTATED: RefCell<Option<Value>> = const { RefCell::new(None) };
+}
+
+// ── Integer width (`Integer` vs `Long`) ────────────────────────────────────
+//
+// Groovy's integer arithmetic wraps at the width of its operands: `Integer op
+// Integer` is 32-bit and anything involving a `Long` is 64-bit, so
+// `1000000 * 1000000` is `-727379968` while `1000000L * 1000000` is
+// `1000000000000`. fusevm has one integer type, so the width has to come from
+// somewhere else. It comes from two sources, in this order:
+//
+//   1. The compiler, which marks the op indices whose operands it can see are
+//      `Long` (`crate::compiler::Compiler::is_wide`). This is the only thing
+//      that can tell `2000000000L` from `2000000000` — the same `Value::Int` —
+//      and so the only thing that makes a `long` accumulator accumulate.
+//   2. The operands' magnitudes, for everything the compiler cannot see into: a
+//      value outside `Integer` range *is* a `Long`, whatever produced it. This
+//      is what makes the arithmetic inside a closure wrap like Groovy's.
+//
+// `VM::set_fixnum_range` is what routes the question here at all: with the range
+// set to 32 bits, every `+`/`-`/`*`/negation whose result leaves `Integer` range
+// delegates to [`sited_numeric_hook`], and everything inside it stays on the
+// native and JIT'd fast paths at no cost.
+
+thread_local! {
+    /// The op indices of statically-`Long` arithmetic in the running chunk, from
+    /// the compiler. Replaced on each compile.
+    static WIDE_SITES: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+}
+
+/// Publish the compiler's statically-`Long` arithmetic sites for this chunk.
+pub fn set_wide_sites(sites: HashSet<usize>) {
+    WIDE_SITES.with(|s| *s.borrow_mut() = sites);
+}
+
+/// Whether the op at `ip` was compiled as `Long` arithmetic.
+fn wide_site(ip: usize) -> bool {
+    WIDE_SITES.with(|s| s.borrow().contains(&ip))
+}
+
+/// Whether `a op b` runs at 64 bits: either the compiler saw a `Long` operand
+/// at this site, or one of the values is outside `Integer` range and so is a
+/// `Long` no matter what produced it.
+fn arith_is_wide(ip: usize, a: &Value, b: &Value) -> bool {
+    let out_of_int_range = |v: &Value| matches!(v, Value::Int(n) if i32::try_from(*n).is_err());
+    wide_site(ip) || out_of_int_range(a) || out_of_int_range(b)
+}
+
+/// Wrap `result` at the width `operand`'s magnitude says it has — 32 bits for
+/// an `Integer`, 64 for a `Long`. For the host paths that have an operand but
+/// no compiler site to consult.
+fn wrap_to_width_of(operand: i64, result: i64) -> i64 {
+    if i32::try_from(operand).is_ok() {
+        i64::from(result as i32)
+    } else {
+        result
+    }
+}
+
+/// `GCLASS_LONG`: `getClass()` / `.class` where the compiler saw a `Long`.
+///
+/// The magnitude rule in [`java_class_name`] cannot see a `Long` small enough
+/// to be an `Integer` — `1L` and `1` are the same `Value::Int` — so `1L.class`
+/// asks here instead, where the compiler's static width answers it. Any other
+/// value takes the ordinary reading, so a receiver whose width the compiler
+/// misjudged still names its real class.
+fn b_class_long(vm: &mut VM, _argc: u8) -> Value {
+    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    if matches!(v, Value::Int(_)) {
+        return heap_push(HeapObj::ClassRef("java.lang.Long".to_string()));
+    }
+    class_ref_of(&v)
+}
+
+/// `Math.abs` at the value's own width. The minimum of a two's-complement type
+/// has no positive counterpart, so `Math.abs(Integer.MIN_VALUE)` is
+/// `Integer.MIN_VALUE` and `Math.abs(Long.MIN_VALUE)` is `Long.MIN_VALUE` —
+/// Java returns the wrapped value rather than throwing.
+fn abs_at_width(n: i64) -> i64 {
+    if n == i64::from(i32::MIN) || n == i64::MIN {
+        return n;
+    }
+    n.abs()
+}
+
+/// Java's narrowing conversion to an integral type: keep the target's low bits
+/// and sign-extend. `2147483648L as int` is `-2147483648`, `300 as byte` is
+/// `44`. A `long`/`Long` target is 64 bits, so it keeps the value whole.
+fn narrow_to(ty: &str, n: i64) -> i64 {
+    match simple_name_of(ty).as_str() {
+        "int" | "Integer" => i64::from(n as i32),
+        "short" | "Short" => i64::from(n as i16),
+        "byte" | "Byte" => i64::from(n as i8),
+        _ => n,
+    }
+}
+
+/// Pop the static width flag the compiler pushes as a shift's third argument.
+///
+/// A shift takes its width from the value being shifted, and unlike `+`/`-`/`*`
+/// it has no overflow for the magnitude rule to catch: `1L << 32` and `1 << 32`
+/// see the identical operands and answer `4294967296` and `1`. So the width
+/// here is the compiler's alone.
+fn shift_is_wide(vm: &mut VM) -> bool {
+    matches!(vm.stack.pop(), Some(Value::Int(1)))
+}
+
+/// The Groovy `Integer`/`Long` result of arithmetic that left 32-bit range.
+///
+/// `wide` is [`arith_is_wide`]. A `Long` keeps the full 64-bit two's-complement
+/// result (`Long.MAX_VALUE + 1` is `Long.MIN_VALUE`); an `Integer` narrows to
+/// 32 (`Integer.MAX_VALUE + 1` is `Integer.MIN_VALUE`).
+fn wrap_to_width(value: i64, wide: bool) -> Value {
+    if wide {
+        Value::int(value)
+    } else {
+        Value::int(i64::from(value as i32))
+    }
+}
+
+/// Groovy's `+`/`-`/`*`/`%`/negation on two integers, wrapped at the operands'
+/// own width. Answers `None` for an op or an operand this rule does not cover,
+/// which then takes [`numeric_hook`]'s ordinary path.
+fn int_arith(op: NumOp, a: &Value, b: &Value, ip: usize) -> Option<Value> {
+    let wide = arith_is_wide(ip, a, b);
+    if let (NumOp::Neg, Value::Int(x)) = (op, a) {
+        return Some(wrap_to_width(x.wrapping_neg(), wide));
+    }
+    let (Value::Int(x), Value::Int(y)) = (a, b) else {
+        return None;
+    };
+    let (x, y) = (*x, *y);
+    let raw = match op {
+        NumOp::Add => x.wrapping_add(y),
+        NumOp::Sub => x.wrapping_sub(y),
+        NumOp::Mul => x.wrapping_mul(y),
+        // Only a zero divisor reaches here for `%` (the exact result of a
+        // non-zero one is always in range), and that is a `Throwable`, not a
+        // width question — leave it to `numeric_hook`.
+        _ => return None,
+    };
+    Some(wrap_to_width(raw, wide))
+}
+
+/// The strict numeric hook, told which op index delegated to it.
+///
+/// The site is what separates an `Integer` overflow from a `Long` one — see the
+/// `Integer` width commentary above. Everything else is [`numeric_hook`].
+pub fn sited_numeric_hook(call: fusevm::NumericCall<'_>) -> Result<Value, String> {
+    if let Some(v) = int_arith(call.op, call.a, call.b, call.ip) {
+        return Ok(v);
+    }
+    numeric_hook(call.op, call.a, call.b)
 }
 
 /// Park the new contents of a mutated list receiver for the writeback op.
@@ -476,9 +638,18 @@ fn java_class_name(v: &Value) -> String {
             return crate::throwable::qualified(&meta.name);
         }
     }
+    // An integer outside 32-bit range is a `Long`; inside it, Groovy's default
+    // `Integer`. The one case this misreads is a `Long` small enough to be an
+    // `Integer` (`1L`), which no longer exists once it is a `Value::Int`.
+    if let Value::Int(n) = v {
+        return if i32::try_from(*n).is_ok() {
+            "java.lang.Integer".to_string()
+        } else {
+            "java.lang.Long".to_string()
+        };
+    }
     match v {
         Value::Str(_) => "java.lang.String",
-        Value::Int(_) => "java.lang.Integer",
         Value::Float(_) => "java.lang.Double",
         Value::Bool(_) => "java.lang.Boolean",
         Value::Array(_) => "java.util.ArrayList",
@@ -3730,10 +3901,17 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 raise(vm, "ArithmeticException", "Division by zero");
                 Value::Undef
             }
-            Some(d) => Value::int(n / d),
+            // `Integer.MIN_VALUE.intdiv(-1)` overflows an `Integer` and wraps
+            // back to `Integer.MIN_VALUE`, exactly as Java's `/` does.
+            Some(d) => Value::int(wrap_to_width_of(*n, n.wrapping_div(d))),
         },
-        (Value::Int(n), "abs") => Value::int(n.abs()),
-        (Value::Int(n), "toInteger" | "toLong" | "intValue" | "longValue") => Value::int(*n),
+        // `Math.abs`/`.abs()` on `Integer.MIN_VALUE` is `Integer.MIN_VALUE`:
+        // the positive counterpart is not an `Integer`, so the wrap stands.
+        (Value::Int(n), "abs") => Value::int(abs_at_width(*n)),
+        (Value::Int(n), "toLong" | "longValue") => Value::int(*n),
+        // `intValue()` is Java's narrowing conversion, so `3000000000L.intValue()`
+        // is `-1294967296`.
+        (Value::Int(n), "toInteger" | "intValue") => Value::int(i64::from(*n as i32)),
         (Value::Int(n), "toDouble" | "doubleValue" | "toFloat" | "floatValue") => {
             Value::float(*n as f64)
         }
@@ -3944,6 +4122,7 @@ fn b_power(vm: &mut VM, _argc: u8) -> Value {
 /// append on a list, a concatenation on a string. The list form parks its new
 /// contents for the compiler-emitted writeback, exactly like `list.add`.
 fn b_shl(vm: &mut VM, _argc: u8) -> Value {
+    let wide = shift_is_wide(vm);
     let rhs = vm.stack.pop().unwrap_or(Value::Undef);
     let lhs = vm.stack.pop().unwrap_or(Value::Undef);
     take_mutated();
@@ -3957,7 +4136,16 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
         }
         Value::Str(s) => Value::str(format!("{s}{}", groovy_str(&rhs))),
         _ => match (as_i64(&lhs), as_i64(&rhs)) {
-            (Some(a), Some(b)) => Value::int(a.wrapping_shl(b as u32)),
+            // An `Integer` shifts at 32 bits with the count masked to 5, so
+            // `1 << 31` is `-2147483648` and `1 << 32` is `1` again; a `Long`
+            // shifts at 64 with the count masked to 6.
+            (Some(a), Some(b)) => {
+                if wide {
+                    Value::int(a.wrapping_shl(b as u32 & 63))
+                } else {
+                    Value::int(i64::from((a as i32).wrapping_shl(b as u32 & 31)))
+                }
+            }
             _ => {
                 raise(
                     vm,
@@ -3973,17 +4161,25 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
     }
 }
 
-/// `GUSHR`: Java's `>>>`. The fill width is the operand's Java type — 32 bits
-/// for a value in `Integer` range, 64 otherwise — so `-16 >>> 28` is `15`.
+/// `GUSHR`: Java's `>>>`. The fill width is the left operand's Java type — 32
+/// bits for an `Integer`, 64 for a `Long` — so `-1 >>> 28` is `15` and
+/// `-1L >>> 60` is `15` too. The count is masked to that width's bit index.
+///
+/// Stack: left, right, and the compiler's static width flag (see
+/// [`shift_is_wide`]).
 fn b_ushr(vm: &mut VM, _argc: u8) -> Value {
+    let wide = shift_is_wide(vm);
     let rhs = vm.stack.pop().unwrap_or(Value::Undef);
     let lhs = vm.stack.pop().unwrap_or(Value::Undef);
     match (as_i64(&lhs), as_i64(&rhs)) {
         (Some(a), Some(b)) => {
-            if let Ok(a32) = i32::try_from(a) {
-                Value::int(((a32 as u32) >> (b as u32 & 31)) as i64)
-            } else {
+            if wide {
                 Value::int(((a as u64) >> (b as u32 & 63)) as i64)
+            } else {
+                // The result of an `int >>> n` is an `int`, so it carries the
+                // sign of its low 32 bits: `Integer.MIN_VALUE >>> 0` is
+                // `Integer.MIN_VALUE`, not `2147483648`.
+                Value::int(i64::from(((a as i32 as u32) >> (b as u32 & 31)) as i32))
             }
         }
         _ => {
@@ -4028,17 +4224,22 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
     let v = vm.stack.pop().unwrap_or(Value::Undef);
     match simple_name_of(&ty).as_str() {
         // Integral targets truncate toward zero, as Java's narrowing casts do.
-        "int" | "Integer" | "long" | "Long" | "short" | "Short" | "byte" | "Byte" => match &v {
-            Value::Str(s) => match s.trim().parse::<i64>() {
-                Ok(n) => Value::int(n),
-                Err(_) => raise_number_format(vm, s.trim()),
-            },
-            Value::Float(f) => Value::int(*f as i64),
-            _ => match as_dec(&v) {
-                Some(d) => Value::int(decimal::truncate_to_i64(&d)),
-                None => Value::int(as_i64(&v).unwrap_or(0)),
-            },
-        },
+        "int" | "Integer" | "long" | "Long" | "short" | "Short" | "byte" | "Byte" => {
+            let n = match &v {
+                Value::Str(s) => match s.trim().parse::<i64>() {
+                    Ok(n) => n,
+                    Err(_) => return raise_number_format(vm, s.trim()),
+                },
+                Value::Float(f) => *f as i64,
+                _ => match as_dec(&v) {
+                    Some(d) => decimal::truncate_to_i64(&d),
+                    None => as_i64(&v).unwrap_or(0),
+                },
+            };
+            // A narrowing cast keeps the target's low bits, so `2147483648L as
+            // int` is `-2147483648` and `300 as byte` is `44`.
+            Value::int(narrow_to(&ty, n))
+        }
         "double" | "Double" | "float" | "Float" => match &v {
             Value::Str(s) => match parse_java_double(s) {
                 Some(f) => Value::float(f),
@@ -4136,7 +4337,7 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         // `Math` entry point is IEEE and answers a `double`.
         ("Math", "round") => Value::int(java_round(f0)),
         ("Math", "abs") => match as_i64(&arg0) {
-            Some(n) => Value::int(n.abs()),
+            Some(n) => Value::int(abs_at_width(n)),
             None => Value::float(f0.abs()),
         },
         ("Math", "max" | "min") => {

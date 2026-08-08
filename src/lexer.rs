@@ -42,7 +42,9 @@ pub enum GPart {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     // literals & names
-    Int(i64),
+    /// An integer literal and the Java width it carries — see
+    /// [`crate::ast::IntWidth`], which the suffix and the magnitude decide.
+    Int(i64, crate::ast::IntWidth),
     /// A `d`/`f`-suffixed decimal literal: an IEEE double.
     Float(f64),
     /// An unsuffixed (or `g`-suffixed) decimal literal, kept as its exact source
@@ -240,11 +242,25 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
 
         // numbers (int or decimal)
         if c.is_ascii_digit() {
+            // Radix-prefixed integer literals: `0xFF`, `0b1010`, and the
+            // leading-zero octal `011`. These have no fraction and no exponent,
+            // so they are scanned here and never reach the decimal path. Groovy
+            // reads the digits as a magnitude and gives the literal the smallest
+            // type that holds it, exactly as it does for a decimal literal —
+            // which is why `0xff` is an `Integer` and `0xFFFFFFFF` is the `Long`
+            // `4294967295` rather than Java's `int` overflow error.
+            if let Some((value, end, width)) = scan_radix_int(bytes, i, line)? {
+                out.push(Token {
+                    kind: Tok::Int(value, width),
+                    line,
+                    offset: tok_start,
+                });
+                i = end;
+                continue;
+            }
             let start = i;
             let mut is_float = false;
-            while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
-                i += 1;
-            }
+            i = skip_digits(bytes, i);
             // A `.` is a decimal point only when followed by a digit — otherwise
             // it is the `..`/`..<` range operator (`0..3`) or member access.
             if i < bytes.len()
@@ -253,10 +269,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 && (bytes[i + 1] as char).is_ascii_digit()
             {
                 is_float = true;
-                i += 1;
-                while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
-                    i += 1;
-                }
+                i = skip_digits(bytes, i + 1);
             }
             // Exponent part: `2.5e7`, `9.999e-4`, `1E+3`. Groovy allows an
             // exponent with or without a fractional part, and it makes the
@@ -270,10 +283,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 }
                 if j < bytes.len() && (bytes[j] as char).is_ascii_digit() {
                     is_float = true;
-                    i = j;
-                    while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
-                        i += 1;
-                    }
+                    i = skip_digits(bytes, j);
                 }
             }
             // integer/long/float/double/BigDecimal suffixes are consumed. The
@@ -284,6 +294,12 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             // is Groovy's default and what `1.50` / `2.5e7` mean.
             let num_end = i;
             let mut is_double = false;
+            // An `L` suffix makes the literal a `Long` whatever its magnitude,
+            // so `2000000000L + 2000000000L` is `4000000000` where the
+            // unsuffixed form wraps to `-294967296`. `G` asks for a
+            // `BigInteger`, which groovyrs models at 64 bits — the same
+            // "does not wrap at 32" behaviour, one width short.
+            let mut width = crate::ast::IntWidth::Int;
             if i < bytes.len()
                 && matches!(
                     bytes[i],
@@ -294,9 +310,22 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     is_float = true;
                     is_double = true;
                 }
+                if matches!(bytes[i], b'L' | b'l' | b'g' | b'G') {
+                    width = crate::ast::IntWidth::Long;
+                }
                 i += 1;
             }
-            let text = &src[start..num_end];
+            // `1_000_000` is `1000000`: the separators are not part of the value,
+            // and a decimal literal's text is its `BigDecimal` scale, so they
+            // come out before either parse.
+            let raw = &src[start..num_end];
+            let stripped: String;
+            let text = if raw.as_bytes().contains(&b'_') {
+                stripped = raw.replace('_', "");
+                stripped.as_str()
+            } else {
+                raw
+            };
             if is_double {
                 let v: f64 = text.parse().map_err(|_| {
                     format!("groovyrs: bad decimal literal `{text}` on line {line}")
@@ -323,8 +352,13 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 let v: i64 = text.parse().map_err(|_| {
                     format!("groovyrs: bad integer literal `{text}` on line {line}")
                 })?;
+                // An unsuffixed literal too large for 32 bits is a `Long` in
+                // Groovy, so its arithmetic must not wrap at 32.
+                if i32::try_from(v).is_err() {
+                    width = crate::ast::IntWidth::Long;
+                }
                 out.push(Token {
-                    kind: Tok::Int(v),
+                    kind: Tok::Int(v, width),
                     line,
                     offset: tok_start,
                 });
@@ -669,6 +703,108 @@ fn keyword_or_ident(word: &str) -> Tok {
         "new" => Tok::New,
         _ => Tok::Ident(word.to_string()),
     }
+}
+
+/// Advance past a run of decimal digits, allowing Groovy's `_` group
+/// separators between them (`1_000_000`). The separator is only skipped when a
+/// digit follows, so `1_` ends the number at the `1` and leaves `_` to start an
+/// identifier.
+fn skip_digits(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        let separator = bytes[i] == b'_' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit();
+        if !bytes[i].is_ascii_digit() && !separator {
+            break;
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Scan a radix-prefixed integer literal at `i`: `0x`/`0X` hex, `0b`/`0B`
+/// binary, or a leading-zero octal (`011` is `9`). Answers `None` when the text
+/// at `i` is an ordinary decimal literal, which the caller scans instead.
+///
+/// The digits are read as an unsigned magnitude and the literal takes the
+/// smallest Java type that holds it — Groovy's rule, under which `0xFF` is the
+/// `Integer` `255` and `0xFFFFFFFF` is the `Long` `4294967295`. An explicit `L`
+/// suffix forces `Long` and lets the magnitude occupy all 64 bits, so
+/// `0xFFFFFFFFFFFFFFFFL` is `-1`.
+fn scan_radix_int(
+    bytes: &[u8],
+    i: usize,
+    line: u32,
+) -> Result<Option<(i64, usize, crate::ast::IntWidth)>, String> {
+    if bytes[i] != b'0' || i + 1 >= bytes.len() {
+        return Ok(None);
+    }
+    let (radix, mut j) = match bytes[i + 1] {
+        b'x' | b'X' => (16u32, i + 2),
+        b'b' | b'B' => (2u32, i + 2),
+        // A leading zero is octal only when octal digits follow. `0`, `0.5` and
+        // `0e3` are decimal, and so is `08` — which Groovy rejects, and which
+        // the decimal path parses as `8` rather than pretending to be octal.
+        b'0'..=b'7' => (8u32, i + 1),
+        _ => return Ok(None),
+    };
+    let start = j;
+    let mut digits = String::new();
+    while j < bytes.len() {
+        let c = bytes[j] as char;
+        if c == '_' {
+            j += 1;
+            continue;
+        }
+        if !c.is_digit(radix) {
+            break;
+        }
+        digits.push(c);
+        j += 1;
+    }
+    if digits.is_empty() {
+        // `0x` with no digits, or a leading zero followed by `8`/`9`: not a
+        // radix literal, so the decimal scanner takes it.
+        if radix == 8 {
+            return Ok(None);
+        }
+        return Err(format!(
+            "groovyrs: bad integer literal `{}` on line {line}",
+            String::from_utf8_lossy(&bytes[i..start])
+        ));
+    }
+    // An octal run that turns out to be followed by a `.` or an exponent is a
+    // decimal literal after all (`0.5`, `01.5`), so hand it back.
+    if radix == 8 && j < bytes.len() && matches!(bytes[j], b'.' | b'e' | b'E' | b'8' | b'9') {
+        return Ok(None);
+    }
+    let mut width = crate::ast::IntWidth::Int;
+    if j < bytes.len() && matches!(bytes[j], b'L' | b'l' | b'g' | b'G') {
+        width = crate::ast::IntWidth::Long;
+        j += 1;
+    }
+    let magnitude = u64::from_str_radix(&digits, radix)
+        .map_err(|_| format!("groovyrs: bad integer literal `0{digits}` on line {line}"))?;
+    let value = match width {
+        // An `L`-suffixed literal may fill all 64 bits, and the top bit is the
+        // sign — Java's `0xFFFFFFFFFFFFFFFFL` is `-1`.
+        crate::ast::IntWidth::Long => magnitude as i64,
+        crate::ast::IntWidth::Int => match i64::try_from(magnitude) {
+            Ok(v) => {
+                if i32::try_from(v).is_err() {
+                    width = crate::ast::IntWidth::Long;
+                }
+                v
+            }
+            // Past `Long` the literal is a `BigInteger`, which groovyrs does not
+            // model — a clear lex error beats a silently wrapped value.
+            Err(_) => {
+                return Err(format!(
+                    "groovyrs: integer literal `{}` exceeds Long on line {line}",
+                    String::from_utf8_lossy(&bytes[i..j])
+                ))
+            }
+        },
+    };
+    Ok(Some((value, j, width)))
 }
 
 fn unescape(c: char) -> char {

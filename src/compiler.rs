@@ -161,6 +161,14 @@ struct Compiler {
     /// The `label:` a `StmtKind::Labeled` just introduced, consumed by the loop
     /// or `switch` it wraps when that pushes its [`Loop`] frame.
     pending_label: Option<String>,
+    /// Variables whose value is a `Long` rather than an `Integer` — declared
+    /// `long`/`Long`/`BigInteger`, or `def`-declared from a `Long` initializer.
+    /// See [`Compiler::is_wide`] for why the compiler tracks this at all.
+    wide_vars: HashSet<String>,
+    /// The op indices of arithmetic whose operands are statically `Long`, handed
+    /// to the host as [`crate::host::set_wide_sites`]. See
+    /// [`Compiler::is_wide`].
+    wide_sites: HashSet<usize>,
 }
 
 /// The Groovy/Java type names a `case <Name>:` label can check against without
@@ -299,6 +307,8 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         finallys: Vec::new(),
         temps_seen: 0,
         pending_label: None,
+        wide_vars: HashSet::new(),
+        wide_sites: HashSet::new(),
     };
     // Arm the host's exception machinery for this run. Emitted only by a program
     // that uses `try`/`throw`, and it is what lets a runtime `Throwable` (a zero
@@ -396,6 +406,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         let after = c.b.current_pos();
         c.b.patch_jump(jf, after);
     }
+    crate::host::set_wide_sites(std::mem::take(&mut c.wide_sites));
     Ok(c.b.build())
 }
 
@@ -952,7 +963,8 @@ impl Compiler {
             self.b.emit(Op::Pop, s.line);
         }
         match &s.kind {
-            StmtKind::Local { name, init, .. } => {
+            StmtKind::Local { ty, name, init } => {
+                self.note_var_width(ty, name, init.as_ref());
                 if let Some(e) = init {
                     self.expr(e)?;
                     let store = self.store_op_for_decl(name);
@@ -970,6 +982,11 @@ impl Compiler {
                 // A bare field name inside a method/constructor is `this.field`.
                 if self.is_field(name) {
                     return self.assign_field(name, *op, value);
+                }
+                // An undeclared `x = 1L` is a script binding, and it is a `Long`
+                // for the same reason a declared one is.
+                if self.is_wide(value) {
+                    self.wide_vars.insert(name.clone());
                 }
                 match op {
                     AssignOp::Assign => {
@@ -994,7 +1011,12 @@ impl Compiler {
                         let get = self.load_op_for(name);
                         self.b.emit(get, self.cur_line);
                         self.expr(value)?;
-                        self.b.emit(compound_op(*op), self.cur_line);
+                        let pos = self.b.emit(compound_op(*op), self.cur_line);
+                        // `long t = 0; t += 2000000000; t += 2000000000` is
+                        // `4000000000`: the target's own width decides, not the
+                        // running value's, which is still inside `Integer`
+                        // range when the second `+=` overflows it.
+                        self.mark_wide_site(pos, &Expr::Var(name.clone()), value);
                     }
                 }
                 let store = self.store_op_for(name);
@@ -1764,7 +1786,7 @@ impl Compiler {
 
     fn expr(&mut self, e: &Expr) -> Result<(), String> {
         match e {
-            Expr::Int(n) => {
+            Expr::Int(n, _) => {
                 self.b.emit(Op::LoadInt(*n), self.cur_line);
             }
             Expr::Float(f) => {
@@ -1979,6 +2001,14 @@ impl Compiler {
                 // `super.method(args)` statically dispatches at the superclass,
                 // skipping the current class's override (stack: [this, args,
                 // methodname, superclassname]).
+                // `getClass()` on a receiver the compiler knows is a `Long` has
+                // to be told so: `1L` and `1` are the same runtime value, and
+                // only the static width separates `java.lang.Long` from
+                // `java.lang.Integer`.
+                if method == "getClass" && args.is_empty() && self.is_wide(recv) {
+                    self.expr(recv)?;
+                    return self.emit_call_builtin(crate::host::GCLASS_LONG, 1, *line);
+                }
                 if matches!(**recv, Expr::Super) {
                     self.emit_this();
                     for a in args {
@@ -2016,6 +2046,12 @@ impl Compiler {
                 line,
                 safe,
             } => {
+                // `.class` on a statically-`Long` receiver, for the reason
+                // `getClass()` gives above.
+                if name == "class" && self.is_wide(recv) {
+                    self.expr(recv)?;
+                    return self.emit_call_builtin(crate::host::GCLASS_LONG, 1, *line);
+                }
                 // Stack: [recv, propname]; the property builtin pops both.
                 self.expr(recv)?;
                 let nidx = self.b.add_constant(Value::str(name.clone()));
@@ -2258,6 +2294,109 @@ impl Compiler {
         Ok(())
     }
 
+    /// True when `e`'s value is statically a `Long` rather than an `Integer`.
+    ///
+    /// Groovy's integer width is a property of the *value*, not of a declared
+    /// type: `Integer op Integer` wraps at 32 bits and anything involving a
+    /// `Long` wraps at 64, so `1000000 * 1000000` is `-727379968` while
+    /// `1000000L * 1000000` is `1000000000000`. The host applies that rule at
+    /// run time from the operands' magnitudes (see
+    /// [`crate::host::sited_numeric_hook`]), which is exact for every `Long`
+    /// too large to be an `Integer` — and blind to the one that is not, because
+    /// `2000000000L` and `2000000000` are the same `Value::Int`.
+    ///
+    /// This is what closes that hole. The compiler marks the arithmetic whose
+    /// operands it can *see* are `Long`, and the host trusts the mark over the
+    /// magnitudes. It is what makes the `long` accumulator work — `long t = 0;
+    /// t += 2000000000; t += 2000000000` is `4000000000`, where the same code
+    /// on a `def` is the `Integer` `-294967296`.
+    ///
+    /// Unknown is narrow, which is Groovy's own default: an unsuffixed literal
+    /// is an `Integer`, so a value the compiler cannot see into is far more
+    /// likely to be one than a `Long`. Being wrong here costs only the wrap on
+    /// an overflow the magnitude rule then catches anyway.
+    fn is_wide(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Int(_, w) => *w == IntWidth::Long,
+            Expr::Var(name) => self.wide_vars.contains(name),
+            Expr::Recorded { inner, .. } => self.is_wide(inner),
+            // A shift takes its width from the value being shifted; the count is
+            // an `Integer` either way (`1L << 3` is a `Long`, `1 << 3L` is not).
+            Expr::Binary {
+                op: BinOp::Shl | BinOp::Shr | BinOp::UShr,
+                lhs,
+                ..
+            } => self.is_wide(lhs),
+            Expr::Binary { lhs, rhs, .. } => self.is_wide(lhs) || self.is_wide(rhs),
+            // `-2147483648` is `Integer.MIN_VALUE`, an `Integer`, even though
+            // `2147483648` on its own is a `Long`: the minimum of a
+            // two's-complement type is only writable as a negated literal, so
+            // Java and Groovy read the sign as part of it. That is why
+            // `-2147483648 - 1` is `2147483647`.
+            Expr::Unary { op: UnOp::Neg, rhs } => match &**rhs {
+                // Only the literal that is a `Long` *by magnitude alone* and
+                // negates back into `Integer` range — `2147483648` — reads this
+                // way. An `L` suffix says `Long` outright, so `-8L` stays one.
+                Expr::Int(n, w) => {
+                    *w == IntWidth::Long
+                        && !(i32::try_from(*n).is_err() && i32::try_from(n.wrapping_neg()).is_ok())
+                }
+                other => self.is_wide(other),
+            },
+            Expr::Unary { rhs, .. } => self.is_wide(rhs),
+            Expr::Ternary { then, els, .. } => self.is_wide(then) || self.is_wide(els),
+            Expr::Elvis { lhs, rhs } => self.is_wide(lhs) || self.is_wide(rhs),
+            // `Long.MAX_VALUE` / `Long.MIN_VALUE`, and the casts and conversions
+            // that name the type outright.
+            Expr::Property { recv, name, .. } => {
+                matches!(&**recv, Expr::Var(v) if v == "Long")
+                    && matches!(name.as_str(), "MAX_VALUE" | "MIN_VALUE")
+            }
+            Expr::MethodCall { method, .. } => {
+                matches!(
+                    method.as_str(),
+                    "longValue" | "toLong" | "currentTimeMillis"
+                )
+            }
+            Expr::Cast { ty, .. } => matches!(ty.as_str(), "long" | "Long" | "BigInteger"),
+            _ => false,
+        }
+    }
+
+    /// Sign-extend the low 32 bits of the value on top of the stack — the
+    /// `Integer` an `int`-width operation answers with. `Op::Shr` is an
+    /// arithmetic shift in the interpreter and in the Cranelift backend
+    /// (`sshr`), so this is two native ops the tracing JIT records rather than a
+    /// builtin call, which would abort the trace.
+    fn emit_wrap32(&mut self, line: u32) {
+        self.b.emit(Op::LoadInt(32), line);
+        self.b.emit(Op::Shl, line);
+        self.b.emit(Op::LoadInt(32), line);
+        self.b.emit(Op::Shr, line);
+    }
+
+    /// Record that the op just emitted at `pos` is `Long` arithmetic, so the
+    /// host wraps its overflow at 64 bits rather than 32. See
+    /// [`Compiler::is_wide`].
+    fn mark_wide_site(&mut self, pos: usize, lhs: &Expr, rhs: &Expr) {
+        if self.is_wide(lhs) || self.is_wide(rhs) {
+            self.wide_sites.insert(pos);
+        }
+    }
+
+    /// Note the width of a declaration's variable. A `long`/`Long` declaration
+    /// says so outright; a `def` takes the width of its initializer, which is
+    /// how `def t = 0L` accumulates at 64 bits. Widening is one-way: a variable
+    /// assigned a `Long` anywhere is treated as one throughout, because the
+    /// compiler has no flow-sensitive view of which assignment reached a use.
+    fn note_var_width(&mut self, ty: &str, name: &str, init: Option<&Expr>) {
+        let wide =
+            matches!(ty, "long" | "Long" | "BigInteger") || init.is_some_and(|e| self.is_wide(e));
+        if wide {
+            self.wide_vars.insert(name.to_string());
+        }
+    }
+
     fn binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<(), String> {
         // `&&` / `||` short-circuit and evaluate to a `Boolean` (Groovy's
         // logical operators are boolean-valued: `5 && 3` is `true`, `0 || 7` is
@@ -2283,6 +2422,22 @@ impl Compiler {
                 return Ok(());
             }
             _ => {}
+        }
+        // `>>` on an `Integer` is a 32-bit arithmetic shift whose count is
+        // masked to 5 bits, where fusevm's `Op::Shr` is 64-bit with the count
+        // masked to 6: `1 >> 32` is `1` in Groovy and `0` natively, and
+        // `256 >> 33` is `128`. Sign-extending the value to 32 bits and masking
+        // the count to 5 restores Groovy's answer in native ops the tracing JIT
+        // still records — a builtin here would cost every shifting loop its
+        // trace. A `Long` shift is already exactly what `Op::Shr` does.
+        if matches!(op, BinOp::Shr) && !self.is_wide(lhs) {
+            self.expr(lhs)?;
+            self.emit_wrap32(self.cur_line);
+            self.expr(rhs)?;
+            self.b.emit(Op::LoadInt(31), self.cur_line);
+            self.b.emit(Op::BitAnd, self.cur_line);
+            self.b.emit(Op::Shr, self.cur_line);
+            return Ok(());
         }
         self.expr(lhs)?;
         self.expr(rhs)?;
@@ -2317,7 +2472,18 @@ impl Compiler {
             _ => None,
         };
         if let Some(id) = builtin {
-            self.emit_call_builtin(id, 2, self.cur_line)?;
+            // `<<` and `>>>` shift at the *left* operand's Java width, and the
+            // count is masked to that width's bit index — `1 << 32` is `1`, and
+            // `1L << 32` is `4294967296`. The host reads the width from the
+            // operand's magnitude, which cannot tell `1L` from `1`, so the
+            // statically-known width rides along as a third argument.
+            if matches!(op, BinOp::Shl | BinOp::UShr) {
+                let wide = self.is_wide(lhs);
+                self.b.emit(Op::LoadInt(i64::from(wide)), self.cur_line);
+                self.emit_call_builtin(id, 3, self.cur_line)?;
+            } else {
+                self.emit_call_builtin(id, 2, self.cur_line)?;
+            }
             // `list << x` appends in place, so it writes back like `list.add`.
             if matches!(op, BinOp::Shl) {
                 self.emit_receiver_writeback(lhs, "leftShift", &[]);
@@ -2345,7 +2511,12 @@ impl Compiler {
                 unreachable!("routed to a builtin above")
             }
         };
-        self.b.emit(vop, self.cur_line);
+        let pos = self.b.emit(vop, self.cur_line);
+        // `+`/`-`/`*` are the ops that overflow, and the host decides the width
+        // their overflow wraps at. Tell it where the `Long` ones are.
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
+            self.mark_wide_site(pos, lhs, rhs);
+        }
         // A user-class operand routes this op through the strict numeric hook,
         // which re-enters the VM to run an operator-overload method — the one
         // native op that can leave an exception in flight. Only a program that
@@ -2471,7 +2642,7 @@ impl Compiler {
 /// `n % -3`) that make up every hot loop.
 fn is_nonzero_literal(e: &Expr) -> bool {
     match e {
-        Expr::Int(n) => *n != 0,
+        Expr::Int(n, _) => *n != 0,
         Expr::Float(f) => *f != 0.0,
         Expr::Unary { op: UnOp::Neg, rhs } => is_nonzero_literal(rhs),
         _ => false,
@@ -2498,7 +2669,7 @@ fn is_nonzero_literal(e: &Expr) -> bool {
 fn needs_truth(e: &Expr) -> bool {
     match e {
         // Statically a number / boolean / null.
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Null => false,
+        Expr::Int(..) | Expr::Float(_) | Expr::Bool(_) | Expr::Null => false,
         // A list literal and a materialised range are both `Value::Array`.
         Expr::List(_) | Expr::Range { .. } => false,
         // Comparisons and `instanceof` yield a `Boolean`; `<=>` an `Integer`;
@@ -2861,7 +3032,7 @@ fn free_in_expr(
             }
         }
         Expr::InstanceOf { value, .. } => free_in_expr(value, bound, out, seen),
-        Expr::Int(_)
+        Expr::Int(..)
         | Expr::Float(_)
         | Expr::Dec(_)
         | Expr::Str(_)
@@ -3131,7 +3302,7 @@ fn expr_has_ffi(e: &Expr) -> bool {
         Expr::Index { recv, index, .. } => expr_has_ffi(recv) || expr_has_ffi(index),
         Expr::SuperCtor { args, .. } => args.iter().any(expr_has_ffi),
         Expr::InstanceOf { value, .. } => expr_has_ffi(value),
-        Expr::Int(_)
+        Expr::Int(..)
         | Expr::Float(_)
         | Expr::Dec(_)
         | Expr::Str(_)

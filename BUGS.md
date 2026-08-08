@@ -269,13 +269,12 @@ reported as parse or compile errors, never silently mis-run.
   `Boolean`, `Character`, `String`, `System`, `BigDecimal`, …) *do* resolve to a
   `java.lang.Class`, so `Math.max(1, 2)`, `Integer.parseInt("42")` and
   `Integer.MAX_VALUE` work.
-- **`Integer` and `Long` are one 64-bit integer.** groovyrs carries every integer
-  as fusevm's 64-bit `Value::Int`, so it neither wraps at 32 bits nor promotes:
-  `1000000 * 1000000` is `1000000000000` where Groovy answers `-727379968`,
-  `Integer.MAX_VALUE + 1` is `2147483648` where Groovy answers `-2147483648`, and
-  `10000000000.getClass()` reports `java.lang.Integer` where Groovy reports
-  `java.lang.Long`. Fixing it needs a per-value Java width, which the value model
-  does not carry.
+- **`java.math.BigInteger` is not a type.** An integer past `Long` range has
+  nowhere to go: `2 ** 40` and `2147483647G + 1` compute the right *value* but
+  report `java.lang.Long`/`java.math.BigDecimal` where Groovy reports
+  `java.math.BigInteger`, and `2 ** 64` exceeds what an `i64` holds at all. The
+  `G` suffix parses and widens the arithmetic to 64 bits, which is as far as the
+  value model reaches.
 - **A `Range` is materialised, not a type.** `0..5` becomes the list of its
   elements at the point it is written, so it answers every `List` method and
   `for (x in a..b)` is exact — but `println(1..5)` prints `[1, 2, 3, 4, 5]` where
@@ -416,11 +415,29 @@ reported as parse or compile errors, never silently mis-run.
 - **`float`/`Float` is modeled as a `double`.** An `f`-suffixed literal parses to
   an `f64`, so it prints and computes with `double` precision: `0.1f + 0.2f` is
   `0.30000000000000004` where Groovy's `Float` prints `0.30000000447034836`.
-- **Integer arithmetic uses fusevm's 64-bit wrapping.** Groovy's `Integer`
-  arithmetic wraps at 32 bits (`2147483647 + 1` is `-2147483648`, `9993973 *
-  -490` is `-602079474`); groovyrs computes in `i64` and wraps there instead, so
-  a result that overflows an `int` but fits an `i64` prints the mathematically
-  correct value rather than Groovy's wrapped one.
+- **A `Long` small enough to be an `Integer` is one, except where the compiler
+  looked.** Groovy's integer width is a property of the value — `Integer op
+  Integer` wraps at 32 bits, anything with a `Long` in it at 64 — and fusevm has
+  one integer type. groovyrs recovers the width from two places: the compiler,
+  which marks the arithmetic whose operands it can see are `Long` (an `L`
+  suffix, a `long`/`Long` declaration, a literal past `Integer` range, and what
+  propagates from those), and the operands' magnitudes at run time, since a
+  value outside `Integer` range *is* a `Long` whatever produced it. Between them
+  every case in the probe corpus is exact, including the `long` accumulator
+  (`long t = 0; t += 2000000000; t += 2000000000` is `4000000000`) and
+  arithmetic inside a closure (`[1000000, 1000000].inject(1) { a, b -> a * b }`
+  is `-727379968`).
+
+  What is left is a `Long` the compiler could not see *and* whose value fits an
+  `Integer` — a `1L` returned from a function, stored in a list, or passed
+  through a closure parameter. Its arithmetic then wraps at 32 bits and its
+  `getClass()` answers `java.lang.Integer`. Widening the default instead would
+  trade this for the far commoner error of never wrapping an `Integer` at all,
+  since Groovy's own default for an unsuffixed literal is `Integer`.
+- **A variable that is ever assigned a `Long` is one throughout.** The
+  compiler's width tracking is not flow-sensitive, so `def x = 0L; x = 5; x + 1`
+  keeps 64-bit arithmetic where Groovy has narrowed `x` back to an `Integer`.
+  Observable only when that arithmetic overflows.
 - **`for (x in a..b)` iterates ascending only.** A descending literal range
   (`5..1`, which Groovy walks downward) runs zero times. The endpoint is
   evaluated once (a body that mutates it still iterates the original range).

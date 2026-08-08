@@ -246,10 +246,26 @@ pub enum AssignOp {
     Mod,
 }
 
+/// Which Java integer type an integer literal has.
+///
+/// Groovy decides this from the literal alone: an unsuffixed literal is an
+/// `Integer` when its value fits in 32 bits and a `Long` when it does not, and
+/// an `L`/`l` suffix makes it a `Long` regardless. The distinction is not
+/// cosmetic — it is the width the arithmetic wraps at, so `1000000 * 1000000`
+/// is the `Integer` `-727379968` while `1000000L * 1000000` is `1000000000000`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntWidth {
+    /// `java.lang.Integer` — arithmetic wraps at 32 bits.
+    Int,
+    /// `java.lang.Long` — arithmetic wraps at 64 bits.
+    Long,
+}
+
 /// A Groovy expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    Int(i64),
+    /// An integer literal and the Java width it carries (see [`IntWidth`]).
+    Int(i64, IntWidth),
     /// A `d`/`f`-suffixed decimal literal: an IEEE double.
     Float(f64),
     /// An unsuffixed decimal literal — a `java.math.BigDecimal`, held as its

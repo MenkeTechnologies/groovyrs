@@ -662,3 +662,119 @@ println f()
 # `finally` runs before a `return` hands its value back.
 def g = { try { return 1 } finally { println "fin" } }
 println g()
+%%
+println(Integer.MAX_VALUE + 1)
+%%
+println(1000000 * 1000000)
+%%
+println(2000000000 + 2000000000)
+%%
+println(Integer.MIN_VALUE - 1)
+%%
+println((1000000 * 1000000).getClass())
+%%
+println((2000000000 + 2000000000).getClass())
+%%
+println(2147483647.getClass())
+%%
+println(2147483648.getClass())
+%%
+println(1L.getClass())
+%%
+println(2147483647 + 1L)
+%%
+println((2147483647 + 1L).getClass())
+%%
+println(1000000L * 1000000)
+%%
+println(2000000000L + 2000000000L)
+%%
+long t = 0; t += 2000000000; t += 2000000000; println(t)
+%%
+long t = 0; t += 2000000000; t += 2000000000; println(t.getClass())
+%%
+def t = 0L; t += 2000000000; t += 2000000000; println(t)
+%%
+def s = 1000000; s *= s; println(s)
+%%
+def f = { a, b -> a * b }; println(f(1000000, 1000000))
+%%
+println([1000000, 1000000].inject(1) { a, b -> a * b })
+%%
+println(Long.MAX_VALUE + 1)
+%%
+println(9223372036854775807 + 1)
+%%
+println(-Integer.MIN_VALUE)
+%%
+println(-2147483648 - 1)
+%%
+println((-2147483648).getClass())
+%%
+println(Math.abs(Integer.MIN_VALUE))
+%%
+println(Integer.MIN_VALUE.intdiv(-1))
+%%
+def q = Integer.MAX_VALUE; q++; println(q)
+%%
+println("" + (1000000 * 1000000))
+%%
+println(2147483647 + 1 == Integer.MIN_VALUE)
+%%
+byte bb = 100; println(bb + bb)
+%%
+short sh = 30000; println(sh + sh)
+%%
+println(1 << 31)
+%%
+println(1 << 32)
+%%
+println(1 << 64)
+%%
+println(1L << 32)
+%%
+println((1L << 3).getClass())
+%%
+println((1 << 3).getClass())
+%%
+println(1 >> 32)
+%%
+println(1 >> 33)
+%%
+println(256 >> 33)
+%%
+println(-8 >> 1)
+%%
+println(-1 >>> 28)
+%%
+println(-1L >>> 60)
+%%
+println(Integer.MIN_VALUE >>> 0)
+%%
+println(-8 >>> 1)
+%%
+println(0xFF)
+%%
+println(0xFFFFFFFF)
+%%
+println(0xFFFFFFFF.getClass())
+%%
+println(0xFFFFFFFFFFFFFFFFL)
+%%
+println(0b1010)
+%%
+println(011)
+%%
+println(10 - 011)
+%%
+println(1_000_000)
+%%
+println(1_000.5)
+%%
+println(2147483648L as int)
+%%
+println(300 as byte)
+%%
+println(3.9 as int)
+%%
+println(3000000000L.intValue())

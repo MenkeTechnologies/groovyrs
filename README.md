@@ -126,8 +126,9 @@ Implemented and checked against Apache Groovy:
   locals are frame slots, so recursion and mutual recursion are sound; `return
   <expr>` carries a value out, and a `return`-less body returns its last value
   expression (else `null`).
-- **Expressions** — integer / decimal / string (single-, double- and
-  triple-quoted) / boolean / `null` literals; `+ - * / % **`,
+- **Expressions** — integer (decimal, `0x` hex, `0b` binary and leading-zero
+  octal, with `_` group separators and the `L`/`G` suffixes) / decimal / string
+  (single-, double- and triple-quoted) / boolean / `null` literals; `+ - * / % **`,
   `== != < > <= >=`, `&& ||` (short-circuiting), the bitwise `& | ^ ~` and the
   shifts `<< >> >>>`, `x in coll`, the `value as Type` coercion, unary `-` and
   `!`, grouping. An unsuffixed decimal literal is a `BigDecimal` whose scale
@@ -137,6 +138,13 @@ Implemented and checked against Apache Groovy:
   when either side is a string, `-` and `*` also work on strings and lists
   (`"abc" * 3`, `[1, 2, 3] - [2]`), and `<<` is `leftShift` (a bit shift, a list
   append, or a string concatenation).
+- **32-bit `Integer` arithmetic.** Groovy's integer width is a property of the
+  value, and groovyrs reproduces it: `Integer.MAX_VALUE + 1` is `-2147483648`,
+  `1000000 * 1000000` is `-727379968`, and `2147483647 + 1L` is `2147483648`
+  because the `L` makes it a `Long`. The shifts carry their operand's width too,
+  so `1 << 32` is `1` and `1L << 32` is `4294967296`. Arithmetic that stays
+  inside `Integer` range — all of it, in the ordinary program — never leaves
+  fusevm's native and JIT'd fast paths.
 - **Collections** — list literals `[1, 2, 3]` / `[]` and insertion-ordered map
   literals `[a: 1, b: 2]` / `[:]`, printed Groovy-style; subscripting `list[i]`
   (negative index counts from the end), `map[k]`, `str[i]`, and by a range
@@ -240,8 +248,8 @@ Implemented and checked against Apache Groovy:
   text, so `try`/`catch` reaches its handler.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
-overloading by parameter type, script-declared class names as values, 32-bit
-`Integer` semantics, `Range` as a type, the `=~`/`==~` match operators, `++`/`--`
+overloading by parameter type, script-declared class names as values,
+`BigInteger`, `Range` as a type, the `=~`/`==~` match operators, `++`/`--`
 not calling `next`/`previous`, by-reference upvalue capture).
 
 ---

@@ -2276,3 +2276,102 @@ println(c)
         "[1, 2, 3]\n[1, 2, 3]\n[1, 2, 3]\n[3, 1, 2]\n[3, 2, 1]\n[3, 2, 1]\n"
     );
 }
+
+// ── Groovy's 32-bit `Integer` semantics ────────────────────────────────────
+//
+// Groovy's integer width is a property of the value, not of a declared type:
+// `Integer op Integer` wraps at 32 bits and anything involving a `Long` wraps at
+// 64. Every expected output below was verified byte-for-byte against Apache
+// Groovy 5.0.8.
+
+#[test]
+fn integer_arithmetic_wraps_at_32_bits() {
+    // The two canonical overflows. `1000000 * 1000000` fits an i64 easily, so
+    // getting `-727379968` proves the narrowing is real and not i64 saturation.
+    let (out, _) = run("println(Integer.MAX_VALUE + 1)\nprintln(1000000 * 1000000)\nprintln(2000000000 + 2000000000)\nprintln(Integer.MIN_VALUE - 1)");
+    assert_eq!(out, "-2147483648\n-727379968\n-294967296\n2147483647\n");
+}
+
+#[test]
+fn a_long_operand_widens_the_arithmetic_to_64_bits() {
+    // The `L` is the only difference between these and the wrapping forms
+    // above — the runtime values are identical, so this is what proves the
+    // compiler's static width reaches the host.
+    let (out, _) =
+        run("println(2147483647 + 1L)\nprintln(1000000L * 1000000)\nprintln(2000000000L + 2000000000L)");
+    assert_eq!(out, "2147483648\n1000000000000\n4000000000\n");
+}
+
+#[test]
+fn a_long_accumulator_accumulates_past_integer_range() {
+    // The declared width has to win over the running value's magnitude: `t` is
+    // still inside `Integer` range when the second `+=` overflows it.
+    let (out, _) = run("long t = 0\nt += 2000000000\nt += 2000000000\nprintln(t)\nprintln(t.getClass())");
+    assert_eq!(out, "4000000000\nclass java.lang.Long\n");
+    // A `def` initialised from an `L` literal is a `Long` the same way.
+    let (out, _) = run("def t = 0L\nt += 2000000000\nt += 2000000000\nprintln(t)");
+    assert_eq!(out, "4000000000\n");
+    // Without either, the same code is `Integer` arithmetic and wraps.
+    let (out, _) = run("def t = 0\nt += 2000000000\nt += 2000000000\nprintln(t)");
+    assert_eq!(out, "-294967296\n");
+}
+
+#[test]
+fn arithmetic_wraps_where_the_compiler_cannot_see_the_operands() {
+    // A closure parameter has no static width, so these wrap on the operands'
+    // magnitudes alone — the runtime half of the width rule.
+    let (out, _) = run("def f = { a, b -> a * b }\nprintln(f(1000000, 1000000))\nprintln([1000000, 1000000].inject(1) { a, b -> a * b })");
+    assert_eq!(out, "-727379968\n-727379968\n");
+}
+
+#[test]
+fn integer_and_long_are_told_apart_by_class() {
+    let (out, _) = run("println(2147483647.getClass())\nprintln(2147483648.getClass())\nprintln(1L.getClass())\nprintln((1000000 * 1000000).getClass())");
+    assert_eq!(
+        out,
+        "class java.lang.Integer\nclass java.lang.Long\nclass java.lang.Long\nclass java.lang.Integer\n"
+    );
+}
+
+#[test]
+fn long_arithmetic_wraps_at_64_bits() {
+    let (out, _) = run("println(Long.MAX_VALUE + 1)\nprintln(9223372036854775807 + 1)");
+    assert_eq!(out, "-9223372036854775808\n-9223372036854775808\n");
+}
+
+#[test]
+fn the_negated_minimum_literal_is_an_integer() {
+    // `-2147483648` is `Integer.MIN_VALUE`, even though `2147483648` alone is a
+    // `Long` — so subtracting one from it wraps rather than widening.
+    let (out, _) = run("println(-2147483648 - 1)\nprintln((-2147483648).getClass())\nprintln(-Integer.MIN_VALUE)\nprintln(Math.abs(Integer.MIN_VALUE))");
+    assert_eq!(out, "2147483647\nclass java.lang.Integer\n-2147483648\n-2147483648\n");
+}
+
+#[test]
+fn shifts_carry_their_left_operands_width() {
+    // The count is masked to the width's bit index, so an `Integer` shift by 32
+    // is the identity and a `Long` shift by 32 is not.
+    let (out, _) = run("println(1 << 31)\nprintln(1 << 32)\nprintln(1L << 32)\nprintln(1 >> 32)\nprintln(256 >> 33)");
+    assert_eq!(out, "-2147483648\n1\n4294967296\n1\n128\n");
+}
+
+#[test]
+fn unsigned_right_shift_fills_to_the_operands_width() {
+    let (out, _) = run("println(-1 >>> 28)\nprintln(-1L >>> 60)\nprintln(-8 >>> 1)\nprintln(Integer.MIN_VALUE >>> 0)");
+    assert_eq!(out, "15\n15\n2147483644\n-2147483648\n");
+}
+
+#[test]
+fn radix_and_separated_integer_literals() {
+    let (out, _) = run("println(0xFF)\nprintln(0b1010)\nprintln(011)\nprintln(1_000_000)\nprintln(0xFFFFFFFF)\nprintln(0xFFFFFFFF.getClass())");
+    assert_eq!(
+        out,
+        "255\n10\n9\n1000000\n4294967295\nclass java.lang.Long\n"
+    );
+}
+
+#[test]
+fn narrowing_conversions_keep_the_targets_low_bits() {
+    let (out, _) = run("println(2147483648L as int)\nprintln(300 as byte)\nprintln(3.9 as int)\nprintln(3000000000L.intValue())\nprintln(Integer.MIN_VALUE.intdiv(-1))");
+    assert_eq!(out, "-2147483648\n44\n3\n-1294967296\n-2147483648\n");
+}

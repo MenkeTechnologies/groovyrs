@@ -59,7 +59,7 @@ pub fn eval_file_debug(path: &str) -> Result<(), String> {
         crate::dap::on_debug_line(vm);
         Value::Undef
     });
-    vm.set_numeric_hook(std::sync::Arc::new(host::numeric_hook));
+    vm.set_sited_numeric_hook(std::sync::Arc::new(host::sited_numeric_hook));
     let _ = host::take_error();
     host::set_vm_ptr(&mut vm);
     let outcome = vm.run();
@@ -79,7 +79,7 @@ fn run_chunk(chunk: fusevm::Chunk) -> Result<Value, String> {
     let _ = host::take_error(); // clear any stale fault from a prior run
     let mut vm = VM::new(chunk);
     host::install(&mut vm);
-    vm.set_numeric_hook(std::sync::Arc::new(host::numeric_hook));
+    vm.set_sited_numeric_hook(std::sync::Arc::new(host::sited_numeric_hook));
     vm.enable_tracing_jit();
     // Publish the VM so the numeric hook can re-enter it for operator overloading
     // (the hook receives no VM handle); cleared once the run returns.

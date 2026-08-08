@@ -1,0 +1,664 @@
+# Probe corpus for parity-scripts/fuzz.sh — small self-contained Groovy snippets
+# whose stdout must be byte-identical to Apache Groovy's. Probes are separated by
+# a line containing only `%%`. Each probe body is compiled inside a `try` block,
+# so declare locals with `def`/a type (block-scoped) and use closures rather than
+# method declarations.
+println 7 / 2
+%%
+println 4 / 2
+%%
+println 1 / 3
+%%
+println 10 / 4
+%%
+println (-7) / 2
+%%
+println 7.intdiv(2)
+%%
+println (-7).intdiv(2)
+%%
+println 7 % 3
+%%
+println (-7) % 3
+%%
+println 7 % -3
+%%
+println 7.0 % 3
+%%
+println 2 ** 10
+%%
+println 2 ** -1
+%%
+println 2.0 ** 3
+%%
+println 0.1 + 0.2
+%%
+println 1.10 + 2.20
+%%
+println 1.25 * 0
+%%
+println 100.00
+%%
+println 2.5e7
+%%
+println 1e-7
+%%
+println 2.5e7 + 1
+%%
+println 1.000 / 4
+%%
+println 1.5e300 * 1.5e300
+%%
+println 0.1d + 0.2d
+%%
+println 5.0d / 0.0d
+%%
+println 1.0G / 3.0G
+%%
+println 10G + 1
+%%
+println 3.14G
+%%
+println 1.0f
+%%
+println 1.5f + 2.5f
+%%
+println 1.0f / 3.0f
+%%
+println (1/3).getClass().getName()
+%%
+println (7/2).getClass().getName()
+%%
+println 1.5.getClass().getName()
+%%
+println 1.5d.getClass().getName()
+%%
+println 10.getClass().getName()
+%%
+println 10000000000.getClass().getName()
+%%
+println 1.0
+%%
+println 1.00 == 1.0
+%%
+println 1.00.equals(1.0)
+%%
+println 0.5 as int
+%%
+println 1.7 as int
+%%
+println (-1.7) as int
+%%
+println Math.round(1.5)
+%%
+println Math.round(2.5)
+%%
+println Math.round(-1.5)
+%%
+println (1.0/0.0)
+%%
+println (0.0/0.0)
+%%
+println 100 as double
+%%
+println 100d
+%%
+println 1.0 + 1
+%%
+println 1 + 1.0
+%%
+println 1.0d + 1
+%%
+println 3.0 / 1.5
+%%
+println 1000000 * 1000000
+%%
+println Integer.MAX_VALUE + 1
+%%
+println Long.MAX_VALUE
+%%
+println 255 as char
+%%
+println (int) 'a'
+%%
+println 'a' as int
+%%
+def s = "world"; println "hello $s"
+%%
+def s = "world"; println "hello ${s.toUpperCase()}"
+%%
+def a = 1, b = 2; println "$a + $b = ${a+b}"
+%%
+def m = [x: 1]; println "val ${m.x}"
+%%
+def l = [1,2]; println "size $l.size"
+%%
+println "a\tb"
+%%
+println "a\\b"
+%%
+println 'single $notinterp'
+%%
+println """triple
+line"""
+%%
+println "${1/3}"
+%%
+println "" + 1.0
+%%
+println "" + (0.1+0.2)
+%%
+def s = "x"; println "$s".getClass().getName()
+%%
+def s = "x"; println "abc".getClass().getName()
+%%
+println "abc"[1]
+%%
+println "abc"[0..1]
+%%
+println "abc"[-1]
+%%
+println "abcdef"[1..3]
+%%
+println "abc".reverse()
+%%
+println "a,b,c".split(",")
+%%
+println "a,b,c".split(",").toList()
+%%
+println "  x  ".trim()
+%%
+println "abc".toUpperCase()
+%%
+println "abc" * 3
+%%
+println "abc" - "b"
+%%
+println "abc".contains("b")
+%%
+println "abc".indexOf("c")
+%%
+println "abc".replace("b","B")
+%%
+println "abc".padLeft(5)
+%%
+println "abc".padRight(5, "-")
+%%
+println "abc".center(7, "*")
+%%
+println "a b".tokenize()
+%%
+println "abc".size()
+%%
+println "abc".length()
+%%
+println "Hello".charAt(1)
+%%
+println "3".toInteger() + 1
+%%
+println "3.5".toDouble()
+%%
+println "3.5".toBigDecimal()
+%%
+println "abc".each { print it }; println()
+%%
+println([1,2,3])
+%%
+println([1,2,3].sum())
+%%
+println([1,2,3].collect { it * 2 })
+%%
+println([1,2,3].findAll { it > 1 })
+%%
+println([1,2,3].find { it > 1 })
+%%
+println([1,2,3].any { it > 2 })
+%%
+println([1,2,3].every { it > 0 })
+%%
+println([1,2,3].reverse())
+%%
+println([3,1,2].sort())
+%%
+println([3,1,2].sort { a, b -> b <=> a })
+%%
+println([1,2,3].inject(0) { a, b -> a + b })
+%%
+println([1,2,3].join("-"))
+%%
+println([1,[2,[3]]].flatten())
+%%
+println([1,2,3].max())
+%%
+println([1,2,3].min())
+%%
+println([1,2,2,3].unique())
+%%
+println([1,2,3].size())
+%%
+println([1,2,3].isEmpty())
+%%
+println([].isEmpty())
+%%
+println([1,2,3][0])
+%%
+println([1,2,3][-1])
+%%
+println([1,2,3][0..1])
+%%
+println([1,2,3] + [4])
+%%
+println([1,2,3] - [2])
+%%
+println([1,2] * 2
+)
+%%
+println([1,2,3].take(2))
+%%
+println([1,2,3].drop(1))
+%%
+println([1,2,3].first())
+%%
+println([1,2,3].last())
+%%
+println([1,2,3].head())
+%%
+println([1,2,3].tail())
+%%
+println([1,2,3].indexOf(2))
+%%
+println([1,2,3].contains(2))
+%%
+println([1,2,3].collectEntries { [it, it*it] })
+%%
+println([1,2,3].groupBy { it % 2 })
+%%
+println([1,2,3].count { it > 1 })
+%%
+println([1,2,3].sum { it * 2 })
+%%
+println([1,2,3].eachWithIndex { v, i -> print "$i:$v " }); println()
+%%
+println([[1,2],[3,4]].collect { a, b -> a + b })
+%%
+def l = [1,2,3]; l << 4; println l
+%%
+def l = [1,2,3]; l.add(4); println l
+%%
+def l = [1,2,3]; l.remove(0); println l
+%%
+def l = [1,2,3]; l[1] = 9; println l
+%%
+def l = []; l[3] = 1; println l
+%%
+println([1,2,3].reverseEach { print it }); println()
+%%
+println([a:1, b:2])
+%%
+println([a:1, b:2].size())
+%%
+println([a:1].a)
+%%
+println([a:1]['a'])
+%%
+println([a:1, b:2].keySet())
+%%
+println([a:1, b:2].values())
+%%
+println([a:1, b:2].collect { k, v -> "$k=$v" })
+%%
+println([a:1, b:2].each { k, v -> print "$k$v" }); println()
+%%
+println([a:1, b:2].findAll { k, v -> v > 1 })
+%%
+println([a:1, b:2].containsKey('a'))
+%%
+def m = [:]; m.x = 1; println m
+%%
+def m = [a:1]; m.remove('a'); println m
+%%
+println([:].isEmpty())
+%%
+println([a:1] + [b:2])
+%%
+println([a:1, b:2].sort { it.key })
+%%
+println([1,2,3].collect { it }.getClass().getName()
+)
+%%
+println([a:1].getClass().getName())
+%%
+println(1..5)
+%%
+println((1..5).toList())
+%%
+println((1..<5).toList())
+%%
+println((5..1).toList())
+%%
+println((1..5).size())
+%%
+println((1..5).sum())
+%%
+println(('a'..'e').toList())
+%%
+println((1..5).step(2))
+%%
+println((1..5).contains(3))
+%%
+for (i in 1..3) print i; println()
+%%
+for (i in [1,2,3]) print i; println()
+%%
+for (i in 1..5) { if (i == 3) continue; print i }; println()
+%%
+for (i in 1..5) { if (i == 3) break; print i }; println()
+%%
+for (int i = 0; i < 3; i++) print i; println()
+%%
+for (int i = 0; i < 5; i++) { if (i % 2 == 0) continue; print i }; println()
+%%
+for (int i = 0; i < 5; i++) { if (i == 3) break; print i }; println()
+%%
+int k = 0; while (k < 3) { k++; print k }; println()
+%%
+int k = 0; while (k < 5) { k++; if (k == 2) continue; print k }; println()
+%%
+int k = 0; while (true) { k++; if (k > 3) break }; println k
+%%
+int k = 0; do { k++ } while (k < 3); println k
+%%
+3.times { print it }; println()
+%%
+1.upto(3) { print it }; println()
+%%
+3.downto(1) { print it }; println()
+%%
+1.step(5, 2) { print it }; println()
+%%
+outer: for (i in 1..3) { for (j in 1..3) { if (j == 2) continue outer; print "$i$j" } }; println()
+%%
+outer: for (i in 1..3) { for (j in 1..3) { if (j == 2) break outer; print "$i$j" } }; println()
+%%
+def c = { it * 2 }; println c(3)
+%%
+def c = { a, b -> a + b }; println c(1, 2)
+%%
+def c = { -> 42 }; println c()
+%%
+def c = { a, b = 5 -> a + b }; println c(1)
+%%
+def x = 10; def c = { x + 1 }; println c()
+%%
+def c = { it }; println c.getClass().getName().startsWith("probe")
+%%
+def c = { a, b -> a }; println c.maximumNumberOfParameters
+%%
+def add = { a -> { b -> a + b } }; println add(1)(2)
+%%
+println([1,2,3].collect { it }.with { it.sum() })
+%%
+def l = [1,2,3]; println l.findResult { it > 1 ? it * 10 : null }
+%%
+switch (2) { case 1: println "one"; break; case 2: println "two"; break; default: println "d" }
+%%
+switch ("b") { case "a": println 1; break; case "b": println 2; break }
+%%
+switch (5) { case 1..3: println "low"; break; case 4..6: println "mid"; break }
+%%
+switch (5) { case Integer: println "int"; break; default: println "other" }
+%%
+switch (1) { case 1: print "a"; case 2: print "b"; break; case 3: print "c" }; println()
+%%
+def x = 3; println(x > 2 ? "big" : "small")
+%%
+def x = null; println(x ?: "default")
+%%
+def m = [a:[b:1]]; println m?.a?.b
+%%
+def m = null; println m?.a
+%%
+println(null == null)
+%%
+if (0) println "t" else println "f"
+%%
+if ("") println "t" else println "f"
+%%
+if ([]) println "t" else println "f"
+%%
+if ([:]) println "t" else println "f"
+%%
+if (null) println "t" else println "f"
+%%
+if ("x") println "t" else println "f"
+%%
+if (0.0) println "t" else println "f"
+%%
+println(!0)
+%%
+println(1 <=> 2)
+%%
+println("a" <=> "b")
+%%
+println([1,2] <=> [1,3])
+%%
+println(1 == 1.0)
+%%
+println("1" == 1)
+%%
+println(5 in [1,5])
+%%
+println("ab" ==~ /a./)
+%%
+println("ab" =~ /a./ ? "y" : "n")
+%%
+def m = ("2024-01" =~ /(\d+)-(\d+)/); m.find(); println m.group(1)
+%%
+println("a1b2".replaceAll(/\d/) { "#" })
+%%
+println 1..3 as List
+%%
+println([1,2,3] as Set)
+%%
+println("3" as Integer + 1)
+%%
+println(3 as String + "x")
+%%
+println([1,2].class.simpleName)
+%%
+println(new int[3].length)
+%%
+try { throw new RuntimeException("boom") } catch (e) { println e.message }
+%%
+try { [1][5] } catch (e) { println e.getClass().getSimpleName() }
+%%
+try { null.foo() } catch (e) { println e.getClass().getSimpleName() }
+%%
+try { 1/0 } catch (e) { println e.getClass().getSimpleName() }
+%%
+try { throw new IllegalStateException("x") } catch (IllegalArgumentException e) { println "wrong" } catch (IllegalStateException e) { println "right" }
+%%
+try { println "t" } finally { println "f" }
+%%
+def r = { try { return 1 } finally { println "fin" } }; println r()
+%%
+println Integer.parseInt("42")
+%%
+println Math.max(1, 2)
+%%
+println Math.abs(-3)
+%%
+println Math.sqrt(16)
+%%
+println Math.floor(1.7)
+%%
+println Math.ceil(1.2)
+%%
+println Math.pow(2, 10)
+%%
+println String.valueOf(1.0)
+%%
+println([1,2,3].toString())
+%%
+println([a:1].toString())
+%%
+println(1.toString())
+%%
+println(1.0.toString())
+%%
+println((1..3).toString())
+%%
+println(null.toString())
+%%
+print "no newline"; println()
+%%
+printf("%d %s%n", 1, "a")
+%%
+println String.format("%.2f", 1.005)
+%%
+println "x".multiply(3)
+%%
+def sb = new StringBuilder(); sb.append("a").append(1); println sb.toString()
+%%
+println([1,2,3].sum().getClass().getName())
+%%
+println([1.0,2.0].sum())
+%%
+println([0.1,0.2].sum())
+%%
+def i = 5; i += 1; println i
+%%
+def i = 5; i -= 1; println i
+%%
+def i = 5; i *= 2; println i
+%%
+def i = 5; i /= 2; println i
+%%
+def i = 5; println i++; println i
+%%
+def i = 5; println ++i; println i
+%%
+def s = "a"; s += "b"; println s
+%%
+def l = [1]; l += [2]; println l
+%%
+println(5 & 3)
+%%
+println(5 | 3)
+%%
+println(5 ^ 3)
+%%
+println(~5)
+%%
+println(1 << 4)
+%%
+println(-16 >> 2)
+%%
+println(-16 >>> 28)
+%%
+def (a, b) = [1, 2]; println "$a$b"
+%%
+def l = [1,2,3]; def (x, y) = l; println "$x$y"
+%%
+println([1,2,3].collect { it }*.toString())
+%%
+println([[1,2],[3,4]]*.size())
+%%
+println([1,2,3].sum() / [1,2,3].size())
+%%
+println((1..10).findAll { it % 3 == 0 })
+%%
+println((1..5).collect { it * it })
+%%
+println([1,2,3].withIndex().collect { v, i -> "$i$v" })
+%%
+println([1,2,3].reverse().join(","))
+%%
+println([1,2,3].sort(false) { -it })
+%%
+println([[1,2],[3,4]].transpose())
+%%
+println([1,2,3,4].split { it % 2 == 0 })
+%%
+println([1,2,3].collate(2))
+%%
+println([1,2,3].combinations().size())
+%%
+println(['a','b'].permutations().size())
+%%
+println([1,2,3].intersect([2,3,4]))
+%%
+println([1,2,3].disjoint([4,5]))
+%%
+println([1,2,3].minus([2]))
+%%
+println([1,2,3].plus([4]))
+%%
+println([1,2,3].sum(10))
+%%
+println([1,2,3].toSorted { a, b -> b <=> a })
+%%
+println([3,1,2].max { -it })
+%%
+println([1,2,3].findIndexOf { it > 1 })
+%%
+println([1,2,3].tail().sum())
+%%
+println([1,2,3].init())
+%%
+println([1,2,3].dropWhile { it < 2 })
+%%
+println([1,2,3].takeWhile { it < 3 })
+%%
+println([a:1,b:2].inject(0) { s, e -> s + e.value })
+%%
+println([a:1,b:2].collectEntries { k, v -> [k, v * 2] })
+%%
+println([a:1].entrySet().iterator().next().key)
+%%
+println([a:1,b:2].max { it.value }.key
+)
+%%
+println([a:1].get('a', 0))
+%%
+println([a:1].getOrDefault('b', 9))
+%%
+println([a:1].withDefault { 0 }['z'])
+%%
+println([1,2,3].asImmutable().size())
+%%
+println([1,2,3].sum { it } instanceof Integer)
+%%
+println(1 instanceof Integer)
+%%
+println("x" instanceof String)
+%%
+println([1] instanceof List)
+%%
+println(1.0 instanceof BigDecimal)
+%%
+println(null instanceof String)
+%%
+# `continue` inside a `try` that targets the enclosing loop.
+for (i in 1..3) { try { if (i == 2) continue; println "body $i" } catch (e) { println "c" } }
+println "done"
+%%
+# `break` inside a `try` that targets the enclosing loop.
+for (i in 1..5) { try { if (i == 3) break; println "b $i" } catch (e) { println "c" } }
+println "done"
+%%
+# Labeled `continue` out of a `try` in a nested loop.
+outer: for (i in 1..3) { for (j in 1..3) { try { if (j == 2) continue outer; print "$i$j " } catch (e) { println "c" } } }
+println "done"
+%%
+# Labeled `break` out of a `try` in a nested loop.
+outer: for (i in 1..3) { for (j in 1..3) { try { if (j == 2) break outer; print "$i$j " } catch (e) { println "c" } } }
+println "done"
+%%
+# `return` from inside a `try` inside a loop, with `finally` running each pass.
+def f = { for (i in 1..5) { try { if (i == 3) return "ret at $i" } finally { print "f$i " } }; return "fell through" }
+println f()
+%%
+# `finally` runs before a `return` hands its value back.
+def g = { try { return 1 } finally { println "fin" } }
+println g()

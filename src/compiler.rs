@@ -803,6 +803,16 @@ impl Compiler {
             && !self.is_local(name)
     }
 
+    /// True when `name` is a statically named JDK class (`Math`, `Integer`, …)
+    /// rather than a variable — so it lowers to a `java.lang.Class` reference.
+    /// A script-declared class of the same name, a local, or a field all win,
+    /// which is Groovy's own resolution order.
+    fn is_static_class_ref(&self, name: &str) -> bool {
+        crate::host::jdk_class_package(name).is_some()
+            && !self.is_local(name)
+            && !self.class_index.contains_key(name)
+    }
+
     /// True when `name` is bound to a slot in the current function/method scope
     /// (a parameter or local), so it must not be reinterpreted as a field/method.
     fn is_local(&self, name: &str) -> bool {
@@ -999,6 +1009,26 @@ impl Compiler {
                 self.b.emit(Op::LoadConst(c), self.cur_line);
                 self.emit_call_builtin(crate::host::GSETPROP, 0, self.cur_line)?;
                 self.b.emit(Op::Pop, self.cur_line);
+                Ok(())
+            }
+            StmtKind::SetIndex { recv, index, value } => {
+                // `recv[index] = value` — stack: recv (deepest), index, value.
+                // The builtin answers the receiver's new contents, which a
+                // variable receiver stores back (a fusevm list is a value, so a
+                // list element cannot be written through the handle).
+                self.expr(recv)?;
+                self.expr(index)?;
+                self.expr(value)?;
+                self.emit_call_builtin(crate::host::GSETINDEX, 0, self.cur_line)?;
+                match recv {
+                    Expr::Var(name) if !self.is_field(name) => {
+                        let store = self.store_op_for(name);
+                        self.b.emit(store, self.cur_line);
+                    }
+                    _ => {
+                        self.b.emit(Op::Pop, self.cur_line);
+                    }
+                }
                 Ok(())
             }
             // Classes are hoisted and emitted as subroutine regions by
@@ -1805,6 +1835,12 @@ impl Compiler {
                 // A bare field name inside a method/constructor is `this.field`.
                 if self.is_field(name) {
                     self.emit_field_get(name)?;
+                } else if self.is_static_class_ref(name) {
+                    // `Math`, `Integer`, … resolve to the JDK class, so that
+                    // `Math.max(1, 2)` has a receiver to dispatch on.
+                    let nidx = self.b.add_constant(Value::str(name.clone()));
+                    self.b.emit(Op::LoadConst(nidx), self.cur_line);
+                    self.emit_call_builtin(crate::host::GCLASSREF, 0, self.cur_line)?;
                 } else {
                     let get = self.load_op_for(name);
                     self.b.emit(get, self.cur_line);
@@ -1880,8 +1916,20 @@ impl Compiler {
                     self.cond_expr(rhs)?;
                     self.b.emit(Op::LogNot, self.cur_line);
                 }
+                // `~x` is the bitwise complement, a plain native op.
+                UnOp::BitNot => {
+                    self.expr(rhs)?;
+                    self.b.emit(Op::BitNot, self.cur_line);
+                }
             },
             Expr::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs)?,
+            // `value as Type`: evaluate the value, push the type name, coerce.
+            Expr::Cast { value, ty } => {
+                self.expr(value)?;
+                let tidx = self.b.add_constant(Value::str(ty.clone()));
+                self.b.emit(Op::LoadConst(tidx), self.cur_line);
+                self.emit_call_builtin(crate::host::GCAST, 0, self.cur_line)?;
+            }
             // Println/PostIncDec in value position: the print builtin leaves its
             // `null` return value on the stack.
             Expr::Println { newline, arg } => {
@@ -1989,16 +2037,24 @@ impl Compiler {
                 end,
                 inclusive,
             } => {
-                // Materialise to a Groovy list of the enumerated integers. The
-                // native `Op::Range` is inclusive (`from..=to`); a half-open
-                // `a..<b` lowers to the inclusive range `a..(b-1)`.
+                // Materialise to a Groovy list of the enumerated values. This
+                // goes through the host rather than the native `Op::Range`
+                // because Groovy counts *down* when the start exceeds the end
+                // and enumerates characters for string endpoints, neither of
+                // which the native op does. The hot shape — `for (x in a..b)` —
+                // never reaches here: the parser desugars it into a counted
+                // `for` loop with native comparisons.
                 self.expr(start)?;
                 self.expr(end)?;
-                if !*inclusive {
-                    self.b.emit(Op::LoadInt(1), self.cur_line);
-                    self.b.emit(Op::Sub, self.cur_line);
-                }
-                self.b.emit(Op::Range, self.cur_line);
+                self.b.emit(
+                    if *inclusive {
+                        Op::LoadTrue
+                    } else {
+                        Op::LoadFalse
+                    },
+                    self.cur_line,
+                );
+                self.emit_call_builtin(crate::host::GRANGE, 0, self.cur_line)?;
             }
             Expr::Ternary { cond, then, els } => {
                 // `cond ? then : els` — branch on Groovy truthiness.
@@ -2132,6 +2188,23 @@ impl Compiler {
             }
             return Ok(());
         }
+        // `printf(format, args…)` / `sprintf(format, args…)` — the script-scope
+        // formatting methods, unless the script declared its own.
+        if matches!(name, "printf" | "sprintf")
+            && !self.fn_names.contains(name)
+            && !self.is_local(name)
+        {
+            for a in args {
+                self.expr(a)?;
+            }
+            let id = if name == "printf" {
+                crate::host::GPRINTF
+            } else {
+                crate::host::GSPRINTF
+            };
+            self.emit_call_builtin(id, args.len() as u8, line)?;
+            return Ok(());
+        }
         // A user-defined function: push the args (left-to-right) and call through
         // the fusevm frame ABI; `Op::Call` leaves the return value on the stack.
         if self.fn_names.contains(name) {
@@ -2232,6 +2305,25 @@ impl Compiler {
         if let BinOp::Mod = op {
             return self.emit_mod(rhs, self.cur_line);
         }
+        // The operators whose result type is a *runtime* question route through
+        // a builtin: `**` follows the numeric tower, `<<` is `leftShift` (a
+        // shift, an append or a concatenation), `>>>` fills to the operand's
+        // Java width, and `in` is the collection's membership test.
+        let builtin = match op {
+            BinOp::Power => Some(crate::host::GPOWER),
+            BinOp::Shl => Some(crate::host::GSHL),
+            BinOp::UShr => Some(crate::host::GUSHR),
+            BinOp::In => Some(crate::host::GIN),
+            _ => None,
+        };
+        if let Some(id) = builtin {
+            self.emit_call_builtin(id, 2, self.cur_line)?;
+            // `list << x` appends in place, so it writes back like `list.add`.
+            if matches!(op, BinOp::Shl) {
+                self.emit_receiver_writeback(lhs, "leftShift", &[]);
+            }
+            return Ok(());
+        }
         let vop = match op {
             BinOp::Add => Op::Add,
             BinOp::Sub => Op::Sub,
@@ -2243,8 +2335,15 @@ impl Compiler {
             BinOp::Gt => Op::NumGt,
             BinOp::Le => Op::NumLe,
             BinOp::Ge => Op::NumGe,
+            BinOp::BitAnd => Op::BitAnd,
+            BinOp::BitOr => Op::BitOr,
+            BinOp::BitXor => Op::BitXor,
+            BinOp::Shr => Op::Shr,
             BinOp::Div | BinOp::Cmp => unreachable!("handled above"),
             BinOp::And | BinOp::Or => unreachable!("handled above"),
+            BinOp::Power | BinOp::Shl | BinOp::UShr | BinOp::In => {
+                unreachable!("routed to a builtin above")
+            }
         };
         self.b.emit(vop, self.cur_line);
         // A user-class operand routes this op through the strict numeric hook,
@@ -2281,11 +2380,31 @@ impl Compiler {
     ///
     /// `sort(false)` explicitly asks for a copy, so only the no-argument, the
     /// `sort(true)`, and the closure-argument forms write back at all.
+    ///
+    /// The `List` mutators (`add`, `remove`, `<<`, …) travel the same path, but
+    /// their *result* is not the new list (`add` answers `true`), so they park
+    /// the new contents in the host's `MUTATED` slot and `GWRITEBACK` prefers
+    /// those over the result.
     fn emit_receiver_writeback(&mut self, recv: &Expr, method: &str, args: &[Expr]) {
-        let mutating = matches!(method, "sort" | "unique")
+        let mutating = (matches!(method, "sort" | "unique")
             && args
                 .iter()
-                .all(|a| matches!(a, Expr::Closure { .. } | Expr::Bool(true)));
+                .all(|a| matches!(a, Expr::Closure { .. } | Expr::Bool(true))))
+            || matches!(
+                method,
+                "add"
+                    | "addAll"
+                    | "remove"
+                    | "removeAt"
+                    | "removeElement"
+                    | "removeAll"
+                    | "retainAll"
+                    | "set"
+                    | "clear"
+                    | "push"
+                    | "pop"
+                    | "leftShift"
+            );
         let Expr::Var(name) = recv else { return };
         // A bare field name inside a method is `this.field`, not a variable —
         // leave that to the (unsupported) property path rather than inventing a
@@ -2589,6 +2708,11 @@ fn free_in_stmt(
             free_in_expr(recv, bound, out, seen);
             free_in_expr(value, bound, out, seen);
         }
+        StmtKind::SetIndex { recv, index, value } => {
+            free_in_expr(recv, bound, out, seen);
+            free_in_expr(index, bound, out, seen);
+            free_in_expr(value, bound, out, seen);
+        }
         StmtKind::Try {
             body,
             catches,
@@ -2632,6 +2756,7 @@ fn free_in_expr(
         Expr::Iterable(inner) => free_in_expr(inner, bound, out, seen),
         Expr::Recorded { inner, .. } => free_in_expr(inner, bound, out, seen),
         Expr::Var(n) => note_free(n, bound, out, seen),
+        Expr::Cast { value, .. } => free_in_expr(value, bound, out, seen),
         Expr::PostIncDec { name, .. } | Expr::PreIncDec { name, .. } => {
             note_free(name, bound, out, seen)
         }
@@ -2831,6 +2956,9 @@ fn body_uses_exceptions(body: &[Stmt]) -> bool {
         StmtKind::SetProperty { recv, value, .. } => {
             expr_uses_exceptions(recv) || expr_uses_exceptions(value)
         }
+        StmtKind::SetIndex { recv, index, value } => {
+            expr_uses_exceptions(recv) || expr_uses_exceptions(index) || expr_uses_exceptions(value)
+        }
         StmtKind::Class {
             fields,
             ctors,
@@ -2930,6 +3058,9 @@ fn body_has_ffi(body: &[Stmt]) -> bool {
         StmtKind::Return { value } => value.as_ref().is_some_and(expr_has_ffi),
         StmtKind::Function { body, .. } => body_has_ffi(body),
         StmtKind::SetProperty { recv, value, .. } => expr_has_ffi(recv) || expr_has_ffi(value),
+        StmtKind::SetIndex { recv, index, value } => {
+            expr_has_ffi(recv) || expr_has_ffi(index) || expr_has_ffi(value)
+        }
         StmtKind::Class {
             fields,
             ctors,
@@ -2974,6 +3105,7 @@ fn expr_has_ffi(e: &Expr) -> bool {
         Expr::Recorded { inner, .. } => expr_has_ffi(inner),
         Expr::Call { name, args, .. } => name == RUST_COMPILE || args.iter().any(expr_has_ffi),
         Expr::Unary { rhs, .. } => expr_has_ffi(rhs),
+        Expr::Cast { value, .. } => expr_has_ffi(value),
         Expr::Binary { lhs, rhs, .. } => expr_has_ffi(lhs) || expr_has_ffi(rhs),
         Expr::Println { arg, .. } => arg.as_deref().is_some_and(expr_has_ffi),
         Expr::List(elems) => elems.iter().any(expr_has_ffi),

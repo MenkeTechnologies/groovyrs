@@ -61,6 +61,14 @@ pub enum StmtKind {
         op: AssignOp,
         value: Expr,
     },
+    /// A subscript assignment `recv[index] = value` — Groovy's `putAt`. Held
+    /// apart from [`StmtKind::Assign`] because the receiver is an expression and
+    /// a list receiver has to be written back (a fusevm list is a value).
+    SetIndex {
+        recv: Expr,
+        index: Expr,
+        value: Expr,
+    },
     /// An expression evaluated for its side effects: `println(x)`.
     Expr(Expr),
     /// `if (cond) { .. } else { .. }`.
@@ -423,6 +431,12 @@ pub enum Expr {
         index: Box<Expr>,
         line: u32,
     },
+    /// A coercion `value as Type` — Groovy's `asType`. The right side is a type
+    /// *name*, not an expression, so it is held as text.
+    Cast {
+        value: Box<Expr>,
+        ty: String,
+    },
 }
 
 /// One piece of a [`Expr::GString`]: literal text, or an embedded expression.
@@ -437,6 +451,8 @@ pub enum GStringPart {
 pub enum UnOp {
     Neg,
     Not,
+    /// `~` — bitwise complement.
+    BitNot,
 }
 
 /// Binary operators.
@@ -458,4 +474,15 @@ pub enum BinOp {
     Cmp,
     And,
     Or,
+    /// `**` — Groovy's power operator (right-associative).
+    Power,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    /// `>>>` — unsigned (zero-filling) right shift.
+    UShr,
+    /// `x in coll` — membership, which Groovy routes through `isCase`.
+    In,
 }

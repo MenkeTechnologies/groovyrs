@@ -122,9 +122,18 @@ pub enum Tok {
     AndAnd,
     OrOr,
     Not,
-    /// `|` — only meaningful in a multi-catch type list (`catch (A | B e)`).
+    /// `|` — bitwise or, and the separator in a multi-catch type list
+    /// (`catch (A | B e)`).
     Pipe,
-    At, // `@` annotation marker (e.g. `@Override`)
+    /// `**` — Groovy's power operator (right-associative).
+    Power,
+    Amp,   // `&` bitwise and
+    Caret, // `^` bitwise xor
+    Tilde, // `~` bitwise complement (a `~/…/` regex literal lexes separately)
+    Shl,   // `<<` left shift / `leftShift`
+    Shr,   // `>>` arithmetic right shift
+    UShr,  // `>>>` unsigned right shift
+    At,    // `@` annotation marker (e.g. `@Override`)
     Eof,
 }
 
@@ -132,6 +141,15 @@ impl fmt::Display for Tok {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")
     }
+}
+
+/// Is the byte at `i` the start of this literal's closing delimiter — one quote
+/// for an ordinary literal, three for a triple-quoted one?
+fn at_string_end(bytes: &[u8], i: usize, quote: u8, triple: bool) -> bool {
+    if bytes[i] != quote {
+        return false;
+    }
+    !triple || (i + 2 < bytes.len() && bytes[i + 1] == quote && bytes[i + 2] == quote)
 }
 
 /// Lex `src` into a token vector terminated by `Tok::Eof`.
@@ -321,10 +339,19 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         if c == '"' || c == '\'' {
             let quote = bytes[i];
             let interpolating = quote == b'"';
-            i += 1;
+            // A triple-quoted literal (`"""…"""` / `'''…'''`) spans raw
+            // newlines and ends only at a matching run of three quotes.
+            let triple = i + 2 < bytes.len() && bytes[i + 1] == quote && bytes[i + 2] == quote;
+            let start_line = line;
+            i += if triple { 3 } else { 1 };
             let mut s = String::new();
             let mut parts: Vec<GPart> = Vec::new();
-            while i < bytes.len() && bytes[i] != quote {
+            while i < bytes.len() && !at_string_end(bytes, i, quote, triple) {
+                // A raw newline is text inside a triple-quoted literal; a
+                // single-quoted one has none (the scan below stops at the quote).
+                if bytes[i] == b'\n' {
+                    line += 1;
+                }
                 if bytes[i] == b'\\' && i + 1 < bytes.len() {
                     // `\$` is a literal dollar, so an escape never interpolates.
                     i += 1;
@@ -371,7 +398,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     "groovyrs: unterminated string literal on line {line}"
                 ));
             }
-            i += 1; // closing quote
+            i += if triple { 3 } else { 1 }; // closing quote(s)
             let kind = if parts.is_empty() {
                 Tok::Str(s)
             } else {
@@ -380,9 +407,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 }
                 Tok::GStr(parts)
             };
+            // A literal is recorded at the line it *opened* on, so a paren-less
+            // `println """a\nb"""` still reads as one statement.
             out.push(Token {
                 kind,
-                line,
+                line: start_line,
                 offset: tok_start,
             });
             continue;
@@ -451,6 +480,15 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             i += 3;
             continue;
         }
+        if three == ">>>" {
+            out.push(Token {
+                kind: Tok::UShr,
+                line,
+                offset: tok_start,
+            });
+            i += 3;
+            continue;
+        }
         let two = if i + 1 < bytes.len() {
             &src[i..i + 2]
         } else {
@@ -477,6 +515,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             ">=" => (Tok::Ge, 2),
             "&&" => (Tok::AndAnd, 2),
             "||" => (Tok::OrOr, 2),
+            "**" => (Tok::Power, 2),
+            "<<" => (Tok::Shl, 2),
+            ">>" => (Tok::Shr, 2),
             _ => match c {
                 '{' => (Tok::LBrace, 1),
                 '}' => (Tok::RBrace, 1),
@@ -511,6 +552,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 '?' => (Tok::Question, 1),
                 '!' => (Tok::Not, 1),
                 '|' => (Tok::Pipe, 1),
+                '&' => (Tok::Amp, 1),
+                '^' => (Tok::Caret, 1),
+                // A `~/…/` regex literal is lexed above, so a `~` reaching here
+                // is the bitwise complement.
+                '~' => (Tok::Tilde, 1),
                 '@' => (Tok::At, 1),
                 other => {
                     return Err(format!(

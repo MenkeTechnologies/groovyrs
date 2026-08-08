@@ -126,16 +126,28 @@ Implemented and checked against Apache Groovy:
   locals are frame slots, so recursion and mutual recursion are sound; `return
   <expr>` carries a value out, and a `return`-less body returns its last value
   expression (else `null`).
-- **Expressions** — integer / decimal / string (single- and double-quoted) /
-  boolean / `null` literals; `+ - * / %`, `== != < > <= >=`, `&& ||`
-  (short-circuiting), unary `-` and `!`, grouping. An unsuffixed decimal literal
-  is a `BigDecimal` whose scale propagates (`1.10 + 2.20 == 3.30`), a `d`/`f`
-  suffix makes an IEEE double; integer `/` promotes to a decimal
-  (`7 / 2 == 3.5`); `+` concatenates when either side is a string.
+- **Expressions** — integer / decimal / string (single-, double- and
+  triple-quoted) / boolean / `null` literals; `+ - * / % **`,
+  `== != < > <= >=`, `&& ||` (short-circuiting), the bitwise `& | ^ ~` and the
+  shifts `<< >> >>>`, `x in coll`, the `value as Type` coercion, unary `-` and
+  `!`, grouping. An unsuffixed decimal literal is a `BigDecimal` whose scale
+  propagates (`1.10 + 2.20 == 3.30`), a `d`/`f` suffix makes an IEEE double;
+  integer `/` promotes to a decimal (`7 / 2 == 3.5`); `**` follows the numeric
+  tower (`2 ** 10` is an `Integer`, `2 ** -1` a `BigDecimal`); `+` concatenates
+  when either side is a string, `-` and `*` also work on strings and lists
+  (`"abc" * 3`, `[1, 2, 3] - [2]`), and `<<` is `leftShift` (a bit shift, a list
+  append, or a string concatenation).
 - **Collections** — list literals `[1, 2, 3]` / `[]` and insertion-ordered map
   literals `[a: 1, b: 2]` / `[:]`, printed Groovy-style; subscripting `list[i]`
-  (negative index counts from the end), `map[k]`, `str[i]`. A multi-entry map
-  keeps insertion order and `m.k = v` mutates it in place.
+  (negative index counts from the end), `map[k]`, `str[i]`, and by a range
+  (`list[0..1]`, `"abcdef"[1..3]`); subscript *assignment* `list[i] = v` (growing
+  the list with nulls past the end) and `map[k] = v`. A multi-entry map keeps
+  insertion order and `m.k = v` mutates it in place. The list mutators
+  (`add`, `remove`, `set`, `clear`, `push`, `pop`, `<<`, …) write back to a
+  variable receiver the way Groovy's in-place mutation does.
+- **Declarations** — the multi-declarator `def a = 1, b = 2` and Groovy's
+  multiple assignment `def (a, b) = [1, 2]` (the right side is evaluated once;
+  a name past its end is `null`).
 - **Classes** — `class C { fields; C(..){..}; def m(){..} }`, `new C(args)`,
   fields with initializers, arity-dispatched constructors, methods with an
   implicit `this`, property get/set with Groovy's auto `getX`/`setX`, a bare
@@ -157,30 +169,52 @@ Implemented and checked against Apache Groovy:
   (Comparable) or `equals`. Primitive operands stay on the native/JIT fast path.
 - **Method / property dispatch** — `s.length()`, `list.size()`,
   `"hi".toUpperCase()`, `map.k`, chains on literals (`[1,2,3].size()`), over a
-  faithful GDK subset routed through a host dispatch. An unknown member raises a
-  catchable `MissingMethodException` / `MissingPropertyException`.
-- **Closures** — `{ a, b -> … }`, the explicit zero-parameter `{ -> … }`, and
-   the implicit `{ it }` form as first-class
+  faithful GDK subset routed through a host dispatch. `size`/`length` are
+  methods, not properties, so `[1,2].size` raises the way Groovy's does. An
+  unknown member raises a catchable `MissingMethodException` /
+  `MissingPropertyException`.
+- **Closures** — `{ a, b -> … }`, defaulted parameters (`{ a, b = 5 -> … }`),
+   the explicit zero-parameter `{ -> … }`, and the implicit `{ it }` form as first-class
   callable values, invoked with `.call(args)` or directly (`def f = { it * 2 };
   f(21)`). A closure captures its enclosing script scope, and a closure nested in
   a function/closure captures that frame's locals as upvalues, so a curried
   `{ x -> { y -> x + y } }` and a chained call `f(a)(b)` work.
-- **Closure-driven GDK** — over lists and ranges: `each`, `eachWithIndex`,
-  `collect`, `findAll`, `find`, `inject`, `sum`, `sort`, `unique`, `max`, `min`,
-  `groupBy`, `join`, `reverse` (`[1,2,3].collect { it * 2 }` → `[2, 4, 6]`). A
-  one-parameter closure to `sort`/`max`/`min`/`unique` is a key extractor, a
-  two-parameter one a comparator, and `sort`/`unique` mutate a variable receiver
-  the way Groovy's do. Over maps: `each`, `collect`, `findAll`, `find`, `any`,
-  `every`, `groupBy`, `inject`, `sort`, `max`, `min` — a two-parameter closure
-  gets `(key, value)`, a one-parameter closure a `Map.Entry`.
+- **Closure-driven GDK** — over lists, ranges and a `String`'s characters:
+  `each`, `eachWithIndex`, `reverseEach`, `collect`, `collectMany`,
+  `collectEntries`, `findAll`, `find`, `findResult`, `findIndexOf`, `any`,
+  `every`, `count`, `inject`, `sum`, `sort`, `toSorted`, `unique`, `toUnique`,
+  `max`, `min`, `groupBy`, `split`, `takeWhile`, `dropWhile`, `join`, `reverse`
+  (`[1,2,3].collect { it * 2 }` → `[2, 4, 6]`), plus `with`/`tap` on any value
+  and the `Number` loops `times` / `upto` / `downto` / `step`. A one-parameter
+  closure to `sort`/`max`/`min`/`unique` is a key extractor, a two-parameter one
+  a comparator, and `sort`/`unique` mutate a variable receiver the way Groovy's
+  do; a multi-parameter closure receives a list element *spread* across its
+  parameters (`[[1,2],[3,4]].collect { a, b -> a + b }` → `[3, 7]`). Over maps:
+  `each`, `collect`, `collectEntries`, `findAll`, `find`, `any`, `every`,
+  `groupBy`, `inject`, `sort`, `max`, `min` — a two-parameter closure gets
+  `(key, value)`, a one-parameter closure a `Map.Entry`.
+- **Pure GDK** — lists answer `take`, `drop`, `first`, `head`, `last`, `tail`,
+  `init`, `indexOf`, `flatten`, `intersect`, `minus`, `plus`, `disjoint`,
+  `transpose`, `collate`, `combinations`, `permutations`, `withIndex`, `toSet`,
+  `toList` and the mutators; strings answer `indexOf`, `replace`, `split`,
+  `tokenize`, `charAt`, `substring`, `padLeft`/`padRight`/`center`, `capitalize`,
+  `take`/`drop`, `multiply`, `startsWith`/`endsWith`; maps answer `put`,
+  `remove`, `getOrDefault`, `entrySet`, `containsValue`, `putAll`, `clear`.
+- **JDK statics** — `Math` (`max`, `min`, `abs`, `round`, `sqrt`, `floor`,
+  `ceil`, `pow`, the trig and log family, `PI`, `E`), `Integer.parseInt` /
+  `MAX_VALUE` / `toHexString`, `Long`, `Double`, `Boolean`, and
+  `String.format` / `String.valueOf`, plus the script-scope `printf` / `sprintf`
+  over a `java.util.Formatter` subset (`%s %d %f %x %o %b %n %%`, width,
+  precision and left-justification).
 - **Spread `*.`** — `list*.member` / `list*.method(args)` applies the member to
   every element (null-safe, so a `null` element spreads to `null`).
 - **`getClass()` / `.class`** — a `java.lang.Class` value that prints
   `class java.lang.Integer` and answers `name`/`simpleName`/`canonicalName`.
 - **`String.toBigDecimal()`** — `new BigDecimal(text.trim())`, with the exact
   scale and `BigDecimal`'s own character-level `NumberFormatException` messages.
-- **Ranges** — first-class `0..5` / `0..<5` values with `.size()`,
-  `.contains(x)`, `.each`, `.collect`.
+- **Ranges** — `0..5` / `0..<5`, descending (`5..1`) and character (`'a'..'e'`)
+  ranges, materialised to the list Groovy enumerates, so every `List` method
+  applies (`.size()`, `.contains(x)`, `.each`, `.collect`, `.toList()`).
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, and
   `a?.member` / `a?.method()`.
 - **Control flow** — `if` / `else if` / `else`, `while`, `do`/`while`, the
@@ -206,8 +240,9 @@ Implemented and checked against Apache Groovy:
   text, so `try`/`catch` reaches its handler.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
-overloading by parameter type, static type references as values, `++`/`--` not
-calling `next`/`previous`, by-reference upvalue capture).
+overloading by parameter type, script-declared class names as values, 32-bit
+`Integer` semantics, `Range` as a type, the `=~`/`==~` match operators, `++`/`--`
+not calling `next`/`previous`, by-reference upvalue capture).
 
 ---
 
@@ -305,15 +340,20 @@ Next waves, in priority order:
    are keyed by name only, so same-named overloads collapse to the last declared.
 3. **`trait`s** — `interface` and `implements` are modeled (including `default`
    methods); `trait` is not.
-4. **A broader standard library** — `Math`, the `=~` / `==~` match operators over
-   the `~/…/` patterns `switch` already understands, and more `java.util`/GDK
-   collection methods.
+4. **A `Range` type.** `0..5` is materialised to its element list today, which is
+   exact for iteration and every `List` method but prints `[1, 2, 3, 4, 5]` where
+   Groovy prints `1..5`, and has no `step(n)`.
+5. **32-bit `Integer` semantics.** Every integer is a 64-bit value, so arithmetic
+   neither wraps at 32 bits nor promotes to `Long`.
+6. **A broader standard library** — the `=~` / `==~` match operators and
+   `Matcher` over the `~/…/` patterns `switch` already understands, instantiable
+   JDK classes (`StringBuilder`), and more `java.util`/GDK collection methods.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
 
 ### Differential parity harness
 
-Two harnesses check groovyrs against the reference `groovy`, both comparing two
+Four harnesses check groovyrs against the reference `groovy`, all comparing two
 subprocesses exactly as a user would observe them:
 
 ```sh
@@ -321,7 +361,17 @@ cargo run --bin parity                 # diff examples/*.groovy vs live `groovy`
 cargo run --bin parity-fuzz -- \
     --mode control --count 2000        # fuzz: groovy -e <s> vs groovyrs -e <s>
 bash parity-scripts/run.sh -v          # byte-parity over the regression corpus
+bash parity-scripts/fuzz.sh            # diff the probe corpus, one JVM start
 ```
+
+`fuzz.sh` diffs `parity-scripts/probes.txt` — several hundred small snippets
+covering division and `BigDecimal` scale, number formatting, `GString`
+interpolation, the list/map/string GDK, closures, ranges and control flow. Every
+probe is wrapped in a `try`, so a throw is a comparable observation rather than a
+dead run. The oracle runs the whole corpus as **one** batched program (the JVM
+starts once); groovyrs runs each probe on its own, so one probe that fails to
+parse cannot swallow the probes after it, and a hang registers as a failure
+rather than stalling the run.
 
 `parity-fuzz` generates grammar-driven, deterministic-output snippets from a
 per-index seed (so any divergence replays with `--seed <N> --once`, then
@@ -334,7 +384,7 @@ generated without restriction now that the `BigDecimal` model is exact. Modes:
 `gstring`, `exceptions`, `faults`, `switch`, `asserts`, `modzero`, `gdk`,
 `conversions`, `classes`, `mixed`.
 
-All three need `groovy` on PATH and never run in CI; the CI-safe replay is the
+All four need `groovy` on PATH and never run in CI; the CI-safe replay is the
 frozen `tests/parity.rs` (snapshot in `tests/data/parity_expected.txt`,
 regenerated only from real `groovy`).
 

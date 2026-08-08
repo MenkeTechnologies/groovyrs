@@ -30,6 +30,7 @@ pub fn parse(src: &str) -> Result<Program, String> {
         pos: 0,
         tmp: 0,
         recording: None,
+        pending: Vec::new(),
     };
     p.program()
 }
@@ -47,6 +48,10 @@ struct Parser {
     /// statement began the line, which is what Groovy prints. `None` everywhere
     /// else, so no other program pays for recording.
     recording: Option<u32>,
+    /// Statements a single source statement expanded into beyond the first —
+    /// a multi-declarator `def a = 1, b = 2` or a destructuring `def (a, b) = l`.
+    /// Drained by every statement-list site through [`Parser::statements`].
+    pending: Vec<Stmt>,
 }
 
 impl Parser {
@@ -154,7 +159,7 @@ impl Parser {
             }
         }
         while !self.is(&Tok::Eof) {
-            body.push(self.statement()?);
+            body.extend(self.statements()?);
             self.expect_terminator()?;
             self.skip_terminators();
         }
@@ -181,7 +186,7 @@ impl Parser {
         let mut out = Vec::new();
         self.skip_terminators();
         while !self.is(&Tok::RBrace) && !self.is(&Tok::Eof) {
-            out.push(self.statement()?);
+            out.extend(self.statements()?);
             self.expect_terminator()?;
             self.skip_terminators();
         }
@@ -196,8 +201,17 @@ impl Parser {
             self.advance();
             self.block()
         } else {
-            Ok(vec![self.statement()?])
+            self.statements()
         }
+    }
+
+    /// One source statement, plus anything it expanded into (`def a = 1, b = 2`
+    /// is three AST statements, `def (a, b) = l` is three).
+    fn statements(&mut self) -> Result<Vec<Stmt>, String> {
+        let first = self.statement()?;
+        let mut out = vec![first];
+        out.append(&mut self.pending);
+        Ok(out)
     }
 
     fn statement(&mut self) -> Result<Stmt, String> {
@@ -289,6 +303,7 @@ impl Parser {
 
     /// The kind of a simple statement (local decl / assignment / expression).
     fn simple_statement_kind(&mut self) -> Result<StmtKind, String> {
+        let line = self.line();
         // `println`/`print` command statements are expression statements, not
         // declarations — resolve them before the two-idents-in-a-row heuristic.
         if matches!(self.peek(), Tok::Ident(n) if n == "println" || n == "print") {
@@ -299,11 +314,32 @@ impl Parser {
         // `def name(params) { .. }` (a function) or `def name [= expr]` (a local).
         if self.is(&Tok::Def) {
             self.advance();
+            // `def (a, b) = expr` — multiple assignment. The right side is
+            // evaluated once into a temporary, then each name takes its element.
+            if self.is(&Tok::LParen) {
+                return self.destructuring_decl(line);
+            }
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
                 return self.function_def(name);
             }
             let init = self.opt_initializer()?;
+            // `def a = 1, b = 2` — the declarators after the first become their
+            // own statements, queued for the enclosing statement list.
+            while self.is(&Tok::Comma) {
+                self.advance();
+                self.skip_newlines();
+                let n = self.ident()?;
+                let i = self.opt_initializer()?;
+                self.pending.push(Stmt::new(
+                    line,
+                    StmtKind::Local {
+                        ty: "def".into(),
+                        name: n,
+                        init: i,
+                    },
+                ));
+            }
             return Ok(StmtKind::Local {
                 ty: "def".into(),
                 name,
@@ -355,12 +391,67 @@ impl Parser {
                     value,
                 });
             }
+            // `recv[index] = value` — Groovy's `putAt`.
+            if let Expr::Index { recv, index, .. } = lhs {
+                self.advance();
+                self.skip_newlines();
+                let value = self.expression()?;
+                return Ok(StmtKind::SetIndex {
+                    recv: *recv,
+                    index: *index,
+                    value,
+                });
+            }
             return Err(format!(
                 "groovyrs: invalid assignment target on line {}",
                 self.line()
             ));
         }
         Ok(StmtKind::Expr(lhs))
+    }
+
+    /// `def (a, b) = expr` — Groovy's multiple assignment. Lowered to a hidden
+    /// temporary holding the right side (so it is evaluated exactly once)
+    /// followed by one declaration per name taking its positional element; a
+    /// name past the end of the right side is `null`, as Groovy's is.
+    fn destructuring_decl(&mut self, line: u32) -> Result<StmtKind, String> {
+        self.eat(&Tok::LParen)?;
+        let mut names = Vec::new();
+        while !self.is(&Tok::RParen) {
+            // An optional type in front of the name (`def (int a, b) = …`).
+            if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Ident(_)) {
+                self.advance();
+            }
+            names.push(self.ident()?);
+            if self.is(&Tok::Comma) {
+                self.advance();
+                self.skip_newlines();
+            }
+        }
+        self.eat(&Tok::RParen)?;
+        self.eat(&Tok::Assign)?;
+        self.skip_newlines();
+        let value = self.expression()?;
+        let tmp = self.fresh_tmp("destructure");
+        for (i, name) in names.into_iter().enumerate() {
+            self.pending.push(Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: "def".into(),
+                    name,
+                    init: Some(Expr::Index {
+                        recv: Box::new(Expr::Var(tmp.clone())),
+                        index: Box::new(Expr::Int(i as i64)),
+                        line,
+                    }),
+                },
+            ));
+        }
+        Ok(StmtKind::Local {
+            ty: "def".into(),
+            name: tmp,
+            init: Some(value),
+        })
     }
 
     /// Parse an optional `= expr` initializer (newlines after `=` continue).
@@ -1097,11 +1188,14 @@ impl Parser {
             cond: Expr::Bool(true),
             then: vec![
                 local(&seq, Expr::Iterable(Box::new(subject))),
+                // `size()`, not the `size` *property* — Groovy has no such
+                // property on a list, and this desugar must not depend on one.
                 local(
                     &len,
-                    Expr::Property {
+                    Expr::MethodCall {
                         recv: Box::new(Expr::Var(seq)),
-                        name: "size".to_string(),
+                        method: "size".to_string(),
+                        args: Vec::new(),
                         line,
                         safe: false,
                     },
@@ -1153,32 +1247,41 @@ impl Parser {
         }
     }
 
-    /// A range expression `a..b` (inclusive) or `a..<b` (half-open), sitting
-    /// just above the binary operators. `a` and `b` are full binary
-    /// expressions, so `0..n-1` parses as `0..(n-1)`.
+    /// A range expression `a..b` (inclusive) or `a..<b` (half-open). Groovy puts
+    /// `..` at the shift band, so its endpoints are parsed one level above that
+    /// (`0..n-1` is `0..(n-1)`, but `1..3 as List` casts the whole range).
     fn range_expr(&mut self) -> Result<Expr, String> {
-        let start = self.binary(0)?;
+        let start = self.binary(RANGE_OPERAND_BP)?;
         let inclusive = match self.peek() {
             Tok::DotDot => true,
             Tok::DotDotLt => false,
-            _ => return Ok(start),
+            _ => return self.binary_from(start, 0),
         };
         self.advance();
         self.skip_newlines();
-        let end = self.binary(0)?;
-        Ok(Expr::Range {
+        let end = self.binary(RANGE_OPERAND_BP)?;
+        let range = Expr::Range {
             start: Box::new(start),
             end: Box::new(end),
             inclusive,
-        })
+        };
+        // A range is itself an operand of anything below the shift band, so the
+        // precedence loop resumes over it (`1..3 as List`, `(1..3) == r`).
+        self.binary_from(range, 0)
     }
 
     fn binary(&mut self, min_bp: u8) -> Result<Expr, String> {
-        let mut lhs = self.unary()?;
+        let lhs = self.unary()?;
+        self.binary_from(lhs, min_bp)
+    }
+
+    /// The precedence-climbing loop, resumed over an already-parsed left side.
+    fn binary_from(&mut self, mut lhs: Expr, min_bp: u8) -> Result<Expr, String> {
         loop {
-            // `value instanceof Type` — relational precedence (binding power 4),
-            // recorded under the `instanceof` keyword's column.
-            if 4 >= min_bp && matches!(self.peek(), Tok::Ident(k) if k == "instanceof") {
+            // `value instanceof Type` — relational precedence, recorded under
+            // the `instanceof` keyword's column.
+            if RELATIONAL_BP >= min_bp && matches!(self.peek(), Tok::Ident(k) if k == "instanceof")
+            {
                 let col = self.col_at(0);
                 self.advance();
                 let class = self.ident()?;
@@ -1191,6 +1294,18 @@ impl Parser {
                 );
                 continue;
             }
+            // `value as Type` — a coercion whose right side is a *type name*,
+            // not an expression, which is why `"3" as Integer + 1` is 4 and not
+            // a parse of `Integer + 1`.
+            if RELATIONAL_BP >= min_bp && matches!(self.peek(), Tok::Ident(k) if k == "as") {
+                self.advance();
+                let ty = self.type_name()?;
+                lhs = Expr::Cast {
+                    value: Box::new(lhs),
+                    ty,
+                };
+                continue;
+            }
             let Some((op, bp)) = binop(self.peek()) else {
                 break;
             };
@@ -1201,7 +1316,13 @@ impl Parser {
             let col = self.col_at(0);
             self.advance();
             self.skip_newlines(); // a binary operator may continue on the next line
-            let rhs = self.binary(bp + 1)?;
+                                  // `**` is the one right-associative operator, so it recurses at its
+                                  // own binding power rather than one above it.
+            let rhs = self.binary(if matches!(op, BinOp::Power) {
+                bp
+            } else {
+                bp + 1
+            })?;
             lhs = self.record(
                 col,
                 Expr::Binary {
@@ -1214,13 +1335,25 @@ impl Parser {
         Ok(lhs)
     }
 
+    /// The type name on the right of an `as` coercion: a dotted name, with any
+    /// generic argument list skipped (a coercion ignores erasure anyway).
+    fn type_name(&mut self) -> Result<String, String> {
+        let mut name = self.ident()?;
+        while matches!(self.peek(), Tok::Dot) {
+            self.advance();
+            name.push('.');
+            name.push_str(&self.ident()?);
+        }
+        Ok(name)
+    }
+
     fn unary(&mut self) -> Result<Expr, String> {
         match self.peek() {
-            Tok::Minus | Tok::Not => {
-                let op = if matches!(self.peek(), Tok::Minus) {
-                    UnOp::Neg
-                } else {
-                    UnOp::Not
+            Tok::Minus | Tok::Not | Tok::Tilde => {
+                let op = match self.peek() {
+                    Tok::Minus => UnOp::Neg,
+                    Tok::Tilde => UnOp::BitNot,
+                    _ => UnOp::Not,
                 };
                 // Recorded under the operator's own column.
                 let col = self.col_at(0);
@@ -1591,6 +1724,7 @@ impl Parser {
         self.eat(&Tok::LBrace)?;
         self.skip_newlines();
         let explicit_params = self.has_closure_arrow();
+        let mut defaults: Vec<(String, Expr)> = Vec::new();
         let params = if explicit_params {
             let mut params = Vec::new();
             // `{ -> … }` declares an empty parameter list: no `it` is supplied.
@@ -1611,7 +1745,16 @@ impl Parser {
                 {
                     self.advance();
                 }
-                params.push(self.ident()?);
+                let name = self.ident()?;
+                // `{ a, b = 5 -> … }` — a default value for a trailing
+                // parameter. It becomes a guard at the top of the body, because
+                // a call that omits the argument arrives with it null.
+                if self.is(&Tok::Assign) {
+                    self.advance();
+                    self.skip_newlines();
+                    defaults.push((name.clone(), self.expression()?));
+                }
+                params.push(name);
                 if self.is(&Tok::Comma) {
                     self.advance();
                     self.skip_newlines();
@@ -1625,7 +1768,35 @@ impl Parser {
         } else {
             Vec::new()
         };
-        let body = self.block()?;
+        let mut body = self.block()?;
+        // Prepend `if (p == null) p = <default>` for each defaulted parameter.
+        // (A call that passes an explicit `null` therefore takes the default,
+        // where Groovy — which generates one overload per arity — keeps null.)
+        for (name, value) in defaults.into_iter().rev() {
+            let line = body.first().map(|s| s.line).unwrap_or(0);
+            body.insert(
+                0,
+                Stmt::new(
+                    line,
+                    StmtKind::If {
+                        cond: Expr::Binary {
+                            op: BinOp::Eq,
+                            lhs: Box::new(Expr::Var(name.clone())),
+                            rhs: Box::new(Expr::Null),
+                        },
+                        then: vec![Stmt::new(
+                            line,
+                            StmtKind::Assign {
+                                name,
+                                op: AssignOp::Assign,
+                                value,
+                            },
+                        )],
+                        els: Vec::new(),
+                    },
+                ),
+            );
+        }
         Ok(Expr::Closure {
             params,
             body,
@@ -1647,23 +1818,41 @@ impl Parser {
         while matches!(self.toks.get(j).map(|t| &t.kind), Some(Tok::Nl)) {
             j += 1;
         }
-        loop {
-            match self.toks.get(j).map(|t| &t.kind) {
-                Some(Tok::Ident(_)) | Some(Tok::Comma) => j += 1,
-                Some(Tok::Arrow) => return true,
-                _ => return false,
-            }
-        }
+        self.arrow_follows_params(j)
     }
 
     /// Lookahead: does the closure just entered open with an explicit parameter
     /// list? True when a run of identifiers/commas (the parameter names, with
     /// optional type words) is followed by `->` before anything else.
     fn has_closure_arrow(&self) -> bool {
-        let mut j = self.pos;
+        self.arrow_follows_params(self.pos)
+    }
+
+    /// Scan a candidate closure parameter list starting at token `from`: a run
+    /// of names, commas and `= default` values, ending at `->`.
+    fn arrow_follows_params(&self, from: usize) -> bool {
+        let mut j = from;
         loop {
             match self.toks.get(j).map(|t| &t.kind) {
                 Some(Tok::Ident(_)) | Some(Tok::Comma) => j += 1,
+                // A default value runs to the next top-level `,` or `->`.
+                Some(Tok::Assign) => {
+                    j += 1;
+                    let mut depth = 0i32;
+                    loop {
+                        match self.toks.get(j).map(|t| &t.kind) {
+                            Some(Tok::LParen | Tok::LBracket | Tok::LBrace) => depth += 1,
+                            Some(Tok::RParen | Tok::RBracket | Tok::RBrace) => depth -= 1,
+                            Some(Tok::Comma | Tok::Arrow) if depth == 0 => break,
+                            None | Some(Tok::Nl | Tok::Semi | Tok::Eof) if depth == 0 => {
+                                return false
+                            }
+                            None => return false,
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                }
                 Some(Tok::Arrow) => return true,
                 _ => return false,
             }
@@ -1717,27 +1906,46 @@ fn assign_op(t: &Tok) -> Option<AssignOp> {
     })
 }
 
-/// Binary operator + its binding power (higher binds tighter).
+/// Binary operator + its binding power (higher binds tighter). The ladder is
+/// Groovy's own: `||` < `&&` < `|` < `^` < `&` < equality < relational (which
+/// `instanceof`, `in` and `as` join) < shifts < additive < multiplicative <
+/// `**`.
 fn binop(t: &Tok) -> Option<(BinOp, u8)> {
     Some(match t {
         Tok::OrOr => (BinOp::Or, 1),
         Tok::AndAnd => (BinOp::And, 2),
-        Tok::EqEq => (BinOp::Eq, 3),
-        Tok::NotEq => (BinOp::Ne, 3),
+        Tok::Pipe => (BinOp::BitOr, 3),
+        Tok::Caret => (BinOp::BitXor, 4),
+        Tok::Amp => (BinOp::BitAnd, 5),
+        Tok::EqEq => (BinOp::Eq, 6),
+        Tok::NotEq => (BinOp::Ne, 6),
         // `<=>` sits at Groovy's equality precedence, below relational ops.
-        Tok::Spaceship => (BinOp::Cmp, 3),
-        Tok::Lt => (BinOp::Lt, 4),
-        Tok::Gt => (BinOp::Gt, 4),
-        Tok::Le => (BinOp::Le, 4),
-        Tok::Ge => (BinOp::Ge, 4),
-        Tok::Plus => (BinOp::Add, 5),
-        Tok::Minus => (BinOp::Sub, 5),
-        Tok::Star => (BinOp::Mul, 6),
-        Tok::Slash => (BinOp::Div, 6),
-        Tok::Percent => (BinOp::Mod, 6),
+        Tok::Spaceship => (BinOp::Cmp, 6),
+        Tok::Lt => (BinOp::Lt, RELATIONAL_BP),
+        Tok::Gt => (BinOp::Gt, RELATIONAL_BP),
+        Tok::Le => (BinOp::Le, RELATIONAL_BP),
+        Tok::Ge => (BinOp::Ge, RELATIONAL_BP),
+        Tok::In => (BinOp::In, RELATIONAL_BP),
+        Tok::Shl => (BinOp::Shl, 8),
+        Tok::Shr => (BinOp::Shr, 8),
+        Tok::UShr => (BinOp::UShr, 8),
+        Tok::Plus => (BinOp::Add, 9),
+        Tok::Minus => (BinOp::Sub, 9),
+        Tok::Star => (BinOp::Mul, 10),
+        Tok::Slash => (BinOp::Div, 10),
+        Tok::Percent => (BinOp::Mod, 10),
+        Tok::Power => (BinOp::Power, 11),
         _ => return None,
     })
 }
+
+/// The binding power of the relational band — where `instanceof`, `in` and the
+/// `as` cast also sit.
+const RELATIONAL_BP: u8 = 7;
+
+/// The binding power a range endpoint parses at: one above the shift band,
+/// where Groovy puts `..` itself.
+const RANGE_OPERAND_BP: u8 = 9;
 
 /// Strip the power-assert recording wrapper off an expression.
 fn unrecorded(e: &Expr) -> &Expr {
@@ -1811,6 +2019,7 @@ fn expr_text(e: &Expr) -> String {
             let sym = match op {
                 UnOp::Neg => "-",
                 UnOp::Not => "!",
+                UnOp::BitNot => "~",
             };
             format!("{sym}({})", expr_text(rhs))
         }
@@ -1901,6 +2110,14 @@ fn binop_text(op: BinOp) -> &'static str {
         BinOp::Cmp => "<=>",
         BinOp::And => "&&",
         BinOp::Or => "||",
+        BinOp::Power => "**",
+        BinOp::BitAnd => "&",
+        BinOp::BitOr => "|",
+        BinOp::BitXor => "^",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
+        BinOp::UShr => ">>>",
+        BinOp::In => "in",
     }
 }
 
@@ -1936,6 +2153,7 @@ fn parse_interpolation(src: &str) -> Result<Expr, String> {
         // A placeholder is lexed on its own, so its columns are relative to the
         // placeholder rather than the script — see BUGS.md.
         recording: None,
+        pending: Vec::new(),
     };
     p.skip_newlines();
     let e = p.expression()?;

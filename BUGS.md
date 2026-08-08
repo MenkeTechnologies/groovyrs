@@ -15,11 +15,10 @@ reported as parse or compile errors, never silently mis-run.
   statement when that statement is a value expression, else `null`.
 - **Method / property dispatch on values.** `s.length()`, `list.size()`,
   `"hi".toUpperCase()`, `map.k`, and chains on literals (`[1,2,3].size()`) route
-  through a host GDK dispatch. A faithful subset is modeled: `size` (String
-  chars / list / map), String `length`/`toUpperCase`/`toLowerCase`/`trim`/
-  `reverse`/`isEmpty`/`contains`, list `isEmpty`/`contains`/`get`/`reverse`/
-  `join`, map `isEmpty`/`containsKey`; the `.size`/`.length` count properties on
-  a `String` or list. A **map**'s property access is only ever a key read
+  through a host GDK dispatch. See the README's *Pure GDK* and *Closure-driven
+  GDK* entries for what is modeled. `size`/`length` are **methods, not
+  properties**, exactly as in Groovy: `[1, 2].size` and `"abc".length` both raise
+  `MissingPropertyException`. A **map**'s property access is only ever a key read
   (`m.k` == `m['k']`, `null` when absent) — including the names that are
   properties on every other value, so `[a:1].size` and `[a:1].class` are `null`
   in Groovy while `[size: 9].size` is `9`. An unknown method/property faults
@@ -262,10 +261,37 @@ reported as parse or compile errors, never silently mis-run.
 - **`trait`.** `class`, `interface`, `extends` (single inheritance for a class,
   multiple for an interface), `implements`, and interface `default` methods are
   supported; `trait` is not, and a `trait` declaration is a parse error.
-- **A static type reference is not a value.** `Foo.class`, `Foo.name`, and
-  passing a class name where a value is expected do not resolve — a bare type
-  name is only meaningful in `new`, `instanceof`, a `catch` clause, and a
-  `switch` `case` label. `getClass()` on a *value* is what answers.
+- **A *script-declared* class name is not a value.** `Foo.class` and `Foo.name`
+  for a class the script declares do not resolve — such a name is only meaningful
+  in `new`, `instanceof`, a `catch` clause, and a `switch` `case` label;
+  `getClass()` on a *value* is what answers. The **JDK** classes a script names
+  statically (`Math`, `Integer`, `Long`, `Double`, `Float`, `Short`, `Byte`,
+  `Boolean`, `Character`, `String`, `System`, `BigDecimal`, …) *do* resolve to a
+  `java.lang.Class`, so `Math.max(1, 2)`, `Integer.parseInt("42")` and
+  `Integer.MAX_VALUE` work.
+- **`Integer` and `Long` are one 64-bit integer.** groovyrs carries every integer
+  as fusevm's 64-bit `Value::Int`, so it neither wraps at 32 bits nor promotes:
+  `1000000 * 1000000` is `1000000000000` where Groovy answers `-727379968`,
+  `Integer.MAX_VALUE + 1` is `2147483648` where Groovy answers `-2147483648`, and
+  `10000000000.getClass()` reports `java.lang.Integer` where Groovy reports
+  `java.lang.Long`. Fixing it needs a per-value Java width, which the value model
+  does not carry.
+- **A `Range` is materialised, not a type.** `0..5` becomes the list of its
+  elements at the point it is written, so it answers every `List` method and
+  `for (x in a..b)` is exact — but `println(1..5)` prints `[1, 2, 3, 4, 5]` where
+  Groovy prints `1..5`, and `Range`-only members (`step(n)`, `from`, `to`,
+  `reverse` as a range) are absent. Descending (`5..1`) and character (`'a'..'e'`)
+  ranges *are* enumerated the way Groovy's are.
+- **`java.util.regex.Matcher` and the `=~` / `==~` operators.** A `~/…/` literal
+  is a value a `switch` label matches and `println` prints, but the match
+  operators, `Matcher.find()` / `group(n)`, and the slashy-string literal form
+  (`/a.b/`) are not implemented.
+- **`StringBuilder` and the other instantiable JDK classes.** `new
+  StringBuilder()` fails to resolve; only the *static* members of the JDK classes
+  listed above are modeled, not their instances.
+- **A `GString` is a `String`.** An interpolated literal produces a plain
+  `java.lang.String`, so `"$s".getClass()` reports `java.lang.String` where
+  Groovy reports `org.codehaus.groovy.runtime.GStringImpl`.
 - **A closure's `getClass()` names `groovy.lang.Closure`.** Groovy reports the
   synthetic per-closure class (`Script1$_run_closure1`), whose name depends on
   the enclosing script's name and the closure's position; groovyrs has no such
@@ -292,6 +318,18 @@ reported as parse or compile errors, never silently mis-run.
   cleanup lines under groovyrs and omits them under `groovy`. An *unlabeled*
   `break`/`continue`, and a labeled one naming the loop the `try` is directly
   inside, run the `finally` in both.
+- **A closure's default parameter is a null guard.** `{ a, b = 5 -> … }` lowers
+  to `if (b == null) b = 5` at the top of the body, where Groovy generates one
+  overload per arity. The two agree for every call that *omits* the argument;
+  they differ when a caller passes an explicit `null`, which groovyrs replaces
+  with the default and Groovy keeps as `null`.
+- **Arithmetic on `null` is only catchable through `/`.** `null - 1`, `null % 3`
+  and friends raise the `NullPointerException` Groovy raises, with Groovy's
+  message, but the compiler emits the post-op pending-exception check only under
+  the gate described below, so outside that gate the exception surfaces as a hard
+  `groovyrs: java.lang.NullPointerException: …` fault instead of reaching a
+  `catch`. `null / 2` lowers to the `GDIV` builtin, which is always checked, so
+  that one is catchable everywhere.
 - **A power assert does not record inside a `GString`.** A placeholder is lexed
   on its own, so its columns are relative to the placeholder rather than the
   script and recording it would put values under the wrong column. `assert

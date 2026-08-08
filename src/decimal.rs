@@ -309,6 +309,13 @@ pub fn round_to_i64(d: &BigDecimal) -> i64 {
         .unwrap_or(0)
 }
 
+/// `d` rounded to `scale` fraction digits, halves away from zero — Java's
+/// `RoundingMode.HALF_UP`, which is what `java.util.Formatter`'s `%f` applies to
+/// a `BigDecimal` argument.
+pub fn round_half_up(d: &BigDecimal, scale: i64) -> BigDecimal {
+    d.with_scale_round(scale, RoundingMode::HalfUp)
+}
+
 /// Compare two decimals by value, ignoring scale (`1.5 <=> 1.50` is `0`), which
 /// is what Groovy's `==`/`<`/`<=>` use on a `BigDecimal`.
 pub fn cmp(a: &BigDecimal, b: &BigDecimal) -> std::cmp::Ordering {

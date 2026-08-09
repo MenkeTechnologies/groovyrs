@@ -1131,3 +1131,177 @@ println([1][5])
 println([1][5] == null)
 %%
 println([1, 2][-1])
+%%
+# java.util.Iterator: `iterator()` on a list, a map, and a string, and the
+# `NoSuchElementException` an exhausted one raises.
+def it = [1, 2, 3].iterator(); println it.next(); println it.hasNext()
+%%
+println([a: 1, b: 2].entrySet().iterator().next().key)
+%%
+println([a: 1].iterator().next())
+%%
+println('ab'.iterator().next())
+%%
+def it = [1].iterator(); it.next(); it.next()
+%%
+println([1, 2, 3].iterator().getClass().getName())
+%%
+# Collection GDK the pure dispatch was missing.
+println([1, 2, 3, 4].countBy { it % 2 })
+println([a: 1, b: 2].countBy { k, v -> v % 2 })
+%%
+println([1, 2, 3].findIndexValues { it > 1 })
+%%
+println([1, 2, 3].getAt(1..2))
+println([1, 2, 3].getAt([0, 2]))
+println([1, 2, 3].getAt(-1))
+%%
+println([1, 2, 3].takeRight(2) + [1, 2].takeRight(5) + [1, 2].takeRight(0))
+%%
+println([1, 2, 3].dropRight(1) + [1, 2].dropRight(5) + [1, 2].dropRight(-1))
+%%
+println([1, 2, 3].plus(1, [9]))
+println([1, 2, 3].plus(0, [9]))
+println([1, 2, 3].plus(3, [9]))
+%%
+def l = [1, 2, 3]; l.swap(0, 2); println l
+%%
+def l = [1, 2]; l.swap(0, 5)
+%%
+# `pop` takes the *first* element and `removeLast` the last; both raise on empty.
+def l = [1, 2, 3]; println l.pop(); println l
+%%
+def l = [1, 2, 3]; println l.removeLast(); println l
+%%
+[].pop()
+%%
+[].removeLast()
+%%
+[].last()
+%%
+[].tail()
+%%
+[].init()
+%%
+# `indexed()` answers a map from position to element; `withIndex()` a pair list.
+println([1, 2, 3].indexed())
+println([1, 2, 3].indexed(1))
+println([1, 2, 3].withIndex())
+%%
+# The *first* sub-collection varies fastest in a cartesian product.
+println([[1, 2], [3, 4]].combinations())
+println([[1, 2], [3, 4], [5, 6]].combinations())
+%%
+# Map GDK: subMap, withDefault, spread, count, and `-`.
+println([a: 1, b: 2].subMap(['a']))
+println([a: 1, b: 2].subMap('a', 'b'))
+println([a: 1].subMap(['z']))
+%%
+def m = [a: 1].withDefault { 0 }; println m['z']; println m
+%%
+def m = [:].withDefault { k -> k.size() }; m['abc']; println m
+%%
+println([a: 1, b: 2].spread())
+%%
+println([a: 1, b: 2].count { k, v -> v > 1 })
+%%
+println([a: 1, b: 2] - [a: 1])
+println([a: 1, b: 2] - [a: 9])
+println([a: 1, b: 2].intersect([a: 1]))
+%%
+# `<=>` needs a Comparable: a list, a map, a set and a range are not, so Groovy
+# raises rather than inventing an order — even for two equal lists.
+println([1, 2] <=> [1, 3])
+%%
+println([1, 2] <=> [1, 2])
+%%
+println([a: 1] <=> [a: 2])
+%%
+println([1, 2] <=> 'x')
+%%
+println((1..2) <=> (1..3))
+%%
+println((null <=> 1) as String + ' ' + (1 <=> null))
+%%
+# String GDK.
+println('abc'.tr('a-c', 'x-z'))
+println('hello'.tr('el', 'ip'))
+println('abc'.tr('abc', 'z'))
+println('abc'.tr('a-c', 'xy'))
+println('abc'.tr('c-a', 'x-z'))
+%%
+println('  a\n   b'.stripIndent())
+%%
+println('  a\n  b\n'.stripIndent() + '|')
+%%
+println('  a  \n  b'.stripIndent() + '|')
+%%
+println('    a\n    b'.stripIndent(2) + '|')
+%%
+println('|a\n |b'.stripMargin())
+println('#a\n#b'.stripMargin('#'))
+println('a\nb'.stripMargin())
+%%
+def o = []; 'a1b22'.eachMatch(/\d+/) { o << it }; println o
+%%
+def o = []; 'a1b22'.eachMatch(/(\d)(\d)?/) { o << it }; println o
+%%
+println('abcd'.getAt(1..2) + ' ' + 'abcd'.getAt(0..<2) + ' ' + 'abcd'.getAt(-2..-1))
+%%
+println('%s-%d'.formatted('a', 1))
+%%
+println([' 42'.isInteger(), 'x'.isInteger(), '4.2'.isInteger(), '-42'.isInteger()])
+println(['42'.isLong(), '99999999999999999999'.isLong()])
+println(['4.2'.isDouble(), '4.2'.isBigDecimal(), '42'.isBigInteger(), '4.2'.isBigInteger()])
+%%
+println('abcb'.minus('b') + ' ' + 'abc'.minus('z') + ' ' + 'a1b2'.minus(~/\d/))
+%%
+println('a\tb'.expand() + '|')
+println('ab\tc'.expand() + '|')
+println('a\tb'.expand(4) + '|')
+println('a\tb\nxy\tz'.expand())
+%%
+println('a\r\nb'.normalize() == 'a\nb')
+%%
+# Number GDK: scaled rounding and truncation, and `power`.
+println(3.14.round(1))
+println(3.15d.round(1))
+println(3.7.trunc())
+println((-3.7).trunc())
+println(3.789.trunc(2))
+println(3.7d.trunc())
+%%
+println(10.power(3))
+println(2.power(-1))
+println(2.0.power(3))
+%%
+# groovy.lang.Closure combinators.
+def c = { a, b -> a + b }; println c.curry(1)(2); println c.curry(1, 2)()
+%%
+def c = { a, b -> a - b }; println c.rcurry(1)(5)
+%%
+def c = { a, b, d -> "$a$b$d" }; println c.ncurry(1, 'X')('a', 'c')
+%%
+def n = 0; def c = { n++; it * 2 }; def m = c.memoize(); println m(3); println m(3); println n
+%%
+def a = { it + 1 }; def b = { it * 2 }; println a.andThen(b)(3); println a.compose(b)(3)
+%%
+def a = { it + 1 }; def b = { it * 2 }; def c = a << b; println c(3)
+%%
+def c = { it * 2 }; println c.clone()(2)
+%%
+# `with`/`tap` make the receiver the closure's delegate: a bare call the script
+# cannot resolve dispatches against it, and a mutator writes through.
+def m = [:]; m.with { put('a', 1) }; println m
+%%
+println([1, 2].with { size() })
+%%
+println('abc'.with { toUpperCase() })
+%%
+println([1, 2].tap { add(3) })
+%%
+println([1, 2].with { [3].with { size() } })
+%%
+def size = { 99 }; println([1, 2].with { size() })
+%%
+[1, 2].with { zork() }

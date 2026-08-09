@@ -42,6 +42,21 @@ reported as parse or compile errors, never silently mis-run.
   { it + n } }`) keeps `n` after the outer frame returns. Chained calls
   `f(a)(b)` parse (postfix call-application). Capture of a frame local is
   **by value** at closure-creation time (see the simplification note below).
+- **Closure combinators.** `curry` / `rcurry` / `ncurry`, `memoize`, `andThen` /
+  `compose` / `<<`, and `clone`. Each answers a *derived* closure — a handle that
+  wraps the callable it was built from rather than a body region of its own — so
+  it is a closure everywhere a closure is expected (`.call`, a GDK argument,
+  another combinator) and reports the arity it still accepts.
+- **`with` / `tap` delegate to the receiver.** A bare call inside the closure
+  that the script cannot resolve dispatches against the receiver — Groovy's
+  `OWNER_FIRST` chain, innermost `with` first — so `[:].with { put('a', 1) }` and
+  `'abc'.with { toUpperCase() }` work and a script closure of the same name still
+  wins. A list mutator writes through, so `[1, 2].tap { add(3) }` is
+  `[1, 2, 3]`.
+- **`java.util.Iterator`.** `iterator()` on a list, a map (its entries), a range
+  and a `String` answers a live cursor behind a shared handle: `next()` advances
+  it for every holder, `hasNext()` reports what is left, and `next()` past the
+  end raises `NoSuchElementException`.
 - **Classes.** `class C { fields; C(..){..}; def m(){..} }`, `new C(args)`,
   fields (with initializers), constructors (arity-dispatched), methods with an
   implicit `this`, property get/set, and Groovy's auto getter/setter over a
@@ -312,6 +327,21 @@ reported as parse or compile errors, never silently mis-run.
   name is `[I`), and groovyrs models only the `List`. Modeling it as a `List`
   would make `[1, 2, 3].length` answer where Groovy raises, so the construct
   faults instead.
+- **`list.subsequences()`.** Groovy answers a `java.util.HashSet<List>`, and
+  `println` shows it in Java's *hash-bucket* order — `[1,2,3].subsequences()`
+  prints `[[1], [1, 2, 3], [2], [2, 3], [1, 2], [3], [1, 3]]`, which is neither
+  generation nor sorted order. Reproducing that means reproducing
+  `List.hashCode`, `HashMap`'s spread and its bucket walk; answering in any other
+  order would print the wrong thing, so the method faults instead.
+- **A static method called through an instance.** Java's overload resolution
+  admits `255.toString(16)` as the *static* `Integer.toString(int)`, so Groovy
+  prints `16` (not `ff`). groovyrs dispatches instance methods only and raises
+  `MissingMethodException`. `Integer.toString(255, 16)` — the static call spelled
+  out — answers `ff` as it should.
+- **`a >> b` on two closures.** `>>` lowers to native shift ops so an integer
+  shifting loop keeps its JIT trace (a builtin there would abort it), and fusevm's
+  numeric hook has no shift opcode to intercept. Composition is available under
+  every other spelling Groovy gives it: `a.andThen(b)`, `b.compose(a)`, `b << a`.
 - **`new Random(…)` / `new Date(…)` and the other stateful JDK classes.**
   Reproducing them means reproducing Java's exact LCG and clock, so they fault
   rather than answering a plausible-looking different number. The instantiable
@@ -390,6 +420,20 @@ reported as parse or compile errors, never silently mis-run.
   (<simple types>) values: [<values>]` — is byte-identical to Groovy. The same
   holds for the suggestion line Groovy sometimes appends to a
   `MissingPropertyException` on a class with fields.
+- **A `Set` is a de-duplicated list.** `as Set`, `toSet()` and
+  `new HashSet(…)`/`LinkedHashSet`/`TreeSet` all build an ordinary list with the
+  later duplicates dropped, which prints and iterates the way a `LinkedHashSet`
+  does. What differs is the *type*: `getClass()` names `java.util.ArrayList`, and
+  the set operators do not re-deduplicate, so `([1, 2] as Set) + ([2, 3] as Set)`
+  is `[1, 2, 2, 3]` where Groovy answers `[1, 2, 3]`. `asImmutable()` /
+  `asSynchronized()` are copies rather than wrapper types for the same reason,
+  so they too keep the `java.util.ArrayList` class name.
+- **A bare *property* read inside `with`/`tap` does not consult the delegate.**
+  A bare *call* does (`[:].with { put('a', 1) }` works), because an unresolved
+  call reaches the host at run time; an unresolved name reads a script binding,
+  which the compiler lowers to a global load with nowhere to hook the delegate
+  in. `[a: 1].with { a }` therefore answers `null` where Groovy answers `1`.
+  `it.a` and `[a: 1].with { get('a') }` both work.
 - **A property read on a list is not a spread read.** Groovy's `list.prop` maps
   the read over the elements, so `[1,2,3].zork` reports the *element* type
   (`No such property: zork for class: java.lang.Integer`, wrapped in an

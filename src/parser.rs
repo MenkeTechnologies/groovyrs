@@ -1235,7 +1235,14 @@ impl Parser {
                         class: "String".into(),
                     },
                 ),
-                local(&st, ternary(v(&desc), Expr::Int(-1, IntWidth::Int), Expr::Int(1, IntWidth::Int))),
+                local(
+                    &st,
+                    ternary(
+                        v(&desc),
+                        Expr::Int(-1, IntWidth::Int),
+                        Expr::Int(1, IntWidth::Int),
+                    ),
+                ),
                 local(&last, last_init),
                 Stmt::new(line, loop_for),
             ],

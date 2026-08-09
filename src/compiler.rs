@@ -2796,6 +2796,8 @@ impl Compiler {
                     | "clear"
                     | "push"
                     | "pop"
+                    | "removeLast"
+                    | "swap"
                     | "leftShift"
             );
         let Expr::Var(name) = recv else { return };

@@ -324,6 +324,12 @@ pub fn round_half_up(d: &BigDecimal, scale: i64) -> BigDecimal {
     d.with_scale_round(scale, RoundingMode::HalfUp)
 }
 
+/// `d` cut to `scale` fraction digits, dropping the rest — Java's
+/// `RoundingMode.DOWN`, which is what Groovy's `BigDecimal.trunc` applies.
+pub fn truncate_to_scale(d: &BigDecimal, scale: i64) -> BigDecimal {
+    d.with_scale_round(scale, RoundingMode::Down)
+}
+
 /// Compare two decimals by value, ignoring scale (`1.5 <=> 1.50` is `0`), which
 /// is what Groovy's `==`/`<`/`<=>` use on a `BigDecimal`.
 pub fn cmp(a: &BigDecimal, b: &BigDecimal) -> std::cmp::Ordering {

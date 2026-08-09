@@ -403,6 +403,26 @@ thread_local! {
     /// this slot instead: the GDK arm stores them, and the writeback op that the
     /// compiler emits for a variable receiver takes them back out.
     static MUTATED: RefCell<Option<Value>> = const { RefCell::new(None) };
+    /// Results already computed by a `clo.memoize()` closure, keyed by that
+    /// closure's heap id and the Groovy rendering of its arguments. Cleared with
+    /// the heap.
+    static MEMO: RefCell<HashMap<(u32, String), Value>> = RefCell::new(HashMap::new());
+    /// The default-value closure a map got from `map.withDefault { … }`, keyed by
+    /// the map's heap id. A missing-key read then answers that closure's result
+    /// and stores it, which is what `groovy.lang.MapWithDefault` does.
+    static MAP_DEFAULTS: RefCell<HashMap<u32, Value>> = RefCell::new(HashMap::new());
+    /// The `with`/`tap` receivers whose closures are currently running, innermost
+    /// last — Groovy's closure *delegate* chain. A bare call inside the closure
+    /// that the owner (the script) cannot resolve is dispatched against the
+    /// innermost delegate that answers it, which is Groovy's `OWNER_FIRST`
+    /// resolve strategy: the compiler has already tried the owner by the time a
+    /// name reaches [`b_closure_call`] as a non-closure.
+    ///
+    /// A list is a fusevm *value*, so a mutator called on the delegate
+    /// (`[1, 2].tap { add(3) }`) parks its new contents in [`MUTATED`]; the
+    /// dispatch writes them back into the slot here, which is what `tap` then
+    /// answers.
+    static DELEGATES: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
 }
 
 // ── Integer width (`Integer` vs `Long`) ────────────────────────────────────
@@ -685,6 +705,7 @@ fn java_class_name(v: &Value) -> String {
         _ if as_dec(v).is_some() => "java.math.BigDecimal",
         _ if as_omap(v).is_some() => "java.util.LinkedHashMap",
         _ if closure_meta(v).is_some() => "groovy.lang.Closure",
+        _ if as_iter(v).is_some() => return as_iter(v).unwrap().0.to_string(),
         _ => "java.lang.Object",
     }
     .to_string()
@@ -942,6 +963,16 @@ enum HeapObj {
         class: &'static str,
         text: String,
     },
+    /// A `java.util.Iterator` over an already-enumerated sequence — what
+    /// `list.iterator()` / `map.iterator()` / `range.iterator()` answer. Stateful
+    /// like Java's (`next()` advances a cursor the caller keeps seeing), so it
+    /// lives behind a shared handle; `class` is the iterator implementation
+    /// `getClass()` names for the receiver it came from.
+    Iter {
+        class: &'static str,
+        items: Vec<Value>,
+        pos: usize,
+    },
 }
 
 /// A Groovy range: its endpoints as written, and whether the upper one is
@@ -964,6 +995,32 @@ struct ClosureMeta {
     name_idx: u16,
     params: u8,
     captures: Vec<Value>,
+    /// Set when this closure has no body region of its own but wraps another
+    /// callable — what `curry`, `>>`/`<<`, and `memoize` return. `name_idx` and
+    /// `captures` are unused then; `params` still reports the arity the derived
+    /// closure accepts, which the arity-sensitive GDK methods read.
+    derived: Option<Box<Derived>>,
+}
+
+/// How a derived closure computes its result from the closure it wraps.
+#[derive(Clone)]
+enum Derived {
+    /// `clo.curry(a…)` / `clo.rcurry(a…)` / `clo.ncurry(n, a…)`: the bound
+    /// values are spliced into the call's argument list, at index `at` from the
+    /// left or — when `from_right` — at `at` counted back from the end.
+    Curried {
+        base: Value,
+        at: usize,
+        from_right: bool,
+        bound: Vec<Value>,
+    },
+    /// `a >> b` (`a.andThen(b)`) and `a << b`: call `first` with the arguments,
+    /// then `second` with that result.
+    Composed { first: Value, second: Value },
+    /// `clo.memoize()`: call `base` once per distinct argument list, keyed by the
+    /// Groovy rendering of the arguments. The cache lives in [`MEMO`], keyed by
+    /// this closure's own heap id, so it is shared by every holder of the handle.
+    Memoized { base: Value },
 }
 
 /// A class instance: its class id (into `CLASSES`) and its field values keyed by
@@ -1005,6 +1062,8 @@ fn reset_heap() {
     HEAP.with(|h| h.borrow_mut().clear());
     CLASSES.with(|c| c.borrow_mut().clear());
     DEC_LITERALS.with(|d| d.borrow_mut().clear());
+    MEMO.with(|m| m.borrow_mut().clear());
+    MAP_DEFAULTS.with(|m| m.borrow_mut().clear());
     PENDING.with(|p| *p.borrow_mut() = None);
     EXC_ARMED.with(|a| a.set(false));
     // The built-in throwables occupy the first registry ids of every run; a
@@ -1040,6 +1099,32 @@ fn as_class_ref(v: &Value) -> Option<String> {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
             Some(HeapObj::ClassRef(n)) => Some(n.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// The `(class, remaining-element-count)` of an iterator handle, if `v` is one.
+fn as_iter(v: &Value) -> Option<(&'static str, usize)> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Iter { class, items, pos }) => Some((*class, items.len() - *pos)),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// Advance an iterator handle, answering the element it was sitting on. `None`
+/// once it is exhausted (Java's `NoSuchElementException` case).
+fn iter_next(v: &Value) -> Option<Value> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
+            Some(HeapObj::Iter { items, pos, .. }) if *pos < items.len() => {
+                *pos += 1;
+                Some(items[*pos - 1].clone())
+            }
             _ => None,
         }),
         _ => None,
@@ -1324,7 +1409,135 @@ fn b_make_closure(vm: &mut VM, _argc: u8) -> Value {
         name_idx,
         params,
         captures,
+        derived: None,
     }))
+}
+
+/// Build a derived-closure handle (see [`Derived`]) reporting `params` arity.
+fn derived_closure(params: u8, d: Derived) -> Value {
+    heap_push(HeapObj::Closure(ClosureMeta {
+        name_idx: u16::MAX,
+        params,
+        captures: Vec::new(),
+        derived: Some(Box::new(d)),
+    }))
+}
+
+/// Run a derived closure: splice in curried arguments, chain a composition, or
+/// answer a memoized call from [`MEMO`].
+fn invoke_derived(vm: &mut VM, this: &Value, d: &Derived, args: &[Value]) -> Result<Value, String> {
+    match d {
+        Derived::Curried {
+            base,
+            at,
+            from_right,
+            bound,
+        } => {
+            let mut call: Vec<Value> = args.to_vec();
+            // `rcurry` counts its insertion point back from the end of the
+            // *supplied* arguments, so `{a,b -> a-b}.rcurry(1)(5)` is `5 - 1`.
+            let idx = if *from_right {
+                call.len().saturating_sub(*at)
+            } else {
+                (*at).min(call.len())
+            };
+            for (i, v) in bound.iter().enumerate() {
+                call.insert(idx + i, v.clone());
+            }
+            invoke_closure(vm, base, &call)
+        }
+        Derived::Composed { first, second } => {
+            let mid = invoke_closure(vm, first, args)?;
+            invoke_closure(vm, second, std::slice::from_ref(&mid))
+        }
+        Derived::Memoized { base } => {
+            let id = match this {
+                Value::Obj(id) => *id,
+                _ => return invoke_closure(vm, base, args),
+            };
+            let key: Vec<String> = args.iter().map(groovy_str).collect();
+            let key = key.join("\u{1}");
+            if let Some(hit) = MEMO.with(|m| m.borrow().get(&(id, key.clone())).cloned()) {
+                return Ok(hit);
+            }
+            let out = invoke_closure(vm, base, args)?;
+            MEMO.with(|m| m.borrow_mut().insert((id, key), out.clone()));
+            Ok(out)
+        }
+    }
+}
+
+/// `clo.curry(…)` / `rcurry` / `ncurry` / `memoize` / `>>` / `<<` / `andThen` /
+/// `clone` — the `groovy.lang.Closure` combinators, which all answer another
+/// closure. Returns `None` when `method` is not one of them.
+fn closure_combinator(
+    recv: &Value,
+    meta: &ClosureMeta,
+    method: &str,
+    args: &[Value],
+) -> Option<Value> {
+    let remaining = |taken: usize| meta.params.saturating_sub(taken as u8);
+    Some(match method {
+        "curry" => derived_closure(
+            remaining(args.len()),
+            Derived::Curried {
+                base: recv.clone(),
+                at: 0,
+                from_right: false,
+                bound: args.to_vec(),
+            },
+        ),
+        "rcurry" => derived_closure(
+            remaining(args.len()),
+            Derived::Curried {
+                base: recv.clone(),
+                at: 0,
+                from_right: true,
+                bound: args.to_vec(),
+            },
+        ),
+        "ncurry" => {
+            let n = as_i64(args.first()?)?.max(0) as usize;
+            let bound = args[1..].to_vec();
+            derived_closure(
+                remaining(bound.len()),
+                Derived::Curried {
+                    base: recv.clone(),
+                    at: n,
+                    from_right: false,
+                    bound,
+                },
+            )
+        }
+        "memoize" => derived_closure(meta.params, Derived::Memoized { base: recv.clone() }),
+        // `a >> b` and `a.andThen(b)` run the receiver first; `a << b` runs the
+        // argument first. Both answer a closure of the *first* one's arity.
+        "rightShift" | "andThen" => {
+            let other = args.first()?.clone();
+            closure_meta(&other)?;
+            derived_closure(
+                meta.params,
+                Derived::Composed {
+                    first: recv.clone(),
+                    second: other,
+                },
+            )
+        }
+        "leftShift" | "compose" => {
+            let other = args.first()?.clone();
+            let om = closure_meta(&other)?;
+            derived_closure(
+                om.params,
+                Derived::Composed {
+                    first: other,
+                    second: recv.clone(),
+                },
+            )
+        }
+        // A closure clone is a fresh handle over the same body and captures.
+        "clone" => heap_push(HeapObj::Closure(meta.clone())),
+        _ => return None,
+    })
 }
 
 /// Invoke a closure `clo` with `args`, running its body through the fusevm frame
@@ -1334,6 +1547,10 @@ fn b_make_closure(vm: &mut VM, _argc: u8) -> Value {
 /// the enclosing dispatch loop resumes where it left off.
 fn invoke_closure(vm: &mut VM, clo: &Value, args: &[Value]) -> Result<Value, String> {
     let meta = closure_meta(clo).ok_or_else(|| "groovyrs: value is not a closure".to_string())?;
+    // A curried / composed / memoized closure has no body region of its own.
+    if let Some(d) = &meta.derived {
+        return invoke_derived(vm, clo, d, args);
+    }
     let entry = vm
         .chunk
         .find_sub(meta.name_idx)
@@ -2743,6 +2960,34 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
 fn b_index(vm: &mut VM, _argc: u8) -> Value {
     let index = vm.stack.pop().unwrap_or(Value::Undef);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    index_read(vm, recv, index)
+}
+
+/// A missing-key read on a map built by `withDefault { … }`: run the stored
+/// closure with the key, store the result under it, and answer it. `null` for
+/// an ordinary map, which is what a missing key reads as.
+fn map_default(vm: &mut VM, map: &Value, key: &str) -> Value {
+    let Value::Obj(id) = map else {
+        return Value::Undef;
+    };
+    let Some(clo) = MAP_DEFAULTS.with(|m| m.borrow().get(id).cloned()) else {
+        return Value::Undef;
+    };
+    match invoke_closure(vm, &clo, &[Value::str(key.to_string())]) {
+        Ok(v) => {
+            omap_set(map, key.to_string(), v.clone());
+            v
+        }
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    }
+}
+
+/// `recv[index]`, shared by the `[…]` subscript builtin and by the `getAt(…)`
+/// method — Groovy defines the subscript *as* `getAt`, so both are one path.
+fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
     // A range subscripts as the list it enumerates, on either side: `(1..5)[0]`
     // is `1`, and `list[1..2]` is the sublist at those positions.
     let recv = range_as_list(&recv);
@@ -2764,11 +3009,10 @@ fn b_index(vm: &mut VM, _argc: u8) -> Value {
     }
     if let Some(entries) = as_omap(&recv) {
         let k = index.as_str_cow().into_owned();
-        return entries
-            .iter()
-            .find(|(ek, _)| *ek == k)
-            .map(|(_, v)| v.clone())
-            .unwrap_or(Value::Undef);
+        return match entries.iter().find(|(ek, _)| *ek == k) {
+            Some((_, v)) => v.clone(),
+            None => map_default(vm, &recv, &k),
+        };
     }
     // Subscripting by a *collection* of indices — which is what a range
     // subscript is (it is rewritten to its element list above). `list[0..1]` is the
@@ -2915,6 +3159,11 @@ fn b_closure_call(vm: &mut VM, argc: u8) -> Value {
     args.reverse();
     let clo = vm.stack.pop().unwrap_or(Value::Undef);
     if closure_meta(&clo).is_none() {
+        // The owner (the script) has no such closure, so a `with`/`tap` delegate
+        // is next in Groovy's `OWNER_FIRST` chain — innermost first.
+        if let Some(v) = dispatch_on_delegate(vm, &name, &args) {
+            return v;
+        }
         // Faithful to the compile-time diagnostic the non-closure path replaced.
         fault(vm, format!("unresolved reference: {name}"));
         return Value::Undef;
@@ -2926,6 +3175,23 @@ fn b_closure_call(vm: &mut VM, argc: u8) -> Value {
             Value::Undef
         }
     }
+}
+
+/// Dispatch a bare `name(args)` call the owner could not resolve against the
+/// innermost `with`/`tap` delegate. `None` when no `with`/`tap` is running, so
+/// the caller reports the name as unresolved as before. A mutator's new
+/// contents are written back into the delegate slot, so `tap` sees them.
+fn dispatch_on_delegate(vm: &mut VM, name: &str, args: &[Value]) -> Option<Value> {
+    let recv = DELEGATES.with(|d| d.borrow().last().cloned())?;
+    let out = dispatch_call(vm, recv, name, args.to_vec());
+    if let Some(next) = take_mutated() {
+        DELEGATES.with(|d| {
+            if let Some(slot) = d.borrow_mut().last_mut() {
+                *slot = next;
+            }
+        });
+    }
+    Some(out)
 }
 
 /// `GMETHOD_SAFE`: the safe-navigation method call `recv?.method(args)`. Returns
@@ -3128,6 +3394,12 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             }
         };
     }
+    // The `groovy.lang.Closure` combinators, which answer another closure.
+    if let Some(meta) = closure_meta(&recv) {
+        if let Some(v) = closure_combinator(&recv, &meta, method, &args) {
+            return v;
+        }
+    }
     // `clo.call(args)` — invoke the receiver closure.
     if method == "call" && closure_meta(&recv).is_some() {
         return match invoke_closure(vm, &recv, &args) {
@@ -3147,7 +3419,14 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // the receiver as `it`. `with` answers the closure's result, `tap` the
     // receiver. Defined on every value, so it precedes the per-type tables.
     if matches!(method, "with" | "tap") && args.len() == 1 && closure_meta(&args[0]).is_some() {
-        return match invoke_closure(vm, &args[0], std::slice::from_ref(&recv)) {
+        DELEGATES.with(|d| d.borrow_mut().push(recv.clone()));
+        let result = invoke_closure(vm, &args[0], std::slice::from_ref(&recv));
+        // A mutator run against the delegate replaced its contents, so `tap`
+        // answers the *mutated* receiver, not the one it was handed.
+        let recv = DELEGATES
+            .with(|d| d.borrow_mut().pop())
+            .unwrap_or_else(|| recv.clone());
+        return match result {
             Ok(v) => {
                 if method == "tap" {
                     recv
@@ -3228,6 +3507,33 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             }
         };
     }
+    // `s.eachMatch(pattern) { … }` runs the closure over every match — the whole
+    // match for a group-less pattern, `[whole, g1, …]` when it has groups — and
+    // answers the receiver.
+    if let (Value::Str(s), "eachMatch") = (&recv, method) {
+        let Some(clo) = args.last().filter(|a| closure_meta(a).is_some()) else {
+            return raise_missing_method(vm, &recv, method, &args);
+        };
+        let pattern = args.first().map(pattern_source_of).unwrap_or_default();
+        let compiled = crate::regex::compile(&pattern);
+        let hits = match &*compiled {
+            Ok(p) => p.find_all(s).unwrap_or_default(),
+            Err(e) => {
+                raise(vm, "PatternSyntaxException", e);
+                return Value::Undef;
+            }
+        };
+        for hit in &hits {
+            if let Err(e) = invoke_closure(vm, clo, &[match_value(hit)]) {
+                fault(vm, e);
+                return Value::Undef;
+            }
+            if pending_exc() {
+                return Value::Undef;
+            }
+        }
+        return recv;
+    }
     // A `String` iterates over its characters, so the same closure-driven GDK
     // applies. The `each` family answers the receiver itself, not a list.
     if let Value::Str(s) = &recv {
@@ -3260,6 +3566,14 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
                 }
             };
         }
+    }
+    // `x.getAt(i)` is the `x[i]` subscript spelled out — same operation, same
+    // range/list/negative-index rules, same out-of-bounds diagnostics.
+    if method == "getAt"
+        && args.len() == 1
+        && (!matches!(recv, Value::Obj(_)) || as_omap(&recv).is_some())
+    {
+        return index_read(vm, recv, args[0].clone());
     }
     // Pure GDK dispatch — no closure, no VM re-entrancy.
     dispatch_method(vm, &recv, method, &args)
@@ -3480,6 +3794,59 @@ fn dispatch_iteration(
                     .map(|(k, v)| (k, Value::array(v)))
                     .collect(),
             ))))
+        }
+        // `list.countBy { … }` — a map from the closure's value to how many
+        // elements produced it, keys in first-seen order.
+        "countBy" => {
+            let clo = args.last()?;
+            closure_meta(clo)?;
+            let mut counts: Vec<(String, i64)> = Vec::new();
+            for it in items {
+                let key = match invoke_closure(vm, clo, &item_args(clo, it)) {
+                    Ok(v) => groovy_str(&v),
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                match counts.iter_mut().find(|(k, _)| *k == key) {
+                    Some(slot) => slot.1 += 1,
+                    None => counts.push((key, 1)),
+                }
+            }
+            Some(Ok(heap_push(HeapObj::OrderedMap(
+                counts
+                    .into_iter()
+                    .map(|(k, n)| (k, Value::int(n)))
+                    .collect(),
+            ))))
+        }
+        // `list.findIndexValues { … }` — *every* accepted index, where
+        // `findIndexOf` answers only the first.
+        "findIndexValues" => {
+            let clo = args.last()?;
+            closure_meta(clo)?;
+            // The optional leading argument is the index to start looking from.
+            let from = args
+                .first()
+                .filter(|a| closure_meta(a).is_none())
+                .and_then(as_i64)
+                .unwrap_or(0)
+                .max(0) as usize;
+            let mut out: Vec<Value> = Vec::new();
+            for (i, it) in items.iter().enumerate().skip(from) {
+                let v = match invoke_closure(vm, clo, &item_args(clo, it)) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                if groovy_truthy(vm, &v) {
+                    out.push(Value::int(i as i64));
+                }
+            }
+            Some(Ok(Value::array(out)))
         }
         // `list.any { … }` / `list.every { … }` — short-circuiting predicates.
         // `any` stops at the first accepted element, `every` at the first
@@ -3933,6 +4300,58 @@ fn dispatch_map_iteration(
                 ))
             }))
         }
+        // `map.count { k, v -> … }` — how many entries the closure accepts.
+        "count" => {
+            let clo = clo?;
+            let mut n = 0i64;
+            for (k, v) in entries {
+                let r = match invoke_closure(vm, clo, &entry_args(clo, k, v)) {
+                    Ok(r) => r,
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                n += groovy_truthy(vm, &r) as i64;
+            }
+            Some(Ok(Value::int(n)))
+        }
+        // `map.countBy { k, v -> … }` — a map from the closure's value to how
+        // many entries produced it, in first-seen order.
+        "countBy" => {
+            let clo = clo?;
+            let mut counts: Vec<(String, i64)> = Vec::new();
+            for (k, v) in entries {
+                let key = match invoke_closure(vm, clo, &entry_args(clo, k, v)) {
+                    Ok(r) => groovy_str(&r),
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                match counts.iter_mut().find(|(ck, _)| *ck == key) {
+                    Some(slot) => slot.1 += 1,
+                    None => counts.push((key, 1)),
+                }
+            }
+            Some(Ok(heap_push(HeapObj::OrderedMap(
+                counts
+                    .into_iter()
+                    .map(|(k, n)| (k, Value::int(n)))
+                    .collect(),
+            ))))
+        }
+        // `map.withDefault { key -> … }` — a copy whose missing-key reads run the
+        // closure and *store* its result, the way `groovy.lang.MapWithDefault`
+        // does. The closure is remembered in `MAP_DEFAULTS` against the copy.
+        "withDefault" => {
+            let clo = clo?;
+            let copy = heap_push(HeapObj::OrderedMap(entries.to_vec()));
+            if let Value::Obj(id) = copy {
+                MAP_DEFAULTS.with(|m| m.borrow_mut().insert(id, clo.clone()));
+            }
+            Some(Ok(copy))
+        }
         // `map.max { it.value }` / `min` yield the extreme *entry*.
         "max" | "min" => {
             let clo = clo?;
@@ -4264,6 +4683,123 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (Value::Str(s), "toList" | "toCharArray" | "chars") => {
             Value::array(s.chars().map(|c| Value::str(c.to_string())).collect())
         }
+        // `s.tr(from, to)` — `tr(1)`-style character translation. Both sides
+        // expand `a-c` ranges (reversed ones too); a `from` character past the
+        // end of `to` maps to `to`'s last character, and an unlisted character
+        // passes through.
+        (Value::Str(s), "tr") => {
+            let from = expand_hyphen(&args.first().map(groovy_str).unwrap_or_default());
+            let to = expand_hyphen(&args.get(1).map(groovy_str).unwrap_or_default());
+            Value::str(
+                s.chars()
+                    .map(|c| match from.iter().position(|f| *f == c) {
+                        Some(i) if !to.is_empty() => to[i.min(to.len() - 1)],
+                        _ => c,
+                    })
+                    .collect::<String>(),
+            )
+        }
+        // `s.stripIndent()` is Java's `String.stripIndent`: strip the common
+        // indent and every line's trailing whitespace — except that a string
+        // *ending* in a line terminator opts out of the outdent entirely.
+        (Value::Str(s), "stripIndent") if args.is_empty() => Value::str(strip_indent(s)),
+        // `s.stripIndent(n)` drops exactly `n` leading characters per line (a
+        // shorter line becomes empty) and joins the lines with `\n`.
+        (Value::Str(s), "stripIndent") => {
+            let n = args.first().and_then(as_i64).unwrap_or(0);
+            if s.is_empty() || n <= 0 {
+                return Value::str(s.to_string());
+            }
+            let n = n as usize;
+            Value::str(
+                read_lines(s)
+                    .iter()
+                    .map(|l| l.chars().skip(n).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+        // `s.stripMargin([c])` — drop each line's leading whitespace up to and
+        // including the first margin character (`|` by default). A line without
+        // one is left alone.
+        (Value::Str(s), "stripMargin") => {
+            let margin = args
+                .first()
+                .map(groovy_str)
+                .and_then(|m| m.chars().next())
+                .unwrap_or('|');
+            Value::str(
+                read_lines(s)
+                    .iter()
+                    .map(|l| {
+                        let body = l.trim_start_matches(|c: char| c <= ' ');
+                        match body.strip_prefix(margin) {
+                            Some(rest) => rest.to_string(),
+                            None => l.clone(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+        // `s.expand([tabStop])` — replace each tab with spaces up to the next
+        // tab stop, counting columns from the start of that line.
+        (Value::Str(s), "expand") => {
+            let stop = args.first().and_then(as_i64).unwrap_or(8).max(1) as usize;
+            let expanded: Vec<String> =
+                read_lines(s).iter().map(|l| expand_tabs(l, stop)).collect();
+            Value::str(expanded.join("\n"))
+        }
+        // `normalize` folds CRLF and lone CR to LF; `denormalize` puts the
+        // platform's line separator back (which is LF here).
+        (Value::Str(s), "normalize" | "denormalize") => {
+            Value::str(s.replace("\r\n", "\n").replace('\r', "\n"))
+        }
+        // `s.minus(x)` drops the *first* occurrence — of a literal string, or of
+        // whatever a `Pattern` argument first matches.
+        (Value::Str(s), "minus") => match args.first() {
+            Some(p) if regex_source(p).is_some() => {
+                let compiled = crate::regex::compile(&regex_source(p).unwrap());
+                match &*compiled {
+                    Ok(re) => match re.replace(s, "", true) {
+                        Ok(t) => Value::str(t),
+                        Err(e) => {
+                            fault(vm, format!("groovyrs: {e}"));
+                            Value::Undef
+                        }
+                    },
+                    Err(e) => {
+                        raise(vm, "PatternSyntaxException", e);
+                        Value::Undef
+                    }
+                }
+            }
+            _ => groovy_sub(recv, args.first().unwrap_or(&Value::Undef)),
+        },
+        // `s.formatted(args…)` is `String.format(s, args…)` with the receiver as
+        // the format string.
+        (Value::Str(s), "formatted") => Value::str(java_format(vm, s, args)),
+        // The `String.isX()` conversion predicates — each asks whether the
+        // trimmed text parses as that type, which is how Groovy's are defined.
+        (
+            Value::Str(s),
+            "isInteger" | "isLong" | "isDouble" | "isFloat" | "isBigDecimal" | "isBigInteger"
+            | "isNumber",
+        ) => {
+            let t = s.trim();
+            Value::bool(match method {
+                "isInteger" => t.parse::<i32>().is_ok(),
+                "isLong" => t.parse::<i64>().is_ok(),
+                "isDouble" | "isFloat" => t.parse::<f64>().is_ok(),
+                // `new BigInteger(t)` takes only an integer literal; the rest
+                // ask `new BigDecimal(t)`, which is Java's decimal grammar.
+                "isBigInteger" => {
+                    let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
+                    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+                }
+                _ => crate::decimal::parse_java(t).is_ok(),
+            })
+        }
         (Value::Str(s), "capitalize" | "uncapitalize") => {
             let mut cs = s.chars();
             match cs.next() {
@@ -4334,13 +4870,19 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             })
         }
         // `head`/`first` raise on an empty list; `tail`/`init` are the
-        // complementary slices and raise for the same reason.
-        (Value::Array(a), "first" | "head" | "last" | "tail" | "init" | "pop") => {
+        // complementary slices and raise for the same reason. Each carries the
+        // wording its own GDK method uses.
+        (Value::Array(a), "first" | "head" | "last" | "tail" | "init") => {
             if a.is_empty() {
                 raise(
                     vm,
                     "NoSuchElementException",
-                    "Cannot access first() element from an empty List",
+                    match method {
+                        "last" => "Cannot access last() element from an empty List",
+                        "tail" => "Cannot access tail() for an empty iterable",
+                        "init" => "Cannot access init() for an empty Iterable",
+                        _ => "Cannot access first() element from an empty List",
+                    },
                 );
                 return Value::Undef;
             }
@@ -4348,15 +4890,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 "first" | "head" => a[0].clone(),
                 "last" => a[a.len() - 1].clone(),
                 "tail" => Value::array(a[1..].to_vec()),
-                "init" => Value::array(a[..a.len() - 1].to_vec()),
-                // `pop` removes and answers the *last* element (Groovy's stack
-                // view of a list), so it writes the shortened list back.
-                _ => {
-                    let mut rest = a.clone();
-                    let top = rest.pop().unwrap_or(Value::Undef);
-                    set_mutated(Value::array(rest));
-                    top
-                }
+                _ => Value::array(a[..a.len() - 1].to_vec()),
             }
         }
         (Value::Array(a), "indexOf" | "lastIndexOf") => {
@@ -4391,8 +4925,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             let other = args.first().map(iteration_elements).unwrap_or_default();
             Value::bool(!other.iter().any(|w| a.iter().any(|v| values_equal(v, w))))
         }
-        // Set-flavoured combinators, all keeping the receiver's order.
-        (Value::Array(a), "intersect" | "minus" | "plus") => {
+        // Set-flavoured combinators, all keeping the receiver's order. The
+        // two-argument `plus(index, other)` is a splice and is handled below.
+        (Value::Array(a), "intersect" | "minus" | "plus") if args.len() < 2 => {
             let other = args.first().map(iteration_elements).unwrap_or_default();
             Value::array(match method {
                 "intersect" => a
@@ -4449,6 +4984,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // The cartesian product of the receiver's sub-collections. A non-list
         // element counts as a one-element collection, so `[1, 2, 3]` has exactly
         // one combination.
+        // The *first* sub-collection varies fastest, which is the order
+        // `GroovyCollections.combinations` produces: `[[1, 2], [3, 4]]` gives
+        // `[[1, 3], [2, 3], [1, 4], [2, 4]]`.
         (Value::Array(a), "combinations") => {
             let mut out: Vec<Vec<Value>> = vec![Vec::new()];
             for e in a {
@@ -4456,10 +4994,10 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                     Value::Array(_) => iteration_elements(e),
                     other => vec![other.clone()],
                 };
-                out = out
-                    .into_iter()
-                    .flat_map(|prefix| {
-                        choices.iter().map(move |c| {
+                out = choices
+                    .iter()
+                    .flat_map(|c| {
+                        out.iter().map(move |prefix| {
                             let mut p = prefix.clone();
                             p.push(c.clone());
                             p
@@ -4475,8 +5013,8 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 .map(Value::array)
                 .collect::<Vec<_>>(),
         ),
-        // `list.withIndex([offset])` pairs each element with its position.
-        (Value::Array(a), "withIndex" | "indexed") => {
+        // `list.withIndex([offset])` pairs each element with its position…
+        (Value::Array(a), "withIndex") => {
             let base = args.first().and_then(as_i64).unwrap_or(0);
             Value::array(
                 a.iter()
@@ -4484,6 +5022,90 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                     .map(|(i, v)| Value::array(vec![v.clone(), Value::int(base + i as i64)]))
                     .collect(),
             )
+        }
+        // …while `indexed([offset])` answers a *map* from position to element.
+        (Value::Array(a), "indexed") => {
+            let base = args.first().and_then(as_i64).unwrap_or(0);
+            heap_push(HeapObj::OrderedMap(
+                a.iter()
+                    .enumerate()
+                    .map(|(i, v)| ((base + i as i64).to_string(), v.clone()))
+                    .collect(),
+            ))
+        }
+        // `list.iterator()` — a live cursor over the elements. Stateful, so it
+        // rides a handle (see `HeapObj::Iter`).
+        (Value::Array(a), "iterator" | "listIterator") => heap_push(HeapObj::Iter {
+            class: "java.util.ArrayList$Itr",
+            items: a.clone(),
+            pos: 0,
+        }),
+        (Value::Str(s), "iterator") => heap_push(HeapObj::Iter {
+            class: "java.util.Iterator",
+            items: s.chars().map(|c| Value::str(c.to_string())).collect(),
+            pos: 0,
+        }),
+        // `list.takeRight(n)` / `dropRight(n)` — `take`/`drop` from the end.
+        (Value::Array(a), "takeRight" | "dropRight") => {
+            let n = (args.first().and_then(as_i64).unwrap_or(0).max(0) as usize).min(a.len());
+            Value::array(if method == "takeRight" {
+                a[a.len() - n..].to_vec()
+            } else {
+                a[..a.len() - n].to_vec()
+            })
+        }
+        // `list.plus(index, other)` splices `other` in at `index`.
+        (Value::Array(a), "plus") if args.len() == 2 => {
+            let at = (args[0].to_int().max(0) as usize).min(a.len());
+            let mut out = a[..at].to_vec();
+            out.extend(iteration_elements(&args[1]));
+            out.extend_from_slice(&a[at..]);
+            Value::array(out)
+        }
+        // `list.swap(i, j)` exchanges two elements in place and answers the list.
+        (Value::Array(a), "swap") => {
+            let len = a.len();
+            let i = args.first().and_then(as_i64).unwrap_or(0);
+            let j = args.get(1).and_then(as_i64).unwrap_or(0);
+            let slot = |n: i64| usize::try_from(n).ok().filter(|u| *u < len);
+            match (slot(i), slot(j)) {
+                (Some(x), Some(y)) => {
+                    let mut next = a.clone();
+                    next.swap(x, y);
+                    let out = Value::array(next);
+                    set_mutated(out.clone());
+                    out
+                }
+                _ => {
+                    let bad = if slot(i).is_none() { i } else { j };
+                    raise(
+                        vm,
+                        "IndexOutOfBoundsException",
+                        &format!("Index {bad} out of bounds for length {len}"),
+                    );
+                    Value::Undef
+                }
+            }
+        }
+        // Groovy's `pop` takes the *first* element and `removeLast` the last;
+        // both raise on an empty list rather than answering `null`.
+        (Value::Array(a), "pop" | "removeLast") => {
+            if a.is_empty() {
+                raise(
+                    vm,
+                    "NoSuchElementException",
+                    &format!("Cannot {method}() an empty List"),
+                );
+                return Value::Undef;
+            }
+            let mut next = a.clone();
+            let gone = if method == "pop" {
+                next.remove(0)
+            } else {
+                next.pop().unwrap()
+            };
+            set_mutated(Value::array(next));
+            gone
         }
         // ── List mutators ────────────────────────────────────────────────────
         // Each parks the new contents for the compiler-emitted writeback (see
@@ -4606,6 +5228,10 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `Math.abs`/`.abs()` on `Integer.MIN_VALUE` is `Integer.MIN_VALUE`:
         // the positive counterpart is not an `Integer`, so the wrap stands.
         (Value::Int(n), "abs") => Value::int(abs_at_width(*n)),
+        // `n.power(e)` is the `**` operator spelled out.
+        (Value::Int(_), "power") => {
+            power_of(vm, recv, args.first().unwrap_or(&Value::Undef), false)
+        }
         (Value::Int(n), "toLong" | "longValue") => Value::int(*n),
         // `intValue()` is Java's narrowing conversion, so `3000000000L.intValue()`
         // is `-1294967296`.
@@ -4614,6 +5240,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             Value::float(*n as f64)
         }
         (Value::Int(n), "toBigDecimal") => dec_value(BigDecimal::from(*n)),
+        (Value::Int(n), "toBigInteger") => bigint_value(BigDecimal::from(*n)),
         (Value::Int(n), "equals") => Value::bool(args.first().and_then(as_i64) == Some(*n)),
         (Value::Int(n), "compareTo") => {
             let other = args.first().and_then(as_i64).unwrap_or(0);
@@ -4621,7 +5248,19 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         }
         // ── Double ──
         (Value::Float(f), "abs") => Value::float(f.abs()),
-        (Value::Float(f), "round") => Value::int(java_round(*f)),
+        (Value::Float(f), "round") if args.is_empty() => Value::int(java_round(*f)),
+        // `d.round(n)` keeps `n` decimal places and stays a `double`; `trunc(n)`
+        // is the same cut without the rounding.
+        (Value::Float(f), "round" | "trunc") => {
+            let n = args.first().and_then(as_i64).unwrap_or(0).max(0) as u32;
+            let scale = 10f64.powi(n as i32);
+            let scaled = f * scale;
+            Value::float(if method == "round" {
+                java_round(scaled) as f64 / scale
+            } else {
+                scaled.trunc() / scale
+            })
+        }
         (Value::Float(f), "toInteger" | "toLong" | "intValue" | "longValue") => {
             Value::int(*f as i64)
         }
@@ -4665,7 +5304,20 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 "intValue" | "longValue" | "toInteger" | "toLong" => {
                     Value::int(decimal::truncate_to_i64(&d))
                 }
-                "round" => Value::int(decimal::round_to_i64(&d)),
+                "round" if args.is_empty() => Value::int(decimal::round_to_i64(&d)),
+                // `round(n)` keeps `n` decimal places (half-up, Groovy's mode);
+                // `trunc(n)` cuts them off. Both stay `BigDecimal`s, except that
+                // the no-argument `trunc` answers a `BigInteger`.
+                "round" => dec_value(decimal::round_half_up(
+                    &d,
+                    args.first().and_then(as_i64).unwrap_or(0),
+                )),
+                "trunc" if args.is_empty() => bigint_value(decimal::to_big_integer(&d)),
+                "trunc" => dec_value(decimal::truncate_to_scale(
+                    &d,
+                    args.first().and_then(as_i64).unwrap_or(0),
+                )),
+                "power" => power_of(vm, recv, args.first().unwrap_or(&Value::Undef), false),
                 "doubleValue" | "toDouble" | "floatValue" | "toFloat" => {
                     Value::float(decimal::to_f64(&d))
                 }
@@ -4692,6 +5344,22 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             match method {
                 "getKey" => Value::str(k),
                 "getValue" => v,
+                _ => raise_missing_method(vm, recv, method, args),
+            }
+        }
+
+        // ── java.util.Iterator (host heap) ──
+        _ if as_iter(recv).is_some() => {
+            let (_, left) = as_iter(recv).unwrap();
+            match method {
+                "hasNext" => Value::bool(left > 0),
+                "next" => match iter_next(recv) {
+                    Some(v) => v,
+                    None => {
+                        raise_opt(vm, "NoSuchElementException", None);
+                        Value::Undef
+                    }
+                },
                 _ => raise_missing_method(vm, recv, method, args),
             }
         }
@@ -4723,6 +5391,63 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 "keySet" | "keys" => {
                     Value::array(entries.iter().map(|(k, _)| Value::str(k.clone())).collect())
                 }
+                // `map.subMap(keys)` — the entries for the listed keys, in the
+                // *receiver's* order; a key the map does not hold is dropped.
+                // Both the collection and the varargs spelling are accepted.
+                "subMap" => {
+                    let wanted: Vec<String> = match args {
+                        [one] if matches!(one, Value::Array(_)) || as_range(one).is_some() => {
+                            iteration_elements(one).iter().map(groovy_str).collect()
+                        }
+                        rest => rest.iter().map(groovy_str).collect(),
+                    };
+                    heap_push(HeapObj::OrderedMap(
+                        entries
+                            .into_iter()
+                            .filter(|(k, _)| wanted.iter().any(|w| w == k))
+                            .collect(),
+                    ))
+                }
+                // `map.spread()` is a shallow copy of the map.
+                "spread" | "clone" | "asImmutable" | "asSynchronized" => {
+                    heap_push(HeapObj::OrderedMap(entries))
+                }
+                // `map - other` / `map.minus(other)` drops the entries the other
+                // map holds *identically* (same key and same value).
+                "minus" => {
+                    let drop: Vec<(String, Value)> =
+                        args.first().map(entry_pairs).unwrap_or_default();
+                    heap_push(HeapObj::OrderedMap(
+                        entries
+                            .into_iter()
+                            .filter(|(k, v)| {
+                                !drop.iter().any(|(dk, dv)| dk == k && values_equal(dv, v))
+                            })
+                            .collect(),
+                    ))
+                }
+                // …and `intersect` keeps exactly those.
+                "intersect" => {
+                    let keep: Vec<(String, Value)> =
+                        args.first().map(entry_pairs).unwrap_or_default();
+                    heap_push(HeapObj::OrderedMap(
+                        entries
+                            .into_iter()
+                            .filter(|(k, v)| {
+                                keep.iter().any(|(dk, dv)| dk == k && values_equal(dv, v))
+                            })
+                            .collect(),
+                    ))
+                }
+                // A map iterates over its entries.
+                "iterator" => heap_push(HeapObj::Iter {
+                    class: "java.util.LinkedHashMap$LinkedEntryIterator",
+                    items: entries
+                        .into_iter()
+                        .map(|(k, v)| heap_push(HeapObj::Entry(k, v)))
+                        .collect(),
+                    pos: 0,
+                }),
                 "values" => Value::array(entries.into_iter().map(|(_, v)| v).collect()),
                 // `getOrDefault(k, d)` and the two-argument `get(k, d)` — the
                 // latter also *stores* the default, which is what Groovy's does.
@@ -4796,6 +5521,14 @@ fn b_power(vm: &mut VM, _argc: u8) -> Value {
     let wide = shift_is_wide(vm);
     let exp = vm.stack.pop().unwrap_or(Value::Undef);
     let base = vm.stack.pop().unwrap_or(Value::Undef);
+    power_of(vm, &base, &exp, wide)
+}
+
+/// `base ** exp`, shared by the `**` builtin and the `power(exp)` method Groovy
+/// defines as the same operation. `wide` is the base's statically-known `Long`
+/// width, which decides whether an integer result narrows to `Integer`.
+fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
+    let (base, exp) = (base.clone(), exp.clone());
     let e = match as_i64(&exp) {
         Some(e) => e,
         // A fractional exponent has no exact form, so Groovy runs it as a double.
@@ -4857,6 +5590,17 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
     if let Some((_, text)) = as_buffer(&lhs) {
         buffer_set(&lhs, format!("{text}{}", groovy_str(&rhs)));
         return lhs;
+    }
+    // `a << b` on two closures is `Closure.compose`: `b` runs first.
+    if let (Some(la), Some(rb)) = (closure_meta(&lhs), closure_meta(&rhs)) {
+        let _ = la;
+        return derived_closure(
+            rb.params,
+            Derived::Composed {
+                first: rhs,
+                second: lhs,
+            },
+        );
     }
     match &lhs {
         Value::Array(a) => {
@@ -5380,7 +6124,11 @@ fn range_upper(r: &RangeVal) -> Value {
 
 fn range_bound(r: &RangeVal, upper: bool) -> Value {
     let desc = range_is_reverse(r);
-    let (lo, hi) = if desc { (&r.to, &r.from) } else { (&r.from, &r.to) };
+    let (lo, hi) = if desc {
+        (&r.to, &r.from)
+    } else {
+        (&r.from, &r.to)
+    };
     let end = if upper { hi } else { lo };
     // The end an exclusive walk stops short of is always the *second* endpoint
     // written, whichever side of the order that puts it on. An inclusive range,
@@ -6012,10 +6760,56 @@ fn b_cmp(vm: &mut VM, _argc: u8) -> Value {
             }
         };
     }
+    // `<=>` is `DefaultTypeTransformation.compareTo`, which needs a `Comparable`
+    // left operand once `null` is out of the way. A list, a map, a set, a range
+    // and a user class without `compareTo` are not `Comparable`, so Groovy
+    // raises rather than inventing an order — even for two equal lists.
+    // `null` orders before everything, whichever side it is on.
+    match (matches!(a, Value::Undef), matches!(b, Value::Undef)) {
+        (true, true) => return Value::int(0),
+        (true, false) => return Value::int(-1),
+        (false, true) => return Value::int(1),
+        _ => {}
+    }
+    if is_incomparable(&a) || is_incomparable(&b) {
+        let (sa, sb) = (java_to_string(vm, &a), java_to_string(vm, &b));
+        let message = format!(
+            "Cannot compare {} with value '{sa}' and {} with value '{sb}'",
+            java_class_name(&a),
+            java_class_name(&b),
+        );
+        raise(vm, "IllegalArgumentException", &message);
+        return Value::Undef;
+    }
     match natural_order(&a, &b) {
         std::cmp::Ordering::Less => Value::int(-1),
         std::cmp::Ordering::Greater => Value::int(1),
         std::cmp::Ordering::Equal => Value::int(0),
+    }
+}
+
+/// True for a value Java would not accept as `Comparable`: a collection, a map,
+/// a range, or a class instance with no `compareTo`.
+fn is_incomparable(v: &Value) -> bool {
+    if let Some(inst) = as_instance(v) {
+        return lookup_method(inst.class, "compareTo").is_none();
+    }
+    matches!(v, Value::Array(_) | Value::Hash(_)) || as_omap(v).is_some() || as_range(v).is_some()
+}
+
+/// A value rendered the way *Java's* `toString` renders it, which is what the
+/// `Cannot compare …` diagnostic quotes: a map prints `{k=v, …}` where Groovy's
+/// own rendering prints `[k:v, …]`.
+fn java_to_string(vm: &mut VM, v: &Value) -> String {
+    match as_omap(v) {
+        Some(entries) => {
+            let items: Vec<String> = entries
+                .iter()
+                .map(|(k, val)| format!("{k}={}", groovy_str(val)))
+                .collect();
+            format!("{{{}}}", items.join(", "))
+        }
+        None => render_value(vm, v),
     }
 }
 
@@ -6424,6 +7218,98 @@ fn double_operator(op: NumOp, x: f64, y: f64) -> Value {
     }
 }
 
+/// A string's lines with the terminators removed — Groovy's `readLines`, which
+/// (like Java's `String.lines`) yields no trailing empty line for a string that
+/// ends in a terminator.
+fn read_lines(s: &str) -> Vec<String> {
+    let body = s.strip_suffix('\n').unwrap_or(s);
+    let body = body.strip_suffix('\r').unwrap_or(body);
+    if body.is_empty() && s.is_empty() {
+        return Vec::new();
+    }
+    body.split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
+        .collect()
+}
+
+/// Java's `String.stripIndent`: remove the common indent and each line's
+/// trailing whitespace. A string ending in a line terminator opts *out* of the
+/// outdent (the indent stays) but still loses its trailing whitespace, and the
+/// terminator is put back.
+fn strip_indent(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    let ends_with_terminator = s.ends_with('\n') || s.ends_with('\r');
+    let lines = read_lines(s);
+    let indent_of = |l: &String| l.chars().take_while(|c| c.is_whitespace()).count();
+    // Blank lines do not constrain the indent — except the last one, which does.
+    let outdent = if ends_with_terminator {
+        0
+    } else {
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(i, l)| *i + 1 == lines.len() || !l.trim().is_empty())
+            .map(|(_, l)| indent_of(l))
+            .min()
+            .unwrap_or(0)
+    };
+    let mut out: String = lines
+        .iter()
+        .map(|l| {
+            let body: String = l.chars().skip(outdent).collect();
+            body.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if ends_with_terminator {
+        out.push('\n');
+    }
+    out
+}
+
+/// Replace each tab in one line with spaces up to the next multiple of `stop`,
+/// counting columns from the start of the line — Groovy's `expandLine`.
+fn expand_tabs(line: &str, stop: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+    for c in line.chars() {
+        if c == '\t' {
+            let pad = stop - col % stop;
+            out.extend(std::iter::repeat(' ').take(pad));
+            col += pad;
+        } else {
+            out.push(c);
+            col += 1;
+        }
+    }
+    out
+}
+
+/// Expand a `tr` character set: `a-c` becomes `abc` and a reversed `c-a` becomes
+/// `cba`; a hyphen with no character on one side of it stays literal.
+fn expand_hyphen(spec: &str) -> Vec<char> {
+    let cs: Vec<char> = spec.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < cs.len() {
+        if i + 2 < cs.len() && cs[i + 1] == '-' {
+            let (a, b) = (cs[i] as u32, cs[i + 2] as u32);
+            if a <= b {
+                out.extend((a..=b).filter_map(char::from_u32));
+            } else {
+                out.extend((b..=a).rev().filter_map(char::from_u32));
+            }
+            i += 3;
+        } else {
+            out.push(cs[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Groovy `+` on a non-numeric left operand, dispatched on the left value
 /// (Groovy dispatches `+` as `left.plus(right)`): a list concatenates another
 /// list or appends a scalar; an ordered map merges another map (right wins on a
@@ -6695,6 +7581,13 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
         // removes the first occurrence, `"abc" * 3` repeats, `list - other`
         // subtracts every match, `list * n` repeats the list.
         NumOp::Sub if matches!(a, Value::Str(_) | Value::Array(_)) => Ok(groovy_sub(a, b)),
+        // `map - other` drops the entries the other map holds identically —
+        // the `Map.minus` GDK overload, dispatched on the left operand.
+        NumOp::Sub if as_omap(a).is_some() => {
+            let (x, y) = (a.clone(), b.clone());
+            with_vm(|vm| dispatch_method(vm, &x, "minus", std::slice::from_ref(&y)))
+                .ok_or_else(|| "groovyrs: map `-` dispatched with no active VM".to_string())
+        }
         NumOp::Mul if matches!(a, Value::Str(_) | Value::Array(_)) => Ok(groovy_mul(a, b)),
         // Arithmetic other than `+` on a non-numeric operand has no slice-1
         // meaning (`String.minus`/`multiply` GDK overloads are not modeled yet).

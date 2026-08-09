@@ -190,8 +190,9 @@ Implemented and checked against Apache Groovy:
 - **Closure-driven GDK** — over lists, ranges and a `String`'s characters:
   `each`, `eachWithIndex`, `reverseEach`, `collect`, `collectMany`,
   `collectEntries`, `findAll`, `find`, `findResult`, `findIndexOf`, `any`,
-  `every`, `count`, `inject`, `sum`, `sort`, `toSorted`, `unique`, `toUnique`,
-  `max`, `min`, `groupBy`, `split`, `takeWhile`, `dropWhile`, `join`, `reverse`
+  `every`, `count`, `countBy`, `inject`, `sum`, `sort`, `toSorted`, `unique`,
+  `toUnique`, `max`, `min`, `groupBy`, `split`, `takeWhile`, `dropWhile`,
+  `findIndexValues`, `join`, `reverse`
   (`[1,2,3].collect { it * 2 }` → `[2, 4, 6]`), plus `with`/`tap` on any value
   and the `Number` loops `times` / `upto` / `downto` / `step`. A one-parameter
   closure to `sort`/`max`/`min`/`unique` is a key extractor, a two-parameter one
@@ -199,15 +200,35 @@ Implemented and checked against Apache Groovy:
   do; a multi-parameter closure receives a list element *spread* across its
   parameters (`[[1,2],[3,4]].collect { a, b -> a + b }` → `[3, 7]`). Over maps:
   `each`, `collect`, `collectEntries`, `findAll`, `find`, `any`, `every`,
-  `groupBy`, `inject`, `sort`, `max`, `min` — a two-parameter closure gets
-  `(key, value)`, a one-parameter closure a `Map.Entry`.
-- **Pure GDK** — lists answer `take`, `drop`, `first`, `head`, `last`, `tail`,
-  `init`, `indexOf`, `flatten`, `intersect`, `minus`, `plus`, `disjoint`,
-  `transpose`, `collate`, `combinations`, `permutations`, `withIndex`, `toSet`,
+  `groupBy`, `countBy`, `count`, `inject`, `sort`, `max`, `min`, `withDefault` —
+  a two-parameter closure gets `(key, value)`, a one-parameter closure a
+  `Map.Entry`.
+- **`with` / `tap` delegate the closure to the receiver** — a bare call the
+  script cannot resolve dispatches against it (`[:].with { put('a', 1) }`,
+  `'abc'.with { toUpperCase() }`), innermost `with` first, and a script closure
+  of the same name still wins (Groovy's `OWNER_FIRST`). A mutator writes
+  through, so `[1, 2].tap { add(3) }` is `[1, 2, 3]`.
+- **Closure combinators** — `curry` / `rcurry` / `ncurry`, `memoize`,
+  `andThen` / `compose` / `<<`, and `clone`, each answering another closure that
+  reports the arity it still accepts.
+- **Pure GDK** — lists answer `take`, `drop`, `takeRight`, `dropRight`, `first`,
+  `head`, `last`, `tail`, `init`, `pop`, `removeLast`, `swap`, `getAt`,
+  `indexOf`, `flatten`, `intersect`, `minus`, `plus` (including the
+  `plus(index, other)` splice), `disjoint`, `transpose`, `collate`,
+  `combinations`, `permutations`, `withIndex`, `indexed`, `iterator`, `toSet`,
   `toList` and the mutators; strings answer `indexOf`, `replace`, `split`,
   `tokenize`, `charAt`, `substring`, `padLeft`/`padRight`/`center`, `capitalize`,
-  `take`/`drop`, `multiply`, `startsWith`/`endsWith`; maps answer `put`,
-  `remove`, `getOrDefault`, `entrySet`, `containsValue`, `putAll`, `clear`.
+  `take`/`drop`, `multiply`, `minus`, `startsWith`/`endsWith`, `tr`,
+  `stripIndent`, `stripMargin`, `expand`, `normalize`/`denormalize`, `formatted`
+  and the `isInteger`/`isLong`/`isDouble`/`isBigDecimal`/`isBigInteger`/`isNumber`
+  predicates; maps answer `put`, `remove`, `getOrDefault`, `entrySet`, `keySet`,
+  `values`, `subMap`, `spread`, `minus`, `intersect`, `iterator`,
+  `containsValue`, `putAll`, `clear`. Numbers answer `power`, the scaled
+  `round(n)` and `trunc([n])`, `intdiv`, `abs` and the conversions.
+- **`<=>` needs a `Comparable`** — a list, a map, a set, a range and a user class
+  with no `compareTo` are not, so `[1, 2] <=> [1, 3]` raises the
+  `IllegalArgumentException` Groovy raises (even for two equal lists) rather than
+  inventing an order. `null` still orders before everything.
 - **JDK statics** — `Math` (`max`, `min`, `abs`, `round`, `sqrt`, `floor`,
   `ceil`, `pow`, the trig and log family, `PI`, `E`), `Integer.parseInt` /
   `MAX_VALUE` / `toHexString`, `Long`, `Double`, `Boolean`, and
@@ -342,7 +363,9 @@ Groovy scripts — top-level statements, `def`/typed locals, user-defined
 functions (recursion over the native `Op::Call` frame ABI), closures
 (`{ a, b -> … }` / implicit `{ it }`, `.call` and direct invocation) with the
 closure-driven GDK (`each` / `collect` / `findAll` / `find` / `inject` / `sum` /
-`sort` / `groupBy` / `max` / `min` / `join`) and the spread operator
+`sort` / `groupBy` / `countBy` / `max` / `min` / `join`), the closure
+combinators (`curry` / `rcurry` / `ncurry` / `memoize` / `andThen` / `compose`),
+delegating `with` / `tap`, and the spread operator
 and nested-closure upvalue capture (curried `{ x -> { y -> x + y } }`, chained
 `f(a)(b)`), classes (fields, constructors, methods, `this`, property get/set with
 auto getter/setter, `new`, `toString`, `getAt` subscript) on a host object heap,
@@ -374,8 +397,9 @@ Next waves, in priority order:
 5. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
    `"$s".getClass()` reports `java.lang.String` where Groovy reports
    `org.codehaus.groovy.runtime.GStringImpl`.
-6. **A broader standard library** — more `java.util`/GDK collection methods
-   (`entrySet().iterator()`, `withDefault`, …).
+6. **A `Set` type.** `as Set` / `toSet()` / `new HashSet(…)` build a
+   de-duplicated *list*, which prints and iterates like a `LinkedHashSet` but
+   reports `java.util.ArrayList` and does not re-deduplicate under `+`.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
 

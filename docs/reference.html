@@ -587,13 +587,13 @@ println("hello"[1])   // =&gt; 3 then e</code></pre>
         <article class="doc-entry" id="doc-operators-22">
           <h3><a class="doc-anchor" href="#doc-operators-22">#</a> <code>..</code></h3>
           <pre><code class="lang-groovy">a..b</code></pre>
-          <p>An inclusive range. groovyrs materialises a range to a plain list at lowering time, so `(0..3).class.simpleName` is `ArrayList` where Groovy answers `IntRange` — and printing one shows `[0, 1, 2, 3]` where Groovy shows `0..3`.</p>
+          <p>An inclusive range — a `groovy.lang.Range` object, so `(0..3).class.simpleName` is `IntRange` and printing one shows `0..3`. Being a `java.util.List` in Groovy, every list method and operator applies to it as well.</p>
           <pre><code class="lang-groovy">println(0..3)   // =&gt; [0, 1, 2, 3]</code></pre>
         </article>
         <article class="doc-entry" id="doc-operators-23">
           <h3><a class="doc-anchor" href="#doc-operators-23">#</a> <code>..&lt;</code></h3>
           <pre><code class="lang-groovy">a..&lt;b</code></pre>
-          <p>A half-open range: the endpoint is decremented before the range is materialised.</p>
+          <p>A half-open range: the endpoint is excluded, so `(0..&lt;3)` enumerates `0, 1, 2` and prints `0..&lt;3`.</p>
           <pre><code class="lang-groovy">println(0..&lt;3)   // =&gt; [0, 1, 2]</code></pre>
         </article>
         <article class="doc-entry" id="doc-operators-24">
@@ -931,6 +931,66 @@ println([1, 2, 3].sum { it * 2 })   // =&gt; 6 then 12</code></pre>
           <p>A map from each closure result to the sublist of elements that produced it, with keys in first-seen order. The key is the rendered form of the closure's result.</p>
           <pre><code class="lang-groovy">println([1, 2, 3].groupBy { it % 2 })   // =&gt; [1:[1, 3], 0:[2]]</code></pre>
         </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-13">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-13">#</a> <code>countBy</code></h3>
+          <pre><code class="lang-groovy">list.countBy { it -&gt; key } -&gt; Map</code></pre>
+          <p>A map from each closure result to how many elements produced it, keys in first-seen order.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3, 4].countBy { it % 2 })   // =&gt; [1:2, 0:2]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-closure-methods-14">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-closure-methods-14">#</a> <code>findIndexValues</code></h3>
+          <pre><code class="lang-groovy">list.findIndexValues([from]) { it -&gt; … } -&gt; List</code></pre>
+          <p>Every index whose element the closure accepts, where `findIndexOf` answers only the first. An optional leading argument is the index to start from.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3].findIndexValues { it &gt; 1 })   // =&gt; [1, 2]</code></pre>
+        </article>
+      </section>
+
+      <section class="tutorial-section" id="ch-gdk-closure">
+        <h2>GDK — Closure</h2>
+        <article class="doc-entry" id="doc-gdk-closure-1">
+          <h3><a class="doc-anchor" href="#doc-gdk-closure-1">#</a> <code>curry</code></h3>
+          <pre><code class="lang-groovy">closure.curry(args…) -&gt; Closure</code></pre>
+          <p>A closure with `args` bound to the *leading* parameters; the rest are supplied at call time.</p>
+          <pre><code class="lang-groovy">def add = { a, b -&gt; a + b }
+println add.curry(1)(2)   // =&gt; 3</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-closure-2">
+          <h3><a class="doc-anchor" href="#doc-gdk-closure-2">#</a> <code>rcurry</code></h3>
+          <pre><code class="lang-groovy">closure.rcurry(args…) -&gt; Closure</code></pre>
+          <p>As `curry`, but the bound values go at the *end* of the supplied arguments.</p>
+          <pre><code class="lang-groovy">def sub = { a, b -&gt; a - b }
+println sub.rcurry(1)(5)   // =&gt; 4</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-closure-3">
+          <h3><a class="doc-anchor" href="#doc-gdk-closure-3">#</a> <code>ncurry</code></h3>
+          <pre><code class="lang-groovy">closure.ncurry(n, args…) -&gt; Closure</code></pre>
+          <p>As `curry`, but the bound values are spliced in at index `n` of the argument list.</p>
+          <pre><code class="lang-groovy">def three = { a, b, c -&gt; "$a$b$c" }
+println three.ncurry(1, "X")("a", "c")   // =&gt; aXc</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-closure-4">
+          <h3><a class="doc-anchor" href="#doc-gdk-closure-4">#</a> <code>memoize</code></h3>
+          <pre><code class="lang-groovy">closure.memoize() -&gt; Closure</code></pre>
+          <p>A closure that runs the body once per distinct argument list and answers the recorded result thereafter. The cache is keyed by the rendered arguments and shared by every holder of the handle.</p>
+          <pre><code class="lang-groovy">def n = 0
+def f = { n++; it * 2 }.memoize()
+f(3); f(3)
+println n   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-closure-5">
+          <h3><a class="doc-anchor" href="#doc-gdk-closure-5">#</a> <code>andThen</code></h3>
+          <pre><code class="lang-groovy">closure.andThen(other) -&gt; Closure</code></pre>
+          <p>Composition running the receiver first and feeding its result to `other` — the same as Groovy's `&gt;&gt;`.</p>
+          <pre><code class="lang-groovy">def inc = { it + 1 }
+println inc.andThen { it * 2 }(3)   // =&gt; 8</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-closure-6">
+          <h3><a class="doc-anchor" href="#doc-gdk-closure-6">#</a> <code>compose</code></h3>
+          <pre><code class="lang-groovy">closure.compose(other) -&gt; Closure</code></pre>
+          <p>Composition running `other` first — the same as Groovy's `&lt;&lt;`.</p>
+          <pre><code class="lang-groovy">def inc = { it + 1 }
+println inc.compose { it * 2 }(3)   // =&gt; 7</code></pre>
+        </article>
       </section>
 
       <section class="tutorial-section" id="ch-gdk-map">
@@ -971,6 +1031,30 @@ println([1, 2, 3].sum { it * 2 })   // =&gt; 6 then 12</code></pre>
           <p>The values in insertion order, as a plain list.</p>
           <pre><code class="lang-groovy">println([a: 1, b: 2].values())   // =&gt; [1, 2]</code></pre>
         </article>
+        <article class="doc-entry" id="doc-gdk-map-7">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-7">#</a> <code>subMap</code></h3>
+          <pre><code class="lang-groovy">map.subMap(keys) | map.subMap(k1, k2, …) -&gt; Map</code></pre>
+          <p>The entries for the listed keys, in the *receiver's* order. A key the map does not hold is dropped rather than read as `null`.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].subMap(["a"]))   // =&gt; [a:1]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-8">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-8">#</a> <code>spread</code></h3>
+          <pre><code class="lang-groovy">map.spread() -&gt; Map</code></pre>
+          <p>A shallow copy of the map.</p>
+          <pre><code class="lang-groovy">println([a: 1].spread())   // =&gt; [a:1]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-9">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-9">#</a> <code>intersect</code></h3>
+          <pre><code class="lang-groovy">map.intersect(other) -&gt; Map</code></pre>
+          <p>The entries `other` holds identically — same key *and* same value. `map.minus(other)` (`map - other`) is the complement.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].intersect([a: 1]))   // =&gt; [a:1]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-10">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-10">#</a> <code>iterator</code></h3>
+          <pre><code class="lang-groovy">map.iterator() -&gt; Iterator</code></pre>
+          <p>A live cursor over the map's entries. Also defined on a list, a range and a `String`; `next()` advances the shared handle and raises `NoSuchElementException` past the end.</p>
+          <pre><code class="lang-groovy">println([a: 1].iterator().next())   // =&gt; a=1</code></pre>
+        </article>
       </section>
 
       <section class="tutorial-section" id="ch-gdk-map-closure-methods">
@@ -1008,41 +1092,61 @@ println([1, 2, 3].sum { it * 2 })   // =&gt; 6 then 12</code></pre>
         <article class="doc-entry" id="doc-gdk-map-closure-methods-6">
           <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-6">#</a> <code>any</code></h3>
           <pre><code class="lang-groovy">map.any { k, v -&gt; … } -&gt; Boolean</code></pre>
-          <p>True when the closure accepts at least one entry; stops at the first acceptance. Map-only: Apache Groovy also defines `any` on a list, and groovyrs does not — a list receiver raises `MissingMethodException`.</p>
+          <p>True when the closure accepts at least one entry; stops at the first acceptance.</p>
           <pre><code class="lang-groovy">println([a: 1, b: 2].any { k, v -&gt; v &gt; 1 })   // =&gt; true</code></pre>
         </article>
         <article class="doc-entry" id="doc-gdk-map-closure-methods-7">
           <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-7">#</a> <code>every</code></h3>
           <pre><code class="lang-groovy">map.every { k, v -&gt; … } -&gt; Boolean</code></pre>
-          <p>True when the closure accepts every entry; stops at the first rejection. Map-only, like `any`, and missing from lists for the same reason.</p>
+          <p>True when the closure accepts every entry; stops at the first rejection.</p>
           <pre><code class="lang-groovy">println([a: 1, b: 2].every { k, v -&gt; v &gt; 0 })   // =&gt; true</code></pre>
         </article>
         <article class="doc-entry" id="doc-gdk-map-closure-methods-8">
-          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-8">#</a> <code>groupBy</code></h3>
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-8">#</a> <code>count</code></h3>
+          <pre><code class="lang-groovy">map.count { k, v -&gt; … } -&gt; Integer</code></pre>
+          <p>How many entries the closure accepts.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].count { k, v -&gt; v &gt; 1 })   // =&gt; 1</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-9">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-9">#</a> <code>countBy</code></h3>
+          <pre><code class="lang-groovy">map.countBy { k, v -&gt; key } -&gt; Map</code></pre>
+          <p>A map from each closure result to how many entries produced it, keys in first-seen order.</p>
+          <pre><code class="lang-groovy">println([a: 1, b: 2].countBy { k, v -&gt; v % 2 })   // =&gt; [1:1, 0:1]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-10">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-10">#</a> <code>withDefault</code></h3>
+          <pre><code class="lang-groovy">map.withDefault { key -&gt; … } -&gt; Map</code></pre>
+          <p>A copy whose missing-key read runs the closure with that key, *stores* the result under it, and answers it — Groovy's `MapWithDefault`, which grows as it is read.</p>
+          <pre><code class="lang-groovy">def m = [:].withDefault { 0 }
+println m["z"]
+println m   // =&gt; 0 then [z:0]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-11">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-11">#</a> <code>groupBy</code></h3>
           <pre><code class="lang-groovy">map.groupBy { k, v -&gt; key } -&gt; Map</code></pre>
           <p>A map from each closure result to the *sub-map* of entries that produced it, keys in first-seen order.</p>
           <pre><code class="lang-groovy">println([a: 1, b: 2].groupBy { k, v -&gt; v % 2 })   // =&gt; [1:[a:1], 0:[b:2]]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-gdk-map-closure-methods-9">
-          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-9">#</a> <code>inject</code></h3>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-12">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-12">#</a> <code>inject</code></h3>
           <pre><code class="lang-groovy">map.inject(seed) { acc, entry -&gt; … } -&gt; Object</code></pre>
           <p>Fold over the entries, passing the accumulator and one `Map.Entry`. Unlike the list form the seed is required here.</p>
           <pre><code class="lang-groovy">println([a: 1, b: 2].inject(0) { a, e -&gt; a + e.value })   // =&gt; 3</code></pre>
         </article>
-        <article class="doc-entry" id="doc-gdk-map-closure-methods-10">
-          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-10">#</a> <code>sort</code></h3>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-13">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-13">#</a> <code>sort</code></h3>
           <pre><code class="lang-groovy">map.sort([{ entry -&gt; key }]) -&gt; Map</code></pre>
           <p>A new map ordered by key, or by the closure's key over each entry. Unlike `List.sort` this never mutates or writes back to the receiver, which is also Groovy's behaviour.</p>
           <pre><code class="lang-groovy">println([b: 1, a: 2].sort())   // =&gt; [a:2, b:1]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-gdk-map-closure-methods-11">
-          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-11">#</a> <code>max</code></h3>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-14">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-14">#</a> <code>max</code></h3>
           <pre><code class="lang-groovy">map.max { entry -&gt; key } -&gt; Map.Entry</code></pre>
           <p>The entry whose closure key is greatest, as a `Map.Entry`. The closure is required.</p>
           <pre><code class="lang-groovy">println([a: 2, b: 1].max { it.value })   // =&gt; a=2</code></pre>
         </article>
-        <article class="doc-entry" id="doc-gdk-map-closure-methods-12">
-          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-12">#</a> <code>min</code></h3>
+        <article class="doc-entry" id="doc-gdk-map-closure-methods-15">
+          <h3><a class="doc-anchor" href="#doc-gdk-map-closure-methods-15">#</a> <code>min</code></h3>
           <pre><code class="lang-groovy">map.min { entry -&gt; key } -&gt; Map.Entry</code></pre>
           <p>The entry whose closure key is least, as a `Map.Entry`.</p>
           <pre><code class="lang-groovy">println([a: 2, b: 1].min { it.value })   // =&gt; b=1</code></pre>
@@ -1589,7 +1693,7 @@ println(1.5 instanceof BigDecimal)   // =&gt; true then false</code></pre>
         <article class="doc-entry" id="doc-type-names-16">
           <h3><a class="doc-anchor" href="#doc-type-names-16">#</a> <code>List</code></h3>
           <pre><code class="lang-groovy">value instanceof List</code></pre>
-          <p>True for a list value — including a materialised range, since a range is a list.</p>
+          <p>True for a list value — including a range, since a Groovy `Range` is a `java.util.List`.</p>
           <pre><code class="lang-groovy">println([1] instanceof List)   // =&gt; true</code></pre>
         </article>
         <article class="doc-entry" id="doc-type-names-17">

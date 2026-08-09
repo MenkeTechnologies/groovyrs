@@ -2297,8 +2297,9 @@ fn a_long_operand_widens_the_arithmetic_to_64_bits() {
     // The `L` is the only difference between these and the wrapping forms
     // above — the runtime values are identical, so this is what proves the
     // compiler's static width reaches the host.
-    let (out, _) =
-        run("println(2147483647 + 1L)\nprintln(1000000L * 1000000)\nprintln(2000000000L + 2000000000L)");
+    let (out, _) = run(
+        "println(2147483647 + 1L)\nprintln(1000000L * 1000000)\nprintln(2000000000L + 2000000000L)",
+    );
     assert_eq!(out, "2147483648\n1000000000000\n4000000000\n");
 }
 
@@ -2306,7 +2307,8 @@ fn a_long_operand_widens_the_arithmetic_to_64_bits() {
 fn a_long_accumulator_accumulates_past_integer_range() {
     // The declared width has to win over the running value's magnitude: `t` is
     // still inside `Integer` range when the second `+=` overflows it.
-    let (out, _) = run("long t = 0\nt += 2000000000\nt += 2000000000\nprintln(t)\nprintln(t.getClass())");
+    let (out, _) =
+        run("long t = 0\nt += 2000000000\nt += 2000000000\nprintln(t)\nprintln(t.getClass())");
     assert_eq!(out, "4000000000\nclass java.lang.Long\n");
     // A `def` initialised from an `L` literal is a `Long` the same way.
     let (out, _) = run("def t = 0L\nt += 2000000000\nt += 2000000000\nprintln(t)");
@@ -2344,7 +2346,10 @@ fn the_negated_minimum_literal_is_an_integer() {
     // `-2147483648` is `Integer.MIN_VALUE`, even though `2147483648` alone is a
     // `Long` — so subtracting one from it wraps rather than widening.
     let (out, _) = run("println(-2147483648 - 1)\nprintln((-2147483648).getClass())\nprintln(-Integer.MIN_VALUE)\nprintln(Math.abs(Integer.MIN_VALUE))");
-    assert_eq!(out, "2147483647\nclass java.lang.Integer\n-2147483648\n-2147483648\n");
+    assert_eq!(
+        out,
+        "2147483647\nclass java.lang.Integer\n-2147483648\n-2147483648\n"
+    );
 }
 
 #[test]
@@ -2374,4 +2379,163 @@ fn radix_and_separated_integer_literals() {
 fn narrowing_conversions_keep_the_targets_low_bits() {
     let (out, _) = run("println(2147483648L as int)\nprintln(300 as byte)\nprintln(3.9 as int)\nprintln(3000000000L.intValue())\nprintln(Integer.MIN_VALUE.intdiv(-1))");
     assert_eq!(out, "-2147483648\n44\n3\n-1294967296\n-2147483648\n");
+}
+
+#[test]
+fn iterator_is_a_live_cursor_over_a_list_a_map_and_a_string() {
+    // `next()` advances the shared handle, so a second holder sees the move, and
+    // an exhausted iterator raises `NoSuchElementException`.
+    let (out, _) = run(
+        "def it = [1, 2, 3].iterator()\nprintln it.next()\nprintln it.hasNext()\n\
+         println([a: 1, b: 2].entrySet().iterator().next().key\n)\n\
+         println([a: 1].iterator().next())\nprintln('ab'.iterator().next())\n\
+         println([1, 2].iterator().getClass().getName())\n\
+         def e = [1].iterator()\ne.next()\ntry { e.next() } catch (t) { println t.getClass().getName() }",
+    );
+    assert_eq!(
+        out,
+        "1\ntrue\na\na=1\na\njava.util.ArrayList$Itr\njava.util.NoSuchElementException\n"
+    );
+}
+
+#[test]
+fn pop_takes_the_first_element_and_remove_last_the_last() {
+    // Groovy's `List.pop` is not a stack pop — it removes the *head*. Both it
+    // and `removeLast` raise on an empty list, each naming its own method.
+    let (out, _) = run("def a = [1, 2, 3]\nprintln a.pop()\nprintln a\n\
+         def b = [1, 2, 3]\nprintln b.removeLast()\nprintln b\n\
+         try { [].pop() } catch (t) { println t.getMessage() }\n\
+         try { [].removeLast() } catch (t) { println t.getMessage() }");
+    assert_eq!(
+        out,
+        "1\n[2, 3]\n3\n[1, 2]\nCannot pop() an empty List\nCannot removeLast() an empty List\n"
+    );
+}
+
+#[test]
+fn indexed_answers_a_map_where_with_index_answers_pairs() {
+    let (out, _) = run(
+        "println([1, 2, 3].indexed())\nprintln([1, 2, 3].indexed(1))\nprintln([1, 2, 3].withIndex())",
+    );
+    assert_eq!(
+        out,
+        "[0:1, 1:2, 2:3]\n[1:1, 2:2, 3:3]\n[[1, 0], [2, 1], [3, 2]]\n"
+    );
+}
+
+#[test]
+fn combinations_varies_the_first_sub_collection_fastest() {
+    let (out, _) = run("println([[1, 2], [3, 4]].combinations())");
+    assert_eq!(out, "[[1, 3], [2, 3], [1, 4], [2, 4]]\n");
+}
+
+#[test]
+fn spaceship_raises_for_a_receiver_that_is_not_comparable() {
+    // A list, a map and a range are not `Comparable`, so `<=>` raises rather
+    // than inventing an order — even for two *equal* lists. `null` still orders
+    // before everything.
+    let (out, _) = run(
+        "try { [1, 2] <=> [1, 2] } catch (t) { println t.getMessage() }\n\
+         try { [a: 1] <=> 1 } catch (t) { println t.getMessage() }\n\
+         println(null <=> 1)\nprintln(1 <=> null)\nprintln('a' <=> 'b')",
+    );
+    assert_eq!(
+        out,
+        "Cannot compare java.util.ArrayList with value '[1, 2]' and java.util.ArrayList with value '[1, 2]'\n\
+         Cannot compare java.util.LinkedHashMap with value '{a=1}' and java.lang.Integer with value '1'\n\
+         -1\n1\n-1\n"
+    );
+}
+
+#[test]
+fn map_with_default_stores_the_computed_value() {
+    // `groovy.lang.MapWithDefault` grows: a missing-key read runs the closure
+    // *and* records its result under that key.
+    let (out, _) = run(
+        "def m = [a: 1].withDefault { 0 }\nprintln m['z']\nprintln m\n\
+         def n = [:].withDefault { k -> k.size() }\nn['abc']\nprintln n",
+    );
+    assert_eq!(out, "0\n[a:1, z:0]\n[abc:3]\n");
+}
+
+#[test]
+fn map_sub_map_minus_and_intersect_compare_whole_entries() {
+    let (out, _) = run(
+        "println([a: 1, b: 2].subMap(['a']))\nprintln([a: 1, b: 2].subMap('a', 'b'))\n\
+         println([a: 1].subMap(['z']))\nprintln([a: 1, b: 2] - [a: 1])\n\
+         println([a: 1, b: 2] - [a: 9])\nprintln([a: 1, b: 2].intersect([a: 1]))",
+    );
+    assert_eq!(out, "[a:1]\n[a:1, b:2]\n[:]\n[b:2]\n[a:1, b:2]\n[a:1]\n");
+}
+
+#[test]
+fn string_translation_indent_and_margin_stripping() {
+    // `tr` expands ranges on both sides (a reversed one too) and repeats the
+    // last replacement; `stripIndent` opts out of the outdent when the string
+    // ends in a line terminator, as Java's does.
+    let (out, _) = run(
+        "println('abc'.tr('a-c', 'x-z'))\nprintln('abc'.tr('abc', 'z'))\n\
+         println('abc'.tr('c-a', 'x-z'))\n\
+         println('  a\\n   b'.stripIndent() + '|')\n\
+         println('  a\\n  b\\n'.stripIndent() + '|')\n\
+         println('    a\\n    b'.stripIndent(2) + '|')\n\
+         println('|a\\n |b'.stripMargin())",
+    );
+    assert_eq!(out, "xyz\nzzz\nzyx\na\n b|\n  a\n  b\n|\n  a\n  b|\na\nb\n");
+}
+
+#[test]
+fn string_conversion_predicates_and_tab_expansion() {
+    let (out, _) = run(
+        "println([' 42'.isInteger(), '4.2'.isInteger(), '42'.isBigInteger(), '4.2'.isBigInteger()])\n\
+         println('a\\tb'.expand() + '|')\nprintln('a\\tb'.expand(4) + '|')\n\
+         println('abcb'.minus('b'))\nprintln('a1b2'.minus(~/\\d/))\nprintln('%s-%d'.formatted('a', 1))",
+    );
+    assert_eq!(
+        out,
+        "[true, false, true, false]\na       b|\na   b|\nacb\nab2\na-1\n"
+    );
+}
+
+#[test]
+fn scaled_rounding_truncation_and_power() {
+    // `round(n)`/`trunc(n)` keep the receiver's type; `trunc()` with no scale
+    // answers a `BigInteger`.
+    let (out, _) = run(
+        "println(3.14.round(1))\nprintln(3.15d.round(1))\nprintln(3.7.trunc())\n\
+         println((-3.7).trunc())\nprintln(3.789.trunc(2))\nprintln(3.7d.trunc())\n\
+         println(10.power(3))\nprintln(2.power(-1))\nprintln(2.0.power(3))",
+    );
+    assert_eq!(out, "3.1\n3.2\n3\n-3\n3.78\n3.0\n1000\n0.5\n8.000\n");
+}
+
+#[test]
+fn closure_currying_composition_and_memoization() {
+    // `rcurry` counts its insertion point back from the end of the supplied
+    // arguments, and `memoize` runs the body once per distinct argument list.
+    let (out, _) = run(
+        "def add = { a, b -> a + b }\nprintln add.curry(1)(2)\nprintln add.curry(1, 2)()\n\
+         def sub = { a, b -> a - b }\nprintln sub.rcurry(1)(5)\n\
+         def three = { a, b, c -> \"$a$b$c\" }\nprintln three.ncurry(1, 'X')('a', 'c')\n\
+         def n = 0\ndef twice = { n++; it * 2 }.memoize()\nprintln twice(3)\nprintln twice(3)\nprintln n\n\
+         def inc = { it + 1 }\ndef dbl = { it * 2 }\nprintln inc.andThen(dbl)(3)\nprintln inc.compose(dbl)(3)\n\
+         println((inc << dbl)(3))",
+    );
+    assert_eq!(out, "3\n3\n4\naXc\n6\n6\n1\n8\n7\n7\n");
+}
+
+#[test]
+fn with_and_tap_make_the_receiver_the_closures_delegate() {
+    // Groovy's `OWNER_FIRST`: the script is tried first (so a same-named
+    // closure wins), then the delegate. A mutator writes through, which is what
+    // `tap` answers.
+    let (out, _) = run("def m = [:]\nm.with { put('a', 1) }\nprintln m\n\
+         println([1, 2].with { size() })\nprintln('abc'.with { toUpperCase() })\n\
+         println([1, 2].tap { add(3) })\nprintln([1, 2].with { [3].with { size() } })\n\
+         def size = { 99 }\nprintln([1, 2].with { size() })\n\
+         try { [1, 2].with { zork() } } catch (t) { println t.getClass().getName() }");
+    assert_eq!(
+        out,
+        "[a:1]\n2\nABC\n[1, 2, 3]\n1\n99\ngroovy.lang.MissingMethodException\n"
+    );
 }

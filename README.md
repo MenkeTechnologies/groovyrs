@@ -226,8 +226,9 @@ Implemented and checked against Apache Groovy:
   `head`, `last`, `tail`, `init`, `pop`, `removeLast`, `swap`, `getAt`,
   `indexOf`, `flatten`, `intersect`, `minus`, `plus` (including the
   `plus(index, other)` splice), `disjoint`, `transpose`, `collate`,
-  `combinations`, `permutations`, `withIndex`, `indexed`, `iterator`, `toSet`,
-  `subList`,
+  `combinations`, `permutations` and `subsequences` (both answering the
+  `java.util.HashSet<List>` Groovy does, in the JDK's bucket order),
+  `withIndex`, `indexed`, `iterator`, `toSet`, `subList`,
   `toList` and the mutators; strings answer `indexOf`, `replace`, `split`,
   `tokenize`, `charAt`, `substring`, `padLeft`/`padRight`/`center`, `capitalize`,
   `take`/`drop`, `multiply`, `minus`, `startsWith`/`endsWith`, `tr`,

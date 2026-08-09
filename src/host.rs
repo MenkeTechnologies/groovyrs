@@ -4063,6 +4063,35 @@ fn dispatch_iteration(
             }
             Some(Ok(Value::array(out)))
         }
+        // `list.permutations { it -> … }` is Groovy's `collect(permutations(self),
+        // closure)` — the permutation *set* walked in its own bucket order, with
+        // the closure's results in an `ArrayList`.
+        "permutations" => {
+            let clo = args.last()?;
+            closure_meta(clo)?;
+            let perms = set_elements(
+                &dedup_values(
+                    permutations_of(items)
+                        .into_iter()
+                        .map(Value::array)
+                        .collect(),
+                ),
+                SetKind::Hash {
+                    req: DEFAULT_HASH_REQ,
+                },
+            );
+            let mut out = Vec::with_capacity(perms.len());
+            for p in &perms {
+                match invoke_closure(vm, clo, &item_args(clo, p)) {
+                    Ok(v) => out.push(v),
+                    Err(e) => return Some(Err(e)),
+                }
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+            }
+            Some(Ok(Value::array(out)))
+        }
         // `list.findAll { it -> pred }` — keep the elements the closure accepts.
         "findAll" => {
             let clo = args.last()?;
@@ -5493,11 +5522,24 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
             Value::array(out.into_iter().map(Value::array).collect())
         }
-        (Value::Array(a), "permutations") => Value::array(
+        // `permutations` and `subsequences` answer a `java.util.HashSet<List>`,
+        // not a list — so they de-duplicate (`[1, 1].permutations()` is one
+        // entry) and print in the JDK's bucket order rather than generation
+        // order. Both feed a bare `new HashSet<>()`, whose table starts at 16.
+        (Value::Array(a), "permutations") if args.is_empty() => make_set(
             permutations_of(a)
                 .into_iter()
                 .map(Value::array)
                 .collect::<Vec<_>>(),
+            SetKind::Hash {
+                req: DEFAULT_HASH_REQ,
+            },
+        ),
+        (Value::Array(a), "subsequences") => make_set(
+            subsequences_of(a),
+            SetKind::Hash {
+                req: DEFAULT_HASH_REQ,
+            },
         ),
         // `list.withIndex([offset])` pairs each element with its position…
         (Value::Array(a), "withIndex") => {
@@ -7072,6 +7114,16 @@ fn java_hash(v: &Value) -> Option<i32> {
             (*n ^ ((*n as u64) >> 32) as i64) as i32
         }),
         Value::Bool(b) => Some(if *b { 1231 } else { 1237 }),
+        // `null` hashes to 0 both as a `HashMap` key and as a `List` element
+        // (`Objects.hashCode(null)`), though a bare `null.hashCode()` throws.
+        Value::Undef => Some(0),
+        // `List.hashCode` — `31 * acc + element.hashCode()` from 1. This is what
+        // puts a `HashSet<List>` (`permutations()`, `subsequences()`) in the
+        // order Groovy prints. An element with no reproducible hash makes the
+        // whole list's unreproducible too.
+        Value::Array(items) => items.iter().try_fold(1i32, |h, e| {
+            Some(h.wrapping_mul(31).wrapping_add(java_hash(e)?))
+        }),
         // `String.hashCode` — `s[0]*31^(n-1) + …`, wrapping at 32 bits.
         Value::Str(s) => Some(
             s.encode_utf16()
@@ -7089,6 +7141,11 @@ fn table_size_for(n: usize) -> usize {
     }
     cap.max(1)
 }
+
+/// The initial capacity a bare `new HashSet<>()` asks for — the JDK's
+/// `DEFAULT_INITIAL_CAPACITY`. The GDK methods that answer a set built that way
+/// (`permutations`, `subsequences`) iterate against this table size.
+const DEFAULT_HASH_REQ: usize = 16;
 
 /// The initial capacity `new HashSet(Collection c)` asks for:
 /// `Math.max((int) (c.size() / .75f) + 1, 16)`. `toSet()` does *not* go through
@@ -7149,13 +7206,22 @@ fn set_elements(items: &[Value], kind: SetKind) -> Vec<Value> {
 /// makes `[1, 2, 2, 3] as Set` three elements and, applied to every operator
 /// result, what makes the set operators re-de-duplicate.
 fn make_set(items: Vec<Value>, kind: SetKind) -> Value {
+    heap_push(HeapObj::SetVal {
+        items: dedup_values(items),
+        kind,
+    })
+}
+
+/// `items` with every later duplicate dropped — `Set.add`'s answer for an
+/// element already present is `false`, and it leaves the first one in place.
+fn dedup_values(items: Vec<Value>) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for v in items {
         if !out.iter().any(|k| values_equal(k, &v)) {
             out.push(v);
         }
     }
-    heap_push(HeapObj::SetVal { items: out, kind })
+    out
 }
 
 /// Replace a set handle's elements in place, keeping its kind. This is how a
@@ -7426,6 +7492,60 @@ fn permutations_of(items: &[Value]) -> Vec<Vec<Value>> {
         }
     }
     out
+}
+
+/// `list.subsequences()` — every non-empty ordered subset, in the *insertion*
+/// order `groovy.util.GroovyCollections.subsequences` adds them to its
+/// `HashSet`. A faithful port of that method, which grows the answer one element
+/// at a time:
+///
+/// ```text
+/// Set<List<T>> ans = new HashSet<>();
+/// for (T h : items) {
+///     Set<List<T>> next = new HashSet<>();
+///     for (List<T> it : ans) { List<T> t = new ArrayList<>(it); t.add(h); next.add(t); }
+///     next.addAll(ans);
+///     List<T> l = new ArrayList<>(); l.add(h); next.add(l);
+///     ans = next;
+/// }
+/// ```
+///
+/// Both inner loops walk `ans` in *its* `HashSet` order, and that order decides
+/// where each subsequence lands in `next` — so reproducing Groovy's printed
+/// answer means reproducing the bucket walk at every intermediate step, not only
+/// the last. [`set_elements`] is what supplies it.
+fn subsequences_of(items: &[Value]) -> Vec<Value> {
+    // `ans` is kept in insertion order; `set_elements` reads it back in the
+    // order a `HashSet` would iterate it.
+    let mut ans: Vec<Value> = Vec::new();
+    for h in items {
+        let seen = set_elements(
+            &ans,
+            SetKind::Hash {
+                req: DEFAULT_HASH_REQ,
+            },
+        );
+        let mut next: Vec<Value> = Vec::new();
+        let add = |v: Value, next: &mut Vec<Value>| {
+            if !next.iter().any(|k| values_equal(k, &v)) {
+                next.push(v);
+            }
+        };
+        for it in &seen {
+            let mut extended = match it {
+                Value::Array(a) => a.clone(),
+                _ => continue,
+            };
+            extended.push(h.clone());
+            add(Value::array(extended), &mut next);
+        }
+        for it in &seen {
+            add(it.clone(), &mut next);
+        }
+        add(Value::array(vec![h.clone()]), &mut next);
+        ans = next;
+    }
+    ans
 }
 
 /// Drop the entries of an ordered-map handle whose key `keep` rejects, mutating

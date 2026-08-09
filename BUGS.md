@@ -53,6 +53,15 @@ reported as parse or compile errors, never silently mis-run.
   methods whose Groovy result is a `List` rather than a `Set` (`collect`, `sort`,
   `toList`) still answer a list, and `+` dispatches on its left operand, so
   `[1, 2] + ([2, 3] as Set)` is the four-element `[1, 2, 2, 3]`.
+- **`permutations()` / `subsequences()`.** Both answer a
+  `java.util.HashSet<List>`, so they de-duplicate (`[1, 1].permutations()` is one
+  entry) and print in the JDK's bucket order rather than generation order —
+  `[1,2,3].subsequences()` is `[[1], [1, 2, 3], [2], [2, 3], [1, 2], [3], [1, 3]]`.
+  That needs `List.hashCode` (`31 * acc + element`) through the spread and bucket
+  walk below, at *every* intermediate step for `subsequences`, whose answer is
+  grown one element at a time and whose insertion order into each round's set is
+  the previous round's bucket order. `permutations { … }` is `collect` over that
+  same set and answers an `ArrayList`; `combinations()` really is a `List`.
 - **`HashSet` iteration order.** A `HashSet` presents its elements in the JDK's
   table order — a stable sort of the insertion sequence by
   `(capacity - 1) & (h ^ (h >>> 16))` — rather than in insertion order, so
@@ -373,12 +382,6 @@ reported as parse or compile errors, never silently mis-run.
   name is `[I`), and groovyrs models only the `List`. Modeling it as a `List`
   would make `[1, 2, 3].length` answer where Groovy raises, so the construct
   faults instead.
-- **`list.subsequences()`.** Groovy answers a `java.util.HashSet<List>`, and
-  `println` shows it in Java's *hash-bucket* order — `[1,2,3].subsequences()`
-  prints `[[1], [1, 2, 3], [2], [2, 3], [1, 2], [3], [1, 3]]`, which is neither
-  generation nor sorted order. Reproducing that means reproducing
-  `List.hashCode`, `HashMap`'s spread and its bucket walk; answering in any other
-  order would print the wrong thing, so the method faults instead.
 - **`new Random(…)` / `new Date(…)` and the other stateful JDK classes.**
   Reproducing them means reproducing Java's exact LCG and clock, so they fault
   rather than answering a plausible-looking different number. The instantiable

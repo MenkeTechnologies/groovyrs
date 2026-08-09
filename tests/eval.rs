@@ -2775,3 +2775,68 @@ fn big_integer_converts_its_receiver_and_stays_one_through_unary_minus() {
         )
     );
 }
+
+#[test]
+fn subsequences_answers_a_hash_set_in_the_jdks_bucket_order() {
+    // `subsequences()` is a `java.util.HashSet<List>`, so it prints in the JDK's
+    // table order — `List.hashCode` (`31 * acc + element`) spread through
+    // `(cap - 1) & (h ^ (h >>> 16))` — which is neither generation nor sorted
+    // order. The answer is grown one element at a time and each round's set is
+    // traversed in *its* bucket order, so the intermediate steps have to be
+    // reproduced too, not only the last.
+    let (out, ok) = run(concat!(
+        "println([1,2,3].subsequences())\n",
+        "println([1,2,3].subsequences().getClass())\n",
+        "println([1,2].subsequences())\n",
+        "println([1,2,3,4].subsequences())\n",
+        "println(['a','b','c'].subsequences())\n",
+        "println([1,1,2].subsequences())\n",
+        "println([].subsequences())\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[[1], [1, 2, 3], [2], [2, 3], [1, 2], [3], [1, 3]]\n",
+            "class java.util.HashSet\n",
+            "[[1], [2], [1, 2]]\n",
+            "[[1], [1, 3, 4], [1, 2, 3], [2], [2, 3, 4], [1, 2, 4], [3, 4], [2, 3], [1, 2], [3], [2, 4], [1, 3], [4], [1, 4], [1, 2, 3, 4]]\n",
+            "[[a, b, c], [a], [b], [b, c], [a, b], [c], [a, c]]\n",
+            "[[1], [1, 1, 2], [1, 1], [2], [1, 2]]\n",
+            "[]\n"
+        )
+    );
+}
+
+#[test]
+fn permutations_answers_a_hash_set_too() {
+    // Same story as `subsequences`: `permutations()` is a `HashSet`, so it
+    // de-duplicates and its order depends on the *input*, not only on the
+    // element set. It used to answer an `ArrayList` in generation order.
+    // `combinations()` really is a `List`, and the closure form of
+    // `permutations` is `collect` over the set.
+    let (out, ok) = run(concat!(
+        "println([1,2].permutations())\n",
+        "println([1,2].permutations().getClass())\n",
+        "println([1,2,3].permutations())\n",
+        "println([3,1,2].permutations())\n",
+        "println([1,1].permutations())\n",
+        "println([1,2,3].permutations { it.join('') })\n",
+        "println([1,2,3].permutations { it.join('') }.getClass())\n",
+        "println([[1,2],[3,4]].combinations().getClass())\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[[2, 1], [1, 2]]\n",
+            "class java.util.HashSet\n",
+            "[[1, 2, 3], [3, 2, 1], [2, 1, 3], [3, 1, 2], [1, 3, 2], [2, 3, 1]]\n",
+            "[[3, 2, 1], [1, 2, 3], [3, 1, 2], [2, 1, 3], [1, 3, 2], [2, 3, 1]]\n",
+            "[[1, 1]]\n",
+            "[123, 321, 213, 312, 132, 231]\n",
+            "class java.util.ArrayList\n",
+            "class java.util.ArrayList\n"
+        )
+    );
+}

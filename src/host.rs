@@ -23,7 +23,6 @@
 
 use crate::decimal;
 use bigdecimal::{BigDecimal, Zero};
-use fancy_regex::Regex;
 use fusevm::{Frame, NumOp, VMResult, Value, VM};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -185,6 +184,14 @@ pub const GIS_CASE_TYPE: u16 = 738;
 /// pattern text; pushes the compiled pattern handle.
 pub const GREGEX: u16 = 739;
 
+/// Groovy's `=~` find operator. Stack: the subject (deepest), then the pattern;
+/// pushes a `java.util.regex.Matcher` positioned before the first match.
+pub const GMATCH: u16 = 757;
+
+/// Groovy's `==~` match operator. Stack: the subject (deepest), then the
+/// pattern; pushes a `Boolean` — whether the pattern matches the whole subject.
+pub const GMATCH_FULL: u16 = 758;
+
 /// Clear the power-assert value recorder, at the top of an `assert`.
 pub const GASSERT_START: u16 = 740;
 
@@ -313,6 +320,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GIS_CASE, b_is_case);
     vm.register_builtin(GIS_CASE_TYPE, b_is_case_type);
     vm.register_builtin(GREGEX, b_regex);
+    vm.register_builtin(GMATCH, b_match);
+    vm.register_builtin(GMATCH_FULL, b_match_full);
     vm.register_builtin(GASSERT_START, b_assert_start);
     vm.register_builtin(GASSERT_REC, b_assert_rec);
     vm.register_builtin(GASSERT_FAIL, b_assert_fail);
@@ -654,6 +663,12 @@ fn java_class_name(v: &Value) -> String {
     if let Some((class, _)) = as_buffer(v) {
         return class.to_string();
     }
+    if regex_source(v).is_some() {
+        return "java.util.regex.Pattern".to_string();
+    }
+    if as_matcher(v).is_some() {
+        return "java.util.regex.Matcher".to_string();
+    }
     match v {
         Value::Str(_) => "java.lang.String",
         Value::Float(_) => "java.lang.Double",
@@ -880,11 +895,15 @@ enum HeapObj {
     /// comparison op through [`numeric_hook`], where [`crate::decimal`] applies
     /// Groovy's exact scale rules.
     Dec(BigDecimal),
-    /// A compiled `~/…/` pattern — Groovy's `java.util.regex.Pattern`. Held on
-    /// the heap because it is a value a `switch` label (and a variable) can
-    /// carry, and because compiling it once per literal beats recompiling it on
-    /// every match.
-    Regex(Box<Pattern>),
+    /// A `~/…/` pattern — Groovy's `java.util.regex.Pattern`. Held on the heap
+    /// because it is a value a `switch` label (and a variable) can carry, and
+    /// because its *source* is what `toString` prints. The compiled form lives
+    /// in [`crate::regex`]'s cache, keyed by that source.
+    Regex(String),
+    /// A live `java.util.regex.Matcher` — what `text =~ pattern` yields. Stateful
+    /// like Java's: `find()` moves its cursor and `group(n)` reads whatever the
+    /// last one landed on, so it must be shared by handle rather than copied.
+    Matcher(MatcherVal),
     /// A `java.lang.Class` — what `getClass()` / the `.class` property answers.
     /// Holds the fully-qualified class name (a script-declared class has no
     /// package, so its qualified and simple names coincide).
@@ -1107,6 +1126,13 @@ fn groovy_truthy(vm: &mut VM, v: &Value) -> bool {
             // A `StringBuilder` is a `CharSequence`, whose truth is non-empty.
             if let Some((_, text)) = as_buffer(v) {
                 return !text.is_empty();
+            }
+            // Groovy's `asBoolean(Matcher)` *is* `matcher.find()` — it advances
+            // the cursor, which is what makes `while (m) { … }` walk the
+            // matches and `(s =~ /x/) ? …` ask "does one exist".
+            if let Some(m) = as_matcher(v) {
+                let handle = v.clone();
+                return matcher_find(vm, &handle, &m);
             }
             // A closure handle is an object: always true.
             if closure_meta(v).is_some() {
@@ -1938,26 +1964,18 @@ fn b_instanceof(vm: &mut VM, _argc: u8) -> Value {
     Value::bool(value_is_a(&value, &class))
 }
 
-/// A `~/…/` literal: its source (which is how Groovy's `Pattern` prints) and the
-/// compiled *whole-string* matcher. Groovy's `case ~/…/` is
-/// `Pattern.matcher(s).matches()`, an all-or-nothing match, so the compiled form
-/// is anchored once here rather than re-derived at every comparison.
-struct Pattern {
-    source: String,
-    whole: Regex,
-}
-
-/// `GREGEX`: compile a `~/…/` literal's source into a pattern handle. An
-/// unsupported pattern faults at the literal, which is where the mistake is.
+/// `GREGEX`: compile a `~/…/` literal's source into a `java.util.regex.Pattern`
+/// handle. An unsupported construct faults at the literal, which is where the
+/// mistake is — see [`crate::regex`] for what "unsupported" means and why the
+/// alternative (handing it to the engine anyway) answers a different question.
 fn b_regex(vm: &mut VM, argc: u8) -> Value {
     let source = pop_args(vm, argc)
         .into_iter()
         .next()
         .map(|v| v.as_str_cow().into_owned())
         .unwrap_or_default();
-    // `(?:…)` keeps a top-level alternation from binding past the anchors.
-    match Regex::new(&format!(r"\A(?:{source})\z")) {
-        Ok(whole) => heap_push(HeapObj::Regex(Box::new(Pattern { source, whole }))),
+    match &*crate::regex::compile(&source) {
+        Ok(_) => heap_push(HeapObj::Regex(source)),
         Err(e) => {
             fault(vm, format!("groovyrs: bad regex `{source}`: {e}"));
             Value::Undef
@@ -1965,27 +1983,237 @@ fn b_regex(vm: &mut VM, argc: u8) -> Value {
     }
 }
 
-/// If `v` is a heap pattern handle, does `text` match it in full?
-fn regex_matches(v: &Value, text: &str) -> Option<bool> {
+/// If `v` is a heap pattern handle, its source text — how Groovy renders a
+/// `Pattern`, and what every match on it recompiles from (the compile is cached
+/// by source in [`crate::regex`], so a pattern in a loop compiles once).
+fn regex_source(v: &Value) -> Option<String> {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
-            Some(HeapObj::Regex(p)) => Some(p.whole.is_match(text).unwrap_or(false)),
+            Some(HeapObj::Regex(p)) => Some(p.clone()),
             _ => None,
         }),
         _ => None,
     }
 }
 
-/// If `v` is a heap pattern handle, its source text — how Groovy renders a
-/// `Pattern`.
-fn regex_source(v: &Value) -> Option<String> {
+/// If `v` is a heap pattern handle, does `text` match it in full? Groovy's
+/// `case ~/…/` is `Pattern.matcher(s).matches()`, an all-or-nothing match.
+fn regex_matches(v: &Value, text: &str) -> Option<bool> {
+    let source = regex_source(v)?;
+    match &*crate::regex::compile_whole(&source) {
+        Ok(p) => Some(p.matches_whole(text).unwrap_or(false)),
+        Err(_) => Some(false),
+    }
+}
+
+/// The pattern source a `=~`/`==~` right operand names: a `Pattern` handle
+/// (`~/…/`) contributes its own source, and any other value its string form —
+/// which is how a slashy string (`/a./`, a plain `String` in Groovy) and a
+/// double-quoted one both work as patterns.
+fn pattern_source_of(v: &Value) -> String {
+    regex_source(v).unwrap_or_else(|| groovy_str(v))
+}
+
+/// `GMATCH`: Groovy's `text =~ pattern` — a `java.util.regex.Matcher` over the
+/// subject, positioned before the first match. Stack: subject (deepest), then
+/// the pattern.
+fn b_match(vm: &mut VM, _argc: u8) -> Value {
+    let pattern = vm.stack.pop().unwrap_or(Value::Undef);
+    let text = groovy_str(&vm.stack.pop().unwrap_or(Value::Undef));
+    let source = pattern_source_of(&pattern);
+    if let Err(e) = &*crate::regex::compile(&source) {
+        raise(vm, "PatternSyntaxException", e);
+        return Value::Undef;
+    }
+    heap_push(HeapObj::Matcher(MatcherVal {
+        source,
+        text,
+        pos: 0,
+        last: None,
+    }))
+}
+
+/// `GMATCH_FULL`: Groovy's `text ==~ pattern` — whether the pattern matches the
+/// **whole** subject. Stack: subject (deepest), then the pattern.
+fn b_match_full(vm: &mut VM, _argc: u8) -> Value {
+    let pattern = vm.stack.pop().unwrap_or(Value::Undef);
+    let text = groovy_str(&vm.stack.pop().unwrap_or(Value::Undef));
+    let source = pattern_source_of(&pattern);
+    match &*crate::regex::compile_whole(&source) {
+        Ok(p) => Value::bool(p.matches_whole(&text).unwrap_or(false)),
+        Err(e) => {
+            raise(vm, "PatternSyntaxException", e);
+            Value::Undef
+        }
+    }
+}
+
+/// Clone the matcher behind a handle, if `v` is one.
+fn as_matcher(v: &Value) -> Option<MatcherVal> {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
-            Some(HeapObj::Regex(p)) => Some(p.source.clone()),
+            Some(HeapObj::Matcher(m)) => Some(m.clone()),
             _ => None,
         }),
         _ => None,
     }
+}
+
+/// Write a matcher's cursor and last match back through its handle. Java's
+/// `Matcher` is mutable, so `m.find()` has to be visible to the next call.
+fn matcher_advance(v: &Value, pos: usize, last: Option<crate::regex::Match>) {
+    if let Value::Obj(id) = v {
+        HEAP.with(|h| {
+            if let Some(HeapObj::Matcher(m)) = h.borrow_mut().get_mut(*id as usize) {
+                m.pos = pos;
+                m.last = last;
+            }
+        });
+    }
+}
+
+/// `Matcher.find()` — advance the cursor to the next match, answering whether
+/// there was one. A zero-width match still advances, so the walk terminates.
+fn matcher_find(vm: &mut VM, handle: &Value, m: &MatcherVal) -> bool {
+    let compiled = crate::regex::compile(&m.source);
+    let Ok(p) = &*compiled else { return false };
+    match p.find(&m.text, m.pos) {
+        Ok(Some(hit)) => {
+            let next = if hit.end == hit.start {
+                hit.end + 1
+            } else {
+                hit.end
+            };
+            matcher_advance(handle, next, Some(hit));
+            true
+        }
+        Ok(None) => {
+            matcher_advance(handle, m.text.len() + 1, None);
+            false
+        }
+        Err(e) => {
+            fault(vm, format!("groovyrs: {e}"));
+            false
+        }
+    }
+}
+
+/// Every match in a matcher's subject, which is what `size()`, `count`, `[i]`
+/// and iterating one all run over. Independent of the cursor, exactly as
+/// Groovy's own `DefaultGroovyMethods` re-walks the matcher from the start.
+fn matcher_all(m: &MatcherVal) -> Vec<crate::regex::Match> {
+    match &*crate::regex::compile(&m.source) {
+        Ok(p) => p.find_all(&m.text).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// One match as the value Groovy's `Matcher[i]` and the `each`/`collect` closure
+/// receive: the matched text when the pattern has no groups, and the list
+/// `[whole, g1, g2, …]` when it has. A group that did not participate is `null`.
+fn match_value(hit: &crate::regex::Match) -> Value {
+    if hit.groups.len() <= 1 {
+        return Value::str(hit.groups[0].clone().unwrap_or_default());
+    }
+    Value::array(
+        hit.groups
+            .iter()
+            .map(|g| match g {
+                Some(t) => Value::str(t.clone()),
+                None => Value::Undef,
+            })
+            .collect(),
+    )
+}
+
+/// The `java.util.regex.Matcher` methods a Groovy script calls. `None` for a
+/// method that is not a matcher's, so the caller reports it missing.
+///
+/// `group`/`start`/`end` read the *last* `find`, which is why the matcher is
+/// mutable; `size`/`count`/`getAt` re-walk the subject instead, which is what
+/// Groovy's collection view of a matcher does.
+fn dispatch_matcher_method(
+    vm: &mut VM,
+    handle: &Value,
+    m: &MatcherVal,
+    method: &str,
+    args: &[Value],
+) -> Option<Value> {
+    let group = |n: usize| match m.last.as_ref().and_then(|h| h.groups.get(n)) {
+        Some(Some(t)) => Value::str(t.clone()),
+        Some(None) => Value::Undef,
+        // Java raises `IllegalStateException` before the first `find`; groovyrs
+        // reports the same shape through the fault path.
+        None => Value::Undef,
+    };
+    Some(match method {
+        // Answered here rather than falling through to the match list, which
+        // would name `java.util.ArrayList`.
+        "getClass" => heap_push(HeapObj::ClassRef("java.util.regex.Matcher".to_string())),
+        "toString" => Value::str(matcher_str(m)),
+        "find" => Value::bool(matcher_find(vm, handle, m)),
+        // `group` before any successful `find` is Java's `IllegalStateException`,
+        // not a null — a script that reads it has a real bug.
+        "group" if m.last.is_none() => {
+            raise(vm, "IllegalStateException", "No match found");
+            Value::Undef
+        }
+        "group" => group(args.first().and_then(as_i64).unwrap_or(0).max(0) as usize),
+        "groupCount" => Value::int(match &*crate::regex::compile(&m.source) {
+            Ok(p) => p.group_count() as i64,
+            Err(_) => 0,
+        }),
+        "start" => Value::int(m.last.as_ref().map(|h| h.start as i64).unwrap_or(-1)),
+        "end" => Value::int(m.last.as_ref().map(|h| h.end as i64).unwrap_or(-1)),
+        // `matches()` asks whether the pattern covers the whole subject, which
+        // is a different question from `find()` and does not move the cursor.
+        "matches" => match &*crate::regex::compile_whole(&m.source) {
+            Ok(p) => Value::bool(p.matches_whole(&m.text).unwrap_or(false)),
+            Err(_) => Value::bool(false),
+        },
+        "size" | "count" | "getCount" => Value::int(matcher_all(m).len() as i64),
+        "pattern" | "getPattern" => heap_push(HeapObj::Regex(m.source.clone())),
+        "reset" => {
+            matcher_advance(handle, 0, None);
+            handle.clone()
+        }
+        "getAt" => {
+            let all = matcher_all(m);
+            let i = args.first().and_then(as_i64).unwrap_or(0);
+            let idx = if i < 0 { all.len() as i64 + i } else { i };
+            match usize::try_from(idx).ok().and_then(|u| all.get(u)) {
+                Some(hit) => match_value(hit),
+                None => Value::Undef,
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// `Matcher.toString()` — Java's own shape, `java.util.regex.Matcher[pattern=P
+/// region=0,N lastmatch=M]`, where `lastmatch` is empty until a `find` succeeds.
+fn matcher_str(m: &MatcherVal) -> String {
+    let last = m
+        .last
+        .as_ref()
+        .and_then(|h| h.groups.first().cloned().flatten())
+        .unwrap_or_default();
+    format!(
+        "java.util.regex.Matcher[pattern={} region=0,{} lastmatch={last}]",
+        m.source,
+        m.text.chars().count()
+    )
+}
+
+/// A live `java.util.regex.Matcher`: the pattern source, the subject, the byte
+/// offset the next `find()` searches from, and the match the last one landed on
+/// (which `group(n)`, `start()` and `end()` read).
+#[derive(Clone)]
+pub struct MatcherVal {
+    source: String,
+    text: String,
+    pos: usize,
+    last: Option<crate::regex::Match>,
 }
 
 /// `GIS_CASE_TYPE`: Groovy's `case SomeType:` — `subject instanceof SomeType`.
@@ -2451,6 +2679,11 @@ fn b_index(vm: &mut VM, _argc: u8) -> Value {
     // is `1`, and `list[1..2]` is the sublist at those positions.
     let recv = range_as_list(&recv);
     let index = range_as_list(&index);
+    // `m[0]` is `Matcher.getAt(0)` — the i-th match, as the matched text or as
+    // `[whole, g1, …]` when the pattern has groups.
+    if as_matcher(&recv).is_some() {
+        return dispatch_call(vm, recv, "getAt", vec![index]);
+    }
     if as_instance(&recv).is_some() {
         return match dispatch_instance_method(vm, &recv, "getAt", &[index]) {
             Some(Ok(v)) => v,
@@ -2805,6 +3038,16 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             return v;
         }
     }
+    // A `Matcher` is mutable too — `find()` moves its cursor — so it is answered
+    // through its handle. Anything it does not define runs over its matches,
+    // which is Groovy's collection view of a matcher (`each`, `collect`, …).
+    if let Some(m) = as_matcher(&recv) {
+        if let Some(v) = dispatch_matcher_method(vm, &recv, &m, method, &args) {
+            return v;
+        }
+        let hits: Vec<Value> = matcher_all(&m).iter().map(match_value).collect();
+        return dispatch_call(vm, Value::array(hits), method, args);
+    }
     // A method on a class instance: a user method (implicit `this`) or Groovy's
     // auto getter/setter over a field. Checked first — an instance handle is a
     // `Value::Obj`, the same tag closures use.
@@ -2871,6 +3114,51 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
                 }
             };
         }
+    }
+    // `String.replaceAll`/`replaceFirst`, whose replacement is either Java's
+    // `$n`/`${name}` grammar or — Groovy's addition — a closure called with each
+    // match. The closure form re-enters the VM, which is why this sits here
+    // rather than in the pure GDK table.
+    if let (Value::Str(s), "replaceAll" | "replaceFirst") = (&recv, method) {
+        let first_only = method == "replaceFirst";
+        let pattern = args.first().map(pattern_source_of).unwrap_or_default();
+        let compiled = crate::regex::compile(&pattern);
+        let p = match &*compiled {
+            Ok(p) => p,
+            Err(e) => {
+                raise(vm, "PatternSyntaxException", e);
+                return Value::Undef;
+            }
+        };
+        let replacement = args.get(1).cloned().unwrap_or(Value::Undef);
+        let result = if closure_meta(&replacement).is_some() {
+            // The closure receives the whole match when the pattern has no
+            // groups, and `(whole, g1, …)` when it has — so
+            // `"a1b2".replaceAll(/(\d)/) { all, d -> "<$d>" }` is `a<1>b<2>`.
+            p.replace_with(s, first_only, |hit| {
+                let args: Vec<Value> = if hit.groups.len() <= 1 {
+                    vec![match_value(hit)]
+                } else {
+                    hit.groups
+                        .iter()
+                        .map(|g| match g {
+                            Some(t) => Value::str(t.clone()),
+                            None => Value::Undef,
+                        })
+                        .collect()
+                };
+                invoke_closure(vm, &replacement, &args).map(|v| groovy_str(&v))
+            })
+        } else {
+            p.replace(s, &groovy_str(&replacement), first_only)
+        };
+        return match result {
+            Ok(text) => Value::str(text),
+            Err(e) => {
+                fault(vm, format!("groovyrs: {e}"));
+                Value::Undef
+            }
+        };
     }
     // A `String` iterates over its characters, so the same closure-driven GDK
     // applies. The `each` family answers the receiver itself, not a list.
@@ -3824,16 +4112,60 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         }
         // `split` takes a regex, `tokenize` a set of delimiter characters
         // (whitespace when omitted) and drops the empty tokens.
+        //
+        // `String.split`'s specified rules are not a bare engine split: a
+        // zero-width match at index 0 contributes no leading empty field
+        // (`"abc".split("")` is `[a, b, c]`), and the default limit drops
+        // *trailing* empties but keeps interior ones (`"a,b,,".split(",")` is
+        // `[a, b]`). Both live in `crate::regex`.
         (Value::Str(s), "split") => {
-            let pattern = args.first().map(groovy_str).unwrap_or_default();
-            match Regex::new(&pattern) {
-                Ok(re) => Value::array(
-                    re.split(s)
-                        .map(|p| Value::str(p.unwrap_or_default().to_string()))
-                        .collect(),
-                ),
+            let pattern = args.first().map(pattern_source_of).unwrap_or_default();
+            let limit = args.get(1).and_then(as_i64).unwrap_or(0);
+            match &*crate::regex::compile(&pattern) {
+                Ok(p) => match p.split(s, limit) {
+                    Ok(parts) => Value::array(parts.into_iter().map(Value::str).collect()),
+                    Err(e) => {
+                        raise(vm, "IllegalArgumentException", &e);
+                        Value::Undef
+                    }
+                },
                 Err(e) => {
-                    raise(vm, "IllegalArgumentException", &e.to_string());
+                    raise(vm, "PatternSyntaxException", e);
+                    Value::Undef
+                }
+            }
+        }
+        // `String.matches(regex)` anchors to the whole input.
+        (Value::Str(s), "matches") => {
+            let pattern = args.first().map(pattern_source_of).unwrap_or_default();
+            match &*crate::regex::compile_whole(&pattern) {
+                Ok(p) => Value::bool(p.matches_whole(s).unwrap_or(false)),
+                Err(e) => {
+                    raise(vm, "PatternSyntaxException", e);
+                    Value::Undef
+                }
+            }
+        }
+        // `findAll` answers every match, `find` the first (or `null`).
+        (Value::Str(s), "findAll" | "find") if !args.is_empty() => {
+            let pattern = args.first().map(pattern_source_of).unwrap_or_default();
+            match &*crate::regex::compile(&pattern) {
+                Ok(p) => {
+                    let hits = p.find_all(s).unwrap_or_default();
+                    if method == "find" {
+                        return match hits.first() {
+                            Some(h) => Value::str(h.groups[0].clone().unwrap_or_default()),
+                            None => Value::Undef,
+                        };
+                    }
+                    Value::array(
+                        hits.iter()
+                            .map(|h| Value::str(h.groups[0].clone().unwrap_or_default()))
+                            .collect(),
+                    )
+                }
+                Err(e) => {
+                    raise(vm, "PatternSyntaxException", e);
                     Value::Undef
                 }
             }
@@ -5113,6 +5445,13 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     if name == "class" {
         return class_ref_of(recv);
     }
+    // A `Matcher`'s properties are its getters, Groovy's property-for-getter
+    // rule: `m.count` is `getCount()` and `m.pattern` is `pattern()`.
+    if let Some(m) = as_matcher(recv) {
+        if let Some(v) = dispatch_matcher_method(vm, recv, &m, name, &[]) {
+            return v;
+        }
+    }
     // A `Range`'s own properties are its endpoints; anything else reads off the
     // list it enumerates, exactly as its methods do.
     if let Some(r) = as_range(recv) {
@@ -5667,6 +6006,9 @@ pub fn groovy_str(v: &Value) -> String {
     // `toString` does.
     if let Some((_, text)) = as_buffer(v) {
         return text;
+    }
+    if let Some(m) = as_matcher(v) {
+        return matcher_str(&m);
     }
     // `java.lang.Class.toString` prefixes the qualified name with `class `.
     if let Some(name) = as_class_ref(v) {

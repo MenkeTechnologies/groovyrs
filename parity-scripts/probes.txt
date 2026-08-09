@@ -880,3 +880,95 @@ def f = { -> 5L }; def a = f(); def b = 1000000000; println a * b
 def a = Long.valueOf(5); def b = 1000000000; println a * b
 %%
 def a = 5; if (true) { a = 5L }; def b = 1000000000; println a * b
+%%
+println(/a.b/)
+%%
+println((/a.b/).getClass().getName())
+%%
+println(/\d+/)
+%%
+def x = 5; println(/a${x}b/)
+%%
+println((~/a.b/).getClass().getName())
+%%
+println((~/a.b/).toString())
+%%
+println(("ab" =~ /a./).getClass().getName())
+%%
+println("abc" ==~ /a./)
+%%
+println(("hello" =~ /l+/) ? "y" : "n")
+%%
+println(("hello" =~ /z/) ? "y" : "n")
+%%
+def m = ("2024-01" =~ /(\d+)-(\d+)/); m.find(); println m.group(0)
+%%
+def m = ("2024-01" =~ /(\d+)-(\d+)/); println m.groupCount()
+%%
+def m = ("2024-01" =~ /(\d+)-(\d+)/); println m[0]
+%%
+def m = ("a1b2" =~ /\d/); println m[0]
+%%
+def m = ("a1b2" =~ /\d/); println m.size()
+%%
+def m = ("a1b2c3" =~ /\d/); println m.count
+%%
+println(("abc" =~ /a.c/).matches())
+%%
+def m = ("hello" =~ /l+/); m.find(); println "" + m.start() + "," + m.end()
+%%
+def m = ("ab" =~ /a./); println m.pattern().toString()
+%%
+def r = []; def m = ("a1b2c3" =~ /\d/); while (m.find()) r << m.group(); println r
+%%
+println(("ab" =~ /a./).toString())
+%%
+def m = ("ab" =~ /a./); m.find(); println m.toString()
+%%
+def m = ("ab" =~ /a./); println m.group(0)
+%%
+def out = []; ("a1b2" =~ /\d/).each { out << it }; println out
+%%
+println("a1b2".replaceAll(/(\d)/) { all, d -> "<$d>" })
+%%
+println("a1b2".replaceAll(/\d/, "#"))
+%%
+println("a1b2".replaceFirst("\\d", "#"))
+%%
+println("abc".matches("a.c"))
+%%
+println("abc\n".matches("abc"))
+%%
+println("a,b,,".split(",").toString())
+%%
+println("abc".split("").toString())
+%%
+println("a,b,c".split(",", 2).toString())
+%%
+println("2024-01".replaceAll(/(\d+)-(\d+)/, '$2/$1'))
+%%
+println("a1b2".findAll(/\d/))
+%%
+println("a1b2".find(/\d/))
+%%
+println("١٢".replaceAll("\\d", "."))
+%%
+println("Ä".matches("(?i)ä"))
+%%
+println("ab".replaceAll(".", "X"))
+%%
+println("abc\n".replaceAll("c\$", "X").trim())
+%%
+println("aa".matches("(a)\\1"))
+%%
+println("ab".replaceAll("a(?=b)", "X"))
+%%
+switch("abc") { case ~/a.c/: println "hit"; break; default: println "miss" }
+%%
+println("abc" =~ "b" ? "y" : "n")
+%%
+def a = 10; def b = 2; println a / b
+%%
+println("a/b".split(/\//).toString())
+%%
+println("a(b".replace("(", "["))

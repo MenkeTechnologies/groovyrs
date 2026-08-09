@@ -24,6 +24,12 @@ const THROWABLES: &[(&str, &str, &str)] = &[
         "java.lang",
     ),
     ("IllegalStateException", "RuntimeException", "java.lang"),
+    // What a malformed (or unsupported) `~/…/` / `=~` pattern raises.
+    (
+        "PatternSyntaxException",
+        "IllegalArgumentException",
+        "java.util.regex",
+    ),
     ("ArithmeticException", "RuntimeException", "java.lang"),
     ("NullPointerException", "RuntimeException", "java.lang"),
     ("IndexOutOfBoundsException", "RuntimeException", "java.lang"),

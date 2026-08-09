@@ -121,6 +121,12 @@ pub enum Tok {
     Le,
     Ge,
     Spaceship, // `<=>` compareTo
+    /// `=~` — Groovy's *find* operator, which builds a `java.util.regex.Matcher`
+    /// over the left operand with the right one as its pattern.
+    Match,
+    /// `==~` — Groovy's *match* operator: whether the pattern matches the whole
+    /// left operand. Lexed before `==` so `a ==~ b` is never `a == (~b)`.
+    MatchFull,
     AndAnd,
     OrOr,
     Not,
@@ -451,51 +457,69 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             continue;
         }
 
-        // A `~/pattern/` regex literal. The `/` delimiter needs no escaping of
-        // regex metacharacters, so only `\/` is special inside it — every other
-        // backslash escape belongs to the pattern and passes through verbatim.
+        // A `~/pattern/` regex literal — a `java.util.regex.Pattern`.
         if bytes[i] == b'~' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            let mut j = i + 2;
-            let mut pattern = String::new();
-            loop {
-                if j >= bytes.len() || bytes[j] == b'\n' {
-                    return Err(format!(
-                        "groovyrs: unterminated regex literal on line {line}"
-                    ));
-                }
-                if bytes[j] == b'\\' && j + 1 < bytes.len() {
-                    if bytes[j + 1] == b'/' {
-                        pattern.push('/');
-                    } else {
-                        pattern.push('\\');
-                        pattern.push(bytes[j + 1] as char);
-                    }
-                    j += 2;
-                    continue;
-                }
-                if bytes[j] == b'/' {
-                    j += 1;
-                    break;
-                }
-                let ch = src[j..].chars().next().unwrap();
-                pattern.push(ch);
-                j += ch.len_utf8();
-            }
+            let (parts, next, lines) = scan_slashy(src, i + 2, line)?;
+            line += lines;
+            // `~/…/` is a *pattern*, and Groovy compiles the literal text; an
+            // interpolating one would have to build the source at run time,
+            // which groovyrs does not model.
+            let source: String = parts
+                .iter()
+                .map(|p| match p {
+                    GPart::Text(t) => t.clone(),
+                    GPart::Expr(e) => format!("${{{e}}}"),
+                })
+                .collect();
             out.push(Token {
-                kind: Tok::Regex(pattern),
+                kind: Tok::Regex(source),
                 line,
                 offset: tok_start,
             });
-            i = j;
+            i = next;
             continue;
         }
 
-        // operators & punctuation (longest match first)
-        let three = if i + 2 < bytes.len() {
-            &src[i..i + 3]
-        } else {
-            ""
-        };
+        // A slashy string `/…/` — an ordinary `String` whose backslashes are
+        // *not* escapes, which is why Groovy writes regexes in it: `/\d+/` is
+        // the four characters `\d+`. It is only a literal where an expression
+        // can begin; after a value the same `/` is division (`a / b`), which is
+        // what [`ends_expression`] decides. Comments are matched above, so a
+        // leading `//` or `/*` never reaches here.
+        if c == '/' && !out.last().map(|t| &t.kind).is_some_and(ends_expression) {
+            let (parts, next, lines) = scan_slashy(src, i + 1, line)?;
+            let start_line = line;
+            line += lines;
+            let kind = match parts.as_slice() {
+                [] => Tok::Str(String::new()),
+                [GPart::Text(t)] => Tok::Str(t.clone()),
+                _ => Tok::GStr(parts),
+            };
+            out.push(Token {
+                kind,
+                line: start_line,
+                offset: tok_start,
+            });
+            i = next;
+            continue;
+        }
+
+        // Operators & punctuation, longest match first. The lookahead slices go
+        // through `str::get`, which answers `None` rather than panicking when
+        // the window ends inside a multi-byte character — `println("١٢")` puts
+        // one two bytes past a `(`, and no operator spans a non-ASCII byte
+        // anyway.
+        let three = src.get(i..i + 3).unwrap_or("");
+        // `==~` before both `==` and `=~`, so it is never split.
+        if three == "==~" {
+            out.push(Token {
+                kind: Tok::MatchFull,
+                line,
+                offset: tok_start,
+            });
+            i += 3;
+            continue;
+        }
         if three == "..<" {
             out.push(Token {
                 kind: Tok::DotDotLt,
@@ -523,11 +547,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             i += 3;
             continue;
         }
-        let two = if i + 1 < bytes.len() {
-            &src[i..i + 2]
-        } else {
-            ""
-        };
+        let two = src.get(i..i + 2).unwrap_or("");
         let (kind, adv) = match two {
             ".." => (Tok::DotDot, 2),
             "->" => (Tok::Arrow, 2),
@@ -543,6 +563,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             "%=" => (Tok::PercentAssign, 2),
             "++" => (Tok::PlusPlus, 2),
             "--" => (Tok::MinusMinus, 2),
+            "=~" => (Tok::Match, 2),
             "==" => (Tok::EqEq, 2),
             "!=" => (Tok::NotEq, 2),
             "<=" => (Tok::Le, 2),
@@ -613,6 +634,101 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         offset: bytes.len(),
     });
     Ok(out)
+}
+
+/// Can a `/` directly after this token only be division?
+///
+/// This is the whole of Groovy's slashy-string disambiguation: `/` opens a
+/// literal wherever an expression may begin, and divides wherever one has just
+/// ended. The tokens below are the ones that end an expression — a name, a
+/// literal, a closing bracket, or a postfix `++`/`--`. Everything else (an
+/// operator, an opening bracket, a comma, a newline, a keyword, the start of the
+/// file) leaves the parser expecting an operand, so the `/` starts a literal.
+fn ends_expression(t: &Tok) -> bool {
+    matches!(
+        t,
+        Tok::Ident(_)
+            | Tok::Int(..)
+            | Tok::Float(_)
+            | Tok::Dec(_)
+            | Tok::Str(_)
+            | Tok::GStr(_)
+            | Tok::Regex(_)
+            | Tok::True
+            | Tok::False
+            | Tok::Null
+            | Tok::RParen
+            | Tok::RBracket
+            | Tok::RBrace
+            | Tok::PlusPlus
+            | Tok::MinusMinus
+    )
+}
+
+/// Scan a slashy literal's body, starting just past the opening `/`. Returns its
+/// parts, the index just past the closing `/`, and how many newlines it spanned
+/// (a slashy literal may cross lines).
+///
+/// Backslashes are **not** escapes here — `/\d+/` is the four characters `\d+`,
+/// which is the entire reason Groovy has this literal. The single exception is
+/// `\/`, the only way to write the delimiter itself. `$name` and `${ … }` still
+/// interpolate, exactly as in a double-quoted literal.
+fn scan_slashy(src: &str, start: usize, line: u32) -> Result<(Vec<GPart>, usize, u32), String> {
+    let bytes = src.as_bytes();
+    let mut i = start;
+    let mut lines = 0u32;
+    let mut text = String::new();
+    let mut parts: Vec<GPart> = Vec::new();
+    while i < bytes.len() && bytes[i] != b'/' {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            // Only the delimiter is unescaped; every other backslash is part of
+            // the pattern and both characters survive.
+            if bytes[i + 1] == b'/' {
+                text.push('/');
+            } else {
+                text.push('\\');
+                text.push(bytes[i + 1] as char);
+            }
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'$' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'{' {
+                let (inner, next) = scan_braced(src, i + 2, line + lines)?;
+                lines += src[i..next].matches('\n').count() as u32;
+                if !text.is_empty() {
+                    parts.push(GPart::Text(std::mem::take(&mut text)));
+                }
+                parts.push(GPart::Expr(inner));
+                i = next;
+                continue;
+            }
+            if is_ident_start(bytes[i + 1]) {
+                let (path, next) = scan_dotted_path(src, i + 1);
+                if !text.is_empty() {
+                    parts.push(GPart::Text(std::mem::take(&mut text)));
+                }
+                parts.push(GPart::Expr(path));
+                i = next;
+                continue;
+            }
+        }
+        let ch = src[i..].chars().next().unwrap();
+        if ch == '\n' {
+            lines += 1;
+        }
+        text.push(ch);
+        i += ch.len_utf8();
+    }
+    if i >= bytes.len() {
+        return Err(format!(
+            "groovyrs: unterminated slashy string on line {line}"
+        ));
+    }
+    if !text.is_empty() {
+        parts.push(GPart::Text(text));
+    }
+    Ok((parts, i + 1, lines))
 }
 
 /// Can this byte begin an interpolation placeholder's identifier? `$` is a legal

@@ -501,4 +501,10 @@ pub enum BinOp {
     UShr,
     /// `x in coll` — membership, which Groovy routes through `isCase`.
     In,
+    /// `=~` — the find operator. Yields a `java.util.regex.Matcher` positioned
+    /// before the first match; its truth is whether a match exists.
+    Match,
+    /// `==~` — the match operator. Yields a `Boolean`: whether the pattern
+    /// matches the **whole** left operand (`Matcher.matches()`, not `find()`).
+    MatchFull,
 }

@@ -18,6 +18,7 @@ pub mod host;
 pub mod lexer;
 pub mod lsp;
 pub mod parser;
+pub mod regex;
 pub mod rust_ffi;
 pub mod throwable;
 pub mod tiers;

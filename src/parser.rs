@@ -1907,9 +1907,9 @@ fn assign_op(t: &Tok) -> Option<AssignOp> {
 }
 
 /// Binary operator + its binding power (higher binds tighter). The ladder is
-/// Groovy's own: `||` < `&&` < `|` < `^` < `&` < equality < relational (which
-/// `instanceof`, `in` and `as` join) < shifts < additive < multiplicative <
-/// `**`.
+/// Groovy's own: `||` < `&&` < `|` < `^` < `&` < `=~`/`==~` < equality <
+/// relational (which `instanceof`, `in` and `as` join) < shifts < additive <
+/// multiplicative < `**`.
 fn binop(t: &Tok) -> Option<(BinOp, u8)> {
     Some(match t {
         Tok::OrOr => (BinOp::Or, 1),
@@ -1917,35 +1917,39 @@ fn binop(t: &Tok) -> Option<(BinOp, u8)> {
         Tok::Pipe => (BinOp::BitOr, 3),
         Tok::Caret => (BinOp::BitXor, 4),
         Tok::Amp => (BinOp::BitAnd, 5),
-        Tok::EqEq => (BinOp::Eq, 6),
-        Tok::NotEq => (BinOp::Ne, 6),
+        // The regex operators bind looser than `==`, so `a == b =~ c` groups as
+        // `(a == b) =~ c` — Groovy's own ordering.
+        Tok::Match => (BinOp::Match, 6),
+        Tok::MatchFull => (BinOp::MatchFull, 6),
+        Tok::EqEq => (BinOp::Eq, 7),
+        Tok::NotEq => (BinOp::Ne, 7),
         // `<=>` sits at Groovy's equality precedence, below relational ops.
-        Tok::Spaceship => (BinOp::Cmp, 6),
+        Tok::Spaceship => (BinOp::Cmp, 7),
         Tok::Lt => (BinOp::Lt, RELATIONAL_BP),
         Tok::Gt => (BinOp::Gt, RELATIONAL_BP),
         Tok::Le => (BinOp::Le, RELATIONAL_BP),
         Tok::Ge => (BinOp::Ge, RELATIONAL_BP),
         Tok::In => (BinOp::In, RELATIONAL_BP),
-        Tok::Shl => (BinOp::Shl, 8),
-        Tok::Shr => (BinOp::Shr, 8),
-        Tok::UShr => (BinOp::UShr, 8),
-        Tok::Plus => (BinOp::Add, 9),
-        Tok::Minus => (BinOp::Sub, 9),
-        Tok::Star => (BinOp::Mul, 10),
-        Tok::Slash => (BinOp::Div, 10),
-        Tok::Percent => (BinOp::Mod, 10),
-        Tok::Power => (BinOp::Power, 11),
+        Tok::Shl => (BinOp::Shl, 9),
+        Tok::Shr => (BinOp::Shr, 9),
+        Tok::UShr => (BinOp::UShr, 9),
+        Tok::Plus => (BinOp::Add, 10),
+        Tok::Minus => (BinOp::Sub, 10),
+        Tok::Star => (BinOp::Mul, 11),
+        Tok::Slash => (BinOp::Div, 11),
+        Tok::Percent => (BinOp::Mod, 11),
+        Tok::Power => (BinOp::Power, 12),
         _ => return None,
     })
 }
 
 /// The binding power of the relational band — where `instanceof`, `in` and the
 /// `as` cast also sit.
-const RELATIONAL_BP: u8 = 7;
+const RELATIONAL_BP: u8 = 8;
 
 /// The binding power a range endpoint parses at: one above the shift band,
 /// where Groovy puts `..` itself.
-const RANGE_OPERAND_BP: u8 = 9;
+const RANGE_OPERAND_BP: u8 = 10;
 
 /// Strip the power-assert recording wrapper off an expression.
 fn unrecorded(e: &Expr) -> &Expr {
@@ -2101,6 +2105,8 @@ fn binop_text(op: BinOp) -> &'static str {
         BinOp::Mul => "*",
         BinOp::Div => "/",
         BinOp::Mod => "%",
+        BinOp::Match => "=~",
+        BinOp::MatchFull => "==~",
         BinOp::Eq => "==",
         BinOp::Ne => "!=",
         BinOp::Lt => "<",

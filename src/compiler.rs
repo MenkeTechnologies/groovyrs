@@ -2675,6 +2675,9 @@ impl Compiler {
             BinOp::Shl => Some(crate::host::GSHL),
             BinOp::UShr => Some(crate::host::GUSHR),
             BinOp::In => Some(crate::host::GIN),
+            // `=~` builds a `Matcher`, `==~` answers a `Boolean`.
+            BinOp::Match => Some(crate::host::GMATCH),
+            BinOp::MatchFull => Some(crate::host::GMATCH_FULL),
             _ => None,
         };
         if let Some(id) = builtin {
@@ -2713,7 +2716,12 @@ impl Compiler {
             BinOp::Shr => Op::Shr,
             BinOp::Div | BinOp::Cmp => unreachable!("handled above"),
             BinOp::And | BinOp::Or => unreachable!("handled above"),
-            BinOp::Power | BinOp::Shl | BinOp::UShr | BinOp::In => {
+            BinOp::Power
+            | BinOp::Shl
+            | BinOp::UShr
+            | BinOp::In
+            | BinOp::Match
+            | BinOp::MatchFull => {
                 unreachable!("routed to a builtin above")
             }
         };

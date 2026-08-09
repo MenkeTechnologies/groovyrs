@@ -648,6 +648,12 @@ fn java_class_name(v: &Value) -> String {
             "java.lang.Long".to_string()
         };
     }
+    if let Some(r) = as_range(v) {
+        return range_class(&r).to_string();
+    }
+    if let Some((class, _)) = as_buffer(v) {
+        return class.to_string();
+    }
     match v {
         Value::Str(_) => "java.lang.String",
         Value::Float(_) => "java.lang.Double",
@@ -887,6 +893,34 @@ enum HeapObj {
     /// `each` / `collect` / `find` receives. Holds the entry's key and value; it
     /// prints as `k=v` and answers `key`/`value` (and `getKey`/`getValue`).
     Entry(String, Value),
+    /// A `groovy.lang.Range` — `1..5` / `1..<5` / `'a'..'e'`. Groovy's ranges
+    /// are objects, not lists: `println(1..5)` prints `1..5`, `getClass()` names
+    /// `groovy.lang.IntRange`, and `from`/`to`/`step`/`reverse` are its own
+    /// members. Materialising the literal to a list (which is what groovyrs did)
+    /// gets every one of those wrong, so the endpoints are kept and the elements
+    /// are enumerated on demand by [`range_elements`].
+    Range(RangeVal),
+    /// A mutable character buffer — `java.lang.StringBuilder`, its synchronised
+    /// twin `java.lang.StringBuffer`, and `java.io.StringWriter`. All three are
+    /// the same object here: a growable `String` behind a shared handle, so
+    /// `sb.append("a")` mutates the buffer the caller still holds and answers
+    /// it, which is what makes `sb.append("a").append(1)` chain. The class name
+    /// is kept so `getClass()` names the one that was constructed.
+    Buffer {
+        class: &'static str,
+        text: String,
+    },
+}
+
+/// A Groovy range: its endpoints as written, and whether the upper one is
+/// included (`1..5`) or not (`1..<5`). The endpoints are kept as `Value`s rather
+/// than as an enumerated list so `toString`, `getClass`, `from`, `to`, and
+/// `size()` all answer without walking anything.
+#[derive(Clone)]
+pub struct RangeVal {
+    from: Value,
+    to: Value,
+    inclusive: bool,
 }
 
 /// A registered closure: the body's name-pool index, its parameter count, and
@@ -1066,6 +1100,14 @@ fn groovy_truthy(vm: &mut VM, v: &Value) -> bool {
             if let Some(entries) = as_omap(v) {
                 return !entries.is_empty();
             }
+            // A range is a collection: true when it enumerates anything.
+            if let Some(r) = as_range(v) {
+                return !range_elements(&r).is_empty();
+            }
+            // A `StringBuilder` is a `CharSequence`, whose truth is non-empty.
+            if let Some((_, text)) = as_buffer(v) {
+                return !text.is_empty();
+            }
             // A closure handle is an object: always true.
             if closure_meta(v).is_some() {
                 return true;
@@ -1104,7 +1146,12 @@ fn b_gstring(vm: &mut VM, _argc: u8) -> Value {
     vals.reverse();
     let mut out = String::new();
     for v in &vals {
-        out.push_str(&render_value(vm, v));
+        // A `GString` placeholder goes through `InvokerHelper.write`, which
+        // writes any `Collection` as its elements — so an embedded range renders
+        // `[1, 2, 3]` where `println` and `+` (which take `toString`) render
+        // `1..3`. Verified against Apache Groovy 5.0.8: `"x${1..3}y"` is
+        // `x[1, 2, 3]y`.
+        out.push_str(&render_value(vm, &range_as_list(v)));
     }
     Value::str(out)
 }
@@ -1467,6 +1514,184 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
     Value::Undef
 }
 
+/// `new C(args)` for the JDK classes a Groovy script instantiates directly.
+/// `None` when `C` is not one of them, so the caller falls through to the
+/// script's own class registry (and then to the unresolved-class fault, which
+/// stays an honest error for a class groovyrs does not model).
+///
+/// The collection classes construct the value groovyrs already uses for that
+/// shape — a `Value::Array` for a `List`/`Set`, an ordered-map handle for a
+/// `Map` — so every GDK method on them already applies. The box types construct
+/// the primitive, which is what Groovy's auto-unboxing makes them anyway.
+fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
+    let first = || args.first().cloned().unwrap_or(Value::Undef);
+    let text = || args.first().map(groovy_str).unwrap_or_default();
+    Some(match simple_name_of(class).as_str() {
+        "StringBuilder" | "StringBuffer" | "StringWriter" => {
+            let qualified = match simple_name_of(class).as_str() {
+                "StringBuilder" => "java.lang.StringBuilder",
+                "StringBuffer" => "java.lang.StringBuffer",
+                _ => "java.io.StringWriter",
+            };
+            // `new StringBuilder(16)` sizes the buffer; only a `String`
+            // argument is initial *content*.
+            let text = match args.first() {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => String::new(),
+            };
+            heap_push(HeapObj::Buffer {
+                class: qualified,
+                text,
+            })
+        }
+        "ArrayList" | "LinkedList" | "Vector" => Value::array(match args.first() {
+            Some(v) => iteration_elements(v),
+            None => Vec::new(),
+        }),
+        // A Set is a de-duplicated list here, the same shape `as Set` builds.
+        "HashSet" | "LinkedHashSet" | "TreeSet" => {
+            let mut out: Vec<Value> = Vec::new();
+            for e in args.first().map(iteration_elements).unwrap_or_default() {
+                if !out.iter().any(|k| values_equal(k, &e)) {
+                    out.push(e);
+                }
+            }
+            Value::array(out)
+        }
+        "HashMap" | "LinkedHashMap" | "TreeMap" => {
+            let entries = args.first().and_then(as_omap).unwrap_or_default();
+            heap_push(HeapObj::OrderedMap(entries))
+        }
+        "Object" => heap_push(HeapObj::Instance(Instance {
+            class: u32::MAX,
+            fields: std::collections::HashMap::new(),
+        })),
+        "Integer" | "Long" | "Short" | "Byte" => match as_i64(&first()) {
+            Some(n) => Value::int(n),
+            None => match text().trim().parse::<i64>() {
+                Ok(n) => Value::int(n),
+                Err(_) => raise_number_format(vm, text().trim()),
+            },
+        },
+        "Double" | "Float" => match parse_java_double(&text()) {
+            Some(f) => Value::float(f),
+            None => raise_number_format(vm, text().trim()),
+        },
+        "Boolean" => Value::bool(matches!(&first(), Value::Bool(true)) || text() == "true"),
+        "String" => Value::str(text()),
+        // `new BigDecimal("1.5")` / `new BigInteger("12")` parse with Java's own
+        // character-level diagnostics.
+        "BigDecimal" | "BigInteger" => match &first() {
+            Value::Int(n) => dec_value(decimal::from_i64(*n)),
+            other => match decimal::parse_java(groovy_str(other).trim()) {
+                Ok(d) => dec_value(d),
+                Err(msg) => {
+                    raise_opt(vm, "NumberFormatException", msg.as_deref());
+                    Value::Undef
+                }
+            },
+        },
+        _ => return None,
+    })
+}
+
+/// The text behind a character-buffer handle, if `v` is one.
+fn as_buffer(v: &Value) -> Option<(&'static str, String)> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Buffer { class, text }) => Some((*class, text.clone())),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// Replace a character buffer's contents in place. Java's `StringBuilder`
+/// mutates through the reference, so every holder of the handle sees the change.
+/// Returns `false` if `v` is not a buffer.
+fn buffer_set(v: &Value, text: String) -> bool {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
+            Some(HeapObj::Buffer { text: slot, .. }) => {
+                *slot = text;
+                true
+            }
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// The `java.lang.StringBuilder` methods a script calls, all of them mutating
+/// the buffer in place and answering the builder itself where Java does (which
+/// is what lets `sb.append("a").append(1)` chain). `None` for a method that is
+/// not a buffer's, so the caller reports it missing rather than guessing.
+///
+/// Verified against Apache Groovy 5.0.8: `insert`/`deleteCharAt`/`setLength`/
+/// `replace`/`reverse` all answer the receiver, `charAt` a one-character
+/// `String`, and `indexOf` a character index.
+fn dispatch_buffer_method(recv: &Value, text: &str, method: &str, args: &[Value]) -> Option<Value> {
+    let chars: Vec<char> = text.chars().collect();
+    let idx = |i: usize| args.get(i).and_then(as_i64).unwrap_or(0).max(0) as usize;
+    let arg_str = |i: usize| args.get(i).map(groovy_str).unwrap_or_default();
+    // Every mutator rebuilds the whole text, which is what a `String`-backed
+    // buffer can do without a rope.
+    let mutate = |next: String| {
+        buffer_set(recv, next);
+        recv.clone()
+    };
+    Some(match method {
+        "append" | "leftShift" | "write" | "print" => mutate(format!("{text}{}", arg_str(0))),
+        "toString" | "getText" => Value::str(text.to_string()),
+        "length" | "size" => Value::int(chars.len() as i64),
+        "isEmpty" => Value::bool(chars.is_empty()),
+        "charAt" => Value::str(chars.get(idx(0)).map(|c| c.to_string()).unwrap_or_default()),
+        "indexOf" => Value::int(
+            text.find(&arg_str(0))
+                .map(|b| text[..b].chars().count() as i64)
+                .unwrap_or(-1),
+        ),
+        "reverse" => mutate(chars.iter().rev().collect()),
+        "insert" => {
+            let at = idx(0).min(chars.len());
+            let (head, tail): (String, String) = (
+                chars[..at].iter().collect(),
+                chars[at..].iter().collect::<String>(),
+            );
+            mutate(format!("{head}{}{tail}", arg_str(1)))
+        }
+        "deleteCharAt" => {
+            let at = idx(0);
+            mutate(
+                chars
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != at)
+                    .map(|(_, c)| *c)
+                    .collect(),
+            )
+        }
+        "setLength" => {
+            let n = idx(0);
+            mutate(chars.iter().take(n).collect())
+        }
+        // `replace(start, end, text)` swaps the half-open character span.
+        "replace" => {
+            let (start, end) = (idx(0).min(chars.len()), idx(1).min(chars.len()));
+            let head: String = chars[..start].iter().collect();
+            let tail: String = chars[end.max(start)..].iter().collect();
+            mutate(format!("{head}{}{tail}", arg_str(2)))
+        }
+        "delete" => {
+            let (start, end) = (idx(0).min(chars.len()), idx(1).min(chars.len()));
+            let head: String = chars[..start].iter().collect();
+            let tail: String = chars[end.max(start)..].iter().collect();
+            mutate(format!("{head}{tail}"))
+        }
+        _ => return None,
+    })
+}
+
 /// `GNEW`: construct `new C(args)`. Stack: `argc` constructor args (deepest),
 /// class name on top.
 fn b_new(vm: &mut VM, argc: u8) -> Value {
@@ -1482,6 +1707,13 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
         args.push(vm.stack.pop().unwrap_or(Value::Undef));
     }
     args.reverse();
+    // A script-declared class shadows a JDK one of the same name, so the
+    // registry is consulted first.
+    if find_class(&name).is_none() {
+        if let Some(v) = new_jdk(vm, &name, &args) {
+            return v;
+        }
+    }
     let Some(cid) = find_class(&name) else {
         fault(vm, format!("unable to resolve class {name}"));
         return Value::Undef;
@@ -1781,6 +2013,8 @@ fn b_is_case_type(vm: &mut VM, _argc: u8) -> Value {
 fn b_is_case(vm: &mut VM, _argc: u8) -> Value {
     let label = vm.stack.pop().unwrap_or(Value::Undef);
     let subject = vm.stack.pop().unwrap_or(Value::Undef);
+    // A `Range` label contains — `case 1..5:` and `x in 1..5` both ask that.
+    let label = range_as_list(&label);
     // A null subject never matches a pattern; Groovy matches the rest against
     // their `toString`, which is exactly what `println` renders.
     if let Some(hit) = regex_matches(&label, &groovy_str(&subject)) {
@@ -2002,6 +2236,17 @@ fn inspect_value(v: &Value) -> String {
 /// numerically across types (`case 1:` matches the subject `1.00`), and
 /// everything else compares by its rendered form — the same rule `==` uses.
 fn values_equal(a: &Value, b: &Value) -> bool {
+    // A range compares as the list it enumerates, so `(1..3) == [1, 2, 3]` is
+    // true in both directions the way Groovy's `AbstractList.equals` makes it.
+    if as_range(a).is_some() || as_range(b).is_some() {
+        let (x, y) = (range_as_list(a), range_as_list(b));
+        return match (&x, &y) {
+            (Value::Array(p), Value::Array(q)) => {
+                p.len() == q.len() && p.iter().zip(q).all(|(i, j)| values_equal(i, j))
+            }
+            _ => false,
+        };
+    }
     if let Some(Ok(v)) = decimal_operator(NumOp::Eq, a, b) {
         return matches!(v, Value::Bool(true));
     }
@@ -2030,7 +2275,13 @@ fn value_is_a(value: &Value, class: &str) -> bool {
     let short = class.rsplit('.').next().unwrap_or(class);
     match short {
         "Object" | "GroovyObject" => true,
-        "String" | "CharSequence" | "GString" => matches!(value, Value::Str(_)),
+        "String" | "GString" => matches!(value, Value::Str(_)),
+        // A `StringBuilder`/`StringBuffer`/`StringWriter` is a `CharSequence`
+        // too, which is what `sb instanceof CharSequence` asks.
+        "CharSequence" => matches!(value, Value::Str(_)) || as_buffer(value).is_some(),
+        "StringBuilder" | "StringBuffer" | "StringWriter" | "Appendable" => {
+            as_buffer(value).is_some_and(|(c, _)| simple_name_of(c) == short || short == "Appendable")
+        }
         "Integer" | "Int" | "Long" | "Short" | "Byte" => matches!(value, Value::Int(_)),
         // An unsuffixed Groovy decimal is a `BigDecimal` (a host-heap handle);
         // only a `d`/`f`-suffixed literal is an IEEE `Double`.
@@ -2038,7 +2289,11 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         "Double" | "Float" => matches!(value, Value::Float(_)),
         "Number" => matches!(value, Value::Int(_) | Value::Float(_)) || as_dec(value).is_some(),
         "Boolean" => matches!(value, Value::Bool(_)),
-        "List" | "ArrayList" | "Collection" | "Iterable" => matches!(value, Value::Array(_)),
+        // A Groovy `Range` *is* a `java.util.List`, so it answers both.
+        "List" | "ArrayList" | "Collection" | "Iterable" => {
+            matches!(value, Value::Array(_)) || as_range(value).is_some()
+        }
+        "Range" | "IntRange" | "ObjectRange" | "NumberRange" => as_range(value).is_some(),
         "Map" | "LinkedHashMap" | "HashMap" => {
             matches!(value, Value::Hash(_)) || as_omap(value).is_some()
         }
@@ -2192,6 +2447,10 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
 fn b_index(vm: &mut VM, _argc: u8) -> Value {
     let index = vm.stack.pop().unwrap_or(Value::Undef);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    // A range subscripts as the list it enumerates, on either side: `(1..5)[0]`
+    // is `1`, and `list[1..2]` is the sublist at those positions.
+    let recv = range_as_list(&recv);
+    let index = range_as_list(&index);
     if as_instance(&recv).is_some() {
         return match dispatch_instance_method(vm, &recv, "getAt", &[index]) {
             Some(Ok(v)) => v,
@@ -2522,6 +2781,29 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
                 Value::Undef
             }
         };
+    }
+    // A `Range` answers its own members (`from`, `step`, `size`, `toString`)
+    // and hands every other call to the list it enumerates, which is where the
+    // closure-driven GDK (`each`, `collect`, `find`, `sum`) already lives. That
+    // is faithful because Groovy's `Range` is a `java.util.List`; only the
+    // `each` family answers the receiver itself rather than the list.
+    if let Some(r) = as_range(&recv) {
+        if let Some(v) = dispatch_range_method(&r, method, &args) {
+            return v;
+        }
+        let listed = dispatch_call(vm, Value::array(range_elements(&r)), method, args);
+        return if matches!(method, "each" | "eachWithIndex" | "reverseEach") {
+            recv
+        } else {
+            listed
+        };
+    }
+    // A `StringBuilder`/`StringBuffer`/`StringWriter` mutates through its
+    // handle, so its methods run before the value-shaped dispatch below.
+    if let Some((_, text)) = as_buffer(&recv) {
+        if let Some(v) = dispatch_buffer_method(&recv, &text, method, &args) {
+            return v;
+        }
     }
     // A method on a class instance: a user method (implicit `this`) or Groovy's
     // auto getter/setter over a field. Checked first — an instance handle is a
@@ -3385,6 +3667,14 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
     if method == "getClass" && args.is_empty() {
         return class_ref_of(recv);
     }
+    // A `Range` answers its own members and hands everything else to the list it
+    // enumerates — which is faithful, because Groovy's `Range` is a `List`.
+    if let Some(r) = as_range(recv) {
+        if let Some(v) = dispatch_range_method(&r, method, args) {
+            return v;
+        }
+        return dispatch_method(vm, &Value::array(range_elements(&r)), method, args);
+    }
     match (recv, method) {
         // Universal size query (String chars / list elements / map entries).
         (_, "size") => Value::int(value_size(recv)),
@@ -4126,6 +4416,12 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
     let rhs = vm.stack.pop().unwrap_or(Value::Undef);
     let lhs = vm.stack.pop().unwrap_or(Value::Undef);
     take_mutated();
+    // `sb << "a"` is `StringBuilder.append`, which mutates through the handle
+    // and answers the builder — so it chains, and needs no writeback.
+    if let Some((_, text)) = as_buffer(&lhs) {
+        buffer_set(&lhs, format!("{text}{}", groovy_str(&rhs)));
+        return lhs;
+    }
     match &lhs {
         Value::Array(a) => {
             let mut next = a.clone();
@@ -4196,7 +4492,8 @@ fn b_ushr(vm: &mut VM, _argc: u8) -> Value {
 /// `GIN`: Groovy's `x in coll`. A collection answers `contains`, a range its
 /// bounds, a map key membership, a string substring containment.
 fn b_in(vm: &mut VM, _argc: u8) -> Value {
-    let coll = vm.stack.pop().unwrap_or(Value::Undef);
+    // `x in 1..5` asks the range's `contains`, which is its element list's.
+    let coll = range_as_list(&vm.stack.pop().unwrap_or(Value::Undef));
     let needle = vm.stack.pop().unwrap_or(Value::Undef);
     let _ = vm;
     if let Some(entries) = as_omap(&coll) {
@@ -4278,9 +4575,11 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
                     .unwrap_or_default(),
             ),
         },
+        // A Groovy `Range` already *is* a `java.util.List`, so the cast is
+        // identity: `(1..3) as List` is still the `IntRange` `1..3`.
         "List" | "ArrayList" | "Collection" | "Iterable" => match &v {
-            // A Groovy `Range` already *is* a `List`, so the cast is identity.
             Value::Array(_) => v,
+            _ if as_range(&v).is_some() => v,
             other => Value::array(iteration_elements(other)),
         },
         "Set" | "LinkedHashSet" | "HashSet" | "SortedSet" | "TreeSet" => {
@@ -4505,56 +4804,168 @@ fn java_format(vm: &mut VM, spec: &str, args: &[Value]) -> String {
     out
 }
 
-/// `GRANGE`: materialise a range literal into the list Groovy enumerates.
-/// `5..1` counts down, `'a'..'e'` walks characters, and the exclusive form
-/// drops the endpoint from whichever end the walk finishes on.
+/// `GRANGE`: build a range literal's `groovy.lang.Range` object.
 fn b_range(vm: &mut VM, _argc: u8) -> Value {
     let inclusive = matches!(vm.stack.pop(), Some(Value::Bool(true)));
-    let end = vm.stack.pop().unwrap_or(Value::Undef);
-    let start = vm.stack.pop().unwrap_or(Value::Undef);
-    // Character endpoints enumerate code points and answer single-char strings.
-    let char_ends = match (&start, &end) {
-        (Value::Str(a), Value::Str(b)) if a.chars().count() == 1 && b.chars().count() == 1 => {
-            Some((
-                a.chars().next().unwrap() as i64,
-                b.chars().next().unwrap() as i64,
-            ))
-        }
+    let to = vm.stack.pop().unwrap_or(Value::Undef);
+    let from = vm.stack.pop().unwrap_or(Value::Undef);
+    heap_push(HeapObj::Range(RangeVal {
+        from,
+        to,
+        inclusive,
+    }))
+}
+
+/// Clone the range behind a handle, if `v` is one.
+fn as_range(v: &Value) -> Option<RangeVal> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Range(r)) => Some(r.clone()),
+            _ => None,
+        }),
         _ => None,
-    };
-    let (from, to) = match char_ends {
-        Some(pair) => pair,
-        None => match (as_i64(&start), as_i64(&end)) {
-            (Some(a), Some(b)) => (a, b),
-            // A decimal endpoint truncates to its integer part, as Groovy's
-            // `NumberRange` iteration does for whole steps.
-            _ => (
-                as_dec(&start)
-                    .map(|d| decimal::truncate_to_i64(&d))
-                    .unwrap_or(0),
-                as_dec(&end)
-                    .map(|d| decimal::truncate_to_i64(&d))
-                    .unwrap_or(0),
-            ),
-        },
-    };
+    }
+}
+
+/// A range's endpoints read as code points, when both are single-character
+/// strings — Groovy's `ObjectRange` over characters (`'a'..'e'`).
+fn range_char_ends(r: &RangeVal) -> Option<(i64, i64)> {
+    match (&r.from, &r.to) {
+        (Value::Str(a), Value::Str(b)) if a.chars().count() == 1 && b.chars().count() == 1 => Some((
+            a.chars().next().unwrap() as i64,
+            b.chars().next().unwrap() as i64,
+        )),
+        _ => None,
+    }
+}
+
+/// A range's endpoints as the integers its walk counts between. A decimal
+/// endpoint truncates to its integer part, as Groovy's `NumberRange` iteration
+/// does for whole steps.
+fn range_bounds(r: &RangeVal) -> (i64, i64) {
+    if let Some(pair) = range_char_ends(r) {
+        return pair;
+    }
+    match (as_i64(&r.from), as_i64(&r.to)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => (
+            as_dec(&r.from)
+                .map(|d| decimal::truncate_to_i64(&d))
+                .unwrap_or(0),
+            as_dec(&r.to)
+                .map(|d| decimal::truncate_to_i64(&d))
+                .unwrap_or(0),
+        ),
+    }
+}
+
+/// The values a range enumerates — what iterating it yields and what every
+/// list-shaped GDK method on it runs over. `5..1` counts down, `'a'..'e'` walks
+/// characters, and the exclusive form drops the endpoint from whichever end the
+/// walk finishes on.
+fn range_elements(r: &RangeVal) -> Vec<Value> {
+    let (from, to) = range_bounds(r);
+    let chars = range_char_ends(r).is_some();
     let step = if to >= from { 1 } else { -1 };
-    // The exclusive form stops one short of the endpoint, on either side.
-    let last = if inclusive { to } else { to - step };
+    let last = if r.inclusive { to } else { to - step };
     let mut out = Vec::new();
     let mut i = from;
     while (step > 0 && i <= last) || (step < 0 && i >= last) {
-        out.push(match char_ends {
-            Some(_) => Value::str(
+        out.push(if chars {
+            Value::str(
                 char::from_u32(i as u32)
                     .map(String::from)
                     .unwrap_or_default(),
-            ),
-            None => Value::int(i),
+            )
+        } else {
+            Value::int(i)
         });
         i += step;
     }
-    Value::array(out)
+    out
+}
+
+/// The methods a `groovy.lang.Range` answers *as a range* rather than as the
+/// list it enumerates. `None` hands the call on to the list, which is where
+/// `collect`, `each`, `sum`, `join`, `head`, and the rest are already modeled.
+///
+/// `step` and `reverse` answer a `java.util.ArrayList`, not another range, which
+/// is what Groovy's own `Range.step` / `DefaultGroovyMethods.reverse` return.
+fn dispatch_range_method(r: &RangeVal, method: &str, args: &[Value]) -> Option<Value> {
+    let elems = || range_elements(r);
+    Some(match method {
+        // Answered here rather than falling through, because the list a range
+        // delegates to is an `ArrayList` and would name the wrong class.
+        "getClass" => heap_push(HeapObj::ClassRef(range_class(r).to_string())),
+        "getFrom" => r.from.clone(),
+        "getTo" => r.to.clone(),
+        // `isReverse` asks whether the range counts *down*, which is a property
+        // of the endpoints, not of the `..<` form: `(1..<5).isReverse()` is
+        // false.
+        "isReverse" => Value::bool(range_bounds(r).0 > range_bounds(r).1),
+        "toString" | "inspect" => Value::str(range_str(r)),
+        "size" | "getSize" => Value::int(elems().len() as i64),
+        "step" => {
+            let n = args.first().and_then(as_i64).unwrap_or(1);
+            Value::array(range_step(r, n))
+        }
+        "contains" => {
+            let needle = args.first().cloned().unwrap_or(Value::Undef);
+            Value::bool(elems().iter().any(|e| values_equal(e, &needle)))
+        }
+        _ => return None,
+    })
+}
+
+/// `Range.step(n)` — every `n`-th element, as a `java.util.ArrayList`. A
+/// negative step walks the range from its far end back, so `(1..5).step(-2)` is
+/// `[5, 3, 1]`.
+fn range_step(r: &RangeVal, step: i64) -> Vec<Value> {
+    if step == 0 {
+        return Vec::new();
+    }
+    let mut seq = range_elements(r);
+    if step < 0 {
+        seq.reverse();
+    }
+    seq.into_iter()
+        .step_by(step.unsigned_abs() as usize)
+        .collect()
+}
+
+/// A range as the list it enumerates, or the value unchanged when it is not one.
+/// This is what lets every list operation groovyrs already models — `+`, `==`,
+/// `collect`, subscripting, `instanceof List` — apply to a range for free, which
+/// is faithful because Groovy's `Range` *is* a `java.util.List`.
+fn range_as_list(v: &Value) -> Value {
+    match as_range(v) {
+        Some(r) => Value::array(range_elements(&r)),
+        None => v.clone(),
+    }
+}
+
+/// `Range.toString()` — the source form (`1..5`, `1..<5`, `5..1`, `a..e`), which
+/// is also how `println` and `String +` render one.
+fn range_str(r: &RangeVal) -> String {
+    format!(
+        "{}{}{}",
+        groovy_str(&r.from),
+        if r.inclusive { ".." } else { "..<" },
+        groovy_str(&r.to)
+    )
+}
+
+/// The `groovy.lang.Range` subclass a range's endpoints put it in: integer
+/// endpoints make an `IntRange`, single-character ones an `ObjectRange`, and a
+/// decimal one a `NumberRange`.
+fn range_class(r: &RangeVal) -> &'static str {
+    if range_char_ends(r).is_some() {
+        return "groovy.lang.ObjectRange";
+    }
+    match (&r.from, &r.to) {
+        (Value::Int(_), Value::Int(_)) => "groovy.lang.IntRange",
+        _ => "groovy.lang.NumberRange",
+    }
 }
 
 /// `GPRINTF` / `GSPRINTF`: Groovy's script-scope `printf`/`sprintf`. The
@@ -4701,6 +5112,15 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     // (where it answers `NullObject`'s class rather than raising).
     if name == "class" {
         return class_ref_of(recv);
+    }
+    // A `Range`'s own properties are its endpoints; anything else reads off the
+    // list it enumerates, exactly as its methods do.
+    if let Some(r) = as_range(recv) {
+        return match name {
+            "from" => r.from.clone(),
+            "to" => r.to.clone(),
+            _ => dispatch_property(vm, &Value::array(range_elements(&r)), name),
+        };
     }
     // A `java.lang.Class` exposes its accessors as properties (`c.name`,
     // `c.simpleName`) — Groovy's getter-to-property rule.
@@ -4904,6 +5324,9 @@ fn b_writeback(vm: &mut VM, _argc: u8) -> Value {
 
 /// The elements [`b_iter`] enumerates for a value.
 fn iteration_elements(v: &Value) -> Vec<Value> {
+    if let Some(r) = as_range(v) {
+        return range_elements(&r);
+    }
     if let Some(entries) = as_omap(v) {
         return entries
             .into_iter()
@@ -5234,6 +5657,16 @@ pub fn groovy_str(v: &Value) -> String {
     // A `Pattern` renders as its source text, the way `Pattern.toString` does.
     if let Some(src) = regex_source(v) {
         return src;
+    }
+    // `Range.toString` is the source form (`1..5`), *not* the list it
+    // enumerates — `println(1..5)` prints `1..5` and `"x" + (1..5)` is `x1..5`.
+    if let Some(r) = as_range(v) {
+        return range_str(&r);
+    }
+    // A character buffer renders as its contents, the way `StringBuilder`'s own
+    // `toString` does.
+    if let Some((_, text)) = as_buffer(v) {
+        return text;
     }
     // `java.lang.Class.toString` prefixes the qualified name with `class `.
     if let Some(name) = as_class_ref(v) {
@@ -5568,6 +6001,19 @@ fn instance_compare(a: &Value, b: &Value) -> Option<Result<i64, String>> {
 /// never reaches here (it stays on the native fast path and the JIT). `/` never
 /// reaches here — it lowers to the [`GDIV`] builtin instead.
 pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
+    // A range takes part in an operator as the list it enumerates: `(1..3) + [9]`
+    // concatenates and `(1..3) == [1, 2, 3]` is true, because Groovy's `Range`
+    // is a `java.util.List`. Rewriting the operands here is what gives a range
+    // every list operator at once.
+    //
+    // The one exception is `String + Range`, which dispatches on its *left*
+    // operand: `String.plus` appends the range's `toString`, so `"x" + (1..3)`
+    // is `x1..3` and not `x[1, 2, 3]`. (`(1..3) + "x"` dispatches the other way
+    // and does append the element, giving `[1, 2, 3, x]`.)
+    let string_plus = matches!(op, NumOp::Add) && matches!(a, Value::Str(_));
+    if !string_plus && (as_range(a).is_some() || as_range(b).is_some()) {
+        return numeric_hook(op, &range_as_list(a), &range_as_list(b));
+    }
     // User-class operator overloading. Groovy dispatches an operator on its LEFT
     // operand as a method call (`a + b` == `a.plus(b)`, `a > b` == `a.compareTo(b)
     // > 0`, `a == b` via `equals`/`compareTo`). Only a class-instance left operand

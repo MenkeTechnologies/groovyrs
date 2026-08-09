@@ -778,3 +778,105 @@ println(300 as byte)
 println(3.9 as int)
 %%
 println(3000000000L.intValue())
+%%
+println((1..5).getClass().getName())
+%%
+println((1..<5).toString())
+%%
+println((5..1).toString())
+%%
+println(('a'..'e').toString())
+%%
+println(('a'..'e').getClass().getName())
+%%
+println((1.5..3.5).getClass().getName())
+%%
+println((1..5).step(-2))
+%%
+println((0..10).step(3))
+%%
+println(('a'..'e').step(2))
+%%
+println((1..5).from + "," + (1..5).to)
+%%
+println((1..<5).size())
+%%
+println((1..<1).size())
+%%
+println((1..5).contains(3))
+%%
+println((1..5).reverse())
+%%
+println((1..5).reverse().getClass().getName())
+%%
+println((1..5)[1..2])
+%%
+println((1..3) == [1, 2, 3])
+%%
+println([1, 2, 3] == (1..3))
+%%
+println((1..3) + [9])
+%%
+println((1..3).collect { it * 2 })
+%%
+println((3..7).min())
+%%
+println((1..3).join("-"))
+%%
+println(3 in (1..5))
+%%
+println("x${1..3}y")
+%%
+println("x" + (1..3))
+%%
+println([1..3].toString())
+%%
+println((1..<5).isReverse())
+%%
+println((1..5) instanceof List)
+%%
+def sb = new StringBuilder("hi"); println sb.append("!").toString()
+%%
+println(new StringBuilder().getClass().getName())
+%%
+println(new StringBuilder("abc").reverse().toString())
+%%
+println(new StringBuilder("ac").insert(1, "b").toString())
+%%
+println(new StringBuilder("abc").deleteCharAt(1).toString())
+%%
+def sb = new StringBuilder("abcd"); sb.setLength(2); println sb.toString()
+%%
+println(new StringBuilder("abc").charAt(1))
+%%
+println(new StringBuilder("abc").replace(1, 2, "X").toString())
+%%
+println(new StringBuilder("abc").indexOf("b"))
+%%
+def sb = new StringBuilder(); sb << "a" << 1; println sb.toString()
+%%
+println(new StringBuffer("x").append("y").toString())
+%%
+println(new StringBuffer("x").getClass().getName())
+%%
+def w = new StringWriter(); w.write("hi"); println w.toString()
+%%
+println(new Object().getClass().getName())
+%%
+def l = new ArrayList(); l.add(1); println l.toString()
+%%
+def m = new HashMap(); m.put("a", 1); println m.toString()
+%%
+println(new Integer(3))
+%%
+println(new BigDecimal("1.5").toString())
+%%
+def a = 2000000000; def b = 2000000000; println a + b
+%%
+def a = 5L; a = 5; def b = 1000000000; println a * b
+%%
+def f = { -> 5L }; def a = f(); def b = 1000000000; println a * b
+%%
+def a = Long.valueOf(5); def b = 1000000000; println a * b
+%%
+def a = 5; if (true) { a = 5L }; def b = 1000000000; println a * b

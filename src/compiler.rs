@@ -164,7 +164,30 @@ struct Compiler {
     /// Variables whose value is a `Long` rather than an `Integer` — declared
     /// `long`/`Long`/`BigInteger`, or `def`-declared from a `Long` initializer.
     /// See [`Compiler::is_wide`] for why the compiler tracks this at all.
+    ///
+    /// The set is *flow-sensitive*: a `def` re-declaration or a plain assignment
+    /// re-binds the name to its new initializer's width, narrow included, so
+    /// `def a = 5L; …; a = 5; a * 1000000000` wraps at 32 bits the way Groovy's
+    /// runtime does. It is also *scoped*: [`Compiler::function`] and
+    /// [`Compiler::emit_closure`] save and restore it around a body, so a
+    /// `def a = 5L` inside one closure cannot make a sibling closure's own
+    /// `def a = 2000000000` wide. Both were previously one flat set that only
+    /// ever grew, which made the width of a name depend on every *other* place
+    /// in the file that happened to spell it.
     wide_vars: HashSet<String>,
+    /// Callables whose result is statically a `Long`: a user function or a
+    /// closure-bound variable every one of whose returned expressions is wide.
+    /// Without this, `def f = { -> 5L }; def a = f(); a * 1000000000` would wrap
+    /// at 32 bits — the value is inside `Integer` range, so the host's magnitude
+    /// rule cannot see the `Long` either. Tracked and scoped alongside
+    /// [`Compiler::wide_vars`].
+    wide_returns: HashSet<String>,
+    /// Names whose `Long` width is fixed by an explicit `long`/`Long`/
+    /// `BigInteger` declaration rather than inferred from an initializer. Java's
+    /// static type wins over the assigned value — `long t = 0; t = 5;
+    /// t * 2000000000` is still 64-bit arithmetic — so these are exempt from the
+    /// narrowing above until the name is re-declared.
+    pinned_wide: HashSet<String>,
     /// The op indices of arithmetic whose operands are statically `Long`, handed
     /// to the host as [`crate::host::set_wide_sites`]. See
     /// [`Compiler::is_wide`].
@@ -213,6 +236,15 @@ struct ClassInfo {
     /// declarations, which bind no body but still make a bare call inside a
     /// sibling `default` method mean `this.m()`.
     methods: Vec<String>,
+}
+
+/// The integer-width state a function or closure body is entered with, restored
+/// when it ends so its locals cannot leak a width outward. See
+/// [`Compiler::wide_vars`].
+struct WidthScope {
+    vars: HashSet<String>,
+    returns: HashSet<String>,
+    pinned: HashSet<String>,
 }
 
 /// A closure body queued for emission as a subroutine region. `params` already
@@ -308,6 +340,8 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         temps_seen: 0,
         pending_label: None,
         wide_vars: HashSet::new(),
+        wide_returns: HashSet::new(),
+        pinned_wide: HashSet::new(),
         wide_sites: HashSet::new(),
     };
     // Arm the host's exception machinery for this run. Emitted only by a program
@@ -340,6 +374,15 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
                 ctors,
                 methods,
             );
+        }
+    }
+    // A call to a user function is a `Long` when every `return` in its body is,
+    // which a forward reference needs known before the call is lowered.
+    for stmt in &prog.body {
+        if let StmtKind::Function { name, body, .. } = &stmt.kind {
+            if c.body_returns_wide(body) {
+                c.wide_returns.insert(name.clone());
+            }
         }
     }
     // Emit the script body (function and class definitions are hoisted out and
@@ -480,6 +523,11 @@ impl Compiler {
         // unwind leaves the frame and the caller's post-call check re-raises it.
         let prev_tries = std::mem::take(&mut self.tries);
         let prev_finallys = std::mem::take(&mut self.finallys);
+        // The body's locals are its own: what it declares must not leak a width
+        // onto a same-named variable outside it (or in a sibling body). The
+        // parameters arrive with no width the compiler can see, so they start
+        // narrow whatever the enclosing scope calls that name.
+        let prev_widths = self.enter_width_scope(params);
         self.cur_line = line;
 
         // Prologue: the caller pushed args left-to-right (param0 deepest,
@@ -498,7 +546,95 @@ impl Compiler {
         self.scope = prev;
         self.tries = prev_tries;
         self.finallys = prev_finallys;
+        self.exit_width_scope(prev_widths);
         Ok(())
+    }
+
+    /// Save the width state around a function/closure body and start the body
+    /// with its parameters narrow. Returns what [`Compiler::exit_width_scope`]
+    /// restores.
+    fn enter_width_scope(&mut self, params: &[String]) -> WidthScope {
+        let saved = WidthScope {
+            vars: self.wide_vars.clone(),
+            returns: self.wide_returns.clone(),
+            pinned: self.pinned_wide.clone(),
+        };
+        for p in params {
+            self.wide_vars.remove(p);
+            self.wide_returns.remove(p);
+            self.pinned_wide.remove(p);
+        }
+        saved
+    }
+
+    /// Restore the width state a body was entered with.
+    fn exit_width_scope(&mut self, saved: WidthScope) {
+        self.wide_vars = saved.vars;
+        self.wide_returns = saved.returns;
+        self.pinned_wide = saved.pinned;
+    }
+
+    /// Does every value this body hands back have a statically-`Long` width?
+    /// A body with no returned expression at all answers `false` (its result is
+    /// `null`). Used to give `def a = f()` the width `f`'s body produces.
+    fn body_returns_wide(&self, body: &[Stmt]) -> bool {
+        let mut saw_one = false;
+        let mut all_wide = true;
+        for s in body {
+            self.scan_returns(s, &mut saw_one, &mut all_wide);
+        }
+        // The trailing expression is Groovy's implicit return.
+        if let Some(Stmt {
+            kind: StmtKind::Expr(e),
+            ..
+        }) = body.last()
+        {
+            saw_one = true;
+            all_wide &= self.is_wide(e);
+        }
+        saw_one && all_wide
+    }
+
+    /// Fold every `return <expr>` reachable in `s` into the "all returns are
+    /// wide" answer [`Compiler::body_returns_wide`] builds. A nested function or
+    /// closure body belongs to *that* callable, so it is not descended into.
+    fn scan_returns(&self, s: &Stmt, saw_one: &mut bool, all_wide: &mut bool) {
+        let nested = |c: &Self, body: &[Stmt], saw: &mut bool, all: &mut bool| {
+            for st in body {
+                c.scan_returns(st, saw, all);
+            }
+        };
+        match &s.kind {
+            StmtKind::Return { value } => {
+                *saw_one = true;
+                *all_wide &= value.as_ref().is_some_and(|e| self.is_wide(e));
+            }
+            StmtKind::If { then, els, .. } => {
+                nested(self, then, saw_one, all_wide);
+                nested(self, els, saw_one, all_wide);
+            }
+            StmtKind::While { body, .. }
+            | StmtKind::DoWhile { body, .. }
+            | StmtKind::For { body, .. } => nested(self, body, saw_one, all_wide),
+            StmtKind::Switch { cases, .. } => {
+                for c in cases {
+                    nested(self, &c.body, saw_one, all_wide);
+                }
+            }
+            StmtKind::Try {
+                body,
+                catches,
+                finally_body,
+            } => {
+                nested(self, body, saw_one, all_wide);
+                for c in catches {
+                    nested(self, &c.body, saw_one, all_wide);
+                }
+                nested(self, finally_body, saw_one, all_wide);
+            }
+            StmtKind::Labeled { stmt, .. } => self.scan_returns(stmt, saw_one, all_wide),
+            _ => {}
+        }
     }
 
     /// Emit a queued closure body as a subroutine region, using the same frame
@@ -530,6 +666,9 @@ impl Compiler {
         let prev_methods = std::mem::replace(&mut self.cur_class_methods, pc.class_methods);
         let prev_tries = std::mem::take(&mut self.tries);
         let prev_finallys = std::mem::take(&mut self.finallys);
+        // A closure's captures keep the width they had where it was written, so
+        // only its own parameters reset; its locals are restored on the way out.
+        let prev_widths = self.enter_width_scope(&pc.params);
         let saved_line = self.cur_line;
         self.cur_line = pc.line;
 
@@ -549,6 +688,7 @@ impl Compiler {
         self.cur_class_methods = prev_methods;
         self.tries = prev_tries;
         self.finallys = prev_finallys;
+        self.exit_width_scope(prev_widths);
         self.cur_line = saved_line;
         Ok(())
     }
@@ -964,12 +1104,16 @@ impl Compiler {
         }
         match &s.kind {
             StmtKind::Local { ty, name, init } => {
-                self.note_var_width(ty, name, init.as_ref());
+                // The initializer is lowered first: it may read an *outer*
+                // variable this declaration shadows, which still has its own
+                // width until the new binding takes effect.
                 if let Some(e) = init {
                     self.expr(e)?;
+                    self.note_var_width(ty, name, init.as_ref());
                     let store = self.store_op_for_decl(name);
                     self.b.emit(store, self.cur_line);
                 } else {
+                    self.note_var_width(ty, name, None);
                     // An uninitialized local stays unbound (Groovy defaults it to
                     // `null`; a read before assignment yields `null`). Inside a
                     // function still register the slot so later reads/writes of the
@@ -984,10 +1128,17 @@ impl Compiler {
                     return self.assign_field(name, *op, value);
                 }
                 // An undeclared `x = 1L` is a script binding, and it is a `Long`
-                // for the same reason a declared one is.
-                if self.is_wide(value) {
-                    self.wide_vars.insert(name.clone());
-                }
+                // for the same reason a declared one is. A plain `=` re-binds
+                // the width in both directions (`a = 5` after `def a = 5L` is an
+                // `Integer` again); a compound `x += e` combines with what `x`
+                // already holds, so it can only widen. The new width is applied
+                // *after* the value is lowered, because the value may read the
+                // variable itself (`a = a * 2`) at its old width.
+                let new_wide = if matches!(op, AssignOp::Assign) {
+                    self.is_wide(value)
+                } else {
+                    self.wide_vars.contains(name) || self.is_wide(value)
+                };
                 match op {
                     AssignOp::Assign => {
                         self.expr(value)?;
@@ -1021,6 +1172,7 @@ impl Compiler {
                 }
                 let store = self.store_op_for(name);
                 self.b.emit(store, self.cur_line);
+                self.set_var_width(name, new_wide);
                 Ok(())
             }
             StmtKind::SetProperty { recv, name, value } => {
@@ -1075,10 +1227,14 @@ impl Compiler {
                 self.b.emit(Op::Pop, self.cur_line);
                 Ok(())
             }
-            StmtKind::If { cond, then, els } => self.if_stmt(cond, then, els),
-            StmtKind::While { cond, body } => self.while_stmt(cond, body),
-            StmtKind::DoWhile { body, cond } => self.do_while_stmt(body, cond),
-            StmtKind::Switch { subject, cases } => self.switch_stmt(subject, cases),
+            StmtKind::If { cond, then, els } => {
+                self.branch_stmt(|c| c.if_stmt(cond, then, els))
+            }
+            StmtKind::While { cond, body } => self.branch_stmt(|c| c.while_stmt(cond, body)),
+            StmtKind::DoWhile { body, cond } => self.branch_stmt(|c| c.do_while_stmt(body, cond)),
+            StmtKind::Switch { subject, cases } => {
+                self.branch_stmt(|c| c.switch_stmt(subject, cases))
+            }
             StmtKind::Labeled { label, stmt } => {
                 self.pending_label = Some(label.clone());
                 let r = self.stmt(stmt);
@@ -1092,12 +1248,12 @@ impl Compiler {
                 cond,
                 update,
                 body,
-            } => self.for_stmt(init, cond, update, body),
+            } => self.branch_stmt(|c| c.for_stmt(init, cond, update, body)),
             StmtKind::Try {
                 body,
                 catches,
                 finally_body,
-            } => self.try_stmt(body, catches, finally_body, s.line),
+            } => self.branch_stmt(|c| c.try_stmt(body, catches, finally_body, s.line)),
             StmtKind::Throw(e) => self.throw_stmt(e, s.line),
             StmtKind::Assert {
                 cond,
@@ -2352,11 +2508,19 @@ impl Compiler {
                 matches!(&**recv, Expr::Var(v) if v == "Long")
                     && matches!(name.as_str(), "MAX_VALUE" | "MIN_VALUE")
             }
-            Expr::MethodCall { method, .. } => {
+            // `Long.valueOf(5)` / `Long.parseLong("5")` name the type outright,
+            // so their result is a `Long` however small it is.
+            Expr::MethodCall { recv, method, .. } => {
                 matches!(
                     method.as_str(),
                     "longValue" | "toLong" | "currentTimeMillis"
-                )
+                ) || (matches!(&**recv, Expr::Var(v) if v == "Long")
+                    && matches!(method.as_str(), "valueOf" | "parseLong"))
+            }
+            // A call to a callable whose every return is statically a `Long`.
+            Expr::Call { name, .. } => self.wide_returns.contains(name),
+            Expr::CallValue { callee, .. } => {
+                matches!(&**callee, Expr::Var(f) if self.wide_returns.contains(f))
             }
             Expr::Cast { ty, .. } => matches!(ty.as_str(), "long" | "Long" | "BigInteger"),
             _ => false,
@@ -2385,16 +2549,58 @@ impl Compiler {
     }
 
     /// Note the width of a declaration's variable. A `long`/`Long` declaration
-    /// says so outright; a `def` takes the width of its initializer, which is
-    /// how `def t = 0L` accumulates at 64 bits. Widening is one-way: a variable
-    /// assigned a `Long` anywhere is treated as one throughout, because the
-    /// compiler has no flow-sensitive view of which assignment reached a use.
+    /// says so outright and *pins* the width, which is how `long t = 0`
+    /// accumulates at 64 bits even after a plain `t = 5`; a `def` takes the
+    /// width of its initializer, and re-binds the name either way — a
+    /// declaration is a fresh variable, so `def a = 2000000000` after an earlier
+    /// `def a = 5L` is an `Integer` again.
     fn note_var_width(&mut self, ty: &str, name: &str, init: Option<&Expr>) {
-        let wide =
-            matches!(ty, "long" | "Long" | "BigInteger") || init.is_some_and(|e| self.is_wide(e));
+        if matches!(ty, "long" | "Long" | "BigInteger") {
+            self.wide_vars.insert(name.to_string());
+            self.pinned_wide.insert(name.to_string());
+            return;
+        }
+        self.pinned_wide.remove(name);
+        self.set_var_width(name, init.is_some_and(|e| self.is_wide(e)));
+        // `def f = { -> 5L }` binds a callable, not a number: record what
+        // *calling* it yields so `f()` has a width at the call site.
+        self.wide_returns.remove(name);
+        if let Some(Expr::Closure { body, .. }) = init {
+            if self.body_returns_wide(body) {
+                self.wide_returns.insert(name.to_string());
+            }
+        }
+    }
+
+    /// Record `name`'s width at this point in the flow. A pinned declaration
+    /// (`long x`) keeps its declared width whatever is assigned to it.
+    fn set_var_width(&mut self, name: &str, wide: bool) {
+        if self.pinned_wide.contains(name) {
+            return;
+        }
         if wide {
             self.wide_vars.insert(name.to_string());
+        } else {
+            self.wide_vars.remove(name);
         }
+    }
+
+    /// Lower a statement that encloses a nested body (`if`, the loops, `switch`,
+    /// `try`), merging the widths its branches produced.
+    ///
+    /// A name widened on *any* path is wide afterwards, and a name narrowed on
+    /// one path only is not — the compiler cannot know which branch ran, and
+    /// `Integer` is the default that a magnitude check still catches when the
+    /// guess is wrong (see [`Compiler::is_wide`]). Union is therefore the merge,
+    /// which also keeps `def a = 5; if (c) { a = 5L }; a * b` at 64 bits.
+    fn branch_stmt(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let before = self.wide_vars.clone();
+        let r = f(self);
+        self.wide_vars.extend(before);
+        r
     }
 
     fn binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<(), String> {
@@ -2670,8 +2876,10 @@ fn needs_truth(e: &Expr) -> bool {
     match e {
         // Statically a number / boolean / null.
         Expr::Int(..) | Expr::Float(_) | Expr::Bool(_) | Expr::Null => false,
-        // A list literal and a materialised range are both `Value::Array`.
-        Expr::List(_) | Expr::Range { .. } => false,
+        // A list literal is a `Value::Array`, whose truth fusevm already reads
+        // the way Groovy does. A range is a host handle, so it needs the
+        // builtin (an empty one, `1..<1`, is false).
+        Expr::List(_) => false,
         // Comparisons and `instanceof` yield a `Boolean`; `<=>` an `Integer`;
         // `&&`/`||` are boolean-valued in Groovy (see `Compiler::binary`).
         Expr::Binary {

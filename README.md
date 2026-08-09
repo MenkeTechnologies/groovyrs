@@ -64,7 +64,9 @@ frontend over the shared engine. Highlights:
 - **Operator overloading** — a strict numeric hook supplies string concatenation
   (`"x=" + x`) for mixed operands, and dispatches a user-class instance's operator
   method (`plus`/`minus`/`multiply`/`compareTo`/`equals`/…) for `+`/`-`/`*`/`<`/
-  `==`/… — by re-entering the VM, with primitives kept on the native fast path.
+  `==`/… — by re-entering the VM. A primitive operand never routes to a method,
+  though the hook does answer the primitive pairs fusevm declines to (`Integer`
+  overflow, and an integral/`double` mix past 2^53) with Groovy's own result.
 
 Every program in `examples/` is diffed byte-for-byte against Apache Groovy in
 the test suite.
@@ -182,7 +184,7 @@ Implemented and checked against Apache Groovy:
   `%`→`remainder`, `**`→`power`, unary `-`→`negative`, `[]`→`getAt`,
   `<<`→`leftShift`, `>>`→`rightShift`;
   `<`/`>`/`<=`/`>=`/`<=>` via `compareTo`; null-safe `==`/`!=` via `compareTo`
-  (Comparable) or `equals`. Primitive operands stay on the native/JIT fast path.
+  (Comparable) or `equals`. A primitive operand never routes to a method.
 - **Method / property dispatch** — `s.length()`, `list.size()`,
   `"hi".toUpperCase()`, `map.k`, chains on literals (`[1,2,3].size()`), over a
   faithful GDK subset routed through a host dispatch. `size`/`length` are
@@ -365,9 +367,9 @@ Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm
 | Piece | How |
 | --- | --- |
 | **fusevm-hosted** | No local `vm.rs` / `jit.rs`, no JVM. Groovy lowers to fusevm bytecode and runs on the shared three-tier Cranelift JIT; `jit-disk-cache` persists native code across runs. |
-| **Native arithmetic** | `+ - * %`, comparisons, and logic lower to native fusevm ops; the JIT traces hot integer loops. `%` additionally carries a four-op zero-divisor guard (Java's `%` throws where fusevm's `Op::Mod` answers `0`), elided entirely when the divisor is a non-zero literal — see BUGS.md for what it costs when it is not. A strict numeric hook supplies Groovy's `+` string concatenation for non-numeric operands, and dispatches a user-class instance's operator method (`plus`/`minus`/`compareTo`/…) by re-entering the VM through a published thread-local pointer — primitives never leave the fast path. |
+| **Native arithmetic** | `+ - * %`, comparisons, and logic lower to native fusevm ops; the JIT traces hot integer loops. `%` additionally carries a four-op zero-divisor guard (Java's `%` throws where fusevm's `Op::Mod` answers `0`), elided entirely when the divisor is a non-zero literal — see BUGS.md for what it costs when it is not. A strict numeric hook supplies Groovy's `+` string concatenation for non-numeric operands, and dispatches a user-class instance's operator method (`plus`/`minus`/`compareTo`/…) by re-entering the VM through a published thread-local pointer — a user-class operand is the only thing that routes to a method. The hook also answers a *primitive* pair whenever fusevm declines to natively (an `Integer`-range overflow, or an integral/`double` mix whose integer is past 2^53 and so cannot be widened exactly), with the identical result the native path gives — Groovy promotes to `double`, so the rounded answer is the correct one. |
 | **Groovy division** | `/` lowers to the `GDIV` builtin: two integers divide exactly to an integer and to a `BigDecimal` otherwise (`7/2 → 3.5`, `1/3 → 0.3333333333`), following Groovy's `BigDecimalMath` scale policy; a zero divisor raises Groovy's catchable `ArithmeticException`. |
-| **`BigDecimal` value model** | An unsuffixed decimal literal is an exact (unscaled value, scale) pair on the host heap (`src/decimal.rs`), so scale propagates through `+ - * / %` (`1.25 * 0 → 0.00`, `2.5e7 + 1 → 25000001`) and magnitude is unbounded (`1.5e300 * 1.5e300 → 2.25E+600`). Being non-numeric to fusevm, decimals route through the strict numeric hook; `d`/`f`-suffixed literals stay IEEE doubles on the native fast path. |
+| **`BigDecimal` value model** | An unsuffixed decimal literal is an exact (unscaled value, scale) pair on the host heap (`src/decimal.rs`), so scale propagates through `+ - * / %` (`1.25 * 0 → 0.00`, `2.5e7 + 1 → 25000001`) and magnitude is unbounded (`1.5e300 * 1.5e300 → 2.25E+600`). Being non-numeric to fusevm, decimals route through the strict numeric hook; `d`/`f`-suffixed literals are IEEE doubles, answered natively except where the other operand is an integer too large to widen exactly, which the hook promotes to `double` the same way. |
 | **Groovy print semantics** | `println`/`print` lower to a registered builtin that formats values Groovy-style (`true`/`false`, `3.0`, `null`), rather than the VM's shell-flavoured `PrintLn`. |
 
 ---

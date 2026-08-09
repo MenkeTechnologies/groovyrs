@@ -8723,11 +8723,23 @@ fn instance_compare(a: &Value, b: &Value) -> Option<Result<i64, String>> {
     Some(res.map(|v| v.to_int()))
 }
 
-/// Strict numeric hook: fusevm calls this only for an operation with a
-/// non-numeric operand — Groovy's `+` overload (list concat / map merge / string
-/// concatenation) and value comparisons against strings. All-numeric arithmetic
-/// never reaches here (it stays on the native fast path and the JIT). `/` never
-/// reaches here — it lowers to the [`GDIV`] builtin instead.
+/// Strict numeric hook: fusevm calls this for an operation it will not answer
+/// itself. Three things route here, and only the first is non-numeric:
+///
+///  1. A non-numeric operand — Groovy's `+` overload (list concat / map merge /
+///     string concatenation) and value comparisons against strings.
+///  2. An integer result outside the fixnum range set by
+///     [`VM::set_fixnum_range`], i.e. Groovy's `Integer` overflow. That one is
+///     answered in `int_arith` before it gets this far, so it never reaches
+///     the operator match below — but it does *not* "stay on the native fast
+///     path": it is delegated like any other.
+///  3. A mixed integral/`double` pair whose integer is past 2^53, where reading
+///     the integer as an `f64` would land on a neighbouring value and only the
+///     host knows whether that matters. It does not: Groovy promotes to
+///     `double` first, so the rounded answer is the right one — see the
+///     promotion gate below.
+///
+/// `/` never reaches here — it lowers to the [`GDIV`] builtin instead.
 pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // A range takes part in an operator as the list it enumerates: `(1..3) + [9]`
     // concatenates and `(1..3) == [1, 2, 3]` is true, because Groovy's `Range`
@@ -8753,8 +8765,9 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // operand as a method call (`a + b` == `a.plus(b)`, `a > b` == `a.compareTo(b)
     // > 0`, `a == b` via `equals`/`compareTo`). Only a class-instance left operand
     // routes here; primitive `Int`/`Float`/`String` arithmetic stays on the native
-    // and JIT fast paths and never reaches this hook. `/` is absent — it lowers to
-    // the [`GDIV`] builtin, where the `div` overload is dispatched instead.
+    // and JIT fast paths for every pair fusevm can answer itself. `/` is absent —
+    // it lowers to the [`GDIV`] builtin, where the `div` overload is dispatched
+    // instead.
     if as_instance(a).is_some() {
         if let Some(res) = instance_operator(op, a, b) {
             return res;
@@ -8802,6 +8815,31 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // one to this hook — which is exactly where Groovy's scale rules belong.
     if let Some(res) = decimal_operator(op, a, b) {
         return res;
+    }
+    // Binary numeric promotion. A primitive pair with a `double` in it is
+    // answered on IEEE doubles, exactly as fusevm's native path answers it —
+    // measured against Apache Groovy 5.0.8: `16677181699666569L + 2.0d` is
+    // `1.667718169966657E16`, and `16677181699666569L == 1.6677181699666568E16d`
+    // is *true*, because the `long` is widened to `double` (landing on a
+    // neighbouring value) before the operator runs. So the rounding is the
+    // answer, not a loss to route around.
+    //
+    // fusevm delegates such a pair once the integer is past 2^53, where reading
+    // it as an `f64` is inexact and only the host can say whether that matters.
+    // The gate is on operand *shape* and sits ahead of the operator match below,
+    // because that match ends in a catch-all concatenating `+` and "not defined"
+    // arms that would silently absorb any numeric case it did not cover — which
+    // is what used to happen: `16677181699666569L + 2.0d` answered the *string*
+    // `"166771816996665692.0"`, and `-`/`*`/`%`/`**` answered an error.
+    //
+    // `Bool` is deliberately not a number here (Groovy has no `Boolean.plus`),
+    // and a two-integer pair is not promoted either: `Integer` overflow belongs
+    // to `int_arith`, `/` divides as a `BigDecimal` in [`GDIV`], and `%` by zero
+    // is an `ArithmeticException` — none of which is double arithmetic.
+    let is_groovy_number = |v: &Value| matches!(v, Value::Int(_) | Value::Float(_));
+    let has_double = matches!(a, Value::Float(_)) || matches!(b, Value::Float(_));
+    if has_double && is_groovy_number(a) && is_groovy_number(b) {
+        return Ok(double_operator(op, as_f64(a), as_f64(b)));
     }
     match op {
         // Groovy `+` dispatches on the left operand: list concatenation/append,

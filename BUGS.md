@@ -139,8 +139,10 @@ reported as parse or compile errors, never silently mis-run.
   `<=>` go through `compareTo`; `==`/`!=` use `compareTo` (when the class defines
   it, i.e. is `Comparable`) else `equals`, and are null-safe (an instance is
   never `== null`); `recv[i]` uses `getAt`. Primitive (`Int`/`Float`/`String`)
-  operands stay on the native/JIT fast path — only a user-class operand routes to
-  a method. Mechanism: the strict numeric hook (and the `GDIV`/`GCMP` builtins)
+  operands never route to a method — only a user-class operand does. (They can
+  still reach the numeric hook: `Integer`-range overflow and an integral/`double`
+  pair whose integer is past 2^53 are delegated, and answered there as Groovy's
+  binary numeric promotion answers them.) Mechanism: the strict numeric hook (and the `GDIV`/`GCMP` builtins)
   re-enter the running VM through a published thread-local pointer to invoke the
   method — no fusevm change.
 - **Inheritance.** `class C extends B { … }` with single-inheritance method and

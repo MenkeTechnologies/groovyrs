@@ -61,10 +61,19 @@ for ((i=0; i<N; i++)); do
   } >> "$TMP/all.groovy"
 done
 
+if [ "$N" -eq 0 ]; then
+  echo "fuzz: probe file $PROBES yielded 0 probes — nothing to compare"; exit 2
+fi
+
 timeout 300 "$ORACLE" "$TMP/all.groovy" > "$TMP/oracle.out" 2>"$TMP/oracle.err"
 orc=$?
-if [ $orc -ne 0 ] && [ ! -s "$TMP/oracle.out" ]; then
-  echo "fuzz: oracle batch failed (rc=$orc):"; head -20 "$TMP/oracle.err"; exit 2
+# A non-zero oracle rc is fatal even when it left partial output behind. Every
+# probe the batch never reached would otherwise become a SKIP, and a run that
+# skipped everything used to still exit 0 — a truncated oracle reading as a
+# clean sweep. `timeout` (rc 124) is the case that actually bit us.
+if [ $orc -ne 0 ]; then
+  echo "fuzz: oracle batch failed (rc=$orc) — probes after the failure are unmeasured:"
+  head -20 "$TMP/oracle.err"; exit 2
 fi
 
 # Split the oracle's stdout back out into per-probe expected files.
@@ -78,6 +87,16 @@ command perl -e '
   }
   close $out if $out;
 ' "$TMP/oracle.out" "$TMP"
+
+# The batch has to have reached every probe. One marker per probe is the only
+# evidence of that; a short count means the oracle died partway and the rest of
+# the corpus was never run, so the comparison below would measure a truncated
+# set and report it as a full sweep.
+markers=$(grep -c '^##P' "$TMP/oracle.out")
+if [ "$markers" -ne "$N" ]; then
+  echo "fuzz: oracle emitted $markers/$N probe markers — batch truncated, corpus unmeasured"
+  exit 2
+fi
 
 # A probe only counts as a comparison if the ORACLE ran it: it has to have
 # emitted its `##P` marker (so the batch reached it) and then printed something.
@@ -124,4 +143,11 @@ echo "════════════════════════�
 echo "PROBE PARITY: $pass / $compared match  (oracle: $ORACLE)"
 echo "  $N probes, $skip skipped (oracle never ran them)"
 echo "════════════════════════════════════════════"
+# A run that compared nothing is not a pass. `fail -eq 0` alone is true of a
+# sweep where every probe skipped, which is how a wiped or unreachable corpus
+# reads as success; the comparison count has to reach the exit status too.
+if [ $compared -eq 0 ]; then
+  echo "fuzz: 0 probes compared — nothing was measured"
+  exit 2
+fi
 [ $fail -eq 0 ]

@@ -40,6 +40,13 @@ echo ""
 echo "════════════════════════════════════════════"
 echo "BYTE PARITY: $pass / $total match  (oracle: $ORACLE)"
 echo "════════════════════════════════════════════"
+# An empty corpus compares nothing, and `fail -gt 0` is false of it, so the old
+# exit status called a missing corpus a clean sweep. Measuring nothing is an
+# error, not a pass.
+if [ $total -eq 0 ]; then
+  echo "parity: no *.groovy cases found under $CORPUS — nothing was measured"
+  exit 2
+fi
 if [ $fail -gt 0 ]; then
   echo "Divergences:"
   for m in "${misses[@]}"; do

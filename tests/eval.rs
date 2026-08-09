@@ -2547,15 +2547,13 @@ fn a_bare_name_inside_with_resolves_against_the_delegate() {
     // still wins; a name nothing in the script binds reaches the delegate and
     // is asked for as a property, which is why a missing map key answers
     // `null` and a list — whose property read is a spread — raises.
-    let (out, _) = run(
-        "println([a: 1].with { a })\n\
+    let (out, _) = run("println([a: 1].with { a })\n\
          println([a: 1].tap { a })\n\
          println([a: 1].with { nokey })\n\
          println([a: 1].with { [b: 2].with { \"\" + a + \"/\" + b } })\n\
          def owner = 100\n\
          println([owner: 1].with { owner })\n\
-         try { println([1, 2, 3].with { size }) } catch (t) { println t.getClass().getName() }",
-    );
+         try { println([1, 2, 3].with { size }) } catch (t) { println t.getClass().getName() }");
     assert_eq!(
         out,
         "1\n[a:1]\nnull\nnull/2\n100\ngroovy.lang.MissingPropertyException\n"
@@ -2570,15 +2568,13 @@ fn a_bare_write_inside_with_goes_to_the_delegate_not_a_script_binding() {
     // receiver's new contents back through it. Writing any of them to a script
     // binding instead left the delegate holding its original value *and* leaked
     // the name into the script.
-    let (out, _) = run(
-        "def m1 = [a: 1]\nm1.with { a = 9 }\nprintln m1\n\
+    let (out, _) = run("def m1 = [a: 1]\nm1.with { a = 9 }\nprintln m1\n\
          def m2 = [a: 1]\nm2.with { b = 7 }\nprintln m2\n\
          def m3 = [a: 1]\nm3.with { a += 5 }\nprintln m3\n\
          def m4 = [a: 1]\nm4.with { a++ }\nprintln m4\n\
          def m5 = [a: 1]\nm5.with { a-- }\nprintln m5\n\
          def m6 = [q: [9, 9]]\nm6.with { q[0] = 5 }\nprintln m6\n\
-         def m7 = [lst: [3, 1, 2]]\nm7.with { lst.sort() }\nprintln m7",
-    );
+         def m7 = [lst: [3, 1, 2]]\nm7.with { lst.sort() }\nprintln m7");
     assert_eq!(
         out,
         "[a:9]\n[a:1, b:7]\n[a:6]\n[a:2]\n[a:0]\n[q:[5, 9]]\n[lst:[1, 2, 3]]\n"

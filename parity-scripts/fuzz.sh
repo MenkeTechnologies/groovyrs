@@ -51,30 +51,46 @@ command perl -e '
 N="$(cat "$TMP/count")"
 echo "fuzz: $N probes"
 
-# One batched oracle program: marker, probe, marker, probe, …
-: > "$TMP/all.groovy"
-for ((i=0; i<N; i++)); do
-  {
-    printf 'println "##P%d"\ntry {\n' "$i"
-    cat "$TMP/p$i.body"
-    printf '\n} catch (Throwable t) { println "EXC:" + t.getClass().getName() }\n'
-  } >> "$TMP/all.groovy"
-done
-
 if [ "$N" -eq 0 ]; then
   echo "fuzz: probe file $PROBES yielded 0 probes — nothing to compare"; exit 2
 fi
 
-timeout 300 "$ORACLE" "$TMP/all.groovy" > "$TMP/oracle.out" 2>"$TMP/oracle.err"
-orc=$?
-# A non-zero oracle rc is fatal even when it left partial output behind. Every
-# probe the batch never reached would otherwise become a SKIP, and a run that
-# skipped everything used to still exit 0 — a truncated oracle reading as a
-# clean sweep. `timeout` (rc 124) is the case that actually bit us.
-if [ $orc -ne 0 ]; then
-  echo "fuzz: oracle batch failed (rc=$orc) — probes after the failure are unmeasured:"
-  head -20 "$TMP/oracle.err"; exit 2
-fi
+# Batched oracle programs: marker, probe, marker, probe, …
+#
+# The batch is split across several programs rather than being one, because a
+# Groovy script body compiles to a single `run()` method and the JVM caps a
+# method at 64KB of bytecode. At ~700 probes one batch stopped compiling at all
+# ("Method too large: all.run()"), which the rc gate below correctly refused —
+# but refusing is not measuring, and shrinking the corpus to fit is the wrong
+# direction. Chunking keeps every probe AND keeps the amortisation that the
+# batching exists for: the cost is one JVM start per chunk, not per probe.
+#
+# Every chunk's rc is checked, so the guarantee is stronger than the single
+# batch's was — there are now more ways to fail closed, and none to fail open.
+CHUNK="${GROOVYRS_PARITY_CHUNK:-100}"
+: > "$TMP/oracle.out"
+: > "$TMP/oracle.err"
+for ((base=0; base<N; base+=CHUNK)); do
+  src="$TMP/batch$base.groovy"
+  : > "$src"
+  for ((i=base; i<base+CHUNK && i<N; i++)); do
+    {
+      printf 'println "##P%d"\ntry {\n' "$i"
+      cat "$TMP/p$i.body"
+      printf '\n} catch (Throwable t) { println "EXC:" + t.getClass().getName() }\n'
+    } >> "$src"
+  done
+  timeout 300 "$ORACLE" "$src" >> "$TMP/oracle.out" 2>>"$TMP/oracle.err"
+  orc=$?
+  # A non-zero oracle rc is fatal even when it left partial output behind. Every
+  # probe the chunk never reached would otherwise become a SKIP, and a run that
+  # skipped everything used to still exit 0 — a truncated oracle reading as a
+  # clean sweep. `timeout` (rc 124) is the case that actually bit us.
+  if [ $orc -ne 0 ]; then
+    echo "fuzz: oracle batch at probe $base failed (rc=$orc) — probes after the failure are unmeasured:"
+    head -20 "$TMP/oracle.err"; exit 2
+  fi
+done
 
 # Split the oracle's stdout back out into per-probe expected files.
 command perl -e '

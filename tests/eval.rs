@@ -2698,3 +2698,80 @@ fn a_numeric_right_shift_keeps_its_native_ops() {
     let (out, _) = run("def q = { it }\nq = 64\nprintln(q >> 2)");
     assert_eq!(out, "16\n");
 }
+
+#[test]
+fn to_string_with_an_argument_resolves_the_static_integer_overload() {
+    // Java's overload resolution admits `255.toString(16)` as the *static*
+    // `Integer.toString(int)` — `Integer` has no instance `toString(int)` — so
+    // the receiver is discarded and the argument is rendered in base 10: `16`,
+    // not `ff`. The two-argument form is the radix one. A radix outside 2..36
+    // falls back to base 10 instead of raising.
+    let (out, ok) = run(concat!(
+        "println([255.toString(16), 255.toString(16, 2), 10.toString(16), (-255).toString(16)])\n",
+        "println([255.toString(1), 255.toString(37), 255.toString(36), 255.toString(0)])\n",
+        "println([255L.toString(16), 255L.toString(16, 2), 255.toString(16).getClass()])\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[16, 10000, 16, 16]\n[1, 37, 36, 0]\n[16, 10000, class java.lang.String]\n"
+    );
+}
+
+#[test]
+fn integer_and_long_statics_take_a_radix() {
+    let (out, ok) = run(concat!(
+        "println([Integer.toString(255, 16), Integer.toString(255), Long.toString(255, 16), Long.toString(255)])\n",
+        "println([Integer.toString(255,1), Integer.toString(255,37), Integer.toString(-255,16), Integer.toString(255,2)])\n",
+        "println([Integer.parseInt('ff',16), Integer.parseInt('-ff',16), Integer.parseInt('FF',16), Long.parseLong('ff',16), Integer.valueOf('ff',16)])\n",
+        "try { println(Integer.parseInt('zz',16)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[ff, 255, ff, 255]\n[255, 255, -ff, 11111111]\n[255, -255, 255, 255, 255]\nEXC:NumberFormatException\n"
+    );
+}
+
+#[test]
+fn the_unsigned_renderings_fill_to_the_named_classs_width() {
+    // `Integer.toHexString(-1)` is `ffffffff` — 32 bits — where the same value
+    // through `Long` runs to 64. Rendering both at 64 (a bare `{:x}` over the
+    // host `i64`) made every negative `Integer` sixteen digits wide.
+    let (out, ok) = run(concat!(
+        "println([Integer.toHexString(-1), Long.toHexString(-1L), Integer.toBinaryString(-1), Integer.toOctalString(-1)])\n",
+        "println([Long.toHexString(255), Long.toBinaryString(5), Long.toOctalString(8), Integer.toHexString(255)])\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[ffffffff, ffffffffffffffff, 11111111111111111111111111111111, 37777777777]\n[ff, 101, 10, ff]\n"
+    );
+}
+
+#[test]
+fn big_integer_converts_its_receiver_and_stays_one_through_unary_minus() {
+    // `BigInteger` is the one type here with a real instance `toString(int
+    // radix)`, so it is the spelling that answers `ff`. `BigDecimal` has no such
+    // overload and neither takes two arguments. Unary `-` must keep a
+    // `BigInteger` a `BigInteger` — it used to answer a `BigDecimal`, which
+    // silently changed the type and lost the radix overload with it.
+    let (out, ok) = run(concat!(
+        "println([255G.toString(2), (-255G).toString(16), 255G.toString(36), 255G.toString(1), 255G.toString(16)])\n",
+        "println([(-255G).getClass(), (255G + 1G).getClass(), 255G.negate().getClass(), (-3.14G).getClass()])\n",
+        "try { println(255G.toString(16, 2)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }\n",
+        "try { println(3.14.toString(16)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }\n",
+        "println([255.toString(), 3.14.toString(), [1,2].toString(), 255G.toString()])\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[11111111, -ff, 73, 255, ff]\n",
+            "[class java.math.BigInteger, class java.math.BigInteger, class java.math.BigInteger, class java.math.BigDecimal]\n",
+            "EXC:MissingMethodException\n",
+            "EXC:MissingMethodException\n",
+            "[255, 3.14, [1, 2], 255]\n"
+        )
+    );
+}

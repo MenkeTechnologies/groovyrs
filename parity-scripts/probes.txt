@@ -1633,3 +1633,47 @@ println([256 >> 3, -1 >> 1, 1 >> 32, 256 >> 33, -8L >> 1, (-1L) >> 65])
 # A composed closure is still a Closure, and curries like one.
 def f = { a, b -> a * b }; def g = { it + 1 }
 println((f >> g).curry(3)(4))
+%%
+# `255.toString(16)` is `16`, not `ff`: `Integer` has no instance `toString(int)`,
+# so Java resolves the *static* `Integer.toString(int)` and the receiver is
+# discarded. The two-argument form is the radix one.
+println([255.toString(16), 255.toString(16, 2), 10.toString(16), (-255).toString(16), 0.toString(16)])
+%%
+# A radix outside 2..36 falls back to base 10 rather than raising.
+println([255.toString(1), 255.toString(37), 255.toString(36), 255.toString(0)])
+%%
+# A `Long` receiver resolves the same way, and the result is a `String`.
+println([255L.toString(16), 255L.toString(16, 2), 255.toString(16).getClass()])
+%%
+# The statics spelled out: one argument renders base 10, two apply the radix.
+println([Integer.toString(255, 16), Integer.toString(255), Long.toString(255, 16), Long.toString(255)])
+%%
+println([Integer.toString(255,1), Integer.toString(255,37), Integer.toString(-255,16), Integer.toString(255,36), Integer.toString(255,2)])
+%%
+# `parseInt`/`parseLong`/`valueOf` take a radix, and its digits are case-insensitive.
+println([Integer.parseInt('ff',16), Integer.parseInt('-ff',16), Integer.parseInt('FF',16), Long.parseLong('ff',16), Integer.parseInt('11',2), Integer.valueOf('ff',16)])
+%%
+# A digit the radix does not admit is a NumberFormatException.
+try { println(Integer.parseInt('zz',16)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }
+%%
+# The unsigned renderings fill to the *named class's* width, so `Integer` stops
+# at 32 bits where `Long` runs to 64.
+println([Integer.toHexString(-1), Long.toHexString(-1L), Integer.toBinaryString(-1), Integer.toOctalString(-1)])
+%%
+println([Long.toHexString(255), Long.toBinaryString(5), Long.toOctalString(8), Integer.toHexString(255), Integer.toBinaryString(5), Integer.toOctalString(8)])
+%%
+# `BigInteger` *does* have an instance `toString(int radix)`, so it converts the
+# receiver — the one spelling of this that answers `ff`.
+println([255G.toString(2), (-255G).toString(16), 255G.toString(36), 255G.toString(1), 255G.toString(16)])
+%%
+# `BigDecimal` has no radix overload at all, and `BigInteger` has no two-argument one.
+try { println(255G.toString(16, 2)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }
+try { println(3.14.toString(16)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }
+try { println('ab'.toString(16)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }
+try { println([1,2].toString(3)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }
+%%
+# Unary `-` keeps a `BigInteger` a `BigInteger`, as `+`/`-`/`*` and `negate()` do.
+println([(-255G).getClass(), (255G + 1G).getClass(), 255G.negate().getClass(), (-3.14G).getClass()])
+%%
+# The no-argument `toString` is untouched by the overload above.
+println([255.toString(), 3.14.toString(), [1,2].toString(), 255G.toString(), 255L.toString()])

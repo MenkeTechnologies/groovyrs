@@ -242,8 +242,10 @@ Implemented and checked against Apache Groovy:
   `IllegalArgumentException` Groovy raises (even for two equal lists) rather than
   inventing an order. `null` still orders before everything.
 - **JDK statics** — `Math` (`max`, `min`, `abs`, `round`, `sqrt`, `floor`,
-  `ceil`, `pow`, the trig and log family, `PI`, `E`), `Integer.parseInt` /
-  `MAX_VALUE` / `toHexString`, `Long`, `Double`, `Boolean`, and
+  `ceil`, `pow`, the trig and log family, `PI`, `E`), `Integer` / `Long`
+  (`parseInt` / `parseLong` / `valueOf` with an optional radix, `toString` with
+  one, `toHexString` / `toBinaryString` / `toOctalString` filling to the named
+  class's width, `MAX_VALUE` / `MIN_VALUE`), `Double`, `Boolean`, and
   `String.format` / `String.valueOf`, plus the script-scope `printf` / `sprintf`
   over a `java.util.Formatter` subset (`%s %d %f %x %o %b %n %%`, width,
   precision and left-justification).

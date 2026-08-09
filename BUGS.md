@@ -379,11 +379,6 @@ reported as parse or compile errors, never silently mis-run.
   generation nor sorted order. Reproducing that means reproducing
   `List.hashCode`, `HashMap`'s spread and its bucket walk; answering in any other
   order would print the wrong thing, so the method faults instead.
-- **A static method called through an instance.** Java's overload resolution
-  admits `255.toString(16)` as the *static* `Integer.toString(int)`, so Groovy
-  prints `16` (not `ff`). groovyrs dispatches instance methods only and raises
-  `MissingMethodException`. `Integer.toString(255, 16)` — the static call spelled
-  out — answers `ff` as it should.
 - **`new Random(…)` / `new Date(…)` and the other stateful JDK classes.**
   Reproducing them means reproducing Java's exact LCG and clock, so they fault
   rather than answering a plausible-looking different number. The instantiable

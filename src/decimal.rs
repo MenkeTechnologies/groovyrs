@@ -302,6 +302,17 @@ pub fn to_big_integer(d: &BigDecimal) -> BigDecimal {
     d.with_scale_round(0, RoundingMode::Down)
 }
 
+/// `BigInteger.toString(int radix)`: the value in `radix`, sign-prefixed, with
+/// lowercase digits. Java falls back to base 10 for a radix outside
+/// `Character.MIN_RADIX`..`Character.MAX_RADIX` (2..36) rather than raising, so
+/// `255G.toString(1)` and `255G.toString(37)` are both `255`.
+pub fn to_radix_string(d: &BigDecimal, radix: i64) -> String {
+    let radix = if (2..=36).contains(&radix) { radix } else { 10 };
+    let (unscaled, scale) = to_big_integer(d).into_bigint_and_exponent();
+    debug_assert_eq!(scale, 0, "to_big_integer leaves scale 0");
+    unscaled.to_str_radix(radix as u32)
+}
+
 /// `intValue()` / `toInteger()`: truncate toward zero.
 pub fn truncate_to_i64(d: &BigDecimal) -> i64 {
     d.with_scale_round(0, RoundingMode::Down)

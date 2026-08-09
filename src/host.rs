@@ -5724,6 +5724,16 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (Value::Int(_), "power") => {
             power_of(vm, recv, args.first().unwrap_or(&Value::Undef), false)
         }
+        // `255.toString(16)` is `16`, not `ff`: `Integer` has no *instance*
+        // `toString(int)`, so Java's overload resolution reaches the static
+        // `Integer.toString(int)` and renders the argument, discarding the
+        // receiver. The two-argument form is the radix one — `255.toString(16, 2)`
+        // is `Integer.toString(16, 2)`, `10000`. `Integer.toHexString(255)` is
+        // the spelling that converts the receiver.
+        (Value::Int(_), "toString") => match dispatch_static(vm, "Integer", "toString", args) {
+            Some(v) => v,
+            None => raise_missing_method(vm, recv, method, args),
+        },
         (Value::Int(n), "toLong" | "longValue") => Value::int(*n),
         // `intValue()` is Java's narrowing conversion, so `3000000000L.intValue()`
         // is `-1294967296`.
@@ -5764,6 +5774,14 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         _ if as_dec(recv).is_some() => {
             let d = as_dec(recv).unwrap();
             match method {
+                // `BigInteger` really does have an instance `toString(int radix)`
+                // — unlike `Integer`, whose one-argument form is the static —
+                // so `255G.toString(16)` is `ff`. `BigDecimal` has no such
+                // overload, and neither takes two arguments.
+                "toString" if args.len() == 1 && as_bigint(recv).is_some() => Value::str(
+                    decimal::to_radix_string(&d, args.first().and_then(as_i64).unwrap_or(10)),
+                ),
+                "toString" if !args.is_empty() => raise_missing_method(vm, recv, method, args),
                 "toString" => Value::str(decimal::to_groovy_string(&d)),
                 // `BigDecimal.equals` compares *scale as well as value*, so
                 // `1.00.equals(1.0)` is false where `1.00 == 1.0` is true.
@@ -6420,6 +6438,68 @@ fn b_classref(vm: &mut VM, _argc: u8) -> Value {
     heap_push(HeapObj::ClassRef(qualified))
 }
 
+/// `Integer.toString(int, int radix)` / `Long.toString(long, int radix)`: the
+/// value in `radix`, sign-prefixed, lowercase digits. Java falls back to base 10
+/// for a radix outside `Character.MIN_RADIX`..`Character.MAX_RADIX` (2..36)
+/// instead of raising — `Integer.toString(255, 1)` and `(255, 37)` are both
+/// `255`.
+fn java_radix_string(n: i64, radix: i64) -> String {
+    let radix = if (2..=36).contains(&radix) { radix } else { 10 } as u64;
+    let negative = n < 0;
+    // Read the magnitude unsigned so `Long.MIN_VALUE` (whose positive
+    // counterpart is not an `i64`) still renders.
+    let mut mag = n.unsigned_abs();
+    let mut digits = Vec::new();
+    loop {
+        digits.push(std::char::from_digit((mag % radix) as u32, radix as u32).unwrap());
+        mag /= radix;
+        if mag == 0 {
+            break;
+        }
+    }
+    if negative {
+        digits.push('-');
+    }
+    digits.iter().rev().collect()
+}
+
+/// `Integer.toHexString` and friends, which render the value's *unsigned*
+/// two's-complement bit pattern at its own Java width: `Integer.toHexString(-1)`
+/// is `ffffffff`, `Long.toHexString(-1L)` all sixteen. Rendering an `Integer` at
+/// 64 bits — what a bare `format!("{n:x}")` does — is why `-1` printed sixteen
+/// `f`s here before.
+fn java_unsigned_radix_string(n: i64, radix: u32, wide: bool) -> String {
+    let bits: u64 = if wide { n as u64 } else { u64::from(n as u32) };
+    match radix {
+        2 => format!("{bits:b}"),
+        8 => format!("{bits:o}"),
+        _ => format!("{bits:x}"),
+    }
+}
+
+/// `Integer.parseInt(String, int radix)`: a signed parse in `radix`, digits
+/// case-insensitive. `None` on any text Java rejects, which the caller turns into
+/// `NumberFormatException`.
+fn java_parse_radix(text: &str, radix: i64) -> Option<i64> {
+    if !(2..=36).contains(&radix) {
+        return None;
+    }
+    let t = text.trim();
+    let (negative, body) = match t.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    if body.is_empty() {
+        return None;
+    }
+    let mut acc: i64 = 0;
+    for c in body.chars() {
+        let d = c.to_digit(radix as u32)?;
+        acc = acc.checked_mul(radix)?.checked_add(i64::from(d))?;
+    }
+    Some(if negative { -acc } else { acc })
+}
+
 /// The static methods of the JDK classes a Groovy script actually calls.
 /// Returns `None` when `class`/`method` is not one of them, so the caller falls
 /// through to `MissingMethodException`.
@@ -6461,11 +6541,30 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         ("Math", "pow") => Value::float(f0.powf(as_f64(args.get(1)?))),
         ("Math", "random") => return None,
 
+        // `parseInt`/`parseLong`/`valueOf` take an optional radix, so
+        // `Integer.parseInt("ff", 16)` is `255` — the second argument used to be
+        // dropped, which turned every non-decimal parse into a
+        // `NumberFormatException`.
         ("Integer" | "Long" | "Short" | "Byte", "parseInt" | "parseLong" | "valueOf") => {
             let text = groovy_str(&arg0);
-            match text.trim().parse::<i64>() {
-                Ok(n) => Value::int(n),
-                Err(_) => raise_number_format(vm, text.trim()),
+            let parsed = match args.get(1).and_then(as_i64) {
+                Some(radix) => java_parse_radix(&text, radix),
+                None => text.trim().parse::<i64>().ok(),
+            };
+            match parsed {
+                Some(n) => Value::int(n),
+                None => raise_number_format(vm, text.trim()),
+            }
+        }
+        // Java's overload resolution admits `255.toString(16)` as the *static*
+        // `Integer.toString(int)`, which renders its argument in base 10 and
+        // ignores the receiver — so Groovy prints `16`, not `ff`. The two-arg
+        // form is the one that takes a radix.
+        ("Integer" | "Long", "toString") if !args.is_empty() => {
+            let n = as_i64(&arg0).unwrap_or(0);
+            match args.get(1).and_then(as_i64) {
+                Some(radix) => Value::str(java_radix_string(n, radix)),
+                None => Value::str(n.to_string()),
             }
         }
         ("Double" | "Float", "parseDouble" | "parseFloat" | "valueOf") => {
@@ -6475,9 +6574,21 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
                 None => raise_number_format(vm, text.trim()),
             }
         }
-        ("Integer", "toBinaryString") => Value::str(format!("{:b}", as_i64(&arg0).unwrap_or(0))),
-        ("Integer", "toHexString") => Value::str(format!("{:x}", as_i64(&arg0).unwrap_or(0))),
-        ("Integer", "toOctalString") => Value::str(format!("{:o}", as_i64(&arg0).unwrap_or(0))),
+        // The unsigned renderings fill to the *named class's* width, so
+        // `Integer.toHexString(-1)` is `ffffffff` and `Long.toHexString(-1L)` is
+        // sixteen `f`s.
+        ("Integer" | "Long", "toBinaryString" | "toHexString" | "toOctalString") => {
+            let radix = match method {
+                "toBinaryString" => 2,
+                "toOctalString" => 8,
+                _ => 16,
+            };
+            Value::str(java_unsigned_radix_string(
+                as_i64(&arg0).unwrap_or(0),
+                radix,
+                class == "Long",
+            ))
+        }
         ("Boolean", "parseBoolean" | "valueOf") => {
             Value::bool(groovy_str(&arg0).eq_ignore_ascii_case("true"))
         }
@@ -8090,7 +8201,16 @@ fn zero_divisor_message(dividend: &BigDecimal) -> &'static str {
 /// scale 0.
 fn decimal_operator(op: NumOp, a: &Value, b: &Value) -> Option<Result<Value, String>> {
     if matches!(op, NumOp::Neg) {
-        return Some(Ok(dec_value(decimal::neg(&as_dec(a)?))));
+        let negated = decimal::neg(&as_dec(a)?);
+        // A `BigInteger` stays one through unary `-`, exactly as it does through
+        // `+`/`-`/`*` and `negate()` — `(-255G).getClass()` is
+        // `java.math.BigInteger`. Answering a `BigDecimal` here made `-255G`
+        // quietly change type, and with it lose `toString(radix)`.
+        return Some(Ok(if as_bigint(a).is_some() {
+            bigint_value(negated)
+        } else {
+            dec_value(negated)
+        }));
     }
     if as_dec(a).is_none() && as_dec(b).is_none() {
         return None;

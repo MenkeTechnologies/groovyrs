@@ -150,9 +150,15 @@ Implemented and checked against Apache Groovy:
   (negative index counts from the end), `map[k]`, `str[i]`, and by a range
   (`list[0..1]`, `"abcdef"[1..3]`); subscript *assignment* `list[i] = v` (growing
   the list with nulls past the end) and `map[k] = v`. A multi-entry map keeps
-  insertion order and `m.k = v` mutates it in place. The list mutators
-  (`add`, `remove`, `set`, `clear`, `push`, `pop`, `<<`, …) write back to a
-  variable receiver the way Groovy's in-place mutation does.
+  insertion order and `m.k = v` mutates it in place.
+- **Lists are references**, as Groovy's are: `def b = a` gives one `ArrayList`
+  a second name, so `b.add(4)` is visible through `a`, and `a.is(b)` is `true`
+  while a `collect` copy is `false`. The same holds for a list reached through a
+  map value, an element of another list, a closure parameter or a capture, and
+  for every in-place mutator (`add`, `remove`, `set`, `clear`, `push`, `pop`,
+  `<<`, `sort`, `unique`, `removeAll`, `retainAll`, `swap`, `list[i] = v`).
+  `removeAll`/`retainAll` take Groovy's *predicate closure* as well as a
+  collection, and `push` inserts at the front — the end `pop` takes from.
 - **Declarations** — the multi-declarator `def a = 1, b = 2` and Groovy's
   multiple assignment `def (a, b) = [1, 2]` (the right side is evaluated once;
   a name past its end is `null`).
@@ -401,9 +407,10 @@ Next waves, in priority order:
 5. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
    `"$s".getClass()` reports `java.lang.String` where Groovy reports
    `org.codehaus.groovy.runtime.GStringImpl`.
-6. **List aliasing.** A list is a fusevm value rather than a handle, so two names
-   never refer to one list: `def b = a; b.add(4)` leaves `a` unchanged. This is
-   also why `subList` answers a copy instead of Java's live view.
+6. **`subList` answers a copy, not a live view.** The window and all three of
+   Java's bounds outcomes are exact, but writing through the window does not
+   reach the backing list, and `getClass()` names `java.util.ArrayList` rather
+   than `java.util.ArrayList$SubList`.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
 

@@ -23,9 +23,27 @@ reported as parse or compile errors, never silently mis-run.
   properties on every other value, so `[a:1].size` and `[a:1].class` are `null`
   in Groovy while `[size: 9].size` is `9`. An unknown method/property faults
   rather than mis-running.
-- **List and map literals.** `[1, 2, 3]`, `[]`, `[a: 1]`, `[:]` build a fusevm
-  `Array` (list) and a host-heap insertion-ordered map, and print Groovy-style
+- **List and map literals.** `[1, 2, 3]`, `[]`, `[a: 1]`, `[:]` build a host-heap
+  `java.util.ArrayList` and an insertion-ordered map, and print Groovy-style
   (`[1, 2, 3]`, `[a:1]`, `[:]`).
+- **Lists are references, like Groovy's.** `def b = a` gives one `ArrayList` a
+  second name, so `b.add(4)` shows through `a`, and `a.is(b)` is `true` while a
+  `collect` copy is `false`. The same holds for a list reached through a map
+  value, an element of another list, a closure parameter, or a capture, and for
+  every in-place mutator — `add`, `remove`/`removeAt`, `set`, `clear`, `push`,
+  `pop`/`removeLast`, `<<`, `addAll`, `removeAll`, `retainAll`, `swap`, `sort`,
+  `unique`, and `list[i] = v` — whatever shape the receiver is reached through
+  (a bare name, a field, a map entry, a subscript). The methods Groovy answers
+  the receiver with (`sort`, `unique`, `<<`, `swap`, `each`, `eachWithIndex`)
+  answer the same reference, so `a.is(a.sort())` is `true`; `reverse`,
+  `sort(false)` and `collect` answer a new list, and are `false`.
+  `removeAll`/`retainAll` accept Groovy's *predicate closure* as well as a
+  collection, and `push` inserts at the front — the end `pop` takes from.
+- **`Object.is()` / `equals()`.** `is()` is handle identity, answered by every
+  reference value (list, map, set, range, matcher, buffer, closure, instance).
+  `equals()` on a collection agrees with `==`, including the two cross-type
+  answers: a list never equals a `Set`, and a list does equal the `Range`
+  enumerating the same elements.
 - **`java.util.Set`.** `as Set`, `toSet()` and
   `new HashSet`/`LinkedHashSet`/`TreeSet` build a real set behind a handle, not a
   de-duplicated list. `getClass()` names the implementation, `==` ignores order
@@ -447,24 +465,17 @@ reported as parse or compile errors, never silently mis-run.
   (<simple types>) values: [<values>]` — is byte-identical to Groovy. The same
   holds for the suggestion line Groovy sometimes appends to a
   `MissingPropertyException` on a class with fields.
-- **Lists are values, so two names never alias one list.** `def a = [1, 2, 3];
-  def b = a; b.add(4)` leaves `a` as `[1, 2, 3]`; Groovy answers `[1, 2, 3, 4]`,
-  because both names hold the same `ArrayList`. A fusevm `Value::Array` is a
-  value rather than a handle, and a mutator only writes back through a
-  *variable* receiver (the `MUTATED` slot), so a second name never sees it.
-  Maps, sets, ranges, matchers and `StringBuilder`s are host-heap handles and do
-  alias correctly; this is a list-only gap, and it is what makes the two entries
-  below unreachable rather than merely unwritten.
 - **`subList` answers a copy, not a view.** The window and all three of Java's
   bounds outcomes are exact, but Java's `subList` is a *live view* of the backing
   list — writing through it writes through to the list — and groovyrs's is a
   copy, so `getClass()` names `java.util.ArrayList` rather than
   `java.util.ArrayList$SubList` and a write through the window does not reach the
-  original. This is not specific to `subList`: a fusevm `Value::Array` is a value
-  rather than a handle, so groovyrs has no list aliasing at all, and plain
-  `def b = a; b.add(4)` already leaves `a` unchanged (see *Lists are values*).
-  A view has nothing to point at until lists become heap handles; until then a
-  copy is exactly as aliased as every other list groovyrs hands out.
+  original (`def s = a.subList(0, 2); s.set(0, 99)` leaves `a` alone).
+  This entry used to say a view had "nothing to point at", because lists were
+  fusevm values. They are host-heap handles now (see *Lists are references* in
+  the README), so a view *does* have something to point at: the gap is a
+  `HeapObj` variant carrying a backing handle plus an offset and length, and the
+  bounds re-checks Java makes on every access. Unwritten, no longer unreachable.
 - **A reverse `ObjectRange`'s `subList` differs**, in the one corner where
   Groovy's own answer is self-inconsistent: `('e'..'a').subList(1, 3)` *prints*
   `c..d` but *iterates* `[c]`, because Groovy builds it through the constructor
@@ -592,15 +603,14 @@ reported as parse or compile errors, never silently mis-run.
   (`floor(|to - from|)`, plus one when inclusive) where the walk steps by one and
   stops short of the excluded end. It only shows on a fractional exclusive range;
   every whole-numbered range agrees with its element count.
-- **`sort()` / `unique()` write back only through a bare variable.** Groovy's
-  `List.sort()` and `List.unique()` mutate the receiver in place and return it.
-  A fusevm `Value::Array` is a value, not a reference, so the host can only
-  return a new list; the compiler stores that result back when the receiver is a
-  plain variable (`xs.sort(); println(xs)` is right), which is the shape scripts
-  write. A receiver reached through a field, a map entry, or a subscript
-  (`obj.items.sort()`) gets the sorted list as the call's *value* but leaves the
-  original untouched. `sort(false)` asks for a copy in Groovy too, so it never
-  writes back; `sort(true)` does. Everything else in the GDK is non-mutating in Groovy as well.
+- **`Object.is()` answers only for a heap-handle receiver.** Reference identity
+  needs a reference, so `is()` is defined on the values that have one — a list,
+  map, set, range, matcher, buffer, closure or class instance — and raises
+  `MissingMethodException` on an `Integer`/`String`/`Boolean` receiver, where
+  Groovy answers from the JVM's boxing and interning caches. Those answers are
+  the JVM's (`Integer.valueOf` caches -128..127, and literal `String`s are
+  interned but computed ones are not), so modeling them means modeling the cache
+  boundaries rather than the language.
 - **`Map.Entry` is modeled only as far as the GDK needs.** It prints `k=v` and
   answers `key`/`value`/`getKey()`/`getValue()`; `setValue` and the rest of the
   interface are absent, and its key is always the map's `String` key.

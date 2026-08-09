@@ -3649,6 +3649,36 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // is already written against the transient `Value::Array` form, so the call
     // runs against that and its effect is reconciled back through the handle
     // here — one place rather than seventy match arms.
+    // `Object.is(other)` — reference identity, which is exactly handle identity.
+    // Defined here rather than per-type so every reference value answers it with
+    // one rule. A non-handle receiver falls through to the ordinary dispatch (and
+    // its `MissingMethodException`); see BUGS.md for why the boxed `Integer` /
+    // interned `String` answers are not modeled.
+    if method == "is" && args.len() == 1 {
+        if let Value::Obj(id) = recv {
+            return Value::bool(matches!(args[0], Value::Obj(other) if other == id));
+        }
+    }
+    // `Object.equals(other)` on a collection. Groovy's `==` *is* `equals`, so the
+    // two have to agree; these are the values with no per-type table entry for it
+    // (`String`/`Number` have their own, and a user class's own `equals` is
+    // dispatched below, where an instance receiver reaches it first).
+    //
+    // This runs *above* the per-type branches deliberately: the `Set` branch
+    // hands anything it does not define to the list of its elements, which would
+    // turn `setA.equals(setB)` into a list-vs-set comparison — false, where
+    // Groovy answers true. Verified against Groovy 5.0.8, including the two
+    // cross-type answers `==` already gets right: a list never equals a `Set`,
+    // and a list *does* equal the `Range` enumerating the same elements.
+    if method == "equals"
+        && args.len() == 1
+        && (is_list(&recv)
+            || as_omap(&recv).is_some()
+            || as_set(&recv).is_some()
+            || as_range(&recv).is_some())
+    {
+        return Value::bool(values_equal(&recv, &args[0]));
+    }
     // `with`/`tap` install the receiver as the closure's *delegate*, and a bare
     // mutator call inside the body (`[1, 2].tap { add(3) }`) has to reach this
     // list — so they run against the handle, further down, not against the
@@ -3656,10 +3686,6 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     let delegating =
         matches!(method, "with" | "tap") && args.len() == 1 && closure_meta(&args[0]).is_some();
     if let Some(id) = list_id(&recv).filter(|_| !delegating) {
-        // `Object.is()` is reference identity, which only a handle can answer.
-        if method == "is" {
-            return Value::bool(args.first().and_then(list_id) == Some(id));
-        }
         // `sort`/`unique` do not use the `MUTATED` slot — their *result* is the
         // new list (which is why the compiler writes the result back). Same rule
         // as `compiler::Compiler::emit_receiver_writeback`: only the no-argument,
@@ -3949,6 +3975,32 @@ fn dispatch_iteration(
     args: &[Value],
 ) -> Option<Result<Value, String>> {
     match method {
+        // `list.removeAll { it > 1 }` / `retainAll { … }` — the *predicate*
+        // spellings, which drop (or keep) every element the closure accepts and
+        // answer whether the list changed. The collection-argument spellings
+        // (`removeAll([2, 3])`) are the pure-GDK arm; only the closure form
+        // re-enters the VM, so only it belongs here. Verified against Groovy
+        // 5.0.8: `[1, 2, 3].removeAll { it > 1 }` answers `true` and leaves `[1]`.
+        "removeAll" | "retainAll" => {
+            let clo = args.last()?;
+            closure_meta(clo)?;
+            let mut kept: Vec<Value> = Vec::new();
+            for it in items {
+                let hit = match invoke_closure(vm, clo, &item_args(clo, it)) {
+                    Ok(v) => v.is_truthy(),
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                if hit == (method == "retainAll") {
+                    kept.push(it.clone());
+                }
+            }
+            let changed = kept.len() != items.len();
+            set_mutated(Value::array(kept));
+            Some(Ok(Value::bool(changed)))
+        }
         // `list.each { it -> ... }` — run the closure for its side effects on
         // each element; the list itself is returned.
         "each" => {
@@ -5541,11 +5593,17 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 ("addAll", _) => {
                     next.extend(args.first().map(iteration_elements).unwrap_or_default())
                 }
+                // `push` is Groovy's *stack* spelling, and its stack grows at the
+                // front — the end `pop` takes from. Verified against Groovy
+                // 5.0.8: `[1, 2].push(3)` leaves `[3, 1, 2]`, and `pop()` on that
+                // answers `3`.
+                ("push", _) => next.insert(0, args.first().cloned().unwrap_or(Value::Undef)),
                 _ => next.push(args.first().cloned().unwrap_or(Value::Undef)),
             }
             let answer = match method {
-                // `<<` answers the list itself so calls chain.
-                "leftShift" | "push" => Value::array(next.clone()),
+                // `<<` answers the list itself so calls chain. `push` is `add`,
+                // whose answer is `true` (verified against Groovy 5.0.8).
+                "leftShift" => Value::array(next.clone()),
                 "add" if args.len() == 2 => Value::Undef,
                 _ => Value::bool(true),
             };

@@ -1497,3 +1497,104 @@ println([1, ([2, 3] as Set)])
 %%
 # `toUnique` answers a de-duplicated List, not a set.
 println([1, 2, 2, 3].toUnique().getClass().getName())
+%%
+# List aliasing: a second name for one ArrayList sees the mutation.
+def a = [1, 2, 3]; def b = a; b.add(4); println a; println b
+%%
+# Aliasing through a map value.
+def a = [1, 2]; def m = [k: a]; m.k.add(5); println a; println m
+%%
+# Aliasing through an element of another list, held twice.
+def a = [1, 2]; def outer = [a, a]; outer[0].add(9); println a; println outer
+%%
+# Aliasing through a closure parameter.
+def a = [1]; def f = { l -> l.add(7) }; f(a); println a
+%%
+# Aliasing through a closure capture.
+def a = [1]; def c = { a.add(3) }; c(); println a
+%%
+# A collect copy is NOT an alias.
+def a = [1, 2]; def b = a.collect { it }; b.add(3); println a; println b
+%%
+# Reference identity: the same list, a copy, and a distinct equal list.
+def a = [1, 2]; def b = a; def c = a.collect { it }; def d = [1, 2]
+println a.is(b); println a.is(c); println a.is(d); println a == d
+%%
+# sort() mutates the receiver, so the alias sees it.
+def a = [3, 1, 2]; def b = a; b.sort(); println a; println a.is(b.sort())
+%%
+# sort(false) asks for a copy: the receiver is untouched and identity is false.
+def a = [3, 1, 2]; def b = a.sort(false); println a; println b; println a.is(b)
+%%
+# unique() mutates the receiver.
+def a = [1, 1, 2]; def b = a; b.unique(); println a
+%%
+# clear() through one name empties the other.
+def a = [1, 2, 3]; def b = a; a.clear(); println b; println b.isEmpty()
+%%
+# `<<` appends in place and answers the same list, so it chains.
+def a = [1]; def b = a; b << 2 << 3; println a; println a.is(b)
+%%
+# A subscript write goes through the alias.
+def a = [1, 2, 3]; def b = a; b[1] = 9; println a
+%%
+# remove/set/addAll through an alias.
+def a = [1, 2, 3]; def b = a; b.remove(0); b.set(0, 8); b.addAll([4, 5]); println a
+%%
+# swap answers the receiver and mutates in place.
+def a = [1, 2, 3]; def b = a; println a.is(b.swap(0, 2)); println a
+%%
+# tap runs a bare mutator against the receiver list itself.
+def a = [1, 2]; def b = a.tap { add(3) }; println a; println a.is(b)
+%%
+# each answers the receiver, and a nested list element aliases.
+def a = [[1], [2]]; def inner = a[0]; inner.add(99); println a; println a.is(a.each { })
+%%
+# A list stored into a map and re-read is the same list.
+def a = [1]; def m = [:]; m.x = a; m.x.add(2); println a; println m
+%%
+# `push` is Groovy's stack spelling: it inserts at the FRONT and answers true.
+def f = [1, 2]; println f.push(3); println f
+%%
+# push/pop are the same end of the list.
+def g = []; g.push(1); g.push(2); println g; println g.pop(); println g
+%%
+# push writes through an alias.
+def i = [1, 2]; def j = i; j.push(0); println i
+%%
+# removeAll takes a predicate closure and answers whether the list changed.
+def k = [1, 2, 3]; println k.removeAll { it > 1 }; println k
+%%
+# retainAll takes a predicate closure too.
+def m = [1, 2, 3]; println m.retainAll { it != 2 }; println m
+%%
+# A predicate that matches nothing answers false and leaves the list alone.
+def n = [1, 2]; println n.removeAll { it > 9 }; println n
+%%
+# The collection-argument spellings still work alongside the closure ones.
+def o = [1, 2, 3]; println o.removeAll([2, 3]); println o
+%%
+# A predicate mutation is visible through an alias.
+def p = [1, 2, 3]; def q = p; q.removeAll { it == 2 }; println p
+%%
+# List.equals is by elements, and agrees with `==`.
+def a = [1, 2]
+println a.equals([1, 2]); println a.equals([2, 1]); println a.equals("x")
+println a.equals(null); println a.equals(1..2); println a.equals([1, 2] as Set)
+%%
+# equals on the other collection handles.
+println([a: 1].equals([a: 1])); println(([1] as Set).equals([1] as Set))
+println((1..2).equals(1..2)); println((1..2).equals([1, 2]))
+%%
+# `is()` is handle identity, and answers for every reference value.
+def a = [1]; def m = [k: 1]; def s = [1] as Set; def r = (1..2); def c = { 1 }
+println a.is(a); println m.is(m); println s.is(s); println r.is(r); println c.is(c)
+%%
+# Two separately built equal lists are not the same reference.
+def x = [1]; def y = [1]; println x.is(y); println x == y
+%%
+# A second name for a map is the same reference; a mutation shows through both.
+def m2 = [k: 1]; def m3 = m2; println m2.is(m3); m3.j = 2; println m2
+%%
+# A StringBuilder handle is its own reference.
+def sb = new StringBuilder(); def sb2 = sb; println sb.is(sb2); sb2.append("a"); println sb

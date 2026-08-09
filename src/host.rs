@@ -1001,7 +1001,10 @@ enum HeapObj {
     /// and `add` answers `false` for an element already present. Riding a handle
     /// also makes `s.add(x)` mutate the set the caller still holds, which a
     /// fusevm `Value::Array` cannot do (see `MUTATED`).
-    SetVal { items: Vec<Value>, kind: SetKind },
+    SetVal {
+        items: Vec<Value>,
+        kind: SetKind,
+    },
 }
 
 /// Which `java.util.Set` implementation a set handle is, which is exactly the
@@ -5034,7 +5037,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             let from = args.first().and_then(as_i64).unwrap_or(0);
             let to = args.get(1).and_then(as_i64).unwrap_or(0);
             if from < 0 {
-                raise(vm, "IndexOutOfBoundsException", &format!("fromIndex = {from}"));
+                raise(
+                    vm,
+                    "IndexOutOfBoundsException",
+                    &format!("fromIndex = {from}"),
+                );
                 Value::Undef
             } else if to > a.len() as i64 {
                 raise(vm, "IndexOutOfBoundsException", &format!("toIndex = {to}"));
@@ -6426,12 +6433,7 @@ fn range_elements(r: &RangeVal) -> Vec<Value> {
 ///
 /// `step` and `reverse` answer a `java.util.ArrayList`, not another range, which
 /// is what Groovy's own `Range.step` / `DefaultGroovyMethods.reverse` return.
-fn dispatch_range_method(
-    vm: &mut VM,
-    r: &RangeVal,
-    method: &str,
-    args: &[Value],
-) -> Option<Value> {
+fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]) -> Option<Value> {
     let elems = || range_elements(r);
     Some(match method {
         // `Range.subList` answers another **range**, not the list a range
@@ -6488,7 +6490,11 @@ fn range_sublist(vm: &mut VM, r: &RangeVal, args: &[Value]) -> Option<Value> {
     let to = args.get(1).and_then(as_i64).unwrap_or(0);
     let size = range_size(r);
     if from < 0 {
-        raise(vm, "IndexOutOfBoundsException", &format!("fromIndex = {from}"));
+        raise(
+            vm,
+            "IndexOutOfBoundsException",
+            &format!("fromIndex = {from}"),
+        );
         return Some(Value::Undef);
     }
     if to > size {
@@ -6644,7 +6650,7 @@ fn set_elements(items: &[Value], kind: SetKind) -> Vec<Value> {
             .collect(),
         SetKind::Tree => {
             let mut out = items.to_vec();
-            out.sort_by(|a, b| natural_order(a, b));
+            out.sort_by(natural_order);
             out
         }
     }
@@ -6702,8 +6708,8 @@ fn dispatch_set_method(
         // The set operators. Each answers a set of the receiver's kind with the
         // duplicates dropped, which is the whole point of the type: a list's
         // `+` concatenates, a set's unions.
-        "plus" | "minus" | "intersect" | "unique" | "toSet" | "asImmutable"
-        | "asSynchronized" | "clone" => {
+        "plus" | "minus" | "intersect" | "unique" | "toSet" | "asImmutable" | "asSynchronized"
+        | "clone" => {
             let o = other();
             make_set(
                 match method {
@@ -7901,9 +7907,7 @@ fn groovy_add(a: &Value, b: &Value) -> Value {
             // Java picks the `Collection` one for a set or a range: `[1, 2] +
             // ([2, 3] as Set)` is the four-element `[1, 2, 2, 3]` — the *list*
             // does not de-duplicate — rather than a list with a set inside it.
-            _ if as_set(b).is_some() || as_range(b).is_some() => {
-                out.extend(iteration_elements(b))
-            }
+            _ if as_set(b).is_some() || as_range(b).is_some() => out.extend(iteration_elements(b)),
             other => out.push(other.clone()),
         }
         return Value::array(out);

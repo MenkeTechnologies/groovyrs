@@ -1123,3 +1123,11 @@ def s = ''; for (i in 0..2) { for (j in 2..0) { if (j == 1) continue; s += "$i$j
 def s = ''; O: for (i in 2..0) { for (j in 0..2) { if (j == 1) continue O; s += "$i$j," } }; println s
 %%
 def s = ''; for (i in 4..0) { try { if (i == 2) continue; s += i } finally { s += 'f' } }; println s
+%%
+# An out-of-range list read yields null rather than throwing, so the probe above
+# that only catches measures nothing — observe the value itself.
+println([1][5])
+%%
+println([1][5] == null)
+%%
+println([1, 2][-1])

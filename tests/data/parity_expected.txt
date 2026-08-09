@@ -297,6 +297,44 @@ NaN
 NaN
 2
 compound: / by zero
+==== NumericPromotion.groovy ====
+16677181699666569
+1.6677181699666568E16
+1.667718169966657E16
+1.667718169966657E16
+1.6677181699666566E16
+-1.6677181699666566E16
+3.3354363399333136E16
+3.3354363399333136E16
+8.338590849833284E15
+1.19924339496762E-16
+0.0
+2.0
+2.781283894436935E32
+Infinity
+false
+false
+true
+true
+false
+true
+true
+false
+false
+true
+true
+false
+1
+-1
+true
+true
+false
+false
+0
+3.3354363399333136E16
+java.lang.Double
+java.lang.Double
+java.lang.Double
 ==== Operators.groovy ====
 Vec(13)
 Vec(7)

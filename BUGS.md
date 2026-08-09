@@ -87,15 +87,26 @@ reported as parse or compile errors, never silently mis-run.
 
   Java's **fail-fast** rule is modeled with the JDK's mechanism, an `ArrayList`
   `modCount` the window syncs to at every operation: a structural change made to
-  the backing list through any *other* reference (including a sibling window, and
-  including `a.sort()`, `a.addAll([])` and a `clear()` that emptied nothing —
-  each of which bumps the counter without changing a length) invalidates the
-  window permanently, and every later read or write through it raises the
-  message-less `java.util.ConcurrentModificationException`. `getClass()` and
-  `is()` still answer, since they read the reference rather than the elements,
-  and a window taken *after* the change is fine. Non-structural changes
-  (`set`, `swap`, `sort(false)`, a `removeAll` that removed nothing) leave the
-  window live.
+  the backing list through any *other* reference — a second name for it, or a
+  sibling window — invalidates the window permanently, and every later read or
+  write through it raises the message-less
+  `java.util.ConcurrentModificationException`. `getClass()` and `is()` still
+  answer, since they read the reference rather than the elements, and a window
+  taken *after* the change is fine.
+
+  Which operations count is the JDK's answer, not a length test, and it differs
+  between the list and a window taken onto it. Three bump the counter without
+  changing any length: `a.sort()` (`ArrayList.sort` bumps unconditionally, while
+  `s.sort()` on a *window* runs `List.sort`'s default, which reorders through
+  `set` and does not), `a.addAll([])` (`ArrayList.addAll` bumps before it looks
+  at the argument, while `SubList.addAll` returns first), and `clear()` on an
+  already-empty receiver (both). `unique()` is Groovy's own and ends in
+  `clear()` + `addAll(…)` whatever it found, so it bumps at size 2 and up —
+  except that the no-argument and `unique(true)` forms return early below that
+  while `unique { … }` never does. `set`, `swap`, `sort(false)`, and a
+  `removeAll`/`retainAll` that removed nothing leave the window live. Each of
+  these is measured against Apache Groovy 5.0.8; the table is in
+  `host::bumps_mod_count`.
 
   Bounds are Java's exact behaviour — `IndexOutOfBoundsException` naming
   `fromIndex` or `toIndex`, `IllegalArgumentException` for a reversed range, and

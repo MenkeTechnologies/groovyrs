@@ -136,6 +136,16 @@ reported as parse or compile errors, never silently mis-run.
   and subscript reads the list it enumerates, so `.each`, `.collect`, `+`,
   `== [1, 2, 3]`, `in`, `[1..2]` and `instanceof List` all apply. The
   `for (x in a..b)` loop still lowers to a counted loop and allocates nothing.
+  The walk *steps* from one endpoint to the other with `next`/`previous` rather
+  than renumbering, so it keeps the element type: `1.5..4.0` enumerates
+  `[1.5, 2.5, 3.5]`, not `[1, 2, 3]`. `from`/`to` report the bounds of what is
+  actually enumerated — `(4..0).from` is 0 and `(0..<4).to` is 3 — except on a
+  `NumberRange`, which keeps its endpoints as written. An exclusive range with
+  equal endpoints is a `groovy.lang.EmptyRange`.
+- **`next()` / `previous()`** on `Integer`, `BigInteger`, `BigDecimal` and
+  `String`: the successor and predecessor a range walks with. A `String` moves
+  its *last* character by one code point, so `'a'.next()` is `'b'` and
+  `'z'.next()` is `'{'`.
 - **Ternary, Elvis, safe navigation.** `c ? t : e`, the Elvis `a ?: b`
   (null/false-coalescing), and `a?.member` / `a?.method()` (yields `null` on a
   `null` receiver rather than faulting). All branch on Groovy truthiness.
@@ -477,12 +487,11 @@ reported as parse or compile errors, never silently mis-run.
   `java.lang.Integer`. Widening the default instead would trade this for the far
   commoner error of never wrapping an `Integer` at all, since Groovy's own
   default for an unsuffixed literal is `Integer`.
-- **`for (x in a..b)` iterates ascending only** when the range is written as a
-  bare literal in the loop header, which the parser lowers to a counted loop
-  that allocates nothing. A descending one (`5..1`, which Groovy walks downward)
-  runs zero times in that form; parenthesised (`for (x in (5..1))`) or through a
-  variable it builds a real `Range` and walks downward correctly. The endpoint
-  is evaluated once (a body that mutates it still iterates the original range).
+- **`(1.5..<4.0).size()` answers 2 while `toList()` walks three values.** The
+  inconsistency is Groovy's, and groovyrs reproduces it: `size` divides the span
+  (`floor(|to - from|)`, plus one when inclusive) where the walk steps by one and
+  stops short of the excluded end. It only shows on a fractional exclusive range;
+  every whole-numbered range agrees with its element count.
 - **`sort()` / `unique()` write back only through a bare variable.** Groovy's
   `List.sort()` and `List.unique()` mutate the receiver in place and return it.
   A fusevm `Value::Array` is a value, not a reference, so the host can only

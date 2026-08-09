@@ -220,10 +220,13 @@ Implemented and checked against Apache Groovy:
   `class java.lang.Integer` and answers `name`/`simpleName`/`canonicalName`.
 - **`String.toBigDecimal()`** — `new BigDecimal(text.trim())`, with the exact
   scale and `BigDecimal`'s own character-level `NumberFormatException` messages.
-- **Ranges** — `0..5` / `0..<5`, descending (`5..1`) and character (`'a'..'e'`),
-  as a real `groovy.lang.Range`: it prints `1..5`, `getClass()` names
-  `IntRange`/`ObjectRange`/`NumberRange`, and `from`/`to`/`step(n)`/`reverse()`/
-  `size()`/`contains(x)`/`isReverse()` are its own members. Being a
+- **Ranges** — `0..5` / `0..<5`, descending (`5..1`), character (`'a'..'e'`) and
+  decimal (`1.5..4.0`), as a real `groovy.lang.Range`: it prints `1..5`,
+  `getClass()` names `IntRange`/`ObjectRange`/`NumberRange`/`EmptyRange`, and
+  `from`/`to`/`step(n)`/`reverse()`/`size()`/`contains(x)`/`isReverse()` are its
+  own members — with `from`/`to` reporting the bounds of what is enumerated, so
+  `(4..0).from` is 0 and `(0..<4).to` is 3. The walk steps with `next`/`previous`
+  and so keeps the element type (`1.5..4.0` is `[1.5, 2.5, 3.5]`). Being a
   `java.util.List` in Groovy, every `List` method and operator applies too
   (`.each`, `.collect`, `+`, `== [1, 2, 3]`, `in`, `r[1..2]`).
 - **Regex** — `~/…/` patterns, `/…/` slashy strings (backslashes literal,
@@ -407,7 +410,14 @@ every divergence it reports is a real parity gap — the class of bug the slice-
 generated without restriction now that the `BigDecimal` model is exact. Modes:
 `arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
 `gstring`, `exceptions`, `faults`, `switch`, `asserts`, `modzero`, `gdk`,
-`conversions`, `classes`, `mixed`.
+`conversions`, `classes`, `ranges`, `mixed`.
+
+Both fuzzers report a **skipped** count alongside the divergences. A case only
+counts as a comparison when the reference itself ran the program — it neither
+timed out nor rejected the program before executing a line of it. Without that
+split, a generated program the reference also refuses reads as agreement, and a
+run that measured nothing reports a clean pass. A run of *ours* that has to be
+killed is always a divergence, never a match.
 
 All four need `groovy` on PATH and never run in CI; the CI-safe replay is the
 frozen `tests/parity.rs` (snapshot in `tests/data/parity_expected.txt`,

@@ -1047,8 +1047,36 @@ impl Parser {
     }
 
     /// Parse `for ([def|Type] id in start..end)` (or `..<`) and desugar it to a
-    /// counting C-style `for`, evaluating `end` once into a synthetic temp so a
-    /// body that mutates the endpoint still iterates the original range.
+    /// counting C-style `for` over a *hidden* cursor:
+    ///
+    /// ```text
+    ///   def $lo   = <start>                  ; endpoints evaluated once
+    ///   def $hi   = <end>
+    ///   def $desc = $lo > $hi                ; 5..1 counts DOWN
+    ///   def $chr  = $lo instanceof String    ; 'a'..'e' walks characters
+    ///   def $st   = $desc ? -1 : 1
+    ///   def $last = <$hi, backed off one step when the range is exclusive>
+    ///   for (def $cur = $lo; $desc ? $cur >= $last : $cur <= $last; <step $cur>) {
+    ///       def <var> = $cur
+    ///       <body>
+    ///   }
+    /// ```
+    ///
+    /// Three things this shape buys over incrementing the user's variable
+    /// directly, each measured against Apache Groovy:
+    ///
+    /// * **Direction.** `for (i in 5..1)` yields `5 4 3 2 1`; a bare `i++` loop
+    ///   never enters. Exclusive reverse (`5..<1`) drops the *written* endpoint,
+    ///   so `$last` steps back toward `$lo` either way.
+    /// * **Element type.** `for (c in 'a'..'e')` walks `a b c d e`; `c++` on a
+    ///   `String` never terminates. The character case steps with
+    ///   `next()`/`previous()`, guarded by a loop-invariant `$chr` so an integer
+    ///   range still steps with a native `+`.
+    /// * **Body isolation.** `for (i in 0..4) { i = 3 }` still runs five times,
+    ///   because the loop counts on `$cur` and `<var>` is a fresh binding per
+    ///   iteration — matching Groovy's snapshot iterator.
+    ///
+    /// A non-range subject (`for (x in coll)`) goes to [`Self::for_in_sequence`].
     fn for_in(&mut self) -> Result<StmtKind, String> {
         let line = self.line();
         // Optional `def`/type in front of the loop variable.
@@ -1077,46 +1105,138 @@ impl Parser {
         };
         let end = self.binary(0)?;
         self.eat(&Tok::RParen)?;
-        let body = self.braced_or_single()?;
+        let mut body = self.braced_or_single()?;
 
-        let end_tmp = self.fresh_tmp("end");
-        let cmp = if inclusive { BinOp::Le } else { BinOp::Lt };
-        let loop_for = StmtKind::For {
-            init: Some(Box::new(Stmt::new(
+        let lo = self.fresh_tmp("lo");
+        let hi = self.fresh_tmp("hi");
+        let desc = self.fresh_tmp("desc");
+        let chr = self.fresh_tmp("chr");
+        let st = self.fresh_tmp("st");
+        let last = self.fresh_tmp("last");
+        let cur = self.fresh_tmp("cur");
+
+        let v = |n: &str| Expr::Var(n.to_string());
+        let local = |name: &str, init: Expr| {
+            Stmt::new(
                 line,
                 StmtKind::Local {
                     ty: "def".into(),
-                    name: var.clone(),
-                    init: Some(start),
+                    name: name.to_string(),
+                    init: Some(init),
                 },
-            ))),
-            cond: Some(Expr::Binary {
-                op: cmp,
-                lhs: Box::new(Expr::Var(var.clone())),
-                rhs: Box::new(Expr::Var(end_tmp.clone())),
+            )
+        };
+        let call = |recv: Expr, m: &str| Expr::MethodCall {
+            recv: Box::new(recv),
+            method: m.to_string(),
+            args: Vec::new(),
+            line,
+            safe: false,
+        };
+        let bin = |op: BinOp, l: Expr, r: Expr| Expr::Binary {
+            op,
+            lhs: Box::new(l),
+            rhs: Box::new(r),
+        };
+        let ternary = |c: Expr, t: Expr, e: Expr| Expr::Ternary {
+            cond: Box::new(c),
+            then: Box::new(t),
+            els: Box::new(e),
+        };
+        // Both guards are loop-invariant, and both are usually decidable right
+        // here: a numeric literal endpoint is never a character, and two integer
+        // literals fix the direction. Folding them keeps `for (i in 0..n)` on
+        // the same straight-line increment the naive desugar emitted, so the
+        // generality above costs nothing on the shape that dominates.
+        let chr_const = literal_number(&start).map(|_| false);
+        let desc_const = match (literal_int(&start), literal_int(&end)) {
+            (Some(a), Some(b)) => Some(a > b),
+            _ => None,
+        };
+        let st_e = match desc_const {
+            Some(d) => Expr::Int(if d { -1 } else { 1 }, IntWidth::Int),
+            None => v(&st),
+        };
+
+        // One step of the walk, in the direction `$desc` chose. A character
+        // range steps with the GDK's `next`/`previous`; anything else (Integer,
+        // BigInteger, BigDecimal) adds the loop-invariant `$st`, which keeps an
+        // integer range on a native add.
+        let step = |e: Expr, forward: bool| {
+            let numeric = bin(
+                if forward { BinOp::Add } else { BinOp::Sub },
+                e.clone(),
+                st_e.clone(),
+            );
+            if chr_const == Some(false) {
+                return numeric;
+            }
+            let (back, fwd) = if forward {
+                ("previous", "next")
+            } else {
+                ("next", "previous")
+            };
+            let character = match desc_const {
+                Some(true) => call(e.clone(), back),
+                Some(false) => call(e.clone(), fwd),
+                None => ternary(v(&desc), call(e.clone(), back), call(e.clone(), fwd)),
+            };
+            ternary(v(&chr), character, numeric)
+        };
+
+        // The last value the walk may take: the written endpoint, or one step
+        // back toward `$lo` when the range is exclusive.
+        let last_init = if inclusive {
+            v(&hi)
+        } else {
+            step(v(&hi), false)
+        };
+
+        body.insert(0, local(&var, v(&cur)));
+        let at_or_before = bin(BinOp::Le, v(&cur), v(&last));
+        let at_or_after = bin(BinOp::Ge, v(&cur), v(&last));
+        let loop_for = StmtKind::For {
+            init: Some(Box::new(local(&cur, v(&lo)))),
+            cond: Some(match desc_const {
+                Some(true) => at_or_after,
+                Some(false) => at_or_before,
+                None => ternary(v(&desc), at_or_after, at_or_before),
             }),
+            // With both guards folded the walk is a plain ±1 on the cursor, so
+            // it lowers to the same `++`/`--` the naive desugar used.
             update: Some(Box::new(Stmt::new(
                 line,
-                StmtKind::Expr(Expr::PostIncDec {
-                    name: var,
-                    inc: true,
-                }),
+                match (chr_const, desc_const) {
+                    (Some(false), Some(d)) => StmtKind::Expr(Expr::PostIncDec {
+                        name: cur.clone(),
+                        inc: !d,
+                    }),
+                    _ => StmtKind::Assign {
+                        name: cur.clone(),
+                        op: AssignOp::Assign,
+                        value: step(v(&cur), true),
+                    },
+                },
             ))),
             body,
         };
-        // Wrap in an always-true block so the endpoint temp and the loop share a
-        // frame without introducing a Block node.
+        // Wrap in an always-true block so the loop's synthetic temps and the
+        // loop itself share a frame without introducing a Block node.
         Ok(StmtKind::If {
             cond: Expr::Bool(true),
             then: vec![
-                Stmt::new(
-                    line,
-                    StmtKind::Local {
-                        ty: "def".into(),
-                        name: end_tmp,
-                        init: Some(end),
+                local(&lo, start),
+                local(&hi, end),
+                local(&desc, bin(BinOp::Gt, v(&lo), v(&hi))),
+                local(
+                    &chr,
+                    Expr::InstanceOf {
+                        value: Box::new(v(&lo)),
+                        class: "String".into(),
                     },
                 ),
+                local(&st, ternary(v(&desc), Expr::Int(-1, IntWidth::Int), Expr::Int(1, IntWidth::Int))),
+                local(&last, last_init),
                 Stmt::new(line, loop_for),
             ],
             els: vec![],
@@ -1972,6 +2092,27 @@ fn unrecorded(e: &Expr) -> &Expr {
 /// right. A variable reached any other way is not listed, so `s.length() == 9`
 /// (a method-call receiver) and `-x == 1` (a unary-minus operand) report no
 /// values while `l[0] == 9` and `x % 2 == 9` report `l` and `x`.
+/// Whether an expression is a literal *number* (optionally negated). A range
+/// endpoint the parser can see is a number is not a character, which lets
+/// [`Parser::for_in`] drop the character branch from the walk.
+fn literal_number(e: &Expr) -> Option<()> {
+    match e {
+        Expr::Int(..) | Expr::Float(_) | Expr::Dec(_) | Expr::BigInt(_) => Some(()),
+        Expr::Unary { op: UnOp::Neg, rhs } => literal_number(rhs),
+        _ => None,
+    }
+}
+
+/// The literal machine integer an expression is, when the parser can see one.
+/// Two such endpoints fix a range's direction at compile time.
+fn literal_int(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Int(n, _) => Some(*n),
+        Expr::Unary { op: UnOp::Neg, rhs } => literal_int(rhs).and_then(i64::checked_neg),
+        _ => None,
+    }
+}
+
 fn assert_value_names(cond: &Expr) -> Vec<(String, u32)> {
     fn walk(e: &Expr, out: &mut Vec<(String, u32)>) {
         // An operand that is a bare variable is what the clause names.

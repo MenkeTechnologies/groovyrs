@@ -268,7 +268,7 @@ pub const GSPRINTF: u16 = 754;
 pub const GRANGE: u16 = 755;
 
 /// Builtin id for `getClass()` / `.class` on a receiver the compiler knows is a
-/// `Long`. Stack: the value. See [`b_class_long`].
+/// `Long`. Stack: the value. See `b_class_long`.
 pub const GCLASS_LONG: u16 = 756;
 
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
@@ -4031,6 +4031,14 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         }
         return dispatch_method(vm, &Value::array(range_elements(&r)), method, args);
     }
+    // `next`/`previous` are Groovy's successor/predecessor — what a `Range`
+    // walks with, and what `for (x in a..b)` steps by. They answer on every
+    // ordered type, so they precede the per-type table.
+    if args.is_empty() && matches!(method, "next" | "previous") {
+        if let Some(v) = successor(recv, method == "next") {
+            return v;
+        }
+    }
     match (recv, method) {
         // Universal size query (String chars / list elements / map entries).
         (_, "size") => Value::int(value_size(recv)),
@@ -5301,28 +5309,147 @@ fn range_bounds(r: &RangeVal) -> (i64, i64) {
     }
 }
 
+/// Whether a range counts down — `5..1` and `'e'..'a'` do.
+fn range_is_reverse(r: &RangeVal) -> bool {
+    let (from, to) = range_bounds(r);
+    from > to
+}
+
+/// What `isReverse()` answers, which is the walk direction everywhere except an
+/// `ObjectRange` that collapses to a single value: `('f'..<'e')` walks just `f`,
+/// and Groovy calls that forward. The numeric ranges keep the direction they
+/// were written with, so `(4..<3)` and `(1.0..<0.0)` both stay reverse.
+fn range_reported_reverse(r: &RangeVal) -> bool {
+    if range_char_ends(r).is_some() && range_size(r) == 1 {
+        return false;
+    }
+    range_is_reverse(r)
+}
+
+/// Order two range endpoints. Integers and `BigDecimal`s compare numerically,
+/// single-character strings by code point. `None` when the pair has no ordering,
+/// which stops a walk rather than looping.
+fn range_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
+        (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
+        _ => match (as_dec(a), as_dec(b)) {
+            (Some(x), Some(y)) => Some(decimal::cmp(&x, &y)),
+            _ => None,
+        },
+    }
+}
+
+/// How many values a range enumerates, by Groovy's own arithmetic:
+/// `floor(|to - from|)` plus one when the range is inclusive.
+///
+/// This is *not* always `range_elements(r).len()`, and the difference is
+/// Groovy's, not ours: `(1.5..<4.0).size()` answers 2 while `toList()` walks
+/// three values, because `size` divides the span and the walk steps by one.
+fn range_size(r: &RangeVal) -> i64 {
+    let span = match (as_dec(&r.from), as_dec(&r.to)) {
+        (Some(a), Some(b)) => decimal::truncate_to_i64(&decimal::abs(&decimal::sub(&b, &a))),
+        _ => {
+            let (a, b) = range_bounds(r);
+            (b - a).abs()
+        }
+    };
+    span + i64::from(r.inclusive)
+}
+
+/// Whether a range enumerates nothing — only an exclusive range with equal
+/// endpoints does, and Groovy gives that one its own class.
+fn range_is_empty(r: &RangeVal) -> bool {
+    !r.inclusive && range_cmp(&r.from, &r.to) == Some(std::cmp::Ordering::Equal)
+}
+
+/// A range's lower bound — its `from` property. Groovy normalises this to the
+/// *smaller* end of what the range actually enumerates, so `(4..0).from` is 0
+/// and `(4..<0).from` is 1. A `NumberRange` is the exception: it keeps the
+/// endpoints as written and records exclusivity separately, so `(1.5..<4.0).from`
+/// stays 1.5.
+fn range_lower(r: &RangeVal) -> Value {
+    range_bound(r, false)
+}
+
+/// A range's upper bound — its `to` property. The mirror of [`range_lower`]:
+/// `(0..<4).to` is 3, and `(1.5..<4.0).to` stays 4.0.
+fn range_upper(r: &RangeVal) -> Value {
+    range_bound(r, true)
+}
+
+fn range_bound(r: &RangeVal, upper: bool) -> Value {
+    let desc = range_is_reverse(r);
+    let (lo, hi) = if desc { (&r.to, &r.from) } else { (&r.from, &r.to) };
+    let end = if upper { hi } else { lo };
+    // The end an exclusive walk stops short of is always the *second* endpoint
+    // written, whichever side of the order that puts it on. An inclusive range,
+    // an empty one, and a `NumberRange` all report their endpoint unadjusted.
+    let excluded = !r.inclusive
+        && !range_is_empty(r)
+        && range_class(r) != "groovy.lang.NumberRange"
+        && upper != desc;
+    if excluded {
+        successor(end, desc).unwrap_or_else(|| end.clone())
+    } else {
+        end.clone()
+    }
+}
+
+/// Groovy's `next()` / `previous()`: the successor or predecessor of an ordered
+/// value. Integers and `BigDecimal`s move by one (a `BigInteger` keeps its
+/// type); a `String` moves its *last* character by one code point, so
+/// `'a'.next()` is `'b'` and `'z'.next()` is `'{'`. `None` for a value with no
+/// ordering, which falls through to the per-type table and then to
+/// `MissingMethodException`.
+fn successor(v: &Value, forward: bool) -> Option<Value> {
+    let delta: i64 = if forward { 1 } else { -1 };
+    match v {
+        Value::Int(n) => Some(Value::int(n.wrapping_add(delta))),
+        Value::Str(s) => {
+            let mut chars: Vec<char> = s.chars().collect();
+            let last = chars.pop()?;
+            chars.push(char::from_u32((last as i64 + delta) as u32)?);
+            Some(Value::str(chars.into_iter().collect::<String>()))
+        }
+        _ => {
+            let d = as_dec(v)?;
+            let stepped = decimal::add(&d, &decimal::from_i64(delta));
+            Some(if as_bigint(v).is_some() {
+                bigint_value(stepped)
+            } else {
+                dec_value(stepped)
+            })
+        }
+    }
+}
+
 /// The values a range enumerates — what iterating it yields and what every
 /// list-shaped GDK method on it runs over. `5..1` counts down, `'a'..'e'` walks
 /// characters, and the exclusive form drops the endpoint from whichever end the
 /// walk finishes on.
 fn range_elements(r: &RangeVal) -> Vec<Value> {
-    let (from, to) = range_bounds(r);
-    let chars = range_char_ends(r).is_some();
-    let step = if to >= from { 1 } else { -1 };
-    let last = if r.inclusive { to } else { to - step };
+    use std::cmp::Ordering;
+    let desc = range_is_reverse(r);
     let mut out = Vec::new();
-    let mut i = from;
-    while (step > 0 && i <= last) || (step < 0 && i >= last) {
-        out.push(if chars {
-            Value::str(
-                char::from_u32(i as u32)
-                    .map(String::from)
-                    .unwrap_or_default(),
-            )
-        } else {
-            Value::int(i)
-        });
-        i += step;
+    let mut cur = r.from.clone();
+    // Walk from the endpoint written first toward the other one, stepping with
+    // `next`/`previous`. Stepping rather than renumbering is what keeps the
+    // element *type* — `1.5..4.0` walks `1.5, 2.5, 3.5`, not `1, 2, 3`.
+    while let Some(ord) = range_cmp(&cur, &r.to) {
+        let past = match (desc, ord) {
+            (false, Ordering::Greater) | (true, Ordering::Less) => true,
+            (_, Ordering::Equal) => !r.inclusive,
+            _ => false,
+        };
+        if past {
+            break;
+        }
+        out.push(cur.clone());
+        match successor(&cur, !desc) {
+            Some(next) => cur = next,
+            None => break,
+        }
     }
     out
 }
@@ -5339,14 +5466,17 @@ fn dispatch_range_method(r: &RangeVal, method: &str, args: &[Value]) -> Option<V
         // Answered here rather than falling through, because the list a range
         // delegates to is an `ArrayList` and would name the wrong class.
         "getClass" => heap_push(HeapObj::ClassRef(range_class(r).to_string())),
-        "getFrom" => r.from.clone(),
-        "getTo" => r.to.clone(),
+        // `from`/`to` are the range's *bounds*, not the endpoints as written:
+        // `(4..0).getFrom()` is 0 and `getTo()` is 4, because Groovy's
+        // `IntRange` normalises them and records the direction separately.
+        "getFrom" => range_lower(r),
+        "getTo" => range_upper(r),
         // `isReverse` asks whether the range counts *down*, which is a property
         // of the endpoints, not of the `..<` form: `(1..<5).isReverse()` is
         // false.
-        "isReverse" => Value::bool(range_bounds(r).0 > range_bounds(r).1),
+        "isReverse" => Value::bool(range_reported_reverse(r)),
         "toString" | "inspect" => Value::str(range_str(r)),
-        "size" | "getSize" => Value::int(elems().len() as i64),
+        "size" | "getSize" => Value::int(range_size(r)),
         "step" => {
             let n = args.first().and_then(as_i64).unwrap_or(1);
             Value::array(range_step(r, n))
@@ -5389,6 +5519,17 @@ fn range_as_list(v: &Value) -> Value {
 /// `Range.toString()` — the source form (`1..5`, `1..<5`, `5..1`, `a..e`), which
 /// is also how `println` and `String +` render one.
 fn range_str(r: &RangeVal) -> String {
+    // An `ObjectRange` renders the values it actually walks — `('a'..<'e')`
+    // prints `a..d` — where the numeric ranges keep the form they were written
+    // in. An empty range keeps its `..<` whatever its class.
+    if range_class(r) == "groovy.lang.ObjectRange" {
+        let last = if r.inclusive {
+            r.to.clone()
+        } else {
+            successor(&r.to, range_is_reverse(r)).unwrap_or_else(|| r.to.clone())
+        };
+        return format!("{}..{}", groovy_str(&r.from), groovy_str(&last));
+    }
     format!(
         "{}{}{}",
         groovy_str(&r.from),
@@ -5401,6 +5542,11 @@ fn range_str(r: &RangeVal) -> String {
 /// endpoints make an `IntRange`, single-character ones an `ObjectRange`, and a
 /// decimal one a `NumberRange`.
 fn range_class(r: &RangeVal) -> &'static str {
+    // A range that enumerates nothing — an exclusive one with equal endpoints —
+    // is its own class in Groovy, whatever the endpoints' type.
+    if range_is_empty(r) {
+        return "groovy.lang.EmptyRange";
+    }
     if range_char_ends(r).is_some() {
         return "groovy.lang.ObjectRange";
     }
@@ -5566,8 +5712,8 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     // list it enumerates, exactly as its methods do.
     if let Some(r) = as_range(recv) {
         return match name {
-            "from" => r.from.clone(),
-            "to" => r.to.clone(),
+            "from" => range_lower(&r),
+            "to" => range_upper(&r),
             _ => dispatch_property(vm, &Value::array(range_elements(&r)), name),
         };
     }

@@ -142,6 +142,15 @@ struct Compiler {
     pending_closures: VecDeque<PendingClosure>,
     /// Monotonic id for synthetic closure names (`$closure_0`, `$closure_1`, …).
     closures_seen: u32,
+    /// Nesting depth of the closure body being lowered; 0 outside one. A bare
+    /// name only reaches a `with`/`tap` delegate from inside a closure, so this
+    /// is what keeps script and function bodies on their native variable ops.
+    closure_depth: u32,
+    /// Every name the *script* binds at its own level, collected up front by
+    /// [`collect_script_vars`]. A closure's free name that appears here is an
+    /// ordinary script binding and keeps its native `GetVar`/`SetVar` — only a
+    /// name nothing in the program declares can be a delegate's property.
+    script_vars: HashSet<String>,
     /// True when the program contains `try` or `throw`. Only then is a call site
     /// followed by a pending-exception check, so an exception-free program's
     /// bytecode is exactly what it was before exceptions landed.
@@ -275,6 +284,59 @@ pub fn compile_debug(prog: &Program) -> Result<Chunk, String> {
     compile_with(prog, true)
 }
 
+/// Collect every name the *script* binds at its own level — a `def`/typed
+/// declaration or a bare assignment, including inside the script's own control
+/// flow. A function or class body is a different scope, and a closure body is
+/// precisely the case the set exists to exclude (a name bound only there may be
+/// a `with`/`tap` delegate's property), so neither is descended into.
+fn collect_script_vars(body: &[Stmt], out: &mut HashSet<String>) {
+    for s in body {
+        match &s.kind {
+            StmtKind::Local { name, .. } | StmtKind::Assign { name, .. } => {
+                out.insert(name.clone());
+            }
+            StmtKind::If { then, els, .. } => {
+                collect_script_vars(then, out);
+                collect_script_vars(els, out);
+            }
+            StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+                collect_script_vars(body, out)
+            }
+            StmtKind::For {
+                init, update, body, ..
+            } => {
+                if let Some(i) = init {
+                    collect_script_vars(std::slice::from_ref(&**i), out);
+                }
+                if let Some(u) = update {
+                    collect_script_vars(std::slice::from_ref(&**u), out);
+                }
+                collect_script_vars(body, out);
+            }
+            StmtKind::Labeled { stmt, .. } => {
+                collect_script_vars(std::slice::from_ref(&**stmt), out)
+            }
+            StmtKind::Switch { cases, .. } => {
+                for c in cases {
+                    collect_script_vars(&c.body, out);
+                }
+            }
+            StmtKind::Try {
+                body,
+                catches,
+                finally_body,
+            } => {
+                collect_script_vars(body, out);
+                for c in catches {
+                    collect_script_vars(&c.body, out);
+                }
+                collect_script_vars(finally_body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     let has_ffi = body_has_ffi(&prog.body);
     // Collect user-function names up front so calls can resolve forward references.
@@ -329,6 +391,12 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         class_index,
         pending_closures: VecDeque::new(),
         closures_seen: 0,
+        closure_depth: 0,
+        script_vars: {
+            let mut v = HashSet::new();
+            collect_script_vars(&prog.body, &mut v);
+            v
+        },
         has_exceptions: body_uses_exceptions(&prog.body),
         exc_after_arith: body_uses_exceptions(&prog.body)
             && prog
@@ -461,6 +529,66 @@ impl Compiler {
             Some(slot) => Op::GetSlot(slot),
             None => Op::GetVar(self.b.add_name(name)),
         }
+    }
+
+    /// True when a bare `name` has to go through the delegate-aware builtins:
+    /// we are lowering a closure body and nothing the compiler can see binds the
+    /// name. Groovy resolves such a name against the closure's `with`/`tap`
+    /// delegate (its `OWNER_FIRST` strategy, the owner having failed), which is
+    /// what those builtins do. Anything the compiler *can* bind — a slot, a
+    /// field, a class, a function, a JDK class, a script-level declaration —
+    /// keeps its native `GetVar`/`SetVar`, so an ordinary variable costs nothing
+    /// and a hot closure loop keeps its JIT trace eligibility.
+    fn needs_delegate(&self, name: &str) -> bool {
+        if self.closure_depth == 0 || name == "this" || name.starts_with('$') {
+            return false;
+        }
+        if let Some(scope) = self.scope.as_ref() {
+            if scope.vars.contains_key(name) {
+                return false;
+            }
+        }
+        !self.is_field(name)
+            && !self.method_of_class(name)
+            && !self.fn_names.contains(name)
+            && !self.class_index.contains_key(name)
+            && !self.is_static_class_ref(name)
+            && !self.script_vars.contains(name)
+    }
+
+    /// Emit the read of a bare `name` — the native slot/global read, or the
+    /// delegate-aware builtin for a name only a delegate could bind.
+    fn emit_name_load(&mut self, name: &str, line: u32) -> Result<(), String> {
+        if !self.needs_delegate(name) {
+            let get = self.load_op_for(name);
+            self.b.emit(get, line);
+            return Ok(());
+        }
+        self.emit_name_site(name, line);
+        self.emit_call_builtin(crate::host::GNAME_GET, 0, line)
+    }
+
+    /// Emit the write of a bare `name`, its value already on the stack.
+    fn emit_name_store(&mut self, name: &str, line: u32) -> Result<(), String> {
+        if !self.needs_delegate(name) {
+            let store = self.store_op_for(name);
+            self.b.emit(store, line);
+            return Ok(());
+        }
+        self.emit_name_site(name, line);
+        self.emit_call_builtin(crate::host::GNAME_SET, 0, line)?;
+        self.b.emit(Op::Pop, line);
+        Ok(())
+    }
+
+    /// Push the `(global-index, name)` pair both bare-name builtins read: the
+    /// index answers the owner-first question, the name is what the delegate is
+    /// asked for.
+    fn emit_name_site(&mut self, name: &str, line: u32) {
+        let g = self.b.add_name(name);
+        self.b.emit(Op::LoadInt(g as i64), line);
+        let n = self.b.add_constant(Value::str(name.to_string()));
+        self.b.emit(Op::LoadConst(n), line);
     }
 
     /// The op that writes `name` for an *assignment*: a known local's slot, else
@@ -671,6 +799,9 @@ impl Compiler {
         let prev_widths = self.enter_width_scope(&pc.params);
         let saved_line = self.cur_line;
         self.cur_line = pc.line;
+        // Inside a closure body a free name the compiler cannot bind may be a
+        // `with`/`tap` delegate's property; outside one it never is.
+        self.closure_depth += 1;
 
         // Prologue: pop the pushed params + captures top-down into their slots.
         for i in (0..total).rev() {
@@ -678,6 +809,7 @@ impl Compiler {
         }
 
         self.fn_body(&pc.body)?;
+        self.closure_depth -= 1;
 
         // Fall-through: a closure with no trailing value expression returns null.
         self.b.emit(Op::LoadUndef, self.cur_line);
@@ -1145,22 +1277,19 @@ impl Compiler {
                     }
                     AssignOp::Div => {
                         // `x /= e` → x = x / e, through the Groovy division builtin.
-                        let get = self.load_op_for(name);
-                        self.b.emit(get, self.cur_line);
+                        self.emit_name_load(name, self.cur_line)?;
                         self.expr(value)?;
                         self.emit_call_builtin(crate::host::GDIV, 2, self.cur_line)?;
                     }
                     // `x %= e` shares `%`'s zero-divisor guard.
                     AssignOp::Mod => {
-                        let get = self.load_op_for(name);
-                        self.b.emit(get, self.cur_line);
+                        self.emit_name_load(name, self.cur_line)?;
                         self.expr(value)?;
                         self.emit_mod(value, self.cur_line)?;
                     }
                     _ => {
                         // `x <op>= e` → x = x <op> e
-                        let get = self.load_op_for(name);
-                        self.b.emit(get, self.cur_line);
+                        self.emit_name_load(name, self.cur_line)?;
                         self.expr(value)?;
                         let pos = self.b.emit(compound_op(*op), self.cur_line);
                         // `long t = 0; t += 2000000000; t += 2000000000` is
@@ -1170,8 +1299,7 @@ impl Compiler {
                         self.mark_wide_site(pos, &Expr::Var(name.clone()), value);
                     }
                 }
-                let store = self.store_op_for(name);
-                self.b.emit(store, self.cur_line);
+                self.emit_name_store(name, self.cur_line)?;
                 self.set_var_width(name, new_wide);
                 Ok(())
             }
@@ -1196,8 +1324,7 @@ impl Compiler {
                 self.emit_call_builtin(crate::host::GSETINDEX, 0, self.cur_line)?;
                 match recv {
                     Expr::Var(name) if !self.is_field(name) => {
-                        let store = self.store_op_for(name);
-                        self.b.emit(store, self.cur_line);
+                        self.emit_name_store(name, self.cur_line)?;
                     }
                     _ => {
                         self.b.emit(Op::Pop, self.cur_line);
@@ -1219,8 +1346,7 @@ impl Compiler {
             | StmtKind::Expr(Expr::PreIncDec { name, inc }) => {
                 // In statement position pre and post are identical: the result is
                 // discarded, so only the in-place update matters.
-                self.inc_dec_update(name, *inc);
-                Ok(())
+                self.inc_dec_update(name, *inc)
             }
             StmtKind::Expr(e) => {
                 self.expr(e)?;
@@ -1909,14 +2035,12 @@ impl Compiler {
     /// Emit the in-place update `name = name ± 1` (leaving nothing on the stack).
     /// Used by both `++`/`--` in statement position and as the update step of the
     /// value-position pre/post forms.
-    fn inc_dec_update(&mut self, name: &str, inc: bool) {
-        let get = self.load_op_for(name);
-        self.b.emit(get, self.cur_line);
+    fn inc_dec_update(&mut self, name: &str, inc: bool) -> Result<(), String> {
+        self.emit_name_load(name, self.cur_line)?;
         self.b.emit(Op::LoadInt(1), self.cur_line);
         self.b
             .emit(if inc { Op::Add } else { Op::Sub }, self.cur_line);
-        let store = self.store_op_for(name);
-        self.b.emit(store, self.cur_line);
+        self.emit_name_store(name, self.cur_line)
     }
 
     /// Lower `println(arg)` / `print(arg)` to the Groovy-formatting print
@@ -2026,8 +2150,7 @@ impl Compiler {
                     self.b.emit(Op::LoadConst(nidx), self.cur_line);
                     self.emit_call_builtin(crate::host::GCLASSREF, 0, self.cur_line)?;
                 } else {
-                    let get = self.load_op_for(name);
-                    self.b.emit(get, self.cur_line);
+                    self.emit_name_load(name, self.cur_line)?;
                 }
             }
             Expr::This => {
@@ -2121,15 +2244,13 @@ impl Compiler {
             }
             Expr::PostIncDec { name, inc } => {
                 // Post: yield the value before the update, then update.
-                let get = self.load_op_for(name);
-                self.b.emit(get, self.cur_line);
-                self.inc_dec_update(name, *inc);
+                self.emit_name_load(name, self.cur_line)?;
+                self.inc_dec_update(name, *inc)?;
             }
             Expr::PreIncDec { name, inc } => {
                 // Pre: update, then yield the new value.
-                self.inc_dec_update(name, *inc);
-                let get = self.load_op_for(name);
-                self.b.emit(get, self.cur_line);
+                self.inc_dec_update(name, *inc)?;
+                self.emit_name_load(name, self.cur_line)?;
             }
             Expr::Call { name, args, line } => self.call(name, args, *line)?,
             Expr::List(elems) => {
@@ -2199,7 +2320,7 @@ impl Compiler {
                         crate::host::GMETHOD
                     };
                     self.emit_call_builtin(id, args.len() as u8, *line)?;
-                    self.emit_receiver_writeback(recv, method, args);
+                    self.emit_receiver_writeback(recv, method, args)?;
                 }
             }
             Expr::Property {
@@ -2703,7 +2824,7 @@ impl Compiler {
             }
             // `list << x` appends in place, so it writes back like `list.add`.
             if matches!(op, BinOp::Shl) {
-                self.emit_receiver_writeback(lhs, "leftShift", &[]);
+                self.emit_receiver_writeback(lhs, "leftShift", &[])?;
             }
             return Ok(());
         }
@@ -2778,7 +2899,12 @@ impl Compiler {
     /// their *result* is not the new list (`add` answers `true`), so they park
     /// the new contents in the host's `MUTATED` slot and `GWRITEBACK` prefers
     /// those over the result.
-    fn emit_receiver_writeback(&mut self, recv: &Expr, method: &str, args: &[Expr]) {
+    fn emit_receiver_writeback(
+        &mut self,
+        recv: &Expr,
+        method: &str,
+        args: &[Expr],
+    ) -> Result<(), String> {
         let mutating = (matches!(method, "sort" | "unique")
             && args
                 .iter()
@@ -2800,20 +2926,24 @@ impl Compiler {
                     | "swap"
                     | "leftShift"
             );
-        let Expr::Var(name) = recv else { return };
+        let Expr::Var(name) = recv else {
+            return Ok(());
+        };
         // A bare field name inside a method is `this.field`, not a variable —
         // leave that to the (unsupported) property path rather than inventing a
         // local of the same name.
         if !mutating || self.is_field(name) {
-            return;
+            return Ok(());
         }
         self.b.emit(Op::Dup, self.cur_line);
-        let load = self.load_op_for(name);
-        self.b.emit(load, self.cur_line);
+        // The receiver was *read* through the delegate when only a delegate
+        // binds the name, so the new contents have to go back the same way —
+        // writing them to a script binding instead would leave the delegate
+        // holding the pre-mutation list.
+        self.emit_name_load(name, self.cur_line)?;
         self.b
             .emit(Op::CallBuiltin(crate::host::GWRITEBACK, 2), self.cur_line);
-        let store = self.store_op_for(name);
-        self.b.emit(store, self.cur_line);
+        self.emit_name_store(name, self.cur_line)
     }
 
     /// Lower Groovy `%` for two operands already on the stack.

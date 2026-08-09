@@ -271,6 +271,17 @@ pub const GRANGE: u16 = 755;
 /// `Long`. Stack: the value. See `b_class_long`.
 pub const GCLASS_LONG: u16 = 756;
 
+/// Builtin ids for reading and writing a bare name inside a closure body that
+/// the *owner* could not resolve — the name form of what [`b_closure_call`]
+/// already does for a bare call. Emitted only for a name the compiler could not
+/// tie to a slot, a field, a class, a function, or a script-level declaration,
+/// so an ordinary variable keeps its native `GetVar`/`SetVar` (and with it its
+/// JIT trace eligibility). Stack for the read: the global's name-pool index,
+/// then the name. For the write: the value, the index, then the name.
+/// See [`b_name_get`] / [`b_name_set`].
+pub const GNAME_GET: u16 = 760;
+pub const GNAME_SET: u16 = 761;
+
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -341,6 +352,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GCLASS_LONG, b_class_long);
     vm.register_builtin(GPRINTF, b_printf);
     vm.register_builtin(GSPRINTF, b_sprintf);
+    vm.register_builtin(GNAME_GET, b_name_get);
+    vm.register_builtin(GNAME_SET, b_name_set);
     // A fresh VM install starts with an empty object heap: `Value::Obj` handles
     // are chunk-relative (a closure carries a name-pool index, an instance a
     // class id), so a handle from a prior run must never survive into a new
@@ -3192,6 +3205,86 @@ fn dispatch_on_delegate(vm: &mut VM, name: &str, args: &[Value]) -> Option<Value
         });
     }
     Some(out)
+}
+
+/// Pop the `(global-index, name)` pair both bare-name builtins are handed.
+fn pop_name_site(vm: &mut VM) -> (usize, String) {
+    let name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let gidx = match vm.stack.pop() {
+        Some(Value::Int(i)) if i >= 0 => i as usize,
+        _ => usize::MAX,
+    };
+    (gidx, name)
+}
+
+/// True when the script binding `gidx` has been written. Globals start `Undef`,
+/// so this is what separates "the owner has this name" from "nobody does" —
+/// Groovy's `OWNER_FIRST` question, asked of the only owner a script closure has.
+fn owner_bound(vm: &VM, gidx: usize) -> bool {
+    vm.globals
+        .get(gidx)
+        .is_some_and(|v| !matches!(v, Value::Undef))
+}
+
+/// `GNAME_GET`: read a bare name inside a closure the owner could not resolve.
+/// The owner answers first when it has the binding; otherwise the innermost
+/// `with`/`tap` delegate is asked for the *property* of that name, which is what
+/// Groovy's `OWNER_FIRST` resolve strategy does — and asking it as a property
+/// means a delegate answers a bare name exactly as it answers `delegate.name`.
+/// With no delegate running the answer is `null`, the unbound-global read this
+/// replaced.
+fn b_name_get(vm: &mut VM, _argc: u8) -> Value {
+    let (gidx, name) = pop_name_site(vm);
+    if owner_bound(vm, gidx) {
+        return vm.globals[gidx].clone();
+    }
+    let Some(recv) = DELEGATES.with(|d| d.borrow().last().cloned()) else {
+        return Value::Undef;
+    };
+    if let Some(res) = dispatch_instance_prop_get(vm, &recv, &name) {
+        return match res {
+            Ok(v) => v,
+            Err(e) => {
+                fault(vm, e);
+                Value::Undef
+            }
+        };
+    }
+    dispatch_property(vm, &recv, &name)
+}
+
+/// `GNAME_SET`: write a bare name inside a closure the owner could not resolve.
+/// A bound script binding takes the write; otherwise the innermost delegate does
+/// if it can hold the name — a map takes any key (`[a: 1].with { b = 7 }` adds
+/// `b`), an instance takes a field it declared. A delegate that can hold neither
+/// does *not* raise: Groovy accepts `[1, 2].with { zork = 1 }` silently, so the
+/// write falls through to the script binding, which is where it used to go
+/// unconditionally.
+fn b_name_set(vm: &mut VM, _argc: u8) -> Value {
+    let (gidx, name) = pop_name_site(vm);
+    let value = vm.stack.pop().unwrap_or(Value::Undef);
+    if !owner_bound(vm, gidx) {
+        if let Some(recv) = DELEGATES.with(|d| d.borrow().last().cloned()) {
+            // A map mutates in place through its shared handle, so the delegate
+            // slot needs no write-back the way a mutated list would.
+            if omap_set(&recv, name.clone(), value.clone()) {
+                return Value::Undef;
+            }
+            if as_instance(&recv).is_some_and(|i| i.fields.contains_key(&name)) {
+                set_instance_field(&recv, &name, value);
+                return Value::Undef;
+            }
+        }
+    }
+    if let Some(slot) = vm.globals.get_mut(gidx) {
+        *slot = value;
+    }
+    Value::Undef
 }
 
 /// `GMETHOD_SAFE`: the safe-navigation method call `recv?.method(args)`. Returns

@@ -1305,3 +1305,61 @@ println([1, 2].with { [3].with { size() } })
 def size = { 99 }; println([1, 2].with { size() })
 %%
 [1, 2].with { zork() }
+%%
+# A bare *name* inside `with`/`tap` resolves against the delegate the same way a
+# bare call does. The owner is asked first, so a script binding still wins; the
+# delegate is then asked for the property of that name.
+println([a: 1].with { a })
+%%
+println([a: 1].tap { a })
+%%
+println([a: 1].with { nokey })
+%%
+println([a: 1].with { [b: 2].with { "" + a + "/" + b } })
+%%
+def a = 5; println([a: 1].with { a })
+%%
+def m = [n: 2]; println(m.with { n * 3 })
+%%
+def m = [a: 1]; println(m.with { a }.getClass().getName())
+%%
+def m = [c: 3]; def t = 0; m.with { t = c * 2 }; println t
+%%
+println([1, 2, 3].with { size })
+%%
+# Every site that writes a bare name has to reach the delegate, not just `=`.
+def m = [a: 1]; m.with { a = 9 }; println m
+%%
+def m = [a: 1]; m.with { b = 7 }; println m
+%%
+def m = [:]; m.with { x = 1; y = 2 }; println m
+%%
+def m = [a: 1]; m.with { a += 5 }; println m
+%%
+def m = [a: 1]; m.with { a++ }; println m
+%%
+def m = [a: 1]; m.with { a-- }; println m
+%%
+def m = [q: [9, 9]]; m.with { q[0] = 5 }; println m
+%%
+def m = [lst: [3, 1, 2]]; m.with { lst.sort() }; println m
+%%
+def m = [a: 1]; m.with { a = 9 }; println m.a
+%%
+# A delegate that can hold neither a key nor a field takes no write and raises
+# nothing — the write falls through to the script.
+[1, 2].with { zork = 1 }; println 'ok'
+%%
+# Reading the name again outside the `with`: Groovy raises, since nothing ever
+# bound it at script level. groovyrs answers null (see BUGS.md).
+def m = [a: 1]; m.with { a = 9 }; println a
+%%
+# `Set` construction and the set operators — a de-duplicated list here, so the
+# operators do not re-deduplicate (see BUGS.md).
+println([1, 2, 2, 3].toSet())
+%%
+println(new HashSet([1, 2, 2, 3]))
+%%
+println(([1, 2] as Set) + ([2, 3] as Set))
+%%
+println([1, 2, 3].subList(0, 2))

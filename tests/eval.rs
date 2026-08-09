@@ -2539,3 +2539,81 @@ fn with_and_tap_make_the_receiver_the_closures_delegate() {
         "[a:1]\n2\nABC\n[1, 2, 3]\n1\n99\ngroovy.lang.MissingMethodException\n"
     );
 }
+
+#[test]
+fn a_bare_name_inside_with_resolves_against_the_delegate() {
+    // The property form of the delegate dispatch the bare-*call* form already
+    // did. Groovy's `OWNER_FIRST` asks the owner first, so a script binding
+    // still wins; a name nothing in the script binds reaches the delegate and
+    // is asked for as a property, which is why a missing map key answers
+    // `null` and a list — whose property read is a spread — raises.
+    let (out, _) = run(
+        "println([a: 1].with { a })\n\
+         println([a: 1].tap { a })\n\
+         println([a: 1].with { nokey })\n\
+         println([a: 1].with { [b: 2].with { \"\" + a + \"/\" + b } })\n\
+         def owner = 100\n\
+         println([owner: 1].with { owner })\n\
+         try { println([1, 2, 3].with { size }) } catch (t) { println t.getClass().getName() }",
+    );
+    assert_eq!(
+        out,
+        "1\n[a:1]\nnull\nnull/2\n100\ngroovy.lang.MissingPropertyException\n"
+    );
+}
+
+#[test]
+fn a_bare_write_inside_with_goes_to_the_delegate_not_a_script_binding() {
+    // Every site that writes a bare name has to reach the delegate, not just
+    // the plain `=`: a compound assignment and `++`/`--` read and write the
+    // same name, and a subscript or mutating-method write-back stores the
+    // receiver's new contents back through it. Writing any of them to a script
+    // binding instead left the delegate holding its original value *and* leaked
+    // the name into the script.
+    let (out, _) = run(
+        "def m1 = [a: 1]\nm1.with { a = 9 }\nprintln m1\n\
+         def m2 = [a: 1]\nm2.with { b = 7 }\nprintln m2\n\
+         def m3 = [a: 1]\nm3.with { a += 5 }\nprintln m3\n\
+         def m4 = [a: 1]\nm4.with { a++ }\nprintln m4\n\
+         def m5 = [a: 1]\nm5.with { a-- }\nprintln m5\n\
+         def m6 = [q: [9, 9]]\nm6.with { q[0] = 5 }\nprintln m6\n\
+         def m7 = [lst: [3, 1, 2]]\nm7.with { lst.sort() }\nprintln m7",
+    );
+    assert_eq!(
+        out,
+        "[a:9]\n[a:1, b:7]\n[a:6]\n[a:2]\n[a:0]\n[q:[5, 9]]\n[lst:[1, 2, 3]]\n"
+    );
+}
+
+#[test]
+fn a_delegate_that_cannot_hold_the_name_does_not_raise_on_write() {
+    // Groovy accepts `[1, 2].with { zork = 1 }` silently — a list holds no such
+    // property, and the write falls through to the script rather than raising.
+    let (out, ok) = run("[1, 2].with { zork = 1 }\nprintln 'ok'");
+    assert!(ok);
+    assert_eq!(out, "ok\n");
+}
+
+#[test]
+fn an_ordinary_script_variable_inside_a_closure_keeps_its_native_ops() {
+    // The delegate-aware builtins are emitted only for a name the compiler
+    // cannot bind. A script variable must keep `GetVar`/`SetVar`, because a
+    // builtin in the closure body would cost the loop its JIT trace
+    // eligibility — the reason the compile-time gate exists at all.
+    let dir = std::env::temp_dir();
+    let src = "def total = 0\n[1, 2, 3].each { total += it }\nprintln total\n";
+    let path = dir.join(format!("groovyrs_test_{}.groovy", fasthash(src)));
+    std::fs::write(&path, src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_groovy"))
+        .arg("--disasm")
+        .arg(&path)
+        .output()
+        .expect("spawn groovy");
+    let _ = std::fs::remove_file(&path);
+    let dis = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !dis.contains("CallBuiltin(760") && !dis.contains("CallBuiltin(761"),
+        "a script-bound name must not go through the delegate builtins:\n{dis}"
+    );
+    assert!(dis.contains("GetVar") || dis.contains("SetVar"));
+}

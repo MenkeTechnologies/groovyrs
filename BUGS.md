@@ -327,6 +327,11 @@ reported as parse or compile errors, never silently mis-run.
   name is `[I`), and groovyrs models only the `List`. Modeling it as a `List`
   would make `[1, 2, 3].length` answer where Groovy raises, so the construct
   faults instead.
+- **`list.subList(from, to)`.** Raises `MissingMethodException` where Groovy
+  answers the `[from, to)` slice. The slice itself is spelled `list[from..<to]`,
+  which works; what `subList` additionally has is Java's exact bounds
+  behaviour (`IndexOutOfBoundsException`, and `IllegalArgumentException` when
+  `from > to`), which is what an approximation would get wrong.
 - **`list.subsequences()`.** Groovy answers a `java.util.HashSet<List>`, and
   `println` shows it in Java's *hash-bucket* order — `[1,2,3].subsequences()`
   prints `[[1], [1, 2, 3], [2], [2, 3], [1, 2], [3], [1, 3]]`, which is neither
@@ -428,12 +433,23 @@ reported as parse or compile errors, never silently mis-run.
   is `[1, 2, 2, 3]` where Groovy answers `[1, 2, 3]`. `asImmutable()` /
   `asSynchronized()` are copies rather than wrapper types for the same reason,
   so they too keep the `java.util.ArrayList` class name.
-- **A bare *property* read inside `with`/`tap` does not consult the delegate.**
-  A bare *call* does (`[:].with { put('a', 1) }` works), because an unresolved
-  call reaches the host at run time; an unresolved name reads a script binding,
-  which the compiler lowers to a global load with nowhere to hook the delegate
-  in. `[a: 1].with { a }` therefore answers `null` where Groovy answers `1`.
-  `it.a` and `[a: 1].with { get('a') }` both work.
+- **A bare name written inside `with`/`tap` is not readable again afterwards.**
+  The *name* forms now reach the delegate the way a bare call always did:
+  `[a: 1].with { a }` answers `1`, `m.with { a = 9 }` writes into `m`,
+  `m.with { b = 7 }` adds the key, and `+=` / `++` / `--`, a subscript write and
+  a mutating method's write-back all go back through the delegate. Groovy's
+  `OWNER_FIRST` is preserved: a script binding of the same name still wins, and
+  a delegate that can hold neither a key nor a field takes no write and raises
+  nothing (`[1, 2].with { zork = 1 }` is accepted, as Groovy accepts it).
+  What still differs is reading the name *after* the block: nothing at script
+  level ever bound it, so Groovy raises `MissingPropertyException` where
+  groovyrs answers `null` — the general behaviour of an unbound bare name at
+  script top level, not something `with` introduces.
+  One further difference is positional. Groovy scopes a script variable from its
+  declaration onward, while the compiler collects the script's declared names in
+  one pass over the whole file, so a delegate key that a *later* line also
+  declares as a script variable (`m.with { a }` above a later `def a = 5`)
+  resolves to the script binding rather than the delegate.
 - **A property read on a list is not a spread read.** Groovy's `list.prop` maps
   the read over the elements, so `[1,2,3].zork` reports the *element* type
   (`No such property: zork for class: java.lang.Integer`, wrapped in an

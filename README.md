@@ -203,11 +203,14 @@ Implemented and checked against Apache Groovy:
   `groupBy`, `countBy`, `count`, `inject`, `sort`, `max`, `min`, `withDefault` —
   a two-parameter closure gets `(key, value)`, a one-parameter closure a
   `Map.Entry`.
-- **`with` / `tap` delegate the closure to the receiver** — a bare call the
-  script cannot resolve dispatches against it (`[:].with { put('a', 1) }`,
-  `'abc'.with { toUpperCase() }`), innermost `with` first, and a script closure
-  of the same name still wins (Groovy's `OWNER_FIRST`). A mutator writes
-  through, so `[1, 2].tap { add(3) }` is `[1, 2, 3]`.
+- **`with` / `tap` delegate the closure to the receiver** — a bare call *and* a
+  bare name the script cannot resolve both dispatch against it
+  (`[:].with { put('a', 1) }`, `'abc'.with { toUpperCase() }`,
+  `[a: 1].with { a }`), innermost `with` first, and a script binding of the same
+  name still wins (Groovy's `OWNER_FIRST`). Writes go back through the delegate
+  too — `m.with { a = 9 }` updates `m`, `m.with { b = 7 }` adds the key, and
+  `+=`, `++`/`--`, a subscript write and a mutating method's write-back all
+  follow. A mutator writes through, so `[1, 2].tap { add(3) }` is `[1, 2, 3]`.
 - **Closure combinators** — `curry` / `rcurry` / `ncurry`, `memoize`,
   `andThen` / `compose` / `<<`, and `clone`, each answering another closure that
   reports the arity it still accepts.

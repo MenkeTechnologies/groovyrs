@@ -3014,7 +3014,9 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         "Boolean" => matches!(value, Value::Bool(_)),
         // A Groovy `Range` *is* a `java.util.List`, so it answers both.
         "List" | "ArrayList" | "Collection" | "Iterable" => {
-            matches!(value, Value::Array(_)) || as_list(value).is_some() || as_range(value).is_some()
+            matches!(value, Value::Array(_))
+                || as_list(value).is_some()
+                || as_range(value).is_some()
         }
         "Range" | "IntRange" | "ObjectRange" | "NumberRange" => as_range(value).is_some(),
         "Map" | "LinkedHashMap" | "HashMap" => {
@@ -3347,7 +3349,11 @@ fn b_setindex(vm: &mut VM, _argc: u8) -> Value {
 /// `list[i] = v`. A negative index counts from the end; an index past the end
 /// grows the list, padding with `null`, the way Groovy's `List.putAt` does.
 /// `Err((index, len))` is the negative-index-too-large case.
-fn list_put(mut items: Vec<Value>, index: &Value, value: Value) -> Result<Vec<Value>, (i64, usize)> {
+fn list_put(
+    mut items: Vec<Value>,
+    index: &Value,
+    value: Value,
+) -> Result<Vec<Value>, (i64, usize)> {
     let i = index.to_int();
     let idx = if i < 0 { items.len() as i64 + i } else { i };
     if idx < 0 {
@@ -6602,7 +6608,12 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         // `Integer.toString(int)`, which renders its argument in base 10 and
         // ignores the receiver — so Groovy prints `16`, not `ff`. The two-arg
         // form is the one that takes a radix.
-        ("Integer" | "Long", "toString") if !args.is_empty() => {
+        // Both parameters are `int`, so a non-integer argument matches no
+        // overload and raises — `255.toString('x')` is a MissingMethodException,
+        // not a base-10 zero.
+        ("Integer" | "Long", "toString")
+            if !args.is_empty() && args.iter().all(|a| matches!(a, Value::Int(_))) =>
+        {
             let n = as_i64(&arg0).unwrap_or(0);
             match args.get(1).and_then(as_i64) {
                 Some(radix) => Value::str(java_radix_string(n, radix)),

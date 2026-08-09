@@ -2840,3 +2840,15 @@ fn permutations_answers_a_hash_set_too() {
         )
     );
 }
+
+#[test]
+fn to_string_rejects_an_argument_that_matches_no_overload() {
+    // Both `Integer.toString` parameters are `int`. A `String` argument narrows
+    // to neither, so Groovy raises instead of rendering — it used to answer the
+    // base-10 `0` that a failed coercion left behind.
+    let (out, ok) = run(
+        "try { println(255.toString('x')) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }",
+    );
+    assert!(ok);
+    assert_eq!(out, "EXC:MissingMethodException\n");
+}

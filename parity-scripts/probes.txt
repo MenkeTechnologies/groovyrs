@@ -1715,3 +1715,7 @@ println([[1,2].combinations().getClass(), [[1,2],[3,4]].combinations()])
 %%
 # A set's own methods still reach through to the list ones.
 println([[1,2,3].subsequences().size(), [1,2,3].subsequences().contains([1,3]), [1,2,3].permutations().size()])
+%%
+# Both `Integer.toString` parameters are `int`, so a non-integer argument matches
+# no overload and raises rather than rendering a zero.
+try { println(255.toString('x')) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }

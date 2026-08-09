@@ -400,6 +400,13 @@ reported as parse or compile errors, never silently mis-run.
   methods) are keyed by name only, so two same-named methods with different
   parameter types collapse to one (the last declared wins). Constructors *are*
   dispatched, but by arity only, not parameter type.
+- **A `Long` argument where the JDK overload wants an `int`.**
+  `255.toString(16L)` is a `MissingMethodException` in Groovy — the only
+  candidate is the static `Integer.toString(int)`, and a `Long` does not narrow
+  to it — but groovyrs answers `16`. An `Integer` and a `Long` are one
+  `Value::Int` here and the width is read back from the magnitude, so a small
+  `Long` is indistinguishable from an `Integer` at the call. A non-numeric
+  argument (`255.toString('x')`) does raise.
 - **`++`/`--` do not call `next`/`previous`.** To keep the JIT fast path for
   integer loop counters (`for (i=0; i<n; i++)`), `++`/`--` lower to native
   `+ 1` / `- 1` rather than routing through a builtin (which would abort trace

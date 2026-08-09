@@ -1598,3 +1598,38 @@ def m2 = [k: 1]; def m3 = m2; println m2.is(m3); m3.j = 2; println m2
 %%
 # A StringBuilder handle is its own reference.
 def sb = new StringBuilder(); def sb2 = sb; println sb.is(sb2); sb2.append("a"); println sb
+%%
+# `>>` on two closures is `Closure.andThen`: forward composition, receiver first.
+def f = { it + 1 }; def g = { it * 2 }
+println((f >> g)(3))
+%%
+# `<<` composes the other way round — the argument runs first.
+def f = { it + 1 }; def g = { it * 2 }
+println((f << g)(3))
+%%
+# Composition chains left-to-right, and each step is itself a closure.
+def f = { it + 1 }; def g = { it * 2 }; def h = { it - 3 }
+println((f >> g >> h)(3))
+%%
+# Composing two closure literals needs no name to hang the shape off.
+println(({ it + 1 } >> { it * 2 })(3))
+%%
+# A composed closure keeps the arity of the one that runs first.
+def add = { a, b -> a + b }; def show = { "=$it" }
+println((add >> show)(2, 3))
+%%
+# `andThen`/`compose` are the method spellings of `>>`/`<<`.
+def f = { it + 1 }; def g = { it * 2 }
+println([f.andThen(g)(3), f.compose(g)(3), f.rightShift(g)(3), f.leftShift(g)(3)])
+%%
+# A name that held a closure and was re-bound to a number shifts as a number.
+def q = { it }; q = 64
+println(q >> 2)
+%%
+# `>>` on numbers is untouched by composition: `Integer` shifts at 32 bits with
+# the count masked to 5, a `Long` at 64 with it masked to 6.
+println([256 >> 3, -1 >> 1, 1 >> 32, 256 >> 33, -8L >> 1, (-1L) >> 65])
+%%
+# A composed closure is still a Closure, and curries like one.
+def f = { a, b -> a * b }; def g = { it + 1 }
+println((f >> g).curry(3)(4))

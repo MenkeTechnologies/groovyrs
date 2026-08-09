@@ -197,6 +197,13 @@ struct Compiler {
     /// t * 2000000000` is still 64-bit arithmetic — so these are exempt from the
     /// narrowing above until the name is re-declared.
     pinned_wide: HashSet<String>,
+    /// Names the compiler can see are bound to a host-heap object whose `>>` is
+    /// *not* a bit shift: a closure (`f >> g` is `Closure.andThen`, forward
+    /// composition) or a user-class instance (a `rightShift` overload). Only
+    /// these route `>>` through [`crate::host::GSHR`]; everything else keeps the
+    /// native lowering, so a shifting loop keeps its JIT trace. Tracked and
+    /// scoped alongside [`Compiler::wide_vars`].
+    obj_vars: HashSet<String>,
     /// The op indices of arithmetic whose operands are statically `Long`, handed
     /// to the host as [`crate::host::set_wide_sites`]. See
     /// [`Compiler::is_wide`].
@@ -247,13 +254,15 @@ struct ClassInfo {
     methods: Vec<String>,
 }
 
-/// The integer-width state a function or closure body is entered with, restored
-/// when it ends so its locals cannot leak a width outward. See
-/// [`Compiler::wide_vars`].
+/// The per-name static shape state — integer width, and whether the name holds
+/// a closure/instance — a function or closure body is entered with, restored
+/// when it ends so its locals cannot leak either outward. See
+/// [`Compiler::wide_vars`] and [`Compiler::obj_vars`].
 struct WidthScope {
     vars: HashSet<String>,
     returns: HashSet<String>,
     pinned: HashSet<String>,
+    objs: HashSet<String>,
 }
 
 /// A closure body queued for emission as a subroutine region. `params` already
@@ -410,6 +419,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         wide_vars: HashSet::new(),
         wide_returns: HashSet::new(),
         pinned_wide: HashSet::new(),
+        obj_vars: HashSet::new(),
         wide_sites: HashSet::new(),
     };
     // Arm the host's exception machinery for this run. Emitted only by a program
@@ -686,11 +696,13 @@ impl Compiler {
             vars: self.wide_vars.clone(),
             returns: self.wide_returns.clone(),
             pinned: self.pinned_wide.clone(),
+            objs: self.obj_vars.clone(),
         };
         for p in params {
             self.wide_vars.remove(p);
             self.wide_returns.remove(p);
             self.pinned_wide.remove(p);
+            self.obj_vars.remove(p);
         }
         saved
     }
@@ -700,6 +712,7 @@ impl Compiler {
         self.wide_vars = saved.vars;
         self.wide_returns = saved.returns;
         self.pinned_wide = saved.pinned;
+        self.obj_vars = saved.objs;
     }
 
     /// Does every value this body hands back have a statically-`Long` width?
@@ -1301,6 +1314,13 @@ impl Compiler {
                 }
                 self.emit_name_store(name, self.cur_line)?;
                 self.set_var_width(name, new_wide);
+                // `f = { it }` binds a closure to an undeclared name as surely as
+                // `def f = { it }` does; a compound `f += …` cannot produce one.
+                if matches!(op, AssignOp::Assign) {
+                    self.set_var_obj("", name, Some(value));
+                } else {
+                    self.obj_vars.remove(name);
+                }
                 Ok(())
             }
             StmtKind::SetProperty { recv, name, value } => {
@@ -2688,6 +2708,9 @@ impl Compiler {
     /// declaration is a fresh variable, so `def a = 2000000000` after an earlier
     /// `def a = 5L` is an `Integer` again.
     fn note_var_width(&mut self, ty: &str, name: &str, init: Option<&Expr>) {
+        // A declaration re-binds the name's `>>` receiver shape too, and does so
+        // whatever its width turns out to be.
+        self.set_var_obj(ty, name, init);
         if matches!(ty, "long" | "Long" | "BigInteger") {
             self.wide_vars.insert(name.to_string());
             self.pinned_wide.insert(name.to_string());
@@ -2702,6 +2725,50 @@ impl Compiler {
             if self.body_returns_wide(body) {
                 self.wide_returns.insert(name.to_string());
             }
+        }
+    }
+
+    /// Record whether `name` now holds a closure or a class instance — the two
+    /// receivers whose `>>` is not a bit shift. A declared `Closure c` says so
+    /// outright; otherwise the initializer's static shape decides, and a
+    /// re-binding to anything else clears the name again (`def f = { it }; f = 8`
+    /// leaves `f >> 1` on the native shift). See [`Compiler::obj_vars`].
+    fn set_var_obj(&mut self, ty: &str, name: &str, init: Option<&Expr>) {
+        let is_obj =
+            matches!(ty, "Closure") || init.is_some_and(|e| self.shr_receiver_is_object(e));
+        if is_obj {
+            self.obj_vars.insert(name.to_string());
+        } else {
+            self.obj_vars.remove(name);
+        }
+    }
+
+    /// Can the compiler see that this expression's value is a closure or a class
+    /// instance — a receiver whose `>>` is `Closure.andThen` or a `rightShift`
+    /// overload rather than a bit shift?
+    ///
+    /// Conservative in the safe direction: `false` only means "lower `>>` to the
+    /// native shift", and [`crate::host::b_shr`] still performs that same shift
+    /// when a `true` turns out to be wrong. So a miss costs an answer, a false
+    /// positive costs only the trace on that one site.
+    fn shr_receiver_is_object(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Closure { .. } | Expr::New { .. } => true,
+            Expr::Var(name) => self.obj_vars.contains(name),
+            Expr::Recorded { inner, .. } => self.shr_receiver_is_object(inner),
+            // A composition is itself a closure, so `f >> g >> h` chains.
+            Expr::Binary {
+                op: BinOp::Shr | BinOp::Shl,
+                lhs,
+                ..
+            } => self.shr_receiver_is_object(lhs),
+            Expr::Ternary { then, els, .. } => {
+                self.shr_receiver_is_object(then) || self.shr_receiver_is_object(els)
+            }
+            Expr::Elvis { lhs, rhs } => {
+                self.shr_receiver_is_object(lhs) || self.shr_receiver_is_object(rhs)
+            }
+            _ => false,
         }
     }
 
@@ -2769,6 +2836,23 @@ impl Compiler {
         // the count to 5 restores Groovy's answer in native ops the tracing JIT
         // still records — a builtin here would cost every shifting loop its
         // trace. A `Long` shift is already exactly what `Op::Shr` does.
+        // …but `>>` is only a shift on a *number*. On a closure it is
+        // `Closure.andThen` (forward composition) and on a class instance a
+        // `rightShift` overload, neither of which the native ops can express —
+        // and a `Value::Obj` handle silently coerces to an integer there, so
+        // `f >> g` answered a number instead of a composed closure. Those two
+        // receivers are exactly what `shr_receiver_is_object` spots, so they go
+        // to the builtin and every other `>>` keeps its native lowering.
+        if matches!(op, BinOp::Shr) && self.shr_receiver_is_object(lhs) {
+            self.expr(lhs)?;
+            self.expr(rhs)?;
+            // The width rides along as `GSHL`/`GUSHR` take it, for the numeric
+            // fallback a mis-typed receiver lands on.
+            let wide = self.is_wide(lhs);
+            self.b.emit(Op::LoadInt(i64::from(wide)), self.cur_line);
+            self.emit_call_builtin(crate::host::GSHR, 3, self.cur_line)?;
+            return Ok(());
+        }
         if matches!(op, BinOp::Shr) && !self.is_wide(lhs) {
             self.expr(lhs)?;
             self.emit_wrap32(self.cur_line);

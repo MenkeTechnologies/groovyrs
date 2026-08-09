@@ -136,8 +136,9 @@ Implemented and checked against Apache Groovy:
   integer `/` promotes to a decimal (`7 / 2 == 3.5`); `**` follows the numeric
   tower (`2 ** 10` is an `Integer`, `2 ** -1` a `BigDecimal`); `+` concatenates
   when either side is a string, `-` and `*` also work on strings and lists
-  (`"abc" * 3`, `[1, 2, 3] - [2]`), and `<<` is `leftShift` (a bit shift, a list
-  append, or a string concatenation).
+  (`"abc" * 3`, `[1, 2, 3] - [2]`), `<<` is `leftShift` (a bit shift, a list
+  append, or a string concatenation) and `>>` is `rightShift` (a bit shift on a
+  number, forward composition on a closure).
 - **32-bit `Integer` arithmetic.** Groovy's integer width is a property of the
   value, and groovyrs reproduces it: `Integer.MAX_VALUE + 1` is `-2147483648`,
   `1000000 * 1000000` is `-727379968`, and `2147483647 + 1L` is `2147483648`
@@ -178,7 +179,8 @@ Implemented and checked against Apache Groovy:
   walks superclasses and interfaces transitively.
 - **Operator overloading** — a user-class instance operand dispatches its
   operator method: `+`→`plus`, `-`→`minus`, `*`→`multiply`, `/`→`div`,
-  `%`→`remainder`, `**`→`power`, unary `-`→`negative`, `[]`→`getAt`;
+  `%`→`remainder`, `**`→`power`, unary `-`→`negative`, `[]`→`getAt`,
+  `<<`→`leftShift`, `>>`→`rightShift`;
   `<`/`>`/`<=`/`>=`/`<=>` via `compareTo`; null-safe `==`/`!=` via `compareTo`
   (Comparable) or `equals`. Primitive operands stay on the native/JIT fast path.
 - **Method / property dispatch** — `s.length()`, `list.size()`,
@@ -218,8 +220,8 @@ Implemented and checked against Apache Groovy:
   `+=`, `++`/`--`, a subscript write and a mutating method's write-back all
   follow. A mutator writes through, so `[1, 2].tap { add(3) }` is `[1, 2, 3]`.
 - **Closure combinators** — `curry` / `rcurry` / `ncurry`, `memoize`,
-  `andThen` / `compose` / `<<`, and `clone`, each answering another closure that
-  reports the arity it still accepts.
+  `andThen` / `compose` and the `>>` / `<<` operators, and `clone`, each
+  answering another closure that reports the arity it still accepts.
 - **Pure GDK** — lists answer `take`, `drop`, `takeRight`, `dropRight`, `first`,
   `head`, `last`, `tail`, `init`, `pop`, `removeLast`, `swap`, `getAt`,
   `indexOf`, `flatten`, `intersect`, `minus`, `plus` (including the

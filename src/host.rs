@@ -291,6 +291,19 @@ pub const GNAME_SET: u16 = 761;
 /// See [`b_make_list`].
 pub const GMAKE_LIST: u16 = 762;
 
+/// Builtin id for `>>` on a receiver whose `rightShift` is *not* a bit shift —
+/// a closure (forward composition, `f >> g` is `x -> g(f(x))`) or a user-class
+/// instance with a `rightShift` overload. Stack: the two operands, then the
+/// statically-known `Long` width of the left one (as [`GSHL`] takes it), which
+/// only the numeric fallback consults.
+///
+/// Unlike `<<`, `>>` is *not* routed here unconditionally: an `Integer` `>>` is
+/// six native ops the tracing JIT records (see `Compiler::binary`), and sending
+/// every shift through a builtin would cost each shifting loop its trace. The
+/// compiler emits this only where it can see the left operand is a closure or an
+/// instance, so an ordinary shift is untouched. See [`b_shr`].
+pub const GSHR: u16 = 763;
+
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -353,6 +366,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GASSERT_FAIL, b_assert_fail);
     vm.register_builtin(GPOWER, b_power);
     vm.register_builtin(GSHL, b_shl);
+    vm.register_builtin(GSHR, b_shr);
     vm.register_builtin(GUSHR, b_ushr);
     vm.register_builtin(GIN, b_in);
     vm.register_builtin(GCAST, b_cast);
@@ -6086,6 +6100,12 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
             },
         );
     }
+    // `<<` on a user-class instance is its `leftShift` overload, the same way
+    // `+` is `plus`. Arithmetic reaches an overload through the numeric hook,
+    // but `NumOp` has no shift member, so the dispatch happens here.
+    if let Some(v) = shift_overload(vm, &lhs, &rhs, "leftShift") {
+        return v;
+    }
     match &lhs {
         Value::Array(a) => {
             let mut next = a.clone();
@@ -6118,6 +6138,96 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
                 Value::Undef
             }
         },
+    }
+}
+
+/// Dispatch a shift operator to a user-class `leftShift`/`rightShift` overload.
+/// `Some` once the left operand is an instance — either the overload's result,
+/// or `Undef` after faulting when the class does not define it (Groovy raises
+/// `MissingMethodException`). `None` when the left operand is not an instance,
+/// so the caller's own shift semantics apply.
+///
+/// `+`/`-`/`*`/`%`/`**` reach their overload through the strict numeric hook
+/// ([`instance_operator`]), but fusevm's `NumOp` has no shift member for the
+/// hook to carry, so the shift builtins dispatch here instead.
+fn shift_overload(vm: &mut VM, lhs: &Value, rhs: &Value, method: &str) -> Option<Value> {
+    as_instance(lhs)?;
+    match call_user_method(vm, lhs, method, std::slice::from_ref(rhs)) {
+        Some(Ok(v)) => Some(v),
+        Some(Err(e)) => {
+            fault(vm, e);
+            Some(Value::Undef)
+        }
+        None => {
+            raise(
+                vm,
+                "MissingMethodException",
+                &format!(
+                    "No signature of method: {}.{method}() is applicable for argument types: ({}) values: [{}]",
+                    java_class_name(lhs),
+                    java_class_name(rhs),
+                    groovy_str(rhs)
+                ),
+            );
+            Some(Value::Undef)
+        }
+    }
+}
+
+/// `GSHR`: Groovy's `>>` where the left operand is not a number.
+///
+/// Two forms reach here, both silently mis-answered before: `f >> g` on two
+/// closures is `Closure.andThen` — forward composition, so `(f >> g)(x)` is
+/// `g(f(x))` — and an instance left operand dispatches its `rightShift`
+/// overload. Anything else falls back to the very shift the native lowering
+/// performs, so a receiver the compiler mistook for an object (a name that held
+/// a closure earlier in the flow, say) still answers correctly, just slower.
+///
+/// An ordinary `int >> n` never reaches this builtin: `Compiler::binary` emits
+/// it only for a statically-object left operand and keeps the native ops
+/// otherwise, so a shifting loop keeps its JIT trace.
+fn b_shr(vm: &mut VM, _argc: u8) -> Value {
+    let wide = shift_is_wide(vm);
+    let rhs = vm.stack.pop().unwrap_or(Value::Undef);
+    let lhs = vm.stack.pop().unwrap_or(Value::Undef);
+    // `a >> b` on two closures is `Closure.andThen`: `a` runs first, and the
+    // result takes `a`'s arity.
+    if let (Some(la), Some(_)) = (closure_meta(&lhs), closure_meta(&rhs)) {
+        return derived_closure(
+            la.params,
+            Derived::Composed {
+                first: lhs,
+                second: rhs,
+            },
+        );
+    }
+    if let Some(v) = shift_overload(vm, &lhs, &rhs, "rightShift") {
+        return v;
+    }
+    match (as_i64(&lhs), as_i64(&rhs)) {
+        // Same widths the native lowering uses: an `Integer` shifts its
+        // sign-extended low 32 bits with the count masked to 5, a `Long` all 64
+        // with the count masked to 6.
+        (Some(a), Some(b)) => {
+            if wide {
+                Value::int(a >> (b as u32 & 63))
+            } else {
+                Value::int(i64::from((a as i32) >> (b as u32 & 31)))
+            }
+        }
+        _ => {
+            raise(
+                vm,
+                "MissingMethodException",
+                &format!(
+                    "No signature of method: {}.rightShift() is applicable for argument types: ({}) values: [{}]",
+                    java_class_name(&lhs),
+                    java_class_name(&rhs),
+                    groovy_str(&rhs)
+                ),
+            );
+            Value::Undef
+        }
     }
 }
 

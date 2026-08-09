@@ -2613,3 +2613,88 @@ fn an_ordinary_script_variable_inside_a_closure_keeps_its_native_ops() {
     );
     assert!(dis.contains("GetVar") || dis.contains("SetVar"));
 }
+
+#[test]
+fn right_shift_composes_two_closures() {
+    // `f >> g` is `Closure.andThen`: `f` runs first, so `(f >> g)(3)` is
+    // `g(f(3))`. `<<` composes the other way. Before this, `>>` lowered
+    // unconditionally to the native shift ops, which coerced both `Value::Obj`
+    // handles to integers and answered a number.
+    let (out, ok) = run(concat!(
+        "def f = { it + 1 }\n",
+        "def g = { it * 2 }\n",
+        "def h = { it - 3 }\n",
+        "println((f >> g)(3))\n",
+        "println((f << g)(3))\n",
+        "println((f >> g >> h)(3))\n",
+        "println(({ it + 1 } >> { it * 2 })(3))\n",
+        "Closure p = f\n",
+        "println((p >> g)(3))\n",
+    ));
+    assert!(ok);
+    assert_eq!(out, "8\n7\n5\n8\n8\n");
+}
+
+#[test]
+fn a_composed_closure_keeps_the_first_closures_arity() {
+    let (out, _) =
+        run("def add = { a, b -> a + b }\ndef show = { \"=$it\" }\nprintln((add >> show)(2, 3))");
+    assert_eq!(out, "=5\n");
+}
+
+#[test]
+fn shift_operators_dispatch_a_user_class_overload() {
+    // `+` reaches a `plus` overload through fusevm's numeric hook, but `NumOp`
+    // has no shift member, so `<<`/`>>` dispatch `leftShift`/`rightShift` from
+    // the shift builtins instead. A class without the method raises, as Groovy
+    // does — `>>` used to answer `0` and `<<` to report the wrong receiver.
+    let (out, ok) = run(concat!(
+        "class Pipe {\n",
+        "  String name\n",
+        "  Pipe(String n) { name = n }\n",
+        "  def rightShift(Pipe o) { new Pipe(name + '|' + o.name) }\n",
+        "  def leftShift(o) { 'into:' + o }\n",
+        "  String toString() { name }\n",
+        "}\n",
+        "def a = new Pipe('a')\n",
+        "println(a >> new Pipe('b'))\n",
+        "println(a << 5)\n",
+        "println(new Pipe('x') >> new Pipe('y'))\n",
+        "class Bare { def v = 1 }\n",
+        "try { println(new Bare() >> 2) } catch (e) { println(e.getClass().getName()) }\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        "a|b\ninto:5\nx|y\ngroovy.lang.MissingMethodException\n"
+    );
+}
+
+#[test]
+fn a_numeric_right_shift_keeps_its_native_ops() {
+    // The composition builtin is emitted only where the compiler can see the
+    // left operand is a closure or an instance. An ordinary shift must stay on
+    // `Shl`/`Shr`/`BitAnd`, because a builtin in a shifting loop would cost it
+    // the JIT trace — the reason `>>` is not routed unconditionally the way
+    // `<<` is.
+    let dir = std::env::temp_dir();
+    let src =
+        "def x = 1024\ndef n = 0\nfor (int i = 0; i < 4; i++) { n = n + (x >> i) }\nprintln n\n";
+    let path = dir.join(format!("groovyrs_test_{}.groovy", fasthash(src)));
+    std::fs::write(&path, src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_groovy"))
+        .arg("--disasm")
+        .arg(&path)
+        .output()
+        .expect("spawn groovy");
+    let _ = std::fs::remove_file(&path);
+    let dis = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !dis.contains(&format!("CallBuiltin({}", groovyrs::host::GSHR)),
+        "a numeric `>>` must not go through the composition builtin:\n{dis}"
+    );
+    assert!(dis.contains("Shr"), "{dis}");
+    // And a name re-bound from a closure to a number shifts as a number.
+    let (out, _) = run("def q = { it }\nq = 64\nprintln(q >> 2)");
+    assert_eq!(out, "16\n");
+}

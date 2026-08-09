@@ -88,7 +88,8 @@ reported as parse or compile errors, never silently mis-run.
   `f(a)(b)` parse (postfix call-application). Capture of a frame local is
   **by value** at closure-creation time (see the simplification note below).
 - **Closure combinators.** `curry` / `rcurry` / `ncurry`, `memoize`, `andThen` /
-  `compose` / `<<`, and `clone`. Each answers a *derived* closure — a handle that
+  `compose` and the `>>` / `<<` operators, and `clone`. Each answers a *derived*
+  closure — a handle that
   wraps the callable it was built from rather than a body region of its own — so
   it is a closure everywhere a closure is expected (`.call`, a GDK argument,
   another combinator) and reports the arity it still accepts.
@@ -383,10 +384,6 @@ reported as parse or compile errors, never silently mis-run.
   prints `16` (not `ff`). groovyrs dispatches instance methods only and raises
   `MissingMethodException`. `Integer.toString(255, 16)` — the static call spelled
   out — answers `ff` as it should.
-- **`a >> b` on two closures.** `>>` lowers to native shift ops so an integer
-  shifting loop keeps its JIT trace (a builtin there would abort it), and fusevm's
-  numeric hook has no shift opcode to intercept. Composition is available under
-  every other spelling Groovy gives it: `a.andThen(b)`, `b.compose(a)`, `b << a`.
 - **`new Random(…)` / `new Date(…)` and the other stateful JDK classes.**
   Reproducing them means reproducing Java's exact LCG and clock, so they fault
   rather than answering a plausible-looking different number. The instantiable

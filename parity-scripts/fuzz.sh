@@ -11,12 +11,15 @@
 #
 #   Usage: bash parity-scripts/fuzz.sh [probes-file] [-v]
 #          GROOVYRS_PARITY_GROOVY=/path/to/groovy  overrides the oracle
+#          GROOVYRS_PARITY_OURS=/path/to/groovy    overrides the build under test
 #
 # Probe file format: probe bodies separated by a line containing only `%%`.
 # Lines starting with `#` at the very top of a probe body are comments/titles.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OURS="$ROOT/target/debug/groovy"
+# `GROOVYRS_PARITY_OURS` points the harness at another build — the way to run a
+# probe set through a pre-change binary and check it actually fails there.
+OURS="${GROOVYRS_PARITY_OURS:-$ROOT/target/debug/groovy}"
 PROBES="${1:-$ROOT/parity-scripts/probes.txt}"
 [ "${1:-}" = "-v" ] && { PROBES="$ROOT/parity-scripts/probes.txt"; VERBOSE=-v; } || VERBOSE="${2:-}"
 ORACLE="${GROOVYRS_PARITY_GROOVY:-groovy}"
@@ -76,30 +79,49 @@ command perl -e '
   close $out if $out;
 ' "$TMP/oracle.out" "$TMP"
 
-pass=0; fail=0
+# A probe only counts as a comparison if the ORACLE ran it: it has to have
+# emitted its `##P` marker (so the batch reached it) and then printed something.
+# A probe the reference never executed measures nothing — our side failing too
+# would read as agreement — so those are reported as SKIPPED, never as passes.
+# A run of ours that has to be killed is a MISS whatever the oracle printed;
+# `timeout` exits 124, which an empty-vs-empty `cmp` would otherwise call equal.
+pass=0; fail=0; skip=0
 declare -a misses
+declare -a skips
 for ((i=0; i<N; i++)); do
-  [ -f "$TMP/p$i.exp" ] || : > "$TMP/p$i.exp"
+  if [ ! -f "$TMP/p$i.exp" ] || [ ! -s "$TMP/p$i.exp" ]; then
+    skip=$((skip+1)); skips+=("$i")
+    echo "──── SKIP $i (oracle produced no output — not a comparison) ────"
+    head -3 "$TMP/p$i.body"
+    continue
+  fi
   {
     printf 'try {\n'
     cat "$TMP/p$i.body"
     printf '\n} catch (Throwable t) { println "EXC:" + t.getClass().getName() }\n'
   } > "$TMP/p$i.groovy"
   timeout 20 "$OURS" "$TMP/p$i.groovy" > "$TMP/p$i.got" 2>"$TMP/p$i.err"
-  if cmp -s "$TMP/p$i.exp" "$TMP/p$i.got"; then
+  rc=$?
+  if [ $rc -ne 124 ] && cmp -s "$TMP/p$i.exp" "$TMP/p$i.got"; then
     pass=$((pass+1))
   else
     fail=$((fail+1)); misses+=("$i")
     echo "──── PROBE $i ────"
     head -3 "$TMP/p$i.body"
     echo "  groovy : $(command perl -pe 's/\n/ | /' < "$TMP/p$i.exp")"
-    echo "  groovyrs: $(command perl -pe 's/\n/ | /' < "$TMP/p$i.got")"
+    if [ $rc -eq 124 ]; then
+      echo "  groovyrs: TIMED OUT after 20s (killed)"
+    else
+      echo "  groovyrs: $(command perl -pe 's/\n/ | /' < "$TMP/p$i.got")"
+    fi
     if [ -s "$TMP/p$i.err" ]; then echo "  stderr : $(head -2 "$TMP/p$i.err" | command perl -pe 's/\n/ | /')"; fi
   fi
 done
 
+compared=$((pass+fail))
 echo ""
 echo "════════════════════════════════════════════"
-echo "PROBE PARITY: $pass / $N match  (oracle: $ORACLE)"
+echo "PROBE PARITY: $pass / $compared match  (oracle: $ORACLE)"
+echo "  $N probes, $skip skipped (oracle never ran them)"
 echo "════════════════════════════════════════════"
 [ $fail -eq 0 ]

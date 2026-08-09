@@ -109,6 +109,7 @@ enum Mode {
     Gdk,
     Conversions,
     Classes,
+    Ranges,
     Mixed,
 }
 
@@ -130,6 +131,7 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Gdk => "gdk",
         Mode::Conversions => "conversions",
         Mode::Classes => "classes",
+        Mode::Ranges => "ranges",
         Mode::Mixed => "mixed",
     }
 }
@@ -152,6 +154,7 @@ fn mode_from(s: &str) -> Option<Mode> {
         "gdk" => Mode::Gdk,
         "conversions" => Mode::Conversions,
         "classes" => Mode::Classes,
+        "ranges" => Mode::Ranges,
         "mixed" => Mode::Mixed,
         _ => return None,
     })
@@ -1153,6 +1156,102 @@ fn gen_classes(rng: &mut Rng) -> Vec<String> {
     out
 }
 
+/// The two endpoints of a generated range, as source text. The pair is drawn so
+/// that **either order** is reachable — the `control` mode only ever builds
+/// `lo..hi` with `lo <= hi`, which is why it never observed that a descending
+/// `for (i in 5..1)` iterated zero times under groovyrs and five times under
+/// Groovy. Characters are in the pool for the same reason: `for (c in 'a'..'e')`
+/// walks letters, and a naive `c++` counting loop never terminates.
+fn gen_range_ends(rng: &mut Rng) -> (String, String) {
+    match rng.below(6) {
+        // Integer literals — the parser can fold the direction from these.
+        0 | 1 => (
+            rng.range_i(-3, 5).to_string(),
+            rng.range_i(-3, 5).to_string(),
+        ),
+        // One endpoint behind a variable, so the direction is only known at run
+        // time and the folded and unfolded lowerings are both exercised.
+        2 => (
+            rng.range_i(-3, 5).to_string(),
+            format!("({})", rng.range_i(-3, 5)),
+        ),
+        // Character endpoints, either order.
+        3 | 4 => {
+            let a = (b'a' + rng.below(6) as u8) as char;
+            let b = (b'a' + rng.below(6) as u8) as char;
+            (format!("'{a}'"), format!("'{b}'"))
+        }
+        // Decimal endpoints — a `BigDecimal` range steps by one and keeps scale.
+        _ => (
+            format!("{}.0", rng.range_i(-2, 3)),
+            format!("{}.0", rng.range_i(-2, 3)),
+        ),
+    }
+}
+
+/// A range program: build a range either way round, walk it with `for-in`, and
+/// read the members Groovy defines on `Range` itself.
+///
+/// Four bug classes this mode exists to catch, each of which the `control` mode
+/// structurally cannot reach:
+///
+/// * a descending range iterating zero times,
+/// * a character range never terminating,
+/// * `..<` dropping the wrong endpoint when the range counts down,
+/// * a body that assigns the loop variable changing the iteration.
+///
+/// Every statement is self-contained — the range literal is repeated rather than
+/// bound to a name, and the whole walk is one multi-line entry — so the shrinker
+/// cannot delete a binding and leave a dangling reference behind (which would
+/// report an unbound-name gap instead of a range one).
+fn gen_ranges(rng: &mut Rng) -> Vec<String> {
+    let (a, b) = gen_range_ends(rng);
+    let op = if rng.chance(1, 2) { ".." } else { "..<" };
+    let r = format!("({a}{op}{b})");
+
+    // The `Range` members, which are answered off the *bounds* rather than the
+    // endpoints as written: `(4..0).from` is 0.
+    let mut out = vec![
+        format!("println({r}.size())"),
+        format!("println({r}.from)"),
+        format!("println({r}.to)"),
+        format!("println({r}.isReverse())"),
+        format!("println({r}.toList())"),
+    ];
+    if rng.chance(1, 3) {
+        out.push(format!("println({r}.reverse())"));
+        out.push(format!("println({r}.step({}))", rng.range_i(1, 3)));
+    }
+
+    // The walk itself, as one atomic statement. `acc` accumulates every element,
+    // so a wrong direction, a wrong endpoint, or a skipped iteration all show up
+    // as a single diff.
+    let mut walk = format!("def acc = []\nfor (x in {a}{op}{b}) {{\n");
+    if rng.chance(1, 3) {
+        walk.push_str("  if (acc.size() == 1) continue\n");
+    }
+    if rng.chance(1, 4) {
+        walk.push_str("  if (acc.size() == 3) break\n");
+    }
+    walk.push_str("  acc << x\n");
+    // Assigning the loop variable must not steer the loop: Groovy iterates a
+    // snapshot, so the walk carries on from where it was.
+    if rng.chance(1, 4) {
+        walk.push_str(&format!("  x = {a}\n"));
+    }
+    walk.push_str("}\nprintln(acc)");
+    out.push(walk);
+
+    // `next`/`previous` — the successor operations a range walks with, read
+    // directly so a wrong one is reported at its source rather than as a wrong
+    // element three lines later.
+    if rng.chance(1, 2) {
+        out.push(format!("println(({a}).next())"));
+        out.push(format!("println(({b}).previous())"));
+    }
+    out
+}
+
 /// Generate one case (a list of statements) for a mode and seed.
 fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
     let mut rng = Rng::new(seed);
@@ -1176,6 +1275,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::Gdk,
                 Mode::Conversions,
                 Mode::Classes,
+                Mode::Ranges,
             ],
         )
     } else {
@@ -1194,6 +1294,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
         Mode::Gdk => gen_gdk(&mut rng),
         Mode::Conversions => gen_conversions(&mut rng),
         Mode::Classes => gen_classes(&mut rng),
+        Mode::Ranges => gen_ranges(&mut rng),
         _ => {
             let n = rng.range_i(1, 5) as usize;
             (0..n)
@@ -1219,6 +1320,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         | Mode::Gdk
                         | Mode::Conversions
                         | Mode::Classes
+                        | Mode::Ranges
                         | Mode::Mixed => unreachable!(),
                     };
                     println_of(expr)
@@ -1357,15 +1459,34 @@ fn run_prog(prog: &Path, src: &str, timeout: Duration) -> RunOut {
 
 /// stdout mismatch, or success/failure disagreement, is a divergence.
 fn differs(oracle: &RunOut, ours: &RunOut) -> bool {
+    // A run of ours that had to be killed is a divergence whatever the oracle
+    // did. Without this a hanging loop and an oracle that also failed compare
+    // equal — two failures reading as agreement.
+    if ours.timed_out {
+        return true;
+    }
     if (oracle.exit == 0) != (ours.exit == 0) {
         return true;
     }
     oracle.stdout != ours.stdout
 }
 
+/// Whether the oracle actually *ran* the generated program, which is what makes
+/// the case a comparison at all.
+///
+/// A case where the reference itself never produced anything — it timed out, or
+/// it rejected the program before executing a line of it — measures nothing:
+/// our side failing too would read as agreement. Those cases are counted and
+/// reported as skipped rather than folded into the pass count. A program that
+/// prints and *then* throws still counts: the printed prefix and the exit status
+/// are both real observations, and several modes are built on exactly that.
+fn oracle_ran(o: &RunOut) -> bool {
+    !o.timed_out && (o.exit == 0 || !o.stdout.is_empty())
+}
+
 fn diverges(script: &str, bin: &Path, oracle: &str, timeout: Duration) -> bool {
     let o = run_prog(Path::new(oracle), script, timeout);
-    if o.timed_out {
+    if !oracle_ran(&o) {
         return false;
     }
     let r = run_prog(bin, script, timeout);
@@ -1480,7 +1601,7 @@ fn parse_args() -> Args {
                     mode = m;
                 } else {
                     eprintln!(
-                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|mixed)"
+                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|ranges|mixed)"
                     );
                     std::process::exit(2);
                 }
@@ -1491,7 +1612,7 @@ fn parse_args() -> Args {
                      options:\n  \
                      -c, --count N        cases to run (default 1000)\n  \
                      -s, --seed N         base seed (default 1)\n  \
-                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                                          gstring|exceptions|mixed (default mixed)\n  \
+                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|ranges|mixed (default mixed)\n  \
                      -j, --jobs N         parallel workers (default = cores)\n  \
                      --once               replay a single --seed, minimize, dump both sides\n  \
                      --timeout-ms N       per-run timeout (default 15000; groovy boots the JVM)\n  \
@@ -1564,6 +1685,7 @@ fn main() {
     let next = AtomicU64::new(0);
     let checked = AtomicU64::new(0);
     let timeouts = AtomicU64::new(0);
+    let skipped = AtomicU64::new(0);
     let stop = AtomicBool::new(false);
     let divergences: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
     let start = Instant::now();
@@ -1596,8 +1718,14 @@ fn main() {
                 if o.timed_out || r.timed_out {
                     timeouts.fetch_add(1, Ordering::Relaxed);
                 }
-                // Oracle-side timeout ⇒ pathological case; not a parity gap.
-                if !o.timed_out && differs(&o, &r) {
+                // A case the oracle never ran is not evidence either way; count
+                // it as skipped so a run that measured nothing cannot report a
+                // clean pass.
+                if !oracle_ran(&o) {
+                    skipped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                if differs(&o, &r) {
                     // Re-verify a real gap reproduces before reporting.
                     if !diverges(&script, &bin, &oracle, timeout) {
                         continue;
@@ -1634,14 +1762,18 @@ fn main() {
     divs.sort_by_key(|(s, _)| *s);
     let done = checked.load(Ordering::Relaxed);
     let to = timeouts.load(Ordering::Relaxed);
+    let sk = skipped.load(Ordering::Relaxed);
 
     println!(
         "\n════════════════════════════════════════════\n\
-         checked {done} cases in {:.1}s  ({} timeouts)\n\
+         checked {done} cases in {:.1}s  ({} timeouts, {} skipped)\n\
+         compared  {} cases\n\
          divergences: {}\n\
          ════════════════════════════════════════════",
         elapsed.as_secs_f64(),
         to,
+        sk,
+        done - sk,
         divs.len()
     );
 

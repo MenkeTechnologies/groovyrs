@@ -1040,3 +1040,86 @@ println((123G) instanceof Number)
 println(123G.toBigInteger().getClass().getName())
 %%
 println((5 as BigInteger).getClass().getName())
+%%
+# Ranges: direction, element type, and the members Groovy answers off the bounds
+def s = ''; for (i in 5..1) s += i; println s
+%%
+def s = ''; for (i in 5..<1) s += i; println s
+%%
+def s = ''; for (i in 4..0) { if (i == 2) continue; s += i }; println s
+%%
+def s = ''; for (c in 'a'..'e') s += c; println s
+%%
+def s = ''; for (c in 'e'..'a') s += c; println s
+%%
+def s = ''; for (c in 'a'..<'e') s += c; println s
+%%
+def s = ''; for (c in 'e'..<'a') s += c; println s
+%%
+def s = ''; for (i in 0..4) { s += i; i = 3 }; println s
+%%
+def s = ''; for (i in 1.0..3.0) s += i + ','; println s
+%%
+def s = ''; def n = 1; for (i in 5..n) s += i; println s
+%%
+println((1.5..3.5).toList())
+%%
+println((1.5..4.0).toList())
+%%
+println((4.0..1.5).toList())
+%%
+println((1.0..3.0).sum())
+%%
+println((1.0..3.0).collect { it * 2 })
+%%
+println((1.0..3.0)[1])
+%%
+println((0.5..2.5).toList())
+%%
+println((4..0).from + ' ' + (4..0).to)
+%%
+println((0..<4).from + ' ' + (0..<4).to)
+%%
+println((4..<0).from + ' ' + (4..<0).to)
+%%
+println((0..<-1).from + ' ' + (0..<-1).to)
+%%
+println(('a'..<'e').from + ' ' + ('a'..<'e').to)
+%%
+println(('e'..<'a').from + ' ' + ('e'..<'a').to)
+%%
+println((1.5..<4.0).from + ' ' + (1.5..<4.0).to)
+%%
+println((1.5..<4.0).size())
+%%
+println((0..<0).getClass().getName())
+%%
+println(('a'..<'a').getClass().getName())
+%%
+println((1.0..<1.0).getClass().getName())
+%%
+println('' + ('a'..<'e'))
+%%
+println('' + ('e'..<'a'))
+%%
+println(('f'..<'e').isReverse())
+%%
+println((4..<3).isReverse())
+%%
+println((1.0..<0.0).isReverse())
+%%
+println(5.next() + ' ' + 5.previous())
+%%
+println('a'.next() + ' ' + 'e'.previous())
+%%
+println('z'.next())
+%%
+println(1.0.next() + ' ' + 3.0.previous())
+%%
+println(5G.next().getClass().getName())
+%%
+def s = ''; for (i in 0..2) { for (j in 2..0) { if (j == 1) continue; s += "$i$j," } }; println s
+%%
+def s = ''; O: for (i in 2..0) { for (j in 0..2) { if (j == 1) continue O; s += "$i$j," } }; println s
+%%
+def s = ''; for (i in 4..0) { try { if (i == 2) continue; s += i } finally { s += 'f' } }; println s

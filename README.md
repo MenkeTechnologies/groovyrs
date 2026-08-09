@@ -438,7 +438,7 @@ every divergence it reports is a real parity gap — the class of bug the slice-
 generated without restriction now that the `BigDecimal` model is exact. Modes:
 `arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
 `gstring`, `exceptions`, `faults`, `switch`, `asserts`, `modzero`, `gdk`,
-`conversions`, `classes`, `ranges`, `mixed`.
+`conversions`, `classes`, `ranges`, `aliasing`, `mixed`.
 
 Both fuzzers report a **skipped** count alongside the divergences. A case only
 counts as a comparison when the reference itself ran the program — it neither

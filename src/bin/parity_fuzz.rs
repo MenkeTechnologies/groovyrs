@@ -110,6 +110,7 @@ enum Mode {
     Conversions,
     Classes,
     Ranges,
+    Aliasing,
     Mixed,
 }
 
@@ -132,6 +133,7 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Conversions => "conversions",
         Mode::Classes => "classes",
         Mode::Ranges => "ranges",
+        Mode::Aliasing => "aliasing",
         Mode::Mixed => "mixed",
     }
 }
@@ -155,6 +157,7 @@ fn mode_from(s: &str) -> Option<Mode> {
         "conversions" => Mode::Conversions,
         "classes" => Mode::Classes,
         "ranges" => Mode::Ranges,
+        "aliasing" => Mode::Aliasing,
         "mixed" => Mode::Mixed,
         _ => return None,
     })
@@ -1016,6 +1019,88 @@ const GDK_MAP_CALLS: &[&str] = &[
     "size()",
 ];
 
+/// Non-empty lists the aliasing generator mutates. Every one has at least one
+/// element so an index-taking mutator (`remove(0)`, `set(0, …)`, `pop()`) has a
+/// defined answer rather than a bounds throw, and they stay numeric so an
+/// order-sensitive mutator (`sort`, `unique`) is comparable.
+const ALIAS_LISTS: &[&str] = &["[1, 2, 3]", "[3, 1, 2]", "[1, 1, 2]", "[5]", "[2, 4, 6, 8]"];
+
+/// In-place `java.util.List` mutators. Each writes through the receiver in
+/// Groovy, so every other name for that same list observes the change — which is
+/// the property these programs exist to compare.
+const ALIAS_MUTATORS: &[&str] = &[
+    "add(9)",
+    "add(0, 9)",
+    "remove(0)",
+    "clear()",
+    "sort()",
+    "unique()",
+    "set(0, 9)",
+    "addAll([7, 8])",
+    "leftShift(9)",
+    "removeAll([1])",
+    "retainAll([1, 2])",
+    "removeLast()",
+    "pop()",
+];
+
+/// An aliasing program: build one list, take a **second reference** to it, mutate
+/// through one of the two, and print both.
+///
+/// This is the surface the rest of the generator never reaches. `gen_gdk` builds
+/// a list and calls a method on the single name that built it, so a receiver
+/// write-back through that one variable is indistinguishable from real aliasing;
+/// nothing anywhere else in this file emits a `.add(`, a second name for a list,
+/// or a list reached through a map/element/parameter. Each arm below is one way
+/// Groovy hands out that second reference.
+fn gen_aliasing(rng: &mut Rng) -> Vec<String> {
+    let mut out = Vec::new();
+    let base = pick(rng, ALIAS_LISTS);
+    let m = pick(rng, ALIAS_MUTATORS);
+    out.push(format!("def a = {base}"));
+    match rng.below(6) {
+        // A plain second name.
+        0 => {
+            out.push("def b = a".to_string());
+            out.push(format!("b.{m}"));
+            out.push("println b".to_string());
+            out.push("println a.is(b)".to_string());
+        }
+        // Reached through a map value.
+        1 => {
+            out.push("def m = [k: a]".to_string());
+            out.push(format!("m.k.{m}"));
+            out.push("println m".to_string());
+        }
+        // Reached as an element of another list (twice, so both windows move).
+        2 => {
+            out.push("def outer = [a, a]".to_string());
+            out.push(format!("outer[0].{m}"));
+            out.push("println outer".to_string());
+        }
+        // Handed to a closure as a parameter.
+        3 => {
+            out.push(format!("def f = {{ l -> l.{m} }}"));
+            out.push("f(a)".to_string());
+        }
+        // Captured by a closure.
+        4 => {
+            out.push(format!("def c = {{ a.{m} }}"));
+            out.push("c()".to_string());
+        }
+        // A *copy* is not an alias — the negative case, so a fix that aliased
+        // everything unconditionally diverges here instead of passing.
+        _ => {
+            out.push("def b = a.collect { it }".to_string());
+            out.push(format!("b.{m}"));
+            out.push("println b".to_string());
+            out.push("println a.is(b)".to_string());
+        }
+    }
+    out.push("println a".to_string());
+    out
+}
+
 /// A GDK / spread program: one list or map call, plus a spread expression and a
 /// `for-in` walk over the same value, so the three list surfaces agree.
 fn gen_gdk(rng: &mut Rng) -> Vec<String> {
@@ -1276,6 +1361,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::Conversions,
                 Mode::Classes,
                 Mode::Ranges,
+                Mode::Aliasing,
             ],
         )
     } else {
@@ -1295,6 +1381,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
         Mode::Conversions => gen_conversions(&mut rng),
         Mode::Classes => gen_classes(&mut rng),
         Mode::Ranges => gen_ranges(&mut rng),
+        Mode::Aliasing => gen_aliasing(&mut rng),
         _ => {
             let n = rng.range_i(1, 5) as usize;
             (0..n)
@@ -1321,6 +1408,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         | Mode::Conversions
                         | Mode::Classes
                         | Mode::Ranges
+                        | Mode::Aliasing
                         | Mode::Mixed => unreachable!(),
                     };
                     println_of(expr)
@@ -1601,7 +1689,7 @@ fn parse_args() -> Args {
                     mode = m;
                 } else {
                     eprintln!(
-                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|ranges|mixed)"
+                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|faults|switch|asserts|modzero|gdk|conversions|classes|ranges|aliasing|mixed)"
                     );
                     std::process::exit(2);
                 }
@@ -1612,7 +1700,7 @@ fn parse_args() -> Args {
                      options:\n  \
                      -c, --count N        cases to run (default 1000)\n  \
                      -s, --seed N         base seed (default 1)\n  \
-                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|ranges|mixed (default mixed)\n  \
+                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|mixed (default mixed)\n  \
                      -j, --jobs N         parallel workers (default = cores)\n  \
                      --once               replay a single --seed, minimize, dump both sides\n  \
                      --timeout-ms N       per-run timeout (default 15000; groovy boots the JVM)\n  \

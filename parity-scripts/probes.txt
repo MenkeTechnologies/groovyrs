@@ -1354,8 +1354,8 @@ def m = [a: 1]; m.with { a = 9 }; println m.a
 # bound it at script level. groovyrs answers null (see BUGS.md).
 def m = [a: 1]; m.with { a = 9 }; println a
 %%
-# `Set` construction and the set operators — a de-duplicated list here, so the
-# operators do not re-deduplicate (see BUGS.md).
+# `Set` construction and the set operators. A set is its own type, so the
+# operators re-de-duplicate and the implementations iterate in their own orders.
 println([1, 2, 2, 3].toSet())
 %%
 println(new HashSet([1, 2, 2, 3]))
@@ -1363,3 +1363,137 @@ println(new HashSet([1, 2, 2, 3]))
 println(([1, 2] as Set) + ([2, 3] as Set))
 %%
 println([1, 2, 3].subList(0, 2))
+%%
+# `List.subList` — the window, and the JDK's three distinct bounds outcomes.
+# `fromIndex` is checked before `toIndex` before the ordering, so a call wrong in
+# two ways reports the same one the JDK does.
+println([1, 2, 3, 4, 5].subList(1, 4))
+%%
+println([1, 2, 3, 4, 5].subList(0, 5))
+%%
+println([1, 2, 3, 4, 5].subList(2, 2))
+%%
+println([1, 2, 3, 4, 5].subList(1, 4).subList(0, 2))
+%%
+println([1, 2, 3, 4].subList(1, 3).sum())
+%%
+try { [1, 2, 3].subList(-1, 2) } catch (e) { println e.getClass().getName() + '|' + e.getMessage() }
+%%
+try { [1, 2, 3].subList(0, 9) } catch (e) { println e.getClass().getName() + '|' + e.getMessage() }
+%%
+try { [1, 2, 3].subList(3, 1) } catch (e) { println e.getClass().getName() + '|' + e.getMessage() }
+%%
+# Both endpoints wrong: the negative `fromIndex` is reported, not the high one.
+try { [1, 2, 3].subList(-1, 9) } catch (e) { println e.getClass().getName() + '|' + e.getMessage() }
+%%
+# Out of range *and* reversed: the range check wins over the ordering check.
+try { [1, 2, 3].subList(9, 5) } catch (e) { println e.getClass().getName() + '|' + e.getMessage() }
+%%
+try { [].subList(0, 1) } catch (e) { println e.getClass().getName() + '|' + e.getMessage() }
+%%
+# `Range.subList` answers another Range, indexed from the range's *lower* bound
+# even when it counts down — `(5..1)[1]` is 4 but `(5..1).subList(1, 2)` is `2..2`.
+println((1..5).subList(1, 3))
+%%
+println((1..5).subList(1, 3).getClass().getName())
+%%
+println((5..1).subList(1, 2))
+%%
+println((5..1).subList(0, 5))
+%%
+println((1..<5).subList(1, 3))
+%%
+println(('a'..'e').subList(1, 3))
+%%
+# The empty window is an `EmptyRange` built from the lower bound, wherever the
+# window sat.
+println((1..5).subList(2, 2))
+%%
+println((5..1).subList(2, 2))
+%%
+println((1..5).subList(2, 2).getClass().getName())
+%%
+try { (1..5).subList(3, 1) } catch (e) { println e.getClass().getName() + '|' + e.getMessage() }
+%%
+try { (1..5).subList(0, 9) } catch (e) { println e.getClass().getName() + '|' + e.getMessage() }
+%%
+# A set is its own type: `getClass` names it and `==` ignores order.
+println(([1, 2] as Set).getClass().getName())
+%%
+println([1, 2, 3].toSet().getClass().getName())
+%%
+println((new TreeSet([3, 1, 2])).getClass().getName())
+%%
+println(([1, 2] as Set) == ([2, 1] as Set))
+%%
+# A `Set` and a `List` are never equal in Java, whatever they hold.
+println(([1, 2] as Set) == [1, 2])
+%%
+# The operators re-de-duplicate and keep the receiver's type.
+println(([1, 2] as Set) - ([2, 3] as Set))
+%%
+println(([1, 2] as Set).intersect([2, 3] as Set))
+%%
+println((([1, 2] as Set) + ([2, 3] as Set)).getClass().getName())
+%%
+println(([1, 2] as Set) + [2, 9])
+%%
+# `+` dispatches on the LEFT operand, so a list plus a set concatenates without
+# de-duplicating.
+println([1, 2] + ([2, 3] as Set))
+%%
+# `add` answers whether the set changed, and mutates through the handle.
+def s = [1, 2] as Set; println(s.add(2)); println(s.add(5)); println(s)
+%%
+def s = [1, 2] as Set; println(s.remove(1)); println(s)
+%%
+# `findAll` keeps the receiver's type; `collect` and `sort` answer an ArrayList.
+println(([3, 1, 2] as Set).findAll { it > 1 }.getClass().getName())
+%%
+println(([3, 1, 2] as Set).collect { it * 2 }.getClass().getName())
+%%
+println(([3, 1, 2] as Set).sort().getClass().getName())
+%%
+println(([3, 1, 2] as Set).collect { it * 2 })
+%%
+# `as Set` is a LinkedHashSet, so it keeps insertion order.
+println([10, 3, 7, 1] as Set)
+%%
+println(new LinkedHashSet([10, 3, 7, 1]))
+%%
+# A TreeSet sorts.
+println(new TreeSet([10, 3, 7, 1]))
+%%
+println(new TreeSet(['delta', 'alpha', 'charlie', 'bravo']))
+%%
+# `HashSet` iterates in the JDK's table order, and the table `toSet()` asks for
+# is a different size from the one `new HashSet(collection)` asks for — so the
+# same elements come out in two different orders.
+println(new HashSet([17, 5, 33, 2, 20, 9]))
+%%
+println([17, 5, 33, 2, 20, 9].toSet())
+%%
+println(new HashSet(['delta', 'alpha', 'charlie', 'bravo']))
+%%
+println(['delta', 'alpha', 'charlie', 'bravo'].toSet())
+%%
+# Past the resize threshold both tables end up the same size.
+println((1..14).toList().toSet())
+%%
+println(new HashSet((1..14).toList()))
+%%
+# A set is a collection: empty is false, and iteration follows the print order.
+println(([] as Set) ? 't' : 'f')
+%%
+println(([1] as Set) ? 't' : 'f')
+%%
+def o = []; ([3, 1, 2] as Set).each { o << it }; println(o)
+%%
+def o = []; for (e in ([3, 1, 2] as Set)) { o << e }; println(o)
+%%
+println(([1, 2, 2, 3] as Set).size())
+%%
+println([1, ([2, 3] as Set)])
+%%
+# `toUnique` answers a de-duplicated List, not a set.
+println([1, 2, 2, 3].toUnique().getClass().getName())

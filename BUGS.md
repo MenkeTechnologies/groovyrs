@@ -26,6 +26,33 @@ reported as parse or compile errors, never silently mis-run.
 - **List and map literals.** `[1, 2, 3]`, `[]`, `[a: 1]`, `[:]` build a fusevm
   `Array` (list) and a host-heap insertion-ordered map, and print Groovy-style
   (`[1, 2, 3]`, `[a:1]`, `[:]`).
+- **`java.util.Set`.** `as Set`, `toSet()` and
+  `new HashSet`/`LinkedHashSet`/`TreeSet` build a real set behind a handle, not a
+  de-duplicated list. `getClass()` names the implementation, `==` ignores order
+  and is never true against a `List`, `add` answers `false` for an element
+  already present and mutates through the handle, and the operators
+  re-de-duplicate — `([1, 2] as Set) + ([2, 3] as Set)` is `[1, 2, 3]`. The
+  methods whose Groovy result is a `List` rather than a `Set` (`collect`, `sort`,
+  `toList`) still answer a list, and `+` dispatches on its left operand, so
+  `[1, 2] + ([2, 3] as Set)` is the four-element `[1, 2, 2, 3]`.
+- **`HashSet` iteration order.** A `HashSet` presents its elements in the JDK's
+  table order — a stable sort of the insertion sequence by
+  `(capacity - 1) & (h ^ (h >>> 16))` — rather than in insertion order, so
+  `new HashSet([17, 5, 33, 2, 20, 9])` prints `[17, 33, 2, 20, 5, 9]`. The table
+  size is the one the *constructor* asked for, which differs between paths:
+  `toSet()` asks for the element count and `new HashSet(collection)` for
+  `size / 0.75 + 1` (min 16), so the same six elements come out as
+  `[17, 33, 9, 2, 20, 5]` through the first and `[17, 33, 2, 20, 5, 9]` through
+  the second. Not modeled: a bucket that treeifies (8 collisions with a table of
+  64+), and an element whose hash is the JVM identity hash — that one keeps its
+  insertion position, and it is not reproducible across two JVM runs either.
+- **`subList`.** `list.subList(from, to)` and `range.subList(from, to)`, with
+  Java's exact bounds behaviour — `IndexOutOfBoundsException` naming `fromIndex`
+  or `toIndex`, `IllegalArgumentException` for a reversed range, and the JDK's
+  check *order*, so `[1, 2, 3].subList(9, 5)` reports `toIndex = 5` rather than
+  the reversal. A range's answer is another range (`(1..5).subList(1, 3)` is
+  `2..3`, the empty window an `EmptyRange`). See the divergence note below for
+  what a copy cannot do that a view can.
 - **`++`/`--` in expression position.** Both postfix (`i++`, value before
   update) and prefix (`++i`, value after update), in addition to the statement
   forms.
@@ -327,11 +354,6 @@ reported as parse or compile errors, never silently mis-run.
   name is `[I`), and groovyrs models only the `List`. Modeling it as a `List`
   would make `[1, 2, 3].length` answer where Groovy raises, so the construct
   faults instead.
-- **`list.subList(from, to)`.** Raises `MissingMethodException` where Groovy
-  answers the `[from, to)` slice. The slice itself is spelled `list[from..<to]`,
-  which works; what `subList` additionally has is Java's exact bounds
-  behaviour (`IndexOutOfBoundsException`, and `IllegalArgumentException` when
-  `from > to`), which is what an approximation would get wrong.
 - **`list.subsequences()`.** Groovy answers a `java.util.HashSet<List>`, and
   `println` shows it in Java's *hash-bucket* order — `[1,2,3].subsequences()`
   prints `[[1], [1, 2, 3], [2], [2, 3], [1, 2], [3], [1, 3]]`, which is neither
@@ -425,14 +447,32 @@ reported as parse or compile errors, never silently mis-run.
   (<simple types>) values: [<values>]` — is byte-identical to Groovy. The same
   holds for the suggestion line Groovy sometimes appends to a
   `MissingPropertyException` on a class with fields.
-- **A `Set` is a de-duplicated list.** `as Set`, `toSet()` and
-  `new HashSet(…)`/`LinkedHashSet`/`TreeSet` all build an ordinary list with the
-  later duplicates dropped, which prints and iterates the way a `LinkedHashSet`
-  does. What differs is the *type*: `getClass()` names `java.util.ArrayList`, and
-  the set operators do not re-deduplicate, so `([1, 2] as Set) + ([2, 3] as Set)`
-  is `[1, 2, 2, 3]` where Groovy answers `[1, 2, 3]`. `asImmutable()` /
-  `asSynchronized()` are copies rather than wrapper types for the same reason,
-  so they too keep the `java.util.ArrayList` class name.
+- **Lists are values, so two names never alias one list.** `def a = [1, 2, 3];
+  def b = a; b.add(4)` leaves `a` as `[1, 2, 3]`; Groovy answers `[1, 2, 3, 4]`,
+  because both names hold the same `ArrayList`. A fusevm `Value::Array` is a
+  value rather than a handle, and a mutator only writes back through a
+  *variable* receiver (the `MUTATED` slot), so a second name never sees it.
+  Maps, sets, ranges, matchers and `StringBuilder`s are host-heap handles and do
+  alias correctly; this is a list-only gap, and it is what makes the two entries
+  below unreachable rather than merely unwritten.
+- **`subList` answers a copy, not a view.** The window and all three of Java's
+  bounds outcomes are exact, but Java's `subList` is a *live view* of the backing
+  list — writing through it writes through to the list — and groovyrs's is a
+  copy, so `getClass()` names `java.util.ArrayList` rather than
+  `java.util.ArrayList$SubList` and a write through the window does not reach the
+  original. This is not specific to `subList`: a fusevm `Value::Array` is a value
+  rather than a handle, so groovyrs has no list aliasing at all, and plain
+  `def b = a; b.add(4)` already leaves `a` unchanged (see *Lists are values*).
+  A view has nothing to point at until lists become heap handles; until then a
+  copy is exactly as aliased as every other list groovyrs hands out.
+- **A reverse `ObjectRange`'s `subList` differs**, in the one corner where
+  Groovy's own answer is self-inconsistent: `('e'..'a').subList(1, 3)` *prints*
+  `c..d` but *iterates* `[c]`, because Groovy builds it through the constructor
+  that neither normalises its endpoints nor re-derives them. groovyrs answers
+  `c..b`, which prints and iterates consistently. Every numeric range and every
+  forward `ObjectRange` is exact, including the `EmptyRange` and the
+  count-down indexing quirk (`(5..1)[1]` is `4` while `(5..1).subList(1, 2)` is
+  `2..2`).
 - **A bare name written inside `with`/`tap` is not readable again afterwards.**
   The *name* forms now reach the delegate the way a bare call always did:
   `[a: 1].with { a }` answers `1`, `m.with { a = 9 }` writes into `m`,
@@ -589,7 +629,32 @@ reported as parse or compile errors, never silently mis-run.
 - **An unbound name reads as `null` instead of raising.** A declared-but-
   uninitialized local (`def x` then `println x`) and an entirely undeclared name
   both yield `null`; Groovy defaults the former to `null` too but raises
-  `groovy.lang.MissingPropertyException` for the latter.
+  `groovy.lang.MissingPropertyException: No such property: <name> for class:
+  <script>` for the latter.
+
+  The two cases are the *same emitted code*, which is what makes this hard rather
+  than merely unwritten. At script level `def x` with no initializer emits no
+  store at all (`declare_slot` has no scope to declare into), so `def x; println
+  x` and `println x` are byte-identical at runtime and no "is this global bound?"
+  test can separate them. Making the read raise therefore needs the declaration
+  to start emitting a binding *first*.
+
+  The reads themselves come from one syntactic site — the `Expr::Var` arm of
+  `Compiler::expr` — plus twelve helper sites that load a name directly
+  (compound assignment, `++`/`--`, the receiver write-back, `this`, the
+  `$exc_*` try/finally temporaries, the power-assert `Values:` clause, the
+  closure-capture prologue, and the `GCLOSURE_CALL` callee load). Only the first
+  is a user-written strict read; the rest must stay tolerant, and two of them
+  actively depend on the `null`: `b_closure_call` needs an `Undef` callee to fall
+  through to the `with`/`tap` delegate chain and then report its own
+  `unresolved reference`, and a bare *assignment* made inside a closure or a
+  function body (`[1, 2].each { newVar = it }`) legitimately binds a global that
+  a later top-level read must find — so the decision has to be the runtime
+  bound-ness test, never a compile-time `script_vars` membership test. Script-
+  declared class names used as bare values also currently ride this path.
+  fusevm 0.17's `VM::set_undef_hook` supplies the per-site mechanism (groovyrs
+  installs no hook today); the blocker is the uninitialized-declaration case
+  above, not the hook.
 - **The paren-less `println <expr>` command form is more permissive** than
   Groovy's command-expression grammar. groovyrs parses the whole following
   expression as the single argument, so `println -42` prints `-42`. Real Groovy

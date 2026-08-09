@@ -701,6 +701,9 @@ fn java_class_name(v: &Value) -> String {
     if let Some((class, _)) = as_buffer(v) {
         return class.to_string();
     }
+    if let Some((_, kind)) = as_set(v) {
+        return set_class(kind).to_string();
+    }
     if regex_source(v).is_some() {
         return "java.util.regex.Pattern".to_string();
     }
@@ -986,6 +989,34 @@ enum HeapObj {
         items: Vec<Value>,
         pos: usize,
     },
+    /// A `java.util.Set`. Elements are *stored* in insertion order whatever the
+    /// implementation; [`SetKind`] decides the order they are iterated and
+    /// printed in.
+    ///
+    /// A set is a heap object rather than a de-duplicated `Value::Array` because
+    /// its type is observable in four ways a list cannot carry: `getClass()`
+    /// names it, `==` ignores order (`([1, 2] as Set) == ([2, 1] as Set)`) while
+    /// a list's does not, the set operators re-de-duplicate their result
+    /// (`([1, 2] as Set) + ([2, 3] as Set)` is `[1, 2, 3]`, not `[1, 2, 2, 3]`),
+    /// and `add` answers `false` for an element already present. Riding a handle
+    /// also makes `s.add(x)` mutate the set the caller still holds, which a
+    /// fusevm `Value::Array` cannot do (see `MUTATED`).
+    SetVal { items: Vec<Value>, kind: SetKind },
+}
+
+/// Which `java.util.Set` implementation a set handle is, which is exactly the
+/// question of what order it presents its elements in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetKind {
+    /// `java.util.LinkedHashSet` — insertion order. What `as Set` builds.
+    Linked,
+    /// `java.util.HashSet` — the JDK's bucket order (see [`hash_order`]).
+    /// `req` is the initial capacity the constructor that built it asked for;
+    /// the table size follows from that and the element count, and the two
+    /// differ between construction paths — see [`hash_req_for_collection`].
+    Hash { req: usize },
+    /// `java.util.TreeSet` — ascending natural order.
+    Tree,
 }
 
 /// A Groovy range: its endpoints as written, and whether the upper one is
@@ -1279,6 +1310,10 @@ fn groovy_truthy(vm: &mut VM, v: &Value) -> bool {
             }
             if let Some(entries) = as_omap(v) {
                 return !entries.is_empty();
+            }
+            // A set is a collection: true when it holds anything.
+            if let Some((items, _)) = as_set(v) {
+                return !items.is_empty();
             }
             // A range is a collection: true when it enumerates anything.
             if let Some(r) = as_range(v) {
@@ -1839,7 +1874,7 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
 /// stays an honest error for a class groovyrs does not model).
 ///
 /// The collection classes construct the value groovyrs already uses for that
-/// shape — a `Value::Array` for a `List`/`Set`, an ordered-map handle for a
+/// shape — a `Value::Array` for a `List`, a set handle for a `Set`, an ordered-map handle for a
 /// `Map` — so every GDK method on them already applies. The box types construct
 /// the primitive, which is what Groovy's auto-unboxing makes them anyway.
 fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
@@ -1867,15 +1902,22 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
             Some(v) => iteration_elements(v),
             None => Vec::new(),
         }),
-        // A Set is a de-duplicated list here, the same shape `as Set` builds.
         "HashSet" | "LinkedHashSet" | "TreeSet" => {
-            let mut out: Vec<Value> = Vec::new();
-            for e in args.first().map(iteration_elements).unwrap_or_default() {
-                if !out.iter().any(|k| values_equal(k, &e)) {
-                    out.push(e);
-                }
-            }
-            Value::array(out)
+            let seed = args.first().map(iteration_elements).unwrap_or_default();
+            let kind = match simple_name_of(class).as_str() {
+                "LinkedHashSet" => SetKind::Linked,
+                "TreeSet" => SetKind::Tree,
+                // `new HashSet(Collection)` sizes its table from the argument;
+                // `new HashSet()` takes the default 16.
+                _ => SetKind::Hash {
+                    req: if args.is_empty() {
+                        16
+                    } else {
+                        hash_req_for_collection(seed.len())
+                    },
+                },
+            };
+            make_set(seed, kind)
         }
         "HashMap" | "LinkedHashMap" | "TreeMap" => {
             let entries = args.first().and_then(as_omap).unwrap_or_default();
@@ -2761,6 +2803,20 @@ fn inspect_value(v: &Value) -> String {
 /// numerically across types (`case 1:` matches the subject `1.00`), and
 /// everything else compares by its rendered form — the same rule `==` uses.
 fn values_equal(a: &Value, b: &Value) -> bool {
+    // `Set.equals` ignores order and is only ever true against another set:
+    // `([1, 2] as Set) == ([2, 1] as Set)` but `([1, 2] as Set) == [1, 2]` is
+    // false, because a `Set` and a `List` are never equal in Java whatever they
+    // contain. Both halves need deciding here — the fallback below compares
+    // rendered forms, which would answer the opposite on both counts.
+    let (sa, sb) = (as_set(a), as_set(b));
+    if sa.is_some() || sb.is_some() {
+        return match (sa, sb) {
+            (Some((x, _)), Some((y, _))) => {
+                x.len() == y.len() && x.iter().all(|v| y.iter().any(|w| values_equal(v, w)))
+            }
+            _ => false,
+        };
+    }
     // A range compares as the list it enumerates, so `(1..3) == [1, 2, 3]` is
     // true in both directions the way Groovy's `AbstractList.equals` makes it.
     if as_range(a).is_some() || as_range(b).is_some() {
@@ -3447,8 +3503,17 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // closure-driven GDK (`each`, `collect`, `find`, `sum`) already lives. That
     // is faithful because Groovy's `Range` is a `java.util.List`; only the
     // `each` family answers the receiver itself rather than the list.
+    // A `Set` answers its own members (the operators, the mutators, `getClass`)
+    // and hands everything else to the list it enumerates — which is faithful,
+    // because those methods answer an `ArrayList` in Groovy too.
+    if let Some((items, kind)) = as_set(&recv) {
+        if let Some(v) = dispatch_set_method(vm, &recv, &items, kind, method, &args) {
+            return v;
+        }
+        return dispatch_call(vm, Value::array(set_elements(&items, kind)), method, args);
+    }
     if let Some(r) = as_range(&recv) {
-        if let Some(v) = dispatch_range_method(&r, method, &args) {
+        if let Some(v) = dispatch_range_method(vm, &r, method, &args) {
             return v;
         }
         let listed = dispatch_call(vm, Value::array(range_elements(&r)), method, args);
@@ -4537,8 +4602,14 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
     }
     // A `Range` answers its own members and hands everything else to the list it
     // enumerates — which is faithful, because Groovy's `Range` is a `List`.
+    if let Some((items, kind)) = as_set(recv) {
+        if let Some(v) = dispatch_set_method(vm, recv, &items, kind, method, args) {
+            return v;
+        }
+        return dispatch_method(vm, &Value::array(set_elements(&items, kind)), method, args);
+    }
     if let Some(r) = as_range(recv) {
-        if let Some(v) = dispatch_range_method(&r, method, args) {
+        if let Some(v) = dispatch_range_method(vm, &r, method, args) {
             return v;
         }
         return dispatch_method(vm, &Value::array(range_elements(&r)), method, args);
@@ -4941,6 +5012,44 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 }
             }
         }
+        // `list.subList(from, to)` — the half-open window `[from, to)`.
+        //
+        // The three bounds outcomes are the JDK's own, and they are distinct: a
+        // negative `fromIndex` and a `toIndex` past the end are both
+        // `IndexOutOfBoundsException` but name *different* indices, while a
+        // reversed range is an `IllegalArgumentException` instead. Checking
+        // `from` before `to` before the ordering is the order
+        // `ArrayList.subListRangeCheck` uses, so a call that is wrong in two
+        // ways reports the same one the JDK does.
+        //
+        // The result is a **copy**, not the aliasing `ArrayList$SubList` view
+        // Java answers, and `getClass()` on it names `java.util.ArrayList`
+        // rather than `java.util.ArrayList$SubList`. That is not a choice made
+        // here: a fusevm `Value::Array` is a value rather than a handle (see
+        // `MUTATED`), so groovyrs has no list aliasing at all — plain
+        // `def b = a; b.add(4)` already leaves `a` unchanged. A view would have
+        // nothing to point at until lists become heap handles, and a *copy* is
+        // exactly as aliased as every other list groovyrs hands out.
+        (Value::Array(a), "subList") => {
+            let from = args.first().and_then(as_i64).unwrap_or(0);
+            let to = args.get(1).and_then(as_i64).unwrap_or(0);
+            if from < 0 {
+                raise(vm, "IndexOutOfBoundsException", &format!("fromIndex = {from}"));
+                Value::Undef
+            } else if to > a.len() as i64 {
+                raise(vm, "IndexOutOfBoundsException", &format!("toIndex = {to}"));
+                Value::Undef
+            } else if from > to {
+                raise(
+                    vm,
+                    "IllegalArgumentException",
+                    &format!("fromIndex({from}) > toIndex({to})"),
+                );
+                Value::Undef
+            } else {
+                Value::array(a[from as usize..to as usize].to_vec())
+            }
+        }
         (Value::Array(a), "reverse") => {
             let mut r = a.clone();
             r.reverse();
@@ -4999,12 +5108,21 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (Value::Array(a), "toList" | "asImmutable" | "asSynchronized" | "clone") => {
             Value::array(a.clone())
         }
-        // A `LinkedHashSet` keeps insertion order and prints like a list, so a
-        // de-duplicated list is a faithful model of `list as Set` / `toSet()`.
-        (Value::Array(a), "toSet" | "toUnique") => {
+        // `toSet()` is Groovy's `new HashSet<>(self.size())` + `addAll`, so it
+        // asks for a table sized to the *element count* — a smaller one than
+        // `new HashSet(collection)` asks for, and that difference is visible as
+        // a different iteration order for the same elements.
+        (Value::Array(a), "toSet") => make_set(
+            a.clone(),
+            SetKind::Hash {
+                req: table_size_for(a.len()),
+            },
+        ),
+        // `toUnique` answers a de-duplicated **List**, not a set.
+        (Value::Array(a), "toUnique") => {
             let mut out: Vec<Value> = Vec::new();
             for v in a {
-                if !out.iter().any(|k| groovy_str(k) == groovy_str(v)) {
+                if !out.iter().any(|k| values_equal(k, v)) {
                     out.push(v.clone());
                 }
             }
@@ -5867,14 +5985,21 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
             _ if as_range(&v).is_some() => v,
             other => Value::array(iteration_elements(other)),
         },
-        "Set" | "LinkedHashSet" | "HashSet" | "SortedSet" | "TreeSet" => {
-            let mut out: Vec<Value> = Vec::new();
-            for e in iteration_elements(&v) {
-                if !out.iter().any(|k| values_equal(k, &e)) {
-                    out.push(e);
-                }
-            }
-            Value::array(out)
+        // `x as Set` builds a `LinkedHashSet`, so it keeps the source's order —
+        // `[10, 3, 7, 1] as Set` prints `[10, 3, 7, 1]`, not the `HashSet`
+        // ordering `toSet()` would give it.
+        "Set" | "LinkedHashSet" | "SortedSet" | "TreeSet" | "HashSet" => {
+            let seed = iteration_elements(&v);
+            make_set(
+                seed.clone(),
+                match ty_simple.as_str() {
+                    "TreeSet" | "SortedSet" => SetKind::Tree,
+                    "HashSet" => SetKind::Hash {
+                        req: hash_req_for_collection(seed.len()),
+                    },
+                    _ => SetKind::Linked,
+                },
+            )
         }
         _ => v,
     }
@@ -6301,9 +6426,19 @@ fn range_elements(r: &RangeVal) -> Vec<Value> {
 ///
 /// `step` and `reverse` answer a `java.util.ArrayList`, not another range, which
 /// is what Groovy's own `Range.step` / `DefaultGroovyMethods.reverse` return.
-fn dispatch_range_method(r: &RangeVal, method: &str, args: &[Value]) -> Option<Value> {
+fn dispatch_range_method(
+    vm: &mut VM,
+    r: &RangeVal,
+    method: &str,
+    args: &[Value],
+) -> Option<Value> {
     let elems = || range_elements(r);
     Some(match method {
+        // `Range.subList` answers another **range**, not the list a range
+        // usually delegates to: `(1..5).subList(1, 3)` is `2..3`, and the empty
+        // window is the `EmptyRange` `1..<1` — built from the range's *lower*
+        // bound, not from the window's position.
+        "subList" => return range_sublist(vm, r, args),
         // Answered here rather than falling through, because the list a range
         // delegates to is an `ArrayList` and would name the wrong class.
         "getClass" => heap_push(HeapObj::ClassRef(range_class(r).to_string())),
@@ -6330,6 +6465,71 @@ fn dispatch_range_method(r: &RangeVal, method: &str, args: &[Value]) -> Option<V
     })
 }
 
+/// `Range.subList(from, to)` — the half-open window, answered as another
+/// `Range`.
+///
+/// The window is taken over the range's **ascending** elements even when the
+/// range counts down, which is Groovy's own indexing here and is *not* the
+/// indexing its subscript uses: `(5..1)[1]` is `4`, while `(5..1).subList(1, 2)`
+/// is `2..2`. Groovy's `IntRange.subList` builds `IntRange(from + fromIndex,
+/// from + toIndex - 1, reverse)` from the normalised lower bound and re-applies
+/// the direction afterwards, so the index counts up from the low end regardless.
+/// Reading the ascending elements rather than doing the arithmetic gets the same
+/// answer for every endpoint type groovyrs models — including `1.5..4.5`, whose
+/// elements step by one from a decimal — without a second numeric path.
+///
+/// An empty window is Groovy's `EmptyRange`, whose sole endpoint is the range's
+/// lower bound rather than anything about where the window sat: both
+/// `(1..5).subList(2, 2)` and `(5..1).subList(2, 2)` are `1..<1`.
+///
+/// Bounds are the JDK's, checked in the JDK's order — see the list `subList`.
+fn range_sublist(vm: &mut VM, r: &RangeVal, args: &[Value]) -> Option<Value> {
+    let from = args.first().and_then(as_i64).unwrap_or(0);
+    let to = args.get(1).and_then(as_i64).unwrap_or(0);
+    let size = range_size(r);
+    if from < 0 {
+        raise(vm, "IndexOutOfBoundsException", &format!("fromIndex = {from}"));
+        return Some(Value::Undef);
+    }
+    if to > size {
+        raise(vm, "IndexOutOfBoundsException", &format!("toIndex = {to}"));
+        return Some(Value::Undef);
+    }
+    if from > to {
+        raise(
+            vm,
+            "IllegalArgumentException",
+            &format!("fromIndex({from}) > toIndex({to})"),
+        );
+        return Some(Value::Undef);
+    }
+    let lower = range_lower(r);
+    if from == to {
+        return Some(heap_push(HeapObj::Range(RangeVal {
+            from: lower.clone(),
+            to: lower,
+            inclusive: false,
+        })));
+    }
+    let mut asc = range_elements(r);
+    if range_is_reverse(r) {
+        asc.reverse();
+    }
+    // `from < to <= size` holds here, and `asc` is `size` long, so both indices
+    // are in range.
+    let (lo, hi) = (asc[from as usize].clone(), asc[to as usize - 1].clone());
+    let (a, b) = if range_is_reverse(r) {
+        (hi, lo)
+    } else {
+        (lo, hi)
+    };
+    Some(heap_push(HeapObj::Range(RangeVal {
+        from: a,
+        to: b,
+        inclusive: true,
+    })))
+}
+
 /// `Range.step(n)` — every `n`-th element, as a `java.util.ArrayList`. A
 /// negative step walks the range from its far end back, so `(1..5).step(-2)` is
 /// `[5, 3, 1]`.
@@ -6344,6 +6544,267 @@ fn range_step(r: &RangeVal, step: i64) -> Vec<Value> {
     seq.into_iter()
         .step_by(step.unsigned_abs() as usize)
         .collect()
+}
+
+// ── `java.util.Set` ─────────────────────────────────────────────────────────
+//
+// A set stores its elements in insertion order and presents them in the order
+// its [`SetKind`] dictates. Everything below is verified against Apache Groovy
+// 5.0.8; the `HashSet` ordering in particular is a model of the JDK's table
+// layout rather than a guess, and the probes in `parity-scripts/probes.txt`
+// pin it.
+
+/// The set behind a handle: its elements in insertion order and its kind.
+fn as_set(v: &Value) -> Option<(Vec<Value>, SetKind)> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::SetVal { items, kind }) => Some((items.clone(), *kind)),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// Java's `hashCode` for the element kinds a set can order by. `None` for a
+/// value whose hash is the JVM's identity hash — not reproducible here, and not
+/// reproducible across two JVM runs either — which keeps insertion order.
+fn java_hash(v: &Value) -> Option<i32> {
+    match v {
+        // `Integer.hashCode` is the value; `Long.hashCode` folds the halves.
+        Value::Int(n) => Some(if (i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(n) {
+            *n as i32
+        } else {
+            (*n ^ ((*n as u64) >> 32) as i64) as i32
+        }),
+        Value::Bool(b) => Some(if *b { 1231 } else { 1237 }),
+        // `String.hashCode` — `s[0]*31^(n-1) + …`, wrapping at 32 bits.
+        Value::Str(s) => Some(
+            s.encode_utf16()
+                .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c))),
+        ),
+        _ => None,
+    }
+}
+
+/// The JDK's `HashMap.tableSizeFor` — the least power of two at or above `n`.
+fn table_size_for(n: usize) -> usize {
+    let mut cap = 1usize;
+    while cap < n {
+        cap <<= 1;
+    }
+    cap.max(1)
+}
+
+/// The initial capacity `new HashSet(Collection c)` asks for:
+/// `Math.max((int) (c.size() / .75f) + 1, 16)`. `toSet()` does *not* go through
+/// this — it asks for the collection's size — and the two really do iterate
+/// differently as a result: `[17,5,33,2,20,9].toSet()` is
+/// `[17, 33, 9, 2, 20, 5]` while `new HashSet([17,5,33,2,20,9])` is
+/// `[17, 33, 2, 20, 5, 9]`, because the first lands in an 8-slot table and the
+/// second in a 16-slot one.
+fn hash_req_for_collection(n: usize) -> usize {
+    (((n as f32) / 0.75) as usize + 1).max(16)
+}
+
+/// The order a `HashSet` iterates `items` in, as indices into `items`.
+///
+/// The JDK lays entries out in a power-of-two table indexed by
+/// `(capacity - 1) & (h ^ (h >>> 16))`, appends within a bucket, and preserves
+/// relative order across a resize; iteration then walks bucket 0 upward. So the
+/// order is exactly a **stable sort of the insertion sequence by bucket index**.
+/// The table starts at `table_size_for(req)` and doubles while the element count
+/// exceeds three quarters of it, which is the resize rule.
+///
+/// Not modeled, and not reproducible in Java either: a bucket that treeifies
+/// (8 collisions with a table of 64+), and an element whose hash is the JVM
+/// identity hash — [`java_hash`] answers `None` there and the element keeps its
+/// insertion position.
+fn hash_order(items: &[Value], req: usize) -> Vec<usize> {
+    let n = items.len();
+    let mut cap = table_size_for(req);
+    while n > cap * 3 / 4 {
+        cap *= 2;
+    }
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.sort_by_key(|&i| {
+        let h = java_hash(&items[i]).unwrap_or(0) as u32;
+        ((cap as u32 - 1) & (h ^ (h >> 16))) as usize
+    });
+    idx
+}
+
+/// A set's elements in the order it presents them — what iterating it yields
+/// and what `toString` lays out.
+fn set_elements(items: &[Value], kind: SetKind) -> Vec<Value> {
+    match kind {
+        SetKind::Linked => items.to_vec(),
+        SetKind::Hash { req } => hash_order(items, req)
+            .into_iter()
+            .map(|i| items[i].clone())
+            .collect(),
+        SetKind::Tree => {
+            let mut out = items.to_vec();
+            out.sort_by(|a, b| natural_order(a, b));
+            out
+        }
+    }
+}
+
+/// Build a set handle from `items`, dropping later duplicates — which is what
+/// makes `[1, 2, 2, 3] as Set` three elements and, applied to every operator
+/// result, what makes the set operators re-de-duplicate.
+fn make_set(items: Vec<Value>, kind: SetKind) -> Value {
+    let mut out: Vec<Value> = Vec::new();
+    for v in items {
+        if !out.iter().any(|k| values_equal(k, &v)) {
+            out.push(v);
+        }
+    }
+    heap_push(HeapObj::SetVal { items: out, kind })
+}
+
+/// Replace a set handle's elements in place, keeping its kind. This is how a
+/// mutator (`add`, `remove`, `clear`) is visible to every holder of the handle,
+/// the way `java.util.Set`'s are.
+fn set_store(v: &Value, items: Vec<Value>) {
+    let Value::Obj(id) = v else { return };
+    HEAP.with(|h| {
+        if let Some(HeapObj::SetVal { items: dst, .. }) = h.borrow_mut().get_mut(*id as usize) {
+            *dst = items;
+        }
+    });
+}
+
+/// The methods a `Set` answers **as a set** rather than as the list it
+/// enumerates. `None` hands the call on to that list, which is where `collect`,
+/// `sort`, `sum`, `join`, `find`, `max`, and the rest already live — and which
+/// is faithful, because those all answer a `java.util.ArrayList` in Groovy too
+/// (`([3, 1] as Set).collect { it }` is an `ArrayList`, not a set).
+///
+/// What has to be answered here is everything whose result is *itself* a set,
+/// plus the mutators, which write through the handle.
+fn dispatch_set_method(
+    vm: &mut VM,
+    recv: &Value,
+    items: &[Value],
+    kind: SetKind,
+    method: &str,
+    args: &[Value],
+) -> Option<Value> {
+    let ordered = || set_elements(items, kind);
+    let other = || args.first().map(iteration_elements).unwrap_or_default();
+    Some(match method {
+        "getClass" => heap_push(HeapObj::ClassRef(set_class(kind).to_string())),
+        "toString" | "inspect" => Value::str(groovy_str(recv)),
+        "size" | "getSize" => Value::int(items.len() as i64),
+        "isEmpty" => Value::bool(items.is_empty()),
+        "contains" => Value::bool(items.iter().any(|v| values_equal(v, &first_arg(args)))),
+        // The set operators. Each answers a set of the receiver's kind with the
+        // duplicates dropped, which is the whole point of the type: a list's
+        // `+` concatenates, a set's unions.
+        "plus" | "minus" | "intersect" | "unique" | "toSet" | "asImmutable"
+        | "asSynchronized" | "clone" => {
+            let o = other();
+            make_set(
+                match method {
+                    "plus" => ordered().into_iter().chain(o).collect(),
+                    "minus" => ordered()
+                        .into_iter()
+                        .filter(|v| !o.iter().any(|w| values_equal(v, w)))
+                        .collect(),
+                    "intersect" => ordered()
+                        .into_iter()
+                        .filter(|v| o.iter().any(|w| values_equal(v, w)))
+                        .collect(),
+                    _ => ordered(),
+                },
+                kind,
+            )
+        }
+        // `findAll`/`grep` keep the receiver's type; `collect` does not, so it
+        // falls through to the list. These take a closure, so they route through
+        // `dispatch_call` — the closure-driven GDK lives there, not in
+        // `dispatch_method`.
+        "findAll" | "grep" => {
+            let listed = dispatch_call(vm, Value::array(ordered()), method, args.to_vec());
+            make_set(iteration_elements(&listed), kind)
+        }
+        // `add` answers whether the set changed, and mutates through the handle.
+        "add" | "leftShift" => {
+            let v = first_arg(args);
+            let present = items.iter().any(|k| values_equal(k, &v));
+            if !present {
+                let mut next = items.to_vec();
+                next.push(v);
+                set_store(recv, next);
+            }
+            if method == "leftShift" {
+                recv.clone()
+            } else {
+                Value::bool(!present)
+            }
+        }
+        "remove" => {
+            let v = first_arg(args);
+            let next: Vec<Value> = items
+                .iter()
+                .filter(|k| !values_equal(k, &v))
+                .cloned()
+                .collect();
+            let changed = next.len() != items.len();
+            set_store(recv, next);
+            Value::bool(changed)
+        }
+        "addAll" | "removeAll" | "retainAll" => {
+            let o = other();
+            let next: Vec<Value> = match method {
+                "addAll" => items.iter().cloned().chain(o).collect(),
+                "removeAll" => items
+                    .iter()
+                    .filter(|k| !o.iter().any(|w| values_equal(k, w)))
+                    .cloned()
+                    .collect(),
+                _ => items
+                    .iter()
+                    .filter(|k| o.iter().any(|w| values_equal(k, w)))
+                    .cloned()
+                    .collect(),
+            };
+            let mut deduped: Vec<Value> = Vec::new();
+            for v in next {
+                if !deduped.iter().any(|k| values_equal(k, &v)) {
+                    deduped.push(v);
+                }
+            }
+            let changed = deduped.len() != items.len();
+            set_store(recv, deduped);
+            Value::bool(changed)
+        }
+        "clear" => {
+            set_store(recv, Vec::new());
+            Value::Undef
+        }
+        // `each` answers the receiver, not the list it delegated to.
+        "each" | "eachWithIndex" | "reverseEach" => {
+            dispatch_call(vm, Value::array(ordered()), method, args.to_vec());
+            recv.clone()
+        }
+        _ => return None,
+    })
+}
+
+/// The first argument, or `null` when there is none.
+fn first_arg(args: &[Value]) -> Value {
+    args.first().cloned().unwrap_or(Value::Undef)
+}
+
+/// The qualified class name a set kind reports.
+fn set_class(kind: SetKind) -> &'static str {
+    match kind {
+        SetKind::Linked => "java.util.LinkedHashSet",
+        SetKind::Hash { .. } => "java.util.HashSet",
+        SetKind::Tree => "java.util.TreeSet",
+    }
 }
 
 /// A range as the list it enumerates, or the value unchanged when it is not one.
@@ -6763,6 +7224,9 @@ fn iteration_elements(v: &Value) -> Vec<Value> {
     if let Some(r) = as_range(v) {
         return range_elements(&r);
     }
+    if let Some((items, kind)) = as_set(v) {
+        return set_elements(&items, kind);
+    }
     if let Some(entries) = as_omap(v) {
         return entries
             .into_iter()
@@ -7161,6 +7625,13 @@ pub fn groovy_str(v: &Value) -> String {
     if let Some((k, val)) = as_entry(v) {
         return format!("{k}={}", groovy_str(&val));
     }
+    // A set renders like a list — `[a, b]`, `[]` when empty — but in the order
+    // its implementation presents, which for a `HashSet`/`TreeSet` is not the
+    // order elements went in.
+    if let Some((items, kind)) = as_set(v) {
+        let shown: Vec<String> = set_elements(&items, kind).iter().map(groovy_str).collect();
+        return format!("[{}]", shown.join(", "));
+    }
     // An ordered-map handle renders `[k:v, …]` in insertion order (`[:]` empty).
     if let Some(entries) = as_omap(v) {
         if entries.is_empty() {
@@ -7409,10 +7880,30 @@ fn expand_hyphen(spec: &str) -> Vec<char> {
 /// duplicate key, insertion order preserved); anything else concatenates as a
 /// string.
 fn groovy_add(a: &Value, b: &Value) -> Value {
+    // A set unions rather than concatenating, and the result is another set of
+    // the same kind — so `([1, 2] as Set) + ([2, 3] as Set)` is `[1, 2, 3]`.
+    // Only the *left* operand decides, exactly as `left.plus(right)` implies:
+    // `[1, 2] + ([2, 3] as Set)` is the four-element list `[1, 2, 2, 3]`.
+    if let Some((items, kind)) = as_set(a) {
+        return make_set(
+            set_elements(&items, kind)
+                .into_iter()
+                .chain(iteration_elements(b))
+                .collect(),
+            kind,
+        );
+    }
     if let Value::Array(xs) = a {
         let mut out = xs.clone();
         match b {
             Value::Array(ys) => out.extend(ys.iter().cloned()),
+            // `List.plus` has a `Collection` overload and an `Object` one, and
+            // Java picks the `Collection` one for a set or a range: `[1, 2] +
+            // ([2, 3] as Set)` is the four-element `[1, 2, 2, 3]` — the *list*
+            // does not de-duplicate — rather than a list with a set inside it.
+            _ if as_set(b).is_some() || as_range(b).is_some() => {
+                out.extend(iteration_elements(b))
+            }
             other => out.push(other.clone()),
         }
         return Value::array(out);
@@ -7662,6 +8153,13 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
         // Groovy `+` dispatches on the left operand: list concatenation/append,
         // map merge, else string concatenation.
         NumOp::Add => Ok(groovy_add(a, b)),
+        // A set on either side compares as a set: order-insensitive, and never
+        // equal to a list. The rendered-form comparison below would get both
+        // halves backwards, so it has to be decided before it.
+        NumOp::Eq | NumOp::Ne if as_set(a).is_some() || as_set(b).is_some() => {
+            let eq = values_equal(a, b);
+            Ok(Value::bool(if matches!(op, NumOp::Eq) { eq } else { !eq }))
+        }
         // Groovy `==`/`!=` are value equality (`.equals`), not reference
         // identity — comparing string/boolean operands by value is faithful.
         NumOp::Eq => Ok(Value::bool(groovy_str(a) == groovy_str(b))),
@@ -7674,6 +8172,14 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
         // removes the first occurrence, `"abc" * 3` repeats, `list - other`
         // subtracts every match, `list * n` repeats the list.
         NumOp::Sub if matches!(a, Value::Str(_) | Value::Array(_)) => Ok(groovy_sub(a, b)),
+        // `set - other` answers another set of the same kind with every element
+        // the right side holds removed — the `Set.minus` overload, dispatched on
+        // the left operand like every other Groovy operator.
+        NumOp::Sub if as_set(a).is_some() => {
+            let (x, y) = (a.clone(), b.clone());
+            with_vm(|vm| dispatch_method(vm, &x, "minus", std::slice::from_ref(&y)))
+                .ok_or_else(|| "groovyrs: set `-` dispatched with no active VM".to_string())
+        }
         // `map - other` drops the entries the other map holds identically —
         // the `Map.minus` GDK overload, dispatched on the left operand.
         NumOp::Sub if as_omap(a).is_some() => {

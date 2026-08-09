@@ -219,6 +219,7 @@ Implemented and checked against Apache Groovy:
   `indexOf`, `flatten`, `intersect`, `minus`, `plus` (including the
   `plus(index, other)` splice), `disjoint`, `transpose`, `collate`,
   `combinations`, `permutations`, `withIndex`, `indexed`, `iterator`, `toSet`,
+  `subList`,
   `toList` and the mutators; strings answer `indexOf`, `replace`, `split`,
   `tokenize`, `charAt`, `substring`, `padLeft`/`padRight`/`center`, `capitalize`,
   `take`/`drop`, `multiply`, `minus`, `startsWith`/`endsWith`, `tr`,
@@ -400,9 +401,9 @@ Next waves, in priority order:
 5. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
    `"$s".getClass()` reports `java.lang.String` where Groovy reports
    `org.codehaus.groovy.runtime.GStringImpl`.
-6. **A `Set` type.** `as Set` / `toSet()` / `new HashSet(…)` build a
-   de-duplicated *list*, which prints and iterates like a `LinkedHashSet` but
-   reports `java.util.ArrayList` and does not re-deduplicate under `+`.
+6. **List aliasing.** A list is a fusevm value rather than a handle, so two names
+   never refer to one list: `def b = a; b.add(4)` leaves `a` unchanged. This is
+   also why `subList` answers a copy instead of Java's live view.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
 
@@ -416,7 +417,7 @@ cargo run --bin parity                 # diff examples/*.groovy vs live `groovy`
 cargo run --bin parity-fuzz -- \
     --mode control --count 2000        # fuzz: groovy -e <s> vs groovyrs -e <s>
 bash parity-scripts/run.sh -v          # byte-parity over the regression corpus
-bash parity-scripts/fuzz.sh            # diff the probe corpus, one JVM start
+bash parity-scripts/fuzz.sh            # diff the probe corpus, batched JVM starts
 ```
 
 `fuzz.sh` diffs `parity-scripts/probes.txt` — several hundred small snippets

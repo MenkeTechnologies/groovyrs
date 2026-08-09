@@ -2852,3 +2852,173 @@ fn to_string_rejects_an_argument_that_matches_no_overload() {
     assert!(ok);
     assert_eq!(out, "EXC:MissingMethodException\n");
 }
+
+#[test]
+fn sublist_is_a_live_view_of_the_backing_list() {
+    // Java's `subList` answers a `java.util.ArrayList$SubList`, not a copy: a
+    // write through the window reaches the backing list and a write to the
+    // backing list shows through the window. groovyrs answered a detached copy,
+    // so both directions were invisible. Frozen from Apache Groovy 5.0.8.
+    let (out, ok) = run(concat!(
+        "def a = [1, 2, 3, 4]; def s = a.subList(1, 3)\n",
+        "println([s.getClass().getName(), s.getClass().getSimpleName(), s, s.size()])\n",
+        "s.set(0, 99); println([a, s])\n",
+        "a.set(1, 42); println s\n",
+        "println([a.is(s), s.is(s), a.subList(1, 3).is(a.subList(1, 3))])\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[java.util.ArrayList$SubList, SubList, [2, 3], 2]\n",
+            "[[1, 99, 3, 4], [99, 3]]\n",
+            "[42, 3]\n",
+            "[false, true, false]\n"
+        )
+    );
+}
+
+#[test]
+fn a_structural_write_through_a_window_resizes_the_backing_list() {
+    // Adding and removing through the window splices the backing list at the
+    // window's offset, and the window resizes with it rather than going stale —
+    // the JDK's `updateSizeAndModCount`. Frozen from Apache Groovy 5.0.8.
+    let (out, ok) = run(concat!(
+        "def a = [1, 2, 3, 4]; def s = a.subList(1, 3); s.add(99); println([a, s, a.size()])\n",
+        "def b = [1, 2, 3, 4]; def t = b.subList(1, 3); t.remove(0); println([b, t])\n",
+        "def c = [1, 2, 3, 4]; def u = c.subList(1, 3); u.clear(); println([c, u])\n",
+        "def d = [1, 2]; def v = d.subList(2, 2); v.add(9); println([d, v])\n",
+        "def e = [5, 4, 3, 2, 1]; def w = e.subList(1, 4); println([w.is(w.sort()), e, w])\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[[1, 2, 3, 99, 4], [2, 3, 99], 5]\n",
+            "[[1, 3, 4], [3]]\n",
+            "[[1, 4], []]\n",
+            "[[1, 2, 9], [9]]\n",
+            "[true, [5, 2, 3, 4, 1], [2, 3, 4]]\n"
+        )
+    );
+}
+
+#[test]
+fn a_window_onto_a_window_reaches_the_root_list() {
+    // A nested window points at the *root* list with an absolute offset, and a
+    // structural write through it resizes every window it was taken through.
+    // Frozen from Apache Groovy 5.0.8.
+    let (out, ok) = run(concat!(
+        "def a = [1, 2, 3, 4, 5]; def s = a.subList(1, 4); def t = s.subList(1, 3)\n",
+        "println([t.getClass().getName(), t])\n",
+        "t.set(0, 77); println([a, s, t])\n",
+        "t.add(9); println([a, s, t])\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[java.util.ArrayList$SubList, [3, 4]]\n",
+            "[[1, 2, 77, 4, 5], [2, 77, 4], [77, 4]]\n",
+            "[[1, 2, 77, 4, 9, 5], [2, 77, 4, 9], [77, 4, 9]]\n"
+        )
+    );
+}
+
+#[test]
+fn a_structural_change_to_the_backing_list_invalidates_a_window() {
+    // Java's fail-fast rule: once the backing list's `modCount` moves past the
+    // value the window synced to, every read or write through the window is a
+    // `ConcurrentModificationException` — permanently, and with a `null`
+    // message. A window taken *after* the change is fine. Frozen from Apache
+    // Groovy 5.0.8.
+    let (out, ok) = run(concat!(
+        "def a = [1, 2, 3, 4]; def s = a.subList(1, 3); a.add(5)\n",
+        "try { println s } catch (e) { println([e.getClass().getName(), e.getMessage()]) }\n",
+        "try { println s.size() } catch (e) { println e.getClass().getName() }\n",
+        "try { for (x in s) println x } catch (e) { println e.getClass().getName() }\n",
+        "try { println s[0] } catch (e) { println e.getClass().getName() }\n",
+        "try { s[0] = 1 } catch (e) { println e.getClass().getName() }\n",
+        "try { if (s) println 'live' } catch (e) { println e.getClass().getName() }\n",
+        "try { println(2 in s) } catch (e) { println e.getClass().getName() }\n",
+        "try { println([s]) } catch (e) { println e.getClass().getName() }\n",
+        "try { println s.subList(0, 1) } catch (e) { println e.getClass().getName() }\n",
+        "println a.subList(1, 3)\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        format!(
+            "[java.util.ConcurrentModificationException, null]\n{}[2, 3]\n",
+            "java.util.ConcurrentModificationException\n".repeat(8)
+        )
+    );
+}
+
+#[test]
+fn getclass_and_is_still_answer_on_an_invalidated_window() {
+    // The two calls that read the *reference* rather than the elements. Groovy
+    // answers both after the backing list has moved on, so the comodification
+    // check must not sit in front of them. Frozen from Apache Groovy 5.0.8.
+    let (out, ok) = run(concat!(
+        "def a = [1, 2, 3, 4]; def s = a.subList(1, 3); a.add(5)\n",
+        "println([s.getClass().getName(), s.is(s), s instanceof List])\n",
+    ));
+    assert!(ok);
+    assert_eq!(out, "[java.util.ArrayList$SubList, true, true]\n");
+}
+
+#[test]
+fn only_a_structural_change_invalidates_a_window() {
+    // The boundary the whole rule turns on. `set`, `swap`, a `removeAll` that
+    // removed nothing and `sort(false)` leave `modCount` alone; `sort()` on the
+    // LIST bumps it while `sort()` on a WINDOW does not (`List.sort`'s default
+    // reorders through `set`); `addAll([])` bumps it on the list but not on a
+    // window; and `unique()` returns early below two elements while the closure
+    // form never does. Each answer is Apache Groovy 5.0.8's, measured.
+    let cme = "java.util.ConcurrentModificationException";
+    let (out, ok) = run(concat!(
+        "def a = [1, 2, 3, 4]; def s = a.subList(1, 3)\n",
+        "a[0] = 9; a.swap(0, 3); a.removeAll([99]); a.sort(false); println s\n",
+        "def b = [3, 1, 2, 0]; def p = b.subList(0, 3); def q = b.subList(1, 3)\n",
+        "p.sort(); println([b, q])\n",
+        "def c = [3, 1, 2, 0]; def r = c.subList(1, 3); c.sort()\n",
+        "try { println r } catch (e) { println e.getClass().getName() }\n",
+        "def d = [1, 2, 3, 4]; def e1 = d.subList(0, 3); def f = d.subList(1, 3)\n",
+        "println([e1.addAll([]), f])\n",
+        "def g = [1, 2, 3]; def h = g.subList(0, 2); g.addAll([])\n",
+        "try { println h } catch (e) { println e.getClass().getName() }\n",
+        "def i = [1, 2, 3, 4]; def j = i.subList(0, 1); def k = i.subList(2, 4)\n",
+        "j.unique(); j.unique(true); println k\n",
+        "def l = [1, 2, 3, 4]; def m = l.subList(0, 1); def n = l.subList(2, 4); m.unique { it }\n",
+        "try { println n } catch (e) { println e.getClass().getName() }\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        format!("[2, 3]\n[[1, 2, 3, 0], [2, 3]]\n{cme}\n[false, [2, 3]]\n{cme}\n[3, 4]\n{cme}\n")
+    );
+}
+
+#[test]
+fn add_all_answers_whether_the_list_changed_and_honours_an_index() {
+    // `Collection.addAll` answers whether anything was added, so an empty
+    // argument is `false` — groovyrs answered `true` unconditionally. The
+    // two-argument `addAll(index, collection)` inserts at the index; it used to
+    // read its *index* as the collection and append that, so
+    // `[1, 2].addAll(1, [8, 9])` left `[1, 2, 1]`. Frozen from Apache Groovy 5.0.8.
+    let (out, ok) = run(concat!(
+        "println([[1, 2].addAll([]), [1, 2].addAll([3]), [1, 2].addAll(1, [8, 9]), [1, 2].addAll(1, [])])\n",
+        "def a = [1, 2]; a.addAll(1, [8, 9]); println a\n",
+        "def b = [1, 2]; b.addAll([3]); println b\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[false, true, true, false]\n",
+            "[1, 8, 9, 2]\n",
+            "[1, 2, 3]\n"
+        )
+    );
+}

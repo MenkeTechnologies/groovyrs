@@ -741,7 +741,11 @@ fn java_class_name(v: &Value) -> String {
         Value::Array(_) => "java.util.ArrayList",
         Value::Hash(_) => "java.util.LinkedHashMap",
         Value::Undef => "null",
-        _ if as_list(v).is_some() => "java.util.ArrayList",
+        // A window names the JDK's nested class. Read through the *raw*
+        // accessor: `getClass()` is one of the two calls Groovy still answers on
+        // a stale window (`is()` is the other), so it must not comodification-check.
+        _ if is_sublist(v) => "java.util.ArrayList$SubList",
+        _ if as_list_raw(v).is_some() => "java.util.ArrayList",
         _ if as_bigint(v).is_some() => "java.math.BigInteger",
         _ if as_dec(v).is_some() => "java.math.BigDecimal",
         _ if as_omap(v).is_some() => "java.util.LinkedHashMap",
@@ -760,9 +764,13 @@ fn simple_class_name(v: &Value) -> String {
 }
 
 /// The last segment of a qualified class name (`java.lang.String` → `String`).
+/// A **nested** class is separated by `$` rather than `.`, and `getSimpleName`
+/// drops that too — `java.util.ArrayList$SubList` is `SubList`, which is also the
+/// name a `MissingMethodException` lists in its `argument types: (…)`. Both
+/// verified against Apache Groovy 5.0.8.
 fn simple_name_of(qualified: &str) -> String {
     qualified
-        .rsplit('.')
+        .rsplit(['.', '$'])
         .next()
         .unwrap_or(qualified)
         .to_string()
@@ -1046,7 +1054,46 @@ enum HeapObj {
     /// internal sequences (a range's enumeration, a spread's intermediate) never
     /// allocate a handle. The invariant is that a list which **escapes to user
     /// code** is built by [`glist`] and nothing else.
-    ListVal(Vec<Value>),
+    ///
+    /// `mod_count` is `java.util.ArrayList`'s own field: a counter bumped by
+    /// every *structural* modification (one that changes the length — plus the
+    /// two the JDK bumps anyway, `ArrayList.sort` and `addAll` with an empty
+    /// argument). Nothing reads it except a [`HeapObj::SubList`] taken onto this
+    /// list, which is the only construct in Groovy that can observe it.
+    ListVal {
+        items: Vec<Value>,
+        mod_count: u64,
+    },
+    /// A `java.util.ArrayList$SubList` — a **live window** onto a `ListVal`,
+    /// what `list.subList(from, to)` answers.
+    ///
+    /// Not a copy: a write through the window reaches the backing list and a
+    /// write to the backing list shows through the window, because both names
+    /// resolve to the same element storage. `root` is the backing `ListVal`'s
+    /// handle (a window onto a window still points at the *root* list, as the
+    /// JDK's does), `offset` is absolute in the root's storage, and `len` is the
+    /// window's own size.
+    ///
+    /// `parent` is the handle this window was taken from — the root itself for a
+    /// first-level window, another `SubList` for a nested one. It exists for
+    /// exactly one job, the JDK's `updateSizeAndModCount`: a structural change
+    /// made *through* this window has to resize this window and every window it
+    /// was taken through, walking up. It deliberately does not walk *down*, so a
+    /// window taken **from** this one is invalidated by the change — which is
+    /// what Groovy 5.0.8 does.
+    ///
+    /// `exp_mod` is the root's `mod_count` as of the last operation this window
+    /// took part in. Any other reference structurally modifying the root moves
+    /// the root's counter past it, and every subsequent read or write through
+    /// this window is then a `ConcurrentModificationException` — permanently,
+    /// since the counter never comes back down. See [`check_comodification`].
+    SubList {
+        root: u32,
+        parent: u32,
+        offset: usize,
+        len: usize,
+        exp_mod: u64,
+    },
 }
 
 /// Which `java.util.Set` implementation a set handle is, which is exactly the
@@ -1175,44 +1222,178 @@ fn heap_push(obj: HeapObj) -> Value {
 /// built — every GDK method answering a `List`, every list literal, and every
 /// coercion to one goes through here, so each of them is aliasable.
 fn glist(items: Vec<Value>) -> Value {
-    heap_push(HeapObj::ListVal(items))
+    heap_push(HeapObj::ListVal {
+        items,
+        mod_count: 0,
+    })
+}
+
+/// Where a list handle's elements actually live: the backing `ListVal`'s heap
+/// id, and the `[offset, offset + len)` window of it this handle names. A root
+/// list is the whole of itself; a `SubList` is a window onto its root.
+fn list_slot(v: &Value) -> Option<(u32, usize, usize)> {
+    let Value::Obj(id) = v else { return None };
+    HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::ListVal { items, .. }) => Some((*id, 0, items.len())),
+        Some(HeapObj::SubList {
+            root, offset, len, ..
+        }) => Some((*root, *offset, *len)),
+        _ => None,
+    })
+}
+
+/// The elements behind a `java.util.List` handle **without** checking a window's
+/// comodification — the shape/identity/class questions, which Groovy answers on
+/// a stale window too (`s.getClass()` and `s.is(s)` both work after the backing
+/// list has moved on). Every site that reads a list's *contents* wants
+/// [`as_list`] instead.
+fn as_list_raw(v: &Value) -> Option<Vec<Value>> {
+    let Value::Obj(id) = v else { return None };
+    HEAP.with(|h| {
+        let h = h.borrow();
+        match h.get(*id as usize) {
+            Some(HeapObj::ListVal { items, .. }) => Some(items.clone()),
+            Some(HeapObj::SubList {
+                root, offset, len, ..
+            }) => match h.get(*root as usize) {
+                Some(HeapObj::ListVal { items, .. }) => {
+                    items.get(*offset..*offset + *len).map(<[Value]>::to_vec)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    })
 }
 
 /// The elements behind a `java.util.List` handle, if `v` is one.
+///
+/// Reading a `SubList` whose backing list has been structurally modified through
+/// any other reference raises `ConcurrentModificationException` first — this is
+/// the read half of Java's fail-fast rule, and putting it here is what puts it
+/// on every path that consumes a list's contents at once (rendering, iteration,
+/// subscripting, the operators, and the whole GDK) rather than on a list of
+/// call sites that could drift apart.
 fn as_list(v: &Value) -> Option<Vec<Value>> {
-    match v {
-        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
-            Some(HeapObj::ListVal(items)) => Some(items.clone()),
-            _ => None,
-        }),
-        _ => None,
+    check_comodification(v);
+    as_list_raw(v)
+}
+
+/// The root list's structural-modification counter.
+fn list_mod_count(root: u32) -> u64 {
+    HEAP.with(|h| match h.borrow().get(root as usize) {
+        Some(HeapObj::ListVal { mod_count, .. }) => *mod_count,
+        _ => 0,
+    })
+}
+
+/// Java's `ArrayList.SubList.checkForComodification`: a window is stale once the
+/// root list's `mod_count` has moved past the value the window last synced to.
+/// Raises the message-less `java.util.ConcurrentModificationException` Groovy
+/// 5.0.8 raises and answers `false`; `true` means the value is usable (which
+/// every non-window value trivially is).
+fn check_comodification(v: &Value) -> bool {
+    let Value::Obj(id) = v else { return true };
+    let stale = HEAP.with(|h| {
+        let h = h.borrow();
+        match h.get(*id as usize) {
+            Some(HeapObj::SubList { root, exp_mod, .. }) => match h.get(*root as usize) {
+                Some(HeapObj::ListVal { mod_count, .. }) => *mod_count != *exp_mod,
+                _ => false,
+            },
+            _ => false,
+        }
+    });
+    if stale {
+        // `raise` needs a VM only for the un-armed hard-fault path; the armed
+        // path parks a catchable throwable and never touches it. Reading a stale
+        // window happens under `deref_list`/`groovy_str`, several of which have
+        // no VM in scope, so the ambient one is borrowed here.
+        with_vm(|vm| raise_opt(vm, "ConcurrentModificationException", None));
     }
+    !stale
 }
 
 /// Is `v` a `java.util.List` — either a list handle or the transient
 /// `Value::Array` form? The shape test every "did I get a list?" site uses, so
 /// none of them has to know which of the two representations it is holding.
 fn is_list(v: &Value) -> bool {
-    matches!(v, Value::Array(_)) || as_list(v).is_some()
+    matches!(v, Value::Array(_)) || as_list_raw(v).is_some()
 }
 
 /// The heap id of a list handle, if `v` is one — what an in-place mutator writes
-/// through and what `is()` compares.
+/// through and what `is()` compares. A window answers **its own** id, not its
+/// root's, so `a.is(a.subList(0, a.size()))` is false as Groovy's is.
 fn list_id(v: &Value) -> Option<u32> {
     match v {
-        Value::Obj(id) if as_list(v).is_some() => Some(*id),
+        Value::Obj(id) if as_list_raw(v).is_some() => Some(*id),
         _ => None,
     }
 }
 
+/// Is this handle a live window rather than a whole list?
+fn is_sublist(v: &Value) -> bool {
+    matches!(v, Value::Obj(id) if HEAP.with(|h| matches!(h.borrow().get(*id as usize), Some(HeapObj::SubList { .. }))))
+}
+
 /// Replace a list handle's contents in place. This is what makes a mutation
 /// visible through every other name for the same list.
-fn list_store(id: u32, items: Vec<Value>) {
+///
+/// Through a **window** the new contents are spliced into the backing list at
+/// the window's offset, so the write reaches every other reference to that list.
+/// `structural` says whether the operation is one the JDK counts (see
+/// [`bumps_mod_count`]); a structural one bumps the root's counter — invalidating
+/// every *other* window onto it — and then re-syncs this window and each window
+/// it was taken through, which is the JDK's `updateSizeAndModCount`. A length
+/// change is structural whatever the caller claims, since the window's size
+/// moved.
+fn list_store(id: u32, items: Vec<Value>, structural: bool) {
+    let Some((root, offset, len)) = list_slot(&Value::Obj(id)) else {
+        return;
+    };
+    let structural = structural || items.len() != len;
+    let new_len = items.len();
     HEAP.with(|h| {
-        if let Some(HeapObj::ListVal(slot)) = h.borrow_mut().get_mut(id as usize) {
-            *slot = items;
+        if let Some(HeapObj::ListVal {
+            items: slot,
+            mod_count,
+        }) = h.borrow_mut().get_mut(root as usize)
+        {
+            let end = (offset + len).min(slot.len());
+            slot.splice(offset.min(end)..end, items);
+            if structural {
+                *mod_count += 1;
+            }
         }
     });
+    if !structural || root == id {
+        return;
+    }
+    let synced = list_mod_count(root);
+    let delta = new_len as isize - len as isize;
+    // `updateSizeAndModCount`: this window and every window it was taken
+    // through resize and re-sync. Never downward — a window taken *from* this
+    // one keeps its old count and is invalidated, which is Groovy's behaviour.
+    let mut cur = id;
+    loop {
+        let next = HEAP.with(|h| match h.borrow_mut().get_mut(cur as usize) {
+            Some(HeapObj::SubList {
+                parent,
+                len,
+                exp_mod,
+                ..
+            }) => {
+                *len = len.saturating_add_signed(delta);
+                *exp_mod = synced;
+                Some(*parent)
+            }
+            _ => None,
+        });
+        match next {
+            Some(parent) if parent != cur => cur = parent,
+            _ => return,
+        }
+    }
 }
 
 /// Normalise a list handle to the transient `Value::Array` that the GDK read
@@ -1221,12 +1402,112 @@ fn list_store(id: u32, items: Vec<Value>) {
 /// This is the single adapter between the two representations. Applying it to a
 /// receiver (and to the operands of an operator) is what let every existing
 /// `(Value::Array(a), "method")` arm keep working unchanged when lists became
-/// handles — the alternative was rewriting seventy match arms.
+/// handles — the alternative was rewriting seventy match arms. A window derefs
+/// to the elements it spans, so those same arms read a window without knowing
+/// one exists.
 fn deref_list(v: &Value) -> Value {
     match as_list(v) {
         Some(items) => Value::array(items),
         None => v.clone(),
     }
+}
+
+/// Does `method` count as a *structural* modification — one the JDK bumps
+/// `modCount` for, and so one that invalidates every window taken before it?
+///
+/// Only the operations that bump **unconditionally** are named here. The ones
+/// that bump only when they changed something (`removeAll`, `retainAll`,
+/// `removeElement`, and a `remove` that found nothing) are left to
+/// [`list_store`]'s length rule, which is the same question asked after the fact.
+///
+/// Two of them differ between a whole list and a window, because the JDK reaches
+/// them through different code. Measured against Apache Groovy 5.0.8 (JVM
+/// 26.0.2), taking a window and then running the operation on the named
+/// receiver:
+///
+/// | operation                | on the list  | on a window  |
+/// |--------------------------|--------------|--------------|
+/// | `sort()`, any size       | invalidates  | does not     |
+/// | `addAll([])`             | invalidates  | does not     |
+/// | `clear()`, even on empty | invalidates  | invalidates  |
+/// | `unique()`, size > 1     | invalidates  | invalidates  |
+/// | `unique()`, size 0 or 1  | does not     | does not     |
+/// | `unique { … }`, any size | invalidates  | invalidates  |
+/// | `set`/`swap`             | does not     | does not     |
+/// | `sort(false)`            | does not     | does not     |
+///
+/// `ArrayList.sort` and `ArrayList.addAll` bump the counter before looking at
+/// whether they changed anything; `List.sort`'s default reorders through `set`
+/// alone, and `SubList.addAll` returns before the counter when its argument is
+/// empty. `unique` is Groovy's own and ends in `clear()` + `addAll(…)` whatever
+/// it found — except that the argument-less and `unique(boolean)` forms return
+/// early on a collection that cannot hold a duplicate, which the closure form
+/// does not.
+fn bumps_mod_count(method: &str, args: &[Value], is_view: bool, len: usize) -> bool {
+    // The `sort`/`unique` forms that mutate the receiver at all: the same rule
+    // `compiler::Compiler::emit_receiver_writeback` uses. `sort(false)` asks for
+    // a copy and leaves the receiver — and its counter — alone.
+    let mutating = args
+        .iter()
+        .all(|a| closure_meta(a).is_some() || matches!(a, Value::Bool(true)));
+    let has_closure = args.iter().any(|a| closure_meta(a).is_some());
+    match method {
+        "add" | "leftShift" | "push" | "remove" | "removeAt" | "pop" | "removeLast" | "clear" => {
+            true
+        }
+        "unique" => mutating && (len > 1 || has_closure),
+        "sort" => mutating && !is_view,
+        "addAll" => !is_view,
+        _ => false,
+    }
+}
+
+/// `list.subList(from, to)` — a live `java.util.ArrayList$SubList` window.
+///
+/// The three bounds outcomes are the JDK's own and they are distinct: a negative
+/// `fromIndex` and a `toIndex` past the end are both `IndexOutOfBoundsException`
+/// but name *different* indices, while a reversed range is an
+/// `IllegalArgumentException` instead. Checking `from`, then `to`, then the
+/// ordering is `ArrayList.subListRangeCheck`'s order, so a call that is wrong in
+/// two ways reports the same one the JDK reports.
+///
+/// The bounds are checked against the **receiver's** length, and the window's
+/// offset is relative to the receiver, so a window taken from a window spans the
+/// right elements while still pointing at the root list (which is where the JDK
+/// points it too).
+fn make_sublist(vm: &mut VM, recv: &Value, args: &[Value]) -> Value {
+    let (Some((root, offset, len)), Value::Obj(parent)) = (list_slot(recv), recv) else {
+        return Value::Undef;
+    };
+    let from = args.first().and_then(as_i64).unwrap_or(0);
+    let to = args.get(1).and_then(as_i64).unwrap_or(0);
+    if from < 0 {
+        raise(
+            vm,
+            "IndexOutOfBoundsException",
+            &format!("fromIndex = {from}"),
+        );
+        return Value::Undef;
+    }
+    if to > len as i64 {
+        raise(vm, "IndexOutOfBoundsException", &format!("toIndex = {to}"));
+        return Value::Undef;
+    }
+    if from > to {
+        raise(
+            vm,
+            "IllegalArgumentException",
+            &format!("fromIndex({from}) > toIndex({to})"),
+        );
+        return Value::Undef;
+    }
+    heap_push(HeapObj::SubList {
+        root,
+        parent: *parent,
+        offset: offset + from as usize,
+        len: (to - from) as usize,
+        exp_mod: list_mod_count(root),
+    })
 }
 
 /// Look up a closure handle's metadata, if `v` is a closure value.
@@ -3013,9 +3294,11 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         "Number" => matches!(value, Value::Int(_) | Value::Float(_)) || as_dec(value).is_some(),
         "Boolean" => matches!(value, Value::Bool(_)),
         // A Groovy `Range` *is* a `java.util.List`, so it answers both.
+        // `instanceof` is a type test, not a read: a stale window is still a
+        // `List`, so this asks the raw shape.
         "List" | "ArrayList" | "Collection" | "Iterable" => {
             matches!(value, Value::Array(_))
-                || as_list(value).is_some()
+                || as_list_raw(value).is_some()
                 || as_range(value).is_some()
         }
         "Range" | "IntRange" | "ObjectRange" | "NumberRange" => as_range(value).is_some(),
@@ -3329,9 +3612,15 @@ fn b_setindex(vm: &mut VM, _argc: u8) -> Value {
     // for the list observes it. The element math is [`list_put`], shared with the
     // transient-array arm below so the two can never drift.
     if let Some(id) = list_id(&recv) {
-        return match list_put(as_list(&recv).unwrap_or_default(), &index, value) {
+        if !check_comodification(&recv) {
+            return Value::Undef;
+        }
+        return match list_put(as_list_raw(&recv).unwrap_or_default(), &index, value) {
             Ok(next) => {
-                list_store(id, next);
+                // `putAt(int)` replaces an element, which is not a structural
+                // modification — unless the index was past the end, where Groovy
+                // grows the list and the length rule inside `list_store` catches it.
+                list_store(id, next, false);
                 recv
             }
             Err((i, len)) => raise_negative_index(vm, i, len),
@@ -3571,6 +3860,13 @@ pub fn take_error() -> Option<String> {
     G_ERROR.with(|e| e.borrow_mut().take())
 }
 
+/// Has a hard runtime fault been recorded? The un-armed twin of [`pending_exc`]:
+/// a program with no `try` in it degrades a raise to a `groovyrs:` fault, and a
+/// host loop that would otherwise keep producing output has to stop for that too.
+fn faulted() -> bool {
+    G_ERROR.with(|e| e.borrow().is_some())
+}
+
 /// Record a fault message and halt the VM; the runtime reports it once
 /// [`VM::run`] returns.
 fn fault(vm: &mut VM, msg: impl Into<String>) {
@@ -3706,6 +4002,23 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     let delegating =
         matches!(method, "with" | "tap") && args.len() == 1 && closure_meta(&args[0]).is_some();
     if let Some(id) = list_id(&recv).filter(|_| !delegating) {
+        // `getClass()` reads the reference, not the elements, so it answers on a
+        // stale window too — and it has to answer *here*, because the call below
+        // runs against a detached `Value::Array` that would name the wrong class
+        // (`java.util.ArrayList` for what is an `ArrayList$SubList`).
+        if method == "getClass" && args.is_empty() {
+            return class_ref_of(&recv);
+        }
+        // Every other call through a window is a fail-fast read: if the backing
+        // list moved on, it throws before doing anything.
+        if !check_comodification(&recv) {
+            return Value::Undef;
+        }
+        // `subList` answers a live **window** onto this list, so it too is
+        // decided on the handle rather than on the detached elements.
+        if method == "subList" && args.len() == 2 {
+            return make_sublist(vm, &recv, &args);
+        }
         // `sort`/`unique` do not use the `MUTATED` slot — their *result* is the
         // new list (which is why the compiler writes the result back). Same rule
         // as `compiler::Compiler::emit_receiver_writeback`: only the no-argument,
@@ -3714,7 +4027,8 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             && args
                 .iter()
                 .all(|a| closure_meta(a).is_some() || matches!(a, Value::Bool(true)));
-        let items = as_list(&recv).unwrap_or_default();
+        let items = as_list_raw(&recv).unwrap_or_default();
+        let structural = bumps_mod_count(method, &args, is_sublist(&recv), items.len());
         let answer = dispatch_call(vm, Value::array(items), method, args);
         // An in-place mutator parks its new contents for the compiler's
         // writeback. Store them through the handle instead: that is what every
@@ -3722,12 +4036,12 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         // writeback that does run stores a list back into the variable rather
         // than replacing it with a detached array.
         let mut mutated = take_mutated().is_some_and(|next| {
-            list_store(id, iteration_elements(&next));
+            list_store(id, iteration_elements(&next), structural);
             true
         });
         if result_mutates {
             if let Value::Array(next) = &answer {
-                list_store(id, next.clone());
+                list_store(id, next.clone(), structural);
                 mutated = true;
             }
         }
@@ -5317,24 +5631,12 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 }
             }
         }
-        // `list.subList(from, to)` — the half-open window `[from, to)`.
-        //
-        // The three bounds outcomes are the JDK's own, and they are distinct: a
-        // negative `fromIndex` and a `toIndex` past the end are both
-        // `IndexOutOfBoundsException` but name *different* indices, while a
-        // reversed range is an `IllegalArgumentException` instead. Checking
-        // `from` before `to` before the ordering is the order
-        // `ArrayList.subListRangeCheck` uses, so a call that is wrong in two
-        // ways reports the same one the JDK does.
-        //
-        // The result is a **copy**, not the aliasing `ArrayList$SubList` view
-        // Java answers, and `getClass()` on it names `java.util.ArrayList`
-        // rather than `java.util.ArrayList$SubList`. That is not a choice made
-        // here: a fusevm `Value::Array` is a value rather than a handle (see
-        // `MUTATED`), so groovyrs has no list aliasing at all — plain
-        // `def b = a; b.add(4)` already leaves `a` unchanged. A view would have
-        // nothing to point at until lists become heap handles, and a *copy* is
-        // exactly as aliased as every other list groovyrs hands out.
+        // `list.subList(from, to)` on a **transient** element vector — an
+        // internal sequence that never became a handle, so there is no backing
+        // list for a window to point at. A `subList` a script can name is
+        // answered by [`make_sublist`] on the handle, above this dispatch, and is
+        // a live `java.util.ArrayList$SubList`; this arm is the copy fallback for
+        // the transient form, and repeats the same JDK bounds order.
         (Value::Array(a), "subList") => {
             let from = args.first().and_then(as_i64).unwrap_or(0);
             let to = args.get(1).and_then(as_i64).unwrap_or(0);
@@ -5646,14 +5948,25 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `MUTATED`) and answers what the JDK/GDK call answers.
         (Value::Array(a), "add" | "leftShift" | "push" | "addAll") => {
             let mut next = a.clone();
-            // `add(index, element)` inserts; every other form appends.
+            // How many elements the call actually added — what `addAll` answers.
+            let mut added = 1usize;
+            // `add(index, element)` and `addAll(index, collection)` insert at the
+            // index; every other form appends.
             match (method, args.len()) {
                 ("add", 2) => {
                     let i = (as_i64(&args[0]).unwrap_or(0).max(0) as usize).min(next.len());
                     next.insert(i, args[1].clone());
                 }
+                ("addAll", 2) => {
+                    let at = (as_i64(&args[0]).unwrap_or(0).max(0) as usize).min(next.len());
+                    let extra = iteration_elements(&args[1]);
+                    added = extra.len();
+                    next.splice(at..at, extra);
+                }
                 ("addAll", _) => {
-                    next.extend(args.first().map(iteration_elements).unwrap_or_default())
+                    let extra = args.first().map(iteration_elements).unwrap_or_default();
+                    added = extra.len();
+                    next.extend(extra);
                 }
                 // `push` is Groovy's *stack* spelling, and its stack grows at the
                 // front — the end `pop` takes from. Verified against Groovy
@@ -5667,6 +5980,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // whose answer is `true` (verified against Groovy 5.0.8).
                 "leftShift" => Value::array(next.clone()),
                 "add" if args.len() == 2 => Value::Undef,
+                // `Collection.addAll` answers whether the collection *changed*,
+                // so an empty argument is `false` — `add`/`push` always add their
+                // one element and answer `true`. Verified against Groovy 5.0.8:
+                // `[1, 2].addAll([])` is `false` and `[1, 2].addAll([3])` is `true`.
+                "addAll" => Value::bool(added > 0),
                 _ => Value::bool(true),
             };
             set_mutated(Value::array(next));
@@ -7721,9 +8039,16 @@ fn print_args(vm: &mut VM, argc: u8, newline: bool) -> Value {
     // exception up. An exception that was *already* in flight means this
     // `println` is inside a `finally` running on the unwind path — that output
     // is real and must still appear.
+    //
+    // Rendering can raise on its own account — printing a `subList` window whose
+    // backing list moved on is a `ConcurrentModificationException` — and in a
+    // program with no `try` in it that raise degrades to a hard fault instead of
+    // a pending exception. A fault is an unconditional halt with no unwind path
+    // to print on, so it suppresses the write outright rather than joining the
+    // `already_unwinding` exemption above.
     let already_unwinding = pending_exc();
     let rendered: Vec<String> = vals.iter().map(|v| render_value(vm, v)).collect();
-    if !already_unwinding && pending_exc() {
+    if faulted() || (!already_unwinding && pending_exc()) {
         return Value::Undef;
     }
     let stdout = std::io::stdout();
@@ -7983,7 +8308,7 @@ fn is_incomparable(v: &Value) -> bool {
         return lookup_method(inst.class, "compareTo").is_none();
     }
     matches!(v, Value::Array(_) | Value::Hash(_))
-        || as_list(v).is_some()
+        || as_list_raw(v).is_some()
         || as_omap(v).is_some()
         || as_range(v).is_some()
 }

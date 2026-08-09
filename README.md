@@ -162,6 +162,18 @@ Implemented and checked against Apache Groovy:
   `<<`, `sort`, `unique`, `removeAll`, `retainAll`, `swap`, `list[i] = v`).
   `removeAll`/`retainAll` take Groovy's *predicate closure* as well as a
   collection, and `push` inserts at the front — the end `pop` takes from.
+  `addAll` answers whether the list changed (`[1, 2].addAll([])` is `false`) and
+  takes Java's `addAll(index, collection)` insert form.
+- **`subList` is a live window**, a `java.util.ArrayList$SubList` and not a copy:
+  a write through the window reaches the backing list, a write to the backing
+  list shows through the window, and a structural write through the window
+  (`add`, `remove`, `clear`, `addAll`, `pop`, `push`, `unique`) splices the
+  backing list and resizes the window with it. A window onto a window reaches the
+  root list. Java's fail-fast rule is modeled too: a **structural** change made
+  to the backing list through any *other* reference invalidates the window
+  permanently, and every later read or write through it raises
+  `java.util.ConcurrentModificationException` — `getClass()` and `is()` still
+  answer, because they read the reference rather than the elements.
 - **Declarations** — the multi-declarator `def a = 1, b = 2` and Groovy's
   multiple assignment `def (a, b) = [1, 2]` (the right side is evaluated once;
   a name past its end is `null`).
@@ -414,10 +426,8 @@ Next waves, in priority order:
 5. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
    `"$s".getClass()` reports `java.lang.String` where Groovy reports
    `org.codehaus.groovy.runtime.GStringImpl`.
-6. **`subList` answers a copy, not a live view.** The window and all three of
-   Java's bounds outcomes are exact, but writing through the window does not
-   reach the backing list, and `getClass()` names `java.util.ArrayList` rather
-   than `java.util.ArrayList$SubList`.
+6. **Command-argument chains beyond one argument** — `println a, b` and
+   `foo bar baz` do not parse; the parenthesised call always does.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
 
@@ -452,7 +462,7 @@ every divergence it reports is a real parity gap — the class of bug the slice-
 generated without restriction now that the `BigDecimal` model is exact. Modes:
 `arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
 `gstring`, `exceptions`, `faults`, `switch`, `asserts`, `modzero`, `gdk`,
-`conversions`, `classes`, `ranges`, `aliasing`, `mixed`.
+`conversions`, `classes`, `ranges`, `aliasing`, `views`, `mixed`.
 
 Both fuzzers report a **skipped** count alongside the divergences. A case only
 counts as a comparison when the reference itself ran the program — it neither

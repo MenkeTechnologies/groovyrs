@@ -1719,3 +1719,151 @@ println([[1,2,3].subsequences().size(), [1,2,3].subsequences().contains([1,3]), 
 # Both `Integer.toString` parameters are `int`, so a non-integer argument matches
 # no overload and raises rather than rendering a zero.
 try { println(255.toString('x')) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }
+%%
+# `subList` answers a LIVE java.util.ArrayList$SubList view, not a copy: the
+# class name, and a write through the window reaching the backing list.
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3)
+println([s.getClass().getName(), s.getClass().getSimpleName(), s, s.size()])
+s.set(0, 99); println([a, s])
+%%
+# A write to the backing list shows through the window, and identity is per
+# reference: the window is never the list, and never a second window of it.
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3)
+a.set(1, 42); a.swap(0, 3); println([s, a.is(s), s.is(s), a.subList(1, 3).is(a.subList(1, 3))])
+%%
+# A structural write THROUGH the window reaches the backing list and re-syncs the
+# window; the backing list grows and shrinks with it.
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3)
+s.add(99); println([a, s, a.size(), s.size()])
+%%
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); s.remove(0); println([a, s])
+%%
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); s.clear(); println([a, s])
+%%
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); s.addAll([8, 9]); println([a, s])
+%%
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); s.add(0, 9); println([a, s])
+%%
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); println([s.pop(), a, s]); s.push(7); println([a, s])
+%%
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); s.swap(0, 1); println([a, s])
+%%
+def a = [1, 2, 2, 3]; def s = a.subList(1, 3); s.unique(); println([a, s])
+%%
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); println([s.removeAll { it == 2 }, a, s])
+%%
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); println([s.retainAll { it == 2 }, a, s])
+%%
+# Sorting a window sorts that stretch of the backing list in place and answers
+# the window itself.
+def a = [5, 4, 3, 2, 1]; def s = a.subList(1, 4); println([s.is(s.sort()), a, s])
+%%
+# A window onto a window reaches the root list, and every level of the chain
+# resizes with a structural write through the innermost one.
+def a = [1, 2, 3, 4, 5]; def s = a.subList(1, 4); def t = s.subList(1, 3)
+println([t.getClass().getName(), t]); t.set(0, 77); println([a, s, t])
+t.add(9); println([a, s, t])
+%%
+# An empty window still points somewhere: adding through it inserts at its offset.
+def a = [1, 2]; def s = a.subList(2, 2); println([s, s.size(), s.isEmpty()]); s.add(9); println([a, s])
+%%
+def a = [1, 2, 3]; def s = a.subList(0, 0); s.add(9); println([a, s])
+%%
+# A window reads like any other list: subscripting, negative indexing, iteration,
+# GString interpolation, nesting inside a printed collection, and `==` by element.
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3)
+s[0] = 42
+def seen = ''; for (x in s) seen += x
+println([a, s[0], s[-1], s[0..1], seen, "x${s}y", [s], [k: s], s == [42, 3], s.equals([42, 3])])
+%%
+# The methods that answer a NEW list still do so through a window.
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3)
+println([s.collect { it * 2 }, s.collect { it * 2 }.getClass().getName(), s.reverse(), s + [7], (s + [7]).getClass().getName(), s.toList().getClass().getName(), a])
+%%
+# A STRUCTURAL change to the backing list through any other reference invalidates
+# the window permanently — Java's fail-fast rule.
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); a.add(5)
+try { println s } catch (e) { println([e.getClass().getName(), e.getMessage()]) }
+%%
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); a.remove(0)
+try { println s.size() } catch (e) { println e.getClass().getName() }
+%%
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); a.clear()
+try { println s } catch (e) { println e.getClass().getName() }
+%%
+def a = [3, 1, 2, 4]; def s = a.subList(1, 3); a.sort()
+try { println s } catch (e) { println e.getClass().getName() }
+%%
+def a = [1, 2, 3]; def s = a.subList(0, 2); a.addAll([])
+try { println s } catch (e) { println e.getClass().getName() }
+%%
+def a = []; def s = a.subList(0, 0); a.clear()
+try { println s } catch (e) { println e.getClass().getName() }
+%%
+# Two windows onto one list: a structural write through one invalidates the
+# other, a plain one does not.
+def a = [1, 2, 3, 4]; def s = a.subList(0, 2); def t = a.subList(2, 4)
+s.set(0, 9); println t
+s.add(9)
+try { println t } catch (e) { println e.getClass().getName() }
+%%
+# A window taken FROM the one that was written is invalidated too: the JDK
+# re-syncs a window's ancestors, never its descendants.
+def a = [1, 2, 3, 4, 5]; def s = a.subList(1, 4); def t = s.subList(1, 3); s.add(9)
+try { println t } catch (e) { println e.getClass().getName() }
+%%
+# Operations that leave the backing list's modCount alone keep the window live:
+# element writes, `swap`, a `removeAll`/`retainAll` that removed nothing, and
+# `sort(false)` (which asks for a copy).
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3)
+a[0] = 9; a.swap(0, 3); a.removeAll([99]); a.retainAll([9, 2, 3, 1]); a.sort(false)
+println([s, a])
+%%
+# Sorting a WINDOW is not structural (List.sort reorders through set), so a
+# sibling window survives it — where sorting the LIST itself does not.
+def a = [3, 1, 2, 0]; def s = a.subList(0, 3); def t = a.subList(1, 3)
+s.sort(); println([a, s, t])
+%%
+# `addAll` with an empty argument bumps the LIST's modCount but not a WINDOW's,
+# and answers false either way because nothing changed.
+def a = [1, 2, 3, 4]; def s = a.subList(0, 3); def t = a.subList(1, 3)
+println([s.addAll([]), t])
+%%
+println([[1, 2].addAll([]), [1, 2].addAll([3]), [1, 2].addAll(1, [8, 9]), [1, 2].addAll(1, [])])
+%%
+def a = [1, 2]; a.addAll(1, [8, 9]); println a
+%%
+# `unique()` returns early on a collection too short to hold a duplicate, so it
+# leaves modCount alone at size 0 and 1 — but the closure form never does.
+def a = [1, 2, 3, 4]; def s = a.subList(0, 1); def t = a.subList(2, 4)
+s.unique(); s.unique(true); println t
+%%
+def a = [1, 2, 3, 4]; def s = a.subList(0, 1); def t = a.subList(2, 4); s.unique { it }
+try { println t } catch (e) { println e.getClass().getName() }
+%%
+def a = [7, 8]; def s = a.subList(0, 1); a.unique()
+try { println s } catch (e) { println e.getClass().getName() }
+%%
+# `getClass()` and `is()` are the two calls that read the reference rather than
+# the elements, so they still answer on an invalidated window.
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); a.add(5)
+println([s.getClass().getName(), s.is(s), s instanceof List])
+%%
+# A fresh window taken after the change is fine — only the stale one is dead.
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); a.add(5); println a.subList(1, 3)
+%%
+# Every read path fails fast on a stale window, not just the printed one.
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3); a.add(5)
+try { for (x in s) println x } catch (e) { println e.getClass().getName() }
+try { println s[0] } catch (e) { println e.getClass().getName() }
+try { s[0] = 1 } catch (e) { println e.getClass().getName() }
+try { if (s) println 'live' } catch (e) { println e.getClass().getName() }
+try { println(2 in s) } catch (e) { println e.getClass().getName() }
+try { println(s as Set) } catch (e) { println e.getClass().getName() }
+try { println([s]) } catch (e) { println e.getClass().getName() }
+try { println s.subList(0, 1) } catch (e) { println e.getClass().getName() }
+try { println s.equals([2, 3]) } catch (e) { println e.getClass().getName() }
+%%
+# A MissingMethodException names a window by its nested simple name.
+def a = [1, 2, 3, 4]; def s = a.subList(1, 3)
+try { 'x'.zork(s) } catch (e) { println e.getMessage().split('Possible')[0].trim() }

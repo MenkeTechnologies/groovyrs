@@ -73,13 +73,36 @@ reported as parse or compile errors, never silently mis-run.
   the second. Not modeled: a bucket that treeifies (8 collisions with a table of
   64+), and an element whose hash is the JVM identity hash — that one keeps its
   insertion position, and it is not reproducible across two JVM runs either.
-- **`subList`.** `list.subList(from, to)` and `range.subList(from, to)`, with
-  Java's exact bounds behaviour — `IndexOutOfBoundsException` naming `fromIndex`
-  or `toIndex`, `IllegalArgumentException` for a reversed range, and the JDK's
-  check *order*, so `[1, 2, 3].subList(9, 5)` reports `toIndex = 5` rather than
-  the reversal. A range's answer is another range (`(1..5).subList(1, 3)` is
-  `2..3`, the empty window an `EmptyRange`). See the divergence note below for
-  what a copy cannot do that a view can.
+- **`subList`, as a live view.** `list.subList(from, to)` answers a
+  `java.util.ArrayList$SubList` — a **window** onto the backing list, not a copy.
+  A write through the window reaches the backing list (`s.set(0, 99)`,
+  `s[0] = 99`) and a write to the backing list shows through the window; a
+  *structural* write through the window (`add`, `add(i, e)`, `remove`, `clear`,
+  `addAll`, `pop`, `push`, `removeLast`, `unique`, `removeAll`, `retainAll`)
+  splices the backing list at the window's offset and resizes the window with it,
+  so `[1,2,3,4].subList(1,3).add(99)` leaves `[1, 2, 3, 99, 4]`. `sort()` orders
+  that stretch of the backing list in place and answers the window. A window onto
+  a window addresses the root list, and a structural write through it resizes
+  every window it was taken through.
+
+  Java's **fail-fast** rule is modeled with the JDK's mechanism, an `ArrayList`
+  `modCount` the window syncs to at every operation: a structural change made to
+  the backing list through any *other* reference (including a sibling window, and
+  including `a.sort()`, `a.addAll([])` and a `clear()` that emptied nothing —
+  each of which bumps the counter without changing a length) invalidates the
+  window permanently, and every later read or write through it raises the
+  message-less `java.util.ConcurrentModificationException`. `getClass()` and
+  `is()` still answer, since they read the reference rather than the elements,
+  and a window taken *after* the change is fine. Non-structural changes
+  (`set`, `swap`, `sort(false)`, a `removeAll` that removed nothing) leave the
+  window live.
+
+  Bounds are Java's exact behaviour — `IndexOutOfBoundsException` naming
+  `fromIndex` or `toIndex`, `IllegalArgumentException` for a reversed range, and
+  the JDK's check *order*, so `[1, 2, 3].subList(9, 5)` reports `toIndex = 5`
+  rather than the reversal. `range.subList(from, to)` answers another range
+  (`(1..5).subList(1, 3)` is `2..3`, the empty window an `EmptyRange`), which is
+  what Groovy's `IntRange` does.
 - **`++`/`--` in expression position.** Both postfix (`i++`, value before
   update) and prefix (`++i`, value after update), in addition to the statement
   forms.
@@ -469,17 +492,21 @@ reported as parse or compile errors, never silently mis-run.
   (<simple types>) values: [<values>]` — is byte-identical to Groovy. The same
   holds for the suggestion line Groovy sometimes appends to a
   `MissingPropertyException` on a class with fields.
-- **`subList` answers a copy, not a view.** The window and all three of Java's
-  bounds outcomes are exact, but Java's `subList` is a *live view* of the backing
-  list — writing through it writes through to the list — and groovyrs's is a
-  copy, so `getClass()` names `java.util.ArrayList` rather than
-  `java.util.ArrayList$SubList` and a write through the window does not reach the
-  original (`def s = a.subList(0, 2); s.set(0, 99)` leaves `a` alone).
-  This entry used to say a view had "nothing to point at", because lists were
-  fusevm values. They are host-heap handles now (see *Lists are references* in
-  the README), so a view *does* have something to point at: the gap is a
-  `HeapObj` variant carrying a backing handle plus an offset and length, and the
-  bounds re-checks Java makes on every access. Unwritten, no longer unreachable.
+- **A `ConcurrentModificationException` raised by a native operator is not
+  caught where Groovy catches it.** Reading an invalidated `subList` window
+  raises, and every path that consumes a list's elements is a builtin call whose
+  post-call check unwinds immediately — except `==`, `+` and the other operators,
+  which fusevm answers natively and whose post-op pending check the compiler
+  emits only under the gate described in *An exception thrown out of an
+  operator-overload method*. Outside that gate the throwable is parked and the
+  program runs one more statement before a check finds it, so
+  `try { println(s == [2, 3]) }` prints `true` and *then* raises, where Groovy
+  raises first and prints nothing. The exception, its class and the exit status
+  are right; the extra line is not. This is the same shape as *Arithmetic on
+  `null` is only catchable through `/`* and has the same cause — `try { println(
+  null - 1) }` already prints `null` before the `NullPointerException`. A program
+  with **no** `try` in it is exact either way: the raise degrades to a hard fault,
+  which halts before the next statement.
 - **A reverse `ObjectRange`'s `subList` differs**, in the one corner where
   Groovy's own answer is self-inconsistent: `('e'..'a').subList(1, 3)` *prints*
   `c..d` but *iterates* `[c]`, because Groovy builds it through the constructor

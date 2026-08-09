@@ -2254,11 +2254,17 @@ impl Compiler {
             }
             Expr::Call { name, args, line } => self.call(name, args, *line)?,
             Expr::List(elems) => {
+                // Groovy lists are references — `def b = a` names one
+                // `ArrayList` twice, and `b.add(4)` is visible through `a` — so
+                // a literal registers a host-heap handle rather than leaving a
+                // fusevm array (a *value*) on the stack. `Op::MakeArray` still
+                // gathers the elements; the builtin only wraps the result.
                 for e in elems {
                     self.expr(e)?;
                 }
                 self.b
                     .emit(Op::MakeArray(elems.len() as u16), self.cur_line);
+                self.emit_call_builtin(crate::host::GMAKE_LIST, 1, self.cur_line)?;
             }
             Expr::Map(entries) => {
                 // Groovy maps preserve insertion order, so a map literal builds a
@@ -3024,10 +3030,11 @@ fn needs_truth(e: &Expr) -> bool {
     match e {
         // Statically a number / boolean / null.
         Expr::Int(..) | Expr::Float(_) | Expr::Bool(_) | Expr::Null => false,
-        // A list literal is a `Value::Array`, whose truth fusevm already reads
-        // the way Groovy does. A range is a host handle, so it needs the
-        // builtin (an empty one, `1..<1`, is false).
-        Expr::List(_) => false,
+        // A list literal is a host handle now that lists alias, and every
+        // `Value::Obj` is true to fusevm — so `if ([])` needs the builtin to
+        // report the empty list as false. (It was a `Value::Array`, whose truth
+        // fusevm already read the way Groovy does, when this answered `false`.)
+        Expr::List(_) => true,
         // Comparisons and `instanceof` yield a `Boolean`; `<=>` an `Integer`;
         // `&&`/`||` are boolean-valued in Groovy (see `Compiler::binary`).
         Expr::Binary {

@@ -282,6 +282,15 @@ pub const GCLASS_LONG: u16 = 756;
 pub const GNAME_GET: u16 = 760;
 pub const GNAME_SET: u16 = 761;
 
+/// Builtin id for a list literal: takes the `Value::Array` that `Op::MakeArray`
+/// just built and registers it as a `java.util.ArrayList` handle.
+///
+/// A Groovy list is a *reference* — `def b = a` names one `ArrayList` twice — so
+/// a literal has to allocate a handle rather than leave a fusevm array on the
+/// stack. `Op::MakeArray` still does the element gathering; this only wraps it.
+/// See [`b_make_list`].
+pub const GMAKE_LIST: u16 = 762;
+
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -317,6 +326,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GSETPROP, b_setprop);
     vm.register_builtin(GINDEX, b_index);
     vm.register_builtin(GMAKE_MAP, b_make_map);
+    vm.register_builtin(GMAKE_LIST, b_make_list);
     vm.register_builtin(GCMP, b_cmp);
     vm.register_builtin(GSUPER_METHOD, b_super_method);
     vm.register_builtin(GSUPER_CTOR, b_super_ctor);
@@ -717,6 +727,7 @@ fn java_class_name(v: &Value) -> String {
         Value::Array(_) => "java.util.ArrayList",
         Value::Hash(_) => "java.util.LinkedHashMap",
         Value::Undef => "null",
+        _ if as_list(v).is_some() => "java.util.ArrayList",
         _ if as_bigint(v).is_some() => "java.math.BigInteger",
         _ if as_dec(v).is_some() => "java.math.BigDecimal",
         _ if as_omap(v).is_some() => "java.util.LinkedHashMap",
@@ -1005,6 +1016,23 @@ enum HeapObj {
         items: Vec<Value>,
         kind: SetKind,
     },
+    /// A `java.util.ArrayList` — every Groovy `List` a script can name.
+    ///
+    /// A list rides a handle for the same reason a set and a map do: Groovy's
+    /// lists are *references*. `def b = a` gives the one `ArrayList` a second
+    /// name, and `b.add(4)` is visible through `a`; the same holds for a list
+    /// reached through a map value, an element of another list, a closure
+    /// parameter, or a capture. A fusevm `Value::Array` is a value, so none of
+    /// that could work while lists were one — a mutator could only write back
+    /// through the *variable* it was called on (see `MUTATED`), which made
+    /// `[1, 2, 3]` behave like a copy at every other reference.
+    ///
+    /// `Value::Array` survives as the *transient* element-vector representation:
+    /// [`deref_list`] hands one to the GDK read arms, which pattern-match it, and
+    /// internal sequences (a range's enumeration, a spread's intermediate) never
+    /// allocate a handle. The invariant is that a list which **escapes to user
+    /// code** is built by [`glist`] and nothing else.
+    ListVal(Vec<Value>),
 }
 
 /// Which `java.util.Set` implementation a set handle is, which is exactly the
@@ -1127,6 +1155,64 @@ fn heap_push(obj: HeapObj) -> Value {
         id
     });
     Value::Obj(id)
+}
+
+/// Allocate a Groovy `List`. **The** way a list that escapes to user code is
+/// built — every GDK method answering a `List`, every list literal, and every
+/// coercion to one goes through here, so each of them is aliasable.
+fn glist(items: Vec<Value>) -> Value {
+    heap_push(HeapObj::ListVal(items))
+}
+
+/// The elements behind a `java.util.List` handle, if `v` is one.
+fn as_list(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::ListVal(items)) => Some(items.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// Is `v` a `java.util.List` — either a list handle or the transient
+/// `Value::Array` form? The shape test every "did I get a list?" site uses, so
+/// none of them has to know which of the two representations it is holding.
+fn is_list(v: &Value) -> bool {
+    matches!(v, Value::Array(_)) || as_list(v).is_some()
+}
+
+/// The heap id of a list handle, if `v` is one — what an in-place mutator writes
+/// through and what `is()` compares.
+fn list_id(v: &Value) -> Option<u32> {
+    match v {
+        Value::Obj(id) if as_list(v).is_some() => Some(*id),
+        _ => None,
+    }
+}
+
+/// Replace a list handle's contents in place. This is what makes a mutation
+/// visible through every other name for the same list.
+fn list_store(id: u32, items: Vec<Value>) {
+    HEAP.with(|h| {
+        if let Some(HeapObj::ListVal(slot)) = h.borrow_mut().get_mut(id as usize) {
+            *slot = items;
+        }
+    });
+}
+
+/// Normalise a list handle to the transient `Value::Array` that the GDK read
+/// arms pattern-match on; any other value passes through untouched.
+///
+/// This is the single adapter between the two representations. Applying it to a
+/// receiver (and to the operands of an operator) is what let every existing
+/// `(Value::Array(a), "method")` arm keep working unchanged when lists became
+/// handles — the alternative was rewriting seventy match arms.
+fn deref_list(v: &Value) -> Value {
+    match as_list(v) {
+        Some(items) => Value::array(items),
+        None => v.clone(),
+    }
 }
 
 /// Look up a closure handle's metadata, if `v` is a closure value.
@@ -1311,6 +1397,12 @@ fn groovy_truthy(vm: &mut VM, v: &Value) -> bool {
             if let Some(d) = as_dec(v) {
                 return !decimal::cmp(&d, &decimal::from_i64(0)).is_eq();
             }
+            // A list is a collection: true when it holds anything. This has to
+            // come before the generic "any handle is true" fallback, or an empty
+            // list would be truthy.
+            if let Some(items) = as_list(v) {
+                return !items.is_empty();
+            }
             if let Some(entries) = as_omap(v) {
                 return !entries.is_empty();
             }
@@ -1421,6 +1513,18 @@ fn omap_set(v: &Value, key: String, val: Value) -> bool {
 /// `GMAKE_MAP`: pop the entry count and the interleaved key/value pairs, then
 /// build an insertion-ordered map on the heap. A duplicate key keeps its first
 /// position with the last value (Groovy's `LinkedHashMap` semantics).
+/// `GMAKE_LIST` — wrap the array `Op::MakeArray` just built into a list handle,
+/// so the literal is a reference every other name for it can observe.
+fn b_make_list(vm: &mut VM, _argc: u8) -> Value {
+    let built = vm.stack.pop().unwrap_or(Value::Undef);
+    match built {
+        Value::Array(items) => glist(items),
+        // Not an array: nothing to wrap (an empty literal still arrives as an
+        // array, so this is only reachable if the emitter changes).
+        other => other,
+    }
+}
+
 fn b_make_map(vm: &mut VM, _argc: u8) -> Value {
     let n = vm.stack.pop().unwrap_or(Value::Undef).to_int() as usize;
     // Pop 2n values: they come off as v(n-1), k(n-1), …, v0, k0.
@@ -2599,9 +2703,17 @@ fn b_is_case(vm: &mut VM, _argc: u8) -> Value {
             }
         };
     }
-    if let Value::Array(items) = &label {
+    // `case [a, b]:` is a membership test. The label reaches here in *both*
+    // representations — a list literal is a handle, and a `Range` label was just
+    // rewritten to the transient array form above — so the shape test has to
+    // admit either.
+    if is_list(&label) {
         let want = groovy_str(&subject);
-        return Value::bool(items.iter().any(|v| groovy_str(v) == want));
+        return Value::bool(
+            iteration_elements(&label)
+                .iter()
+                .any(|v| groovy_str(v) == want),
+        );
     }
     // `case null:` matches only null; otherwise Groovy's `equals`.
     if matches!(label, Value::Undef) || matches!(subject, Value::Undef) {
@@ -2792,6 +2904,12 @@ fn inspect_value(v: &Value) -> String {
             .collect();
         return format!("[{}]", items.join(", "));
     }
+    // A list renders its elements with the same quoting rules, recursively —
+    // through the handle form as well as the transient array form.
+    if let Some(items) = as_list(v) {
+        let shown: Vec<String> = items.iter().map(inspect_value).collect();
+        return format!("[{}]", shown.join(", "));
+    }
     match v {
         Value::Str(s) => format!("'{s}'"),
         Value::Array(a) => {
@@ -2806,6 +2924,12 @@ fn inspect_value(v: &Value) -> String {
 /// numerically across types (`case 1:` matches the subject `1.00`), and
 /// everything else compares by its rendered form — the same rule `==` uses.
 fn values_equal(a: &Value, b: &Value) -> bool {
+    // A list rides a heap handle, but `List.equals` is by *elements* — two
+    // separately built lists holding the same values are equal, and the same
+    // list under two names is not equal by virtue of being one handle. Deref to
+    // the transient array form so every comparison below reads the elements.
+    let (da, db) = (deref_list(a), deref_list(b));
+    let (a, b) = (&da, &db);
     // `Set.equals` ignores order and is only ever true against another set:
     // `([1, 2] as Set) == ([2, 1] as Set)` but `([1, 2] as Set) == [1, 2]` is
     // false, because a `Set` and a `List` are never equal in Java whatever they
@@ -2876,7 +3000,7 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         "Boolean" => matches!(value, Value::Bool(_)),
         // A Groovy `Range` *is* a `java.util.List`, so it answers both.
         "List" | "ArrayList" | "Collection" | "Iterable" => {
-            matches!(value, Value::Array(_)) || as_range(value).is_some()
+            matches!(value, Value::Array(_)) || as_list(value).is_some() || as_range(value).is_some()
         }
         "Range" | "IntRange" | "ObjectRange" | "NumberRange" => as_range(value).is_some(),
         "Map" | "LinkedHashMap" | "HashMap" => {
@@ -3061,9 +3185,10 @@ fn map_default(vm: &mut VM, map: &Value, key: &str) -> Value {
 /// method — Groovy defines the subscript *as* `getAt`, so both are one path.
 fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
     // A range subscripts as the list it enumerates, on either side: `(1..5)[0]`
-    // is `1`, and `list[1..2]` is the sublist at those positions.
-    let recv = range_as_list(&recv);
-    let index = range_as_list(&index);
+    // is `1`, and `list[1..2]` is the sublist at those positions. A list handle
+    // reads through the same transient array form the arms below match on.
+    let recv = deref_list(&range_as_list(&recv));
+    let index = deref_list(&range_as_list(&index));
     // `m[0]` is `Matcher.getAt(0)` — the i-th match, as the matched text or as
     // `[whole, g1, …]` when the pattern has groups.
     if as_matcher(&recv).is_some() {
@@ -3184,23 +3309,42 @@ fn b_setindex(vm: &mut VM, _argc: u8) -> Value {
         omap_set(&recv, groovy_str(&index), value);
         return recv;
     }
+    // A list rides a handle, so the write goes *through* it and every other name
+    // for the list observes it. The element math is [`list_put`], shared with the
+    // transient-array arm below so the two can never drift.
+    if let Some(id) = list_id(&recv) {
+        return match list_put(as_list(&recv).unwrap_or_default(), &index, value) {
+            Ok(next) => {
+                list_store(id, next);
+                recv
+            }
+            Err((i, len)) => raise_negative_index(vm, i, len),
+        };
+    }
     match &recv {
-        Value::Array(a) => {
-            let i = index.to_int();
-            let idx = if i < 0 { a.len() as i64 + i } else { i };
-            if idx < 0 {
-                return raise_negative_index(vm, i, a.len());
-            }
-            let mut next = a.clone();
-            let idx = idx as usize;
-            if idx >= next.len() {
-                next.resize(idx + 1, Value::Undef);
-            }
-            next[idx] = value;
-            Value::array(next)
-        }
+        Value::Array(a) => match list_put(a.clone(), &index, value) {
+            Ok(next) => Value::array(next),
+            Err((i, len)) => raise_negative_index(vm, i, len),
+        },
         _ => raise_missing_method(vm, &recv, "putAt", &[index, value]),
     }
+}
+
+/// `list[i] = v`. A negative index counts from the end; an index past the end
+/// grows the list, padding with `null`, the way Groovy's `List.putAt` does.
+/// `Err((index, len))` is the negative-index-too-large case.
+fn list_put(mut items: Vec<Value>, index: &Value, value: Value) -> Result<Vec<Value>, (i64, usize)> {
+    let i = index.to_int();
+    let idx = if i < 0 { items.len() as i64 + i } else { i };
+    if idx < 0 {
+        return Err((i, items.len()));
+    }
+    let idx = idx as usize;
+    if idx >= items.len() {
+        items.resize(idx + 1, Value::Undef);
+    }
+    items[idx] = value;
+    Ok(items)
 }
 
 /// Raise the `ArrayIndexOutOfBoundsException` Groovy reports for a negative
@@ -3500,6 +3644,60 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
                 Value::Undef
             }
         };
+    }
+    // A `List` rides a handle so two names can see one list. Every list method
+    // is already written against the transient `Value::Array` form, so the call
+    // runs against that and its effect is reconciled back through the handle
+    // here — one place rather than seventy match arms.
+    // `with`/`tap` install the receiver as the closure's *delegate*, and a bare
+    // mutator call inside the body (`[1, 2].tap { add(3) }`) has to reach this
+    // list — so they run against the handle, further down, not against the
+    // detached element copy this branch would hand them.
+    let delegating =
+        matches!(method, "with" | "tap") && args.len() == 1 && closure_meta(&args[0]).is_some();
+    if let Some(id) = list_id(&recv).filter(|_| !delegating) {
+        // `Object.is()` is reference identity, which only a handle can answer.
+        if method == "is" {
+            return Value::bool(args.first().and_then(list_id) == Some(id));
+        }
+        // `sort`/`unique` do not use the `MUTATED` slot — their *result* is the
+        // new list (which is why the compiler writes the result back). Same rule
+        // as `compiler::Compiler::emit_receiver_writeback`: only the no-argument,
+        // `sort(true)` and closure forms mutate; `sort(false)` asks for a copy.
+        let result_mutates = matches!(method, "sort" | "unique")
+            && args
+                .iter()
+                .all(|a| closure_meta(a).is_some() || matches!(a, Value::Bool(true)));
+        let items = as_list(&recv).unwrap_or_default();
+        let answer = dispatch_call(vm, Value::array(items), method, args);
+        // An in-place mutator parks its new contents for the compiler's
+        // writeback. Store them through the handle instead: that is what every
+        // *other* name for this list observes. Re-park the handle itself so a
+        // writeback that does run stores a list back into the variable rather
+        // than replacing it with a detached array.
+        let mut mutated = take_mutated().is_some_and(|next| {
+            list_store(id, iteration_elements(&next));
+            true
+        });
+        if result_mutates {
+            if let Value::Array(next) = &answer {
+                list_store(id, next.clone());
+                mutated = true;
+            }
+        }
+        if mutated {
+            set_mutated(recv.clone());
+        }
+        // The methods whose Groovy answer *is* the receiver, so that
+        // `a.is(a.sort())` is true and a chained `a << 1 << 2` keeps writing
+        // into the one list. Verified against Groovy 5.0.8; `reverse`,
+        // `sort(false)` and `collect` answer a new list and are absent.
+        let answers_receiver = matches!(method, "each" | "eachWithIndex" | "reverseEach")
+            || (mutated && matches!(method, "sort" | "unique" | "leftShift" | "swap"));
+        if answers_receiver && matches!(answer, Value::Array(_)) {
+            return recv;
+        }
+        return answer;
     }
     // A `Range` answers its own members (`from`, `step`, `size`, `toString`)
     // and hands every other call to the list it enumerates, which is where the
@@ -4227,8 +4425,10 @@ fn dispatch_iteration(
 /// its parameters (`[[1, 2]].collect { a, b -> a + b }` yields `[3]`), and every
 /// other case receives the element itself.
 fn item_args(clo: &Value, item: &Value) -> Vec<Value> {
-    match item {
-        Value::Array(a) if closure_meta(clo).map(|m| m.params).unwrap_or(1) >= 2 => a.clone(),
+    let spread = closure_meta(clo).map(|m| m.params).unwrap_or(1) >= 2;
+    // The element is a list handle; deref to see the elements to spread.
+    match deref_list(item) {
+        Value::Array(a) if spread => a,
         _ => vec![item.clone()],
     }
 }
@@ -4285,7 +4485,8 @@ fn entry_pairs(v: &Value) -> Vec<(String, Value)> {
     if let Some((k, val)) = as_entry(v) {
         return vec![(k, val)];
     }
-    match v {
+    // The `[key, value]` pair is a list handle; deref to read its two elements.
+    match deref_list(v) {
         Value::Array(a) if a.len() == 2 => vec![(groovy_str(&a[0]), a[1].clone())],
         _ => Vec::new(),
     }
@@ -5208,9 +5409,10 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (Value::Array(a), "combinations") => {
             let mut out: Vec<Vec<Value>> = vec![Vec::new()];
             for e in a {
-                let choices = match e {
-                    Value::Array(_) => iteration_elements(e),
-                    other => vec![other.clone()],
+                let choices = if is_list(e) {
+                    iteration_elements(e)
+                } else {
+                    vec![e.clone()]
                 };
                 out = choices
                     .iter()
@@ -5614,7 +5816,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // Both the collection and the varargs spelling are accepted.
                 "subMap" => {
                     let wanted: Vec<String> = match args {
-                        [one] if matches!(one, Value::Array(_)) || as_range(one).is_some() => {
+                        [one] if is_list(one) || as_range(one).is_some() => {
                             iteration_elements(one).iter().map(groovy_str).collect()
                         }
                         rest => rest.iter().map(groovy_str).collect(),
@@ -5803,6 +6005,12 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
     let rhs = vm.stack.pop().unwrap_or(Value::Undef);
     let lhs = vm.stack.pop().unwrap_or(Value::Undef);
     take_mutated();
+    // `list << x` is `List.leftShift`, an in-place append that answers the list.
+    // Route it through the ordinary method dispatch rather than repeating the
+    // append here, so the handle write-through has exactly one implementation.
+    if list_id(&lhs).is_some() {
+        return dispatch_call(vm, lhs, "leftShift", vec![rhs]);
+    }
     // `sb << "a"` is `StringBuilder.append`, which mutates through the handle
     // and answers the builder — so it chains, and needs no writeback.
     if let Some((_, text)) = as_buffer(&lhs) {
@@ -5890,8 +6098,9 @@ fn b_ushr(vm: &mut VM, _argc: u8) -> Value {
 /// `GIN`: Groovy's `x in coll`. A collection answers `contains`, a range its
 /// bounds, a map key membership, a string substring containment.
 fn b_in(vm: &mut VM, _argc: u8) -> Value {
-    // `x in 1..5` asks the range's `contains`, which is its element list's.
-    let coll = range_as_list(&vm.stack.pop().unwrap_or(Value::Undef));
+    // `x in 1..5` asks the range's `contains`, which is its element list's. A
+    // list handle reads through its transient array form.
+    let coll = deref_list(&range_as_list(&vm.stack.pop().unwrap_or(Value::Undef)));
     let needle = vm.stack.pop().unwrap_or(Value::Undef);
     let _ = vm;
     if let Some(entries) = as_omap(&coll) {
@@ -5916,7 +6125,8 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    // A list handle casts through its transient array form (`as Set`, `as List`).
+    let v = deref_list(&vm.stack.pop().unwrap_or(Value::Undef));
     let ty_simple = simple_name_of(&ty);
     match ty_simple.as_str() {
         // Integral targets truncate toward zero, as Java's narrowing casts do.
@@ -6910,9 +7120,11 @@ fn java_round(f: f64) -> i64 {
 fn flatten_values(items: &[Value]) -> Vec<Value> {
     let mut out = Vec::new();
     for v in items {
-        match v {
-            Value::Array(inner) => out.extend(flatten_values(inner)),
-            other => out.push(other.clone()),
+        // A nested list is a handle; deref so nesting flattens through both the
+        // handle form and the transient array form.
+        match deref_list(v) {
+            Value::Array(inner) => out.extend(flatten_values(&inner)),
+            other => out.push(other),
         }
     }
     out
@@ -7227,6 +7439,9 @@ fn b_writeback(vm: &mut VM, _argc: u8) -> Value {
 
 /// The elements [`b_iter`] enumerates for a value.
 fn iteration_elements(v: &Value) -> Vec<Value> {
+    if let Some(items) = as_list(v) {
+        return items;
+    }
     if let Some(r) = as_range(v) {
         return range_elements(&r);
     }
@@ -7357,7 +7572,10 @@ fn is_incomparable(v: &Value) -> bool {
     if let Some(inst) = as_instance(v) {
         return lookup_method(inst.class, "compareTo").is_none();
     }
-    matches!(v, Value::Array(_) | Value::Hash(_)) || as_omap(v).is_some() || as_range(v).is_some()
+    matches!(v, Value::Array(_) | Value::Hash(_))
+        || as_list(v).is_some()
+        || as_omap(v).is_some()
+        || as_range(v).is_some()
 }
 
 /// A value rendered the way *Java's* `toString` renders it, which is what the
@@ -7630,6 +7848,12 @@ pub fn groovy_str(v: &Value) -> String {
     // `Map.Entry.toString` is `key=value`.
     if let Some((k, val)) = as_entry(v) {
         return format!("{k}={}", groovy_str(&val));
+    }
+    // A list handle renders `[a, b, c]` (`[]` when empty), exactly as the
+    // transient `Value::Array` form below does.
+    if let Some(items) = as_list(v) {
+        let shown: Vec<String> = items.iter().map(groovy_str).collect();
+        return format!("[{}]", shown.join(", "));
     }
     // A set renders like a list — `[a, b]`, `[]` when empty — but in the order
     // its implementation presents, which for a `HashSet`/`TreeSet` is not the
@@ -8095,6 +8319,13 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // operand: `String.plus` appends the range's `toString`, so `"x" + (1..3)`
     // is `x1..3` and not `x[1, 2, 3]`. (`(1..3) + "x"` dispatches the other way
     // and does append the element, giving `[1, 2, 3, x]`.)
+    // A list rides a handle, and every operator below is written against the
+    // transient array form. Rewriting the operands once here is the same trick
+    // the range branch uses, and keeps `groovy_add`/`groovy_sub`/`groovy_mul`
+    // and the comparisons unaware that lists moved to the heap.
+    if as_list(a).is_some() || as_list(b).is_some() {
+        return numeric_hook(op, &deref_list(a), &deref_list(b));
+    }
     let string_plus = matches!(op, NumOp::Add) && matches!(a, Value::Str(_));
     if !string_plus && (as_range(a).is_some() || as_range(b).is_some()) {
         return numeric_hook(op, &range_as_list(a), &range_as_list(b));

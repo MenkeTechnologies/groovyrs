@@ -1227,9 +1227,7 @@ impl Compiler {
                 self.b.emit(Op::Pop, self.cur_line);
                 Ok(())
             }
-            StmtKind::If { cond, then, els } => {
-                self.branch_stmt(|c| c.if_stmt(cond, then, els))
-            }
+            StmtKind::If { cond, then, els } => self.branch_stmt(|c| c.if_stmt(cond, then, els)),
             StmtKind::While { cond, body } => self.branch_stmt(|c| c.while_stmt(cond, body)),
             StmtKind::DoWhile { body, cond } => self.branch_stmt(|c| c.do_while_stmt(body, cond)),
             StmtKind::Switch { subject, cases } => {
@@ -1981,6 +1979,14 @@ impl Compiler {
                 self.b
                     .emit(Op::CallBuiltin(crate::host::GDEC, 1), self.cur_line);
             }
+            // A `java.math.BigInteger` literal is built the same way, from its
+            // digits — the value has no machine-integer form to load.
+            Expr::BigInt(text) => {
+                let c = self.b.add_constant(Value::str(text.clone()));
+                self.b.emit(Op::LoadConst(c), self.cur_line);
+                self.b
+                    .emit(Op::CallBuiltin(crate::host::GBIGINT, 1), self.cur_line);
+            }
             Expr::Str(s) => {
                 let c = self.b.add_constant(Value::str(s.clone()));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
@@ -2683,10 +2689,12 @@ impl Compiler {
         if let Some(id) = builtin {
             // `<<` and `>>>` shift at the *left* operand's Java width, and the
             // count is masked to that width's bit index — `1 << 32` is `1`, and
-            // `1L << 32` is `4294967296`. The host reads the width from the
-            // operand's magnitude, which cannot tell `1L` from `1`, so the
-            // statically-known width rides along as a third argument.
-            if matches!(op, BinOp::Shl | BinOp::UShr) {
+            // `1L << 32` is `4294967296`. `**` narrows its result to that same
+            // width (`2 ** 40` is a `BigInteger`, `2L ** 40` a `Long`). The host
+            // reads the width from the operand's magnitude, which cannot tell
+            // `1L` from `1`, so the statically-known width rides along as a
+            // third argument.
+            if matches!(op, BinOp::Shl | BinOp::UShr | BinOp::Power) {
                 let wide = self.is_wide(lhs);
                 self.b.emit(Op::LoadInt(i64::from(wide)), self.cur_line);
                 self.emit_call_builtin(id, 3, self.cur_line)?;
@@ -3251,6 +3259,7 @@ fn free_in_expr(
         Expr::Int(..)
         | Expr::Float(_)
         | Expr::Dec(_)
+        | Expr::BigInt(_)
         | Expr::Str(_)
         | Expr::Bool(_)
         | Expr::Null => {}
@@ -3521,6 +3530,7 @@ fn expr_has_ffi(e: &Expr) -> bool {
         Expr::Int(..)
         | Expr::Float(_)
         | Expr::Dec(_)
+        | Expr::BigInt(_)
         | Expr::Str(_)
         | Expr::Bool(_)
         | Expr::Null

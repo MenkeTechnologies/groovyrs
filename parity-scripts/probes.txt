@@ -972,3 +972,71 @@ def a = 10; def b = 2; println a / b
 println("a/b".split(/\//).toString())
 %%
 println("a(b".replace("(", "["))
+%%
+println((2 ** 40).getClass().getName())
+%%
+println(2 ** 40)
+%%
+println((2 ** 10).getClass().getName())
+%%
+println((2 ** 62).getClass().getName())
+%%
+println(2 ** 63)
+%%
+println(2 ** 100)
+%%
+println((2 ** 0).getClass().getName())
+%%
+println((2L ** 40).getClass().getName())
+%%
+println(2L ** 40)
+%%
+println((-2) ** 3)
+%%
+println(12345678901234567890123G)
+%%
+println((123G).getClass().getName())
+%%
+println(123G + 1)
+%%
+println((123G + 1).getClass().getName())
+%%
+println(99999999999999999999G * 2)
+%%
+println(100G / 3)
+%%
+println((100G / 3).getClass().getName())
+%%
+println(100G.intdiv(3))
+%%
+println(100G % 7)
+%%
+println(100G > 99)
+%%
+println("" + 123456789012345678901234567890G)
+%%
+println(2 ** -1)
+%%
+println((2 ** -1).getClass().getName())
+%%
+println(2.0 ** 3)
+%%
+println((2.0 ** 3).getClass().getName())
+%%
+println(9223372036854775808)
+%%
+println((9223372036854775808).getClass().getName())
+%%
+println(9223372036854775808 + 1)
+%%
+println(new BigInteger("12").getClass().getName())
+%%
+println((123G) instanceof BigInteger)
+%%
+println((1.5) instanceof BigDecimal)
+%%
+println((123G) instanceof Number)
+%%
+println(123G.toBigInteger().getClass().getName())
+%%
+println((5 as BigInteger).getClass().getName())

@@ -220,9 +220,25 @@ Implemented and checked against Apache Groovy:
   `class java.lang.Integer` and answers `name`/`simpleName`/`canonicalName`.
 - **`String.toBigDecimal()`** — `new BigDecimal(text.trim())`, with the exact
   scale and `BigDecimal`'s own character-level `NumberFormatException` messages.
-- **Ranges** — `0..5` / `0..<5`, descending (`5..1`) and character (`'a'..'e'`)
-  ranges, materialised to the list Groovy enumerates, so every `List` method
-  applies (`.size()`, `.contains(x)`, `.each`, `.collect`, `.toList()`).
+- **Ranges** — `0..5` / `0..<5`, descending (`5..1`) and character (`'a'..'e'`),
+  as a real `groovy.lang.Range`: it prints `1..5`, `getClass()` names
+  `IntRange`/`ObjectRange`/`NumberRange`, and `from`/`to`/`step(n)`/`reverse()`/
+  `size()`/`contains(x)`/`isReverse()` are its own members. Being a
+  `java.util.List` in Groovy, every `List` method and operator applies too
+  (`.each`, `.collect`, `+`, `== [1, 2, 3]`, `in`, `r[1..2]`).
+- **Regex** — `~/…/` patterns, `/…/` slashy strings (backslashes literal,
+  interpolating, multi-line), the `=~` and `==~` operators, and a stateful
+  `java.util.regex.Matcher` (`find`/`group`/`start`/`end`/`matches`/
+  `groupCount`/`pattern`/`m[i]`, iteration, and `find()` truth so `while (m)`
+  walks). `String` carries `matches`, `replaceAll`/`replaceFirst` in both the
+  `$n` and closure forms, `findAll`, `find`, and Java's specified `split` rules.
+- **`BigInteger`** — `123G`, integer literals past `Long`, `new BigInteger(…)`,
+  `as BigInteger`, and the overflowing integer `**`, as a type distinct from
+  `BigDecimal` with unbounded magnitude.
+- **Instantiable JDK classes** — `new StringBuilder()` / `StringBuffer` /
+  `StringWriter` (mutating through a shared handle, so `sb.append("a").append(1)`
+  and `sb << "a" << 1` chain), the collection classes, the box types, and
+  `BigDecimal`/`BigInteger`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, and
   `a?.member` / `a?.method()`.
 - **Control flow** — `if` / `else if` / `else`, `while`, `do`/`while`, the
@@ -248,9 +264,9 @@ Implemented and checked against Apache Groovy:
   text, so `try`/`catch` reaches its handler.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
-overloading by parameter type, script-declared class names as values,
-`BigInteger`, `Range` as a type, the `=~`/`==~` match operators, `++`/`--`
-not calling `next`/`previous`, by-reference upvalue capture).
+overloading by parameter type, script-declared class names as values, Java
+arrays, `GString` as a type, `++`/`--` not calling `next`/`previous`,
+by-reference upvalue capture).
 
 ---
 
@@ -330,7 +346,8 @@ auto getter/setter, `new`, `toString`, `getAt` subscript) on a host object heap,
 single-inheritance `extends` (virtual dispatch, `super`, `instanceof`), operator
 overloading (`plus`/`minus`/`multiply`/`div`/`remainder`/`power`/`negative`/
 `compareTo`/`equals` driving `+`/`-`/`*`/`/`/`%`/`**`/unary `-`/`<`/`>`/`<=>`/`==`),
-insertion-ordered maps, first-class ranges (`0..5` / `0..<5`), arithmetic /
+insertion-ordered maps, first-class `Range` values, `java.util.regex` patterns /
+matchers / the `=~` and `==~` operators, `BigInteger`, arithmetic /
 comparison / logic, `BigDecimal`-style division, ternary / Elvis /
 safe-navigation, Groovy truthiness, GString interpolation, `try` / `catch` /
 `finally` / `throw`, `if` / `while` / `for` / range `for-in` / `break` /
@@ -348,14 +365,14 @@ Next waves, in priority order:
    are keyed by name only, so same-named overloads collapse to the last declared.
 3. **`trait`s** — `interface` and `implements` are modeled (including `default`
    methods); `trait` is not.
-4. **A `Range` type.** `0..5` is materialised to its element list today, which is
-   exact for iteration and every `List` method but prints `[1, 2, 3, 4, 5]` where
-   Groovy prints `1..5`, and has no `step(n)`.
-5. **32-bit `Integer` semantics.** Every integer is a 64-bit value, so arithmetic
-   neither wraps at 32 bits nor promotes to `Long`.
-6. **A broader standard library** — the `=~` / `==~` match operators and
-   `Matcher` over the `~/…/` patterns `switch` already understands, instantiable
-   JDK classes (`StringBuilder`), and more `java.util`/GDK collection methods.
+4. **Java arrays.** `new int[3]` does not resolve — an array is a distinct type
+   from a `List` (`.length` versus `.size()`, class name `[I`), and modeling it
+   as a `List` would make `[1, 2, 3].length` answer where Groovy raises.
+5. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
+   `"$s".getClass()` reports `java.lang.String` where Groovy reports
+   `org.codehaus.groovy.runtime.GStringImpl`.
+6. **A broader standard library** — more `java.util`/GDK collection methods
+   (`entrySet().iterator()`, `withDefault`, …).
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
 

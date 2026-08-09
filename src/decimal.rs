@@ -294,6 +294,14 @@ pub fn abs(a: &BigDecimal) -> BigDecimal {
     a.abs()
 }
 
+/// `BigDecimal.toBigInteger()`: the value with its fraction part dropped, still
+/// carried as a scale-0 [`BigDecimal`] so it keeps its unbounded magnitude
+/// (unlike [`truncate_to_i64`], which saturates). This is what a
+/// `java.math.BigInteger` holds.
+pub fn to_big_integer(d: &BigDecimal) -> BigDecimal {
+    d.with_scale_round(0, RoundingMode::Down)
+}
+
 /// `intValue()` / `toInteger()`: truncate toward zero.
 pub fn truncate_to_i64(d: &BigDecimal) -> i64 {
     d.with_scale_round(0, RoundingMode::Down)

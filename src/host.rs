@@ -184,6 +184,10 @@ pub const GIS_CASE_TYPE: u16 = 738;
 /// pattern text; pushes the compiled pattern handle.
 pub const GREGEX: u16 = 739;
 
+/// Builtin id for materialising a `java.math.BigInteger` literal. The stack
+/// holds the literal's digits (a `String`); returns the handle of its value.
+pub const GBIGINT: u16 = 759;
+
 /// Groovy's `=~` find operator. Stack: the subject (deepest), then the pattern;
 /// pushes a `java.util.regex.Matcher` positioned before the first match.
 pub const GMATCH: u16 = 757;
@@ -258,7 +262,7 @@ pub const GSETINDEX: u16 = 752;
 pub const GPRINTF: u16 = 753;
 pub const GSPRINTF: u16 = 754;
 
-/// Builtin id for materialising a range literal. Stack: start, end, and the
+/// Builtin id for building a range literal. Stack: start, end, and the
 /// inclusive flag. Groovy counts down when the start exceeds the end and
 /// enumerates characters for single-character string endpoints.
 pub const GRANGE: u16 = 755;
@@ -320,6 +324,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GIS_CASE, b_is_case);
     vm.register_builtin(GIS_CASE_TYPE, b_is_case_type);
     vm.register_builtin(GREGEX, b_regex);
+    vm.register_builtin(GBIGINT, b_bigint);
     vm.register_builtin(GMATCH, b_match);
     vm.register_builtin(GMATCH_FULL, b_match_full);
     vm.register_builtin(GASSERT_START, b_assert_start);
@@ -676,6 +681,7 @@ fn java_class_name(v: &Value) -> String {
         Value::Array(_) => "java.util.ArrayList",
         Value::Hash(_) => "java.util.LinkedHashMap",
         Value::Undef => "null",
+        _ if as_bigint(v).is_some() => "java.math.BigInteger",
         _ if as_dec(v).is_some() => "java.math.BigDecimal",
         _ if as_omap(v).is_some() => "java.util.LinkedHashMap",
         _ if closure_meta(v).is_some() => "groovy.lang.Closure",
@@ -895,6 +901,13 @@ enum HeapObj {
     /// comparison op through [`numeric_hook`], where [`crate::decimal`] applies
     /// Groovy's exact scale rules.
     Dec(BigDecimal),
+    /// A `java.math.BigInteger` — an integer too large for a `Long`, a `G`
+    /// literal, or the result of an integer `**` that overflowed. It carries a
+    /// scale-0 [`BigDecimal`], so every exact-arithmetic path groovyrs already
+    /// has applies to it unchanged; what the separate variant buys is the
+    /// *type*, which decides `getClass()`, `instanceof`, and whether an
+    /// arithmetic result stays a `BigInteger` or widens to a `BigDecimal`.
+    BigInt(BigDecimal),
     /// A `~/…/` pattern — Groovy's `java.util.regex.Pattern`. Held on the heap
     /// because it is a value a `switch` label (and a variable) can carry, and
     /// because its *source* is what `toString` prints. The compiled form lives
@@ -1048,11 +1061,38 @@ fn as_entry(v: &Value) -> Option<(String, Value)> {
 fn as_dec(v: &Value) -> Option<BigDecimal> {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
-            Some(HeapObj::Dec(d)) => Some(d.clone()),
+            // A `BigInteger` answers here too: it is a scale-0 `BigDecimal`, so
+            // every exact-arithmetic and rendering path applies to it as it
+            // stands. Only the *type* differs, which [`as_bigint`] asks about.
+            Some(HeapObj::Dec(d)) | Some(HeapObj::BigInt(d)) => Some(d.clone()),
             _ => None,
         }),
         _ => None,
     }
+}
+
+/// Clone the value behind a `java.math.BigInteger` handle, if `v` is one.
+fn as_bigint(v: &Value) -> Option<BigDecimal> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::BigInt(d)) => Some(d.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// Allocate a `java.math.BigInteger`, truncating any fractional part the way
+/// Java's `BigDecimal.toBigInteger` does.
+fn bigint_value(d: BigDecimal) -> Value {
+    heap_push(HeapObj::BigInt(decimal::to_big_integer(&d)))
+}
+
+/// Is `v` an integer type — `Integer`, `Long`, or `BigInteger`? This is what
+/// decides whether an exact arithmetic result stays a `BigInteger`: Groovy
+/// widens to `BigDecimal` only when a real decimal takes part.
+fn is_integral(v: &Value) -> bool {
+    matches!(v, Value::Int(_) | Value::Bool(_)) || as_bigint(v).is_some()
 }
 
 /// The `BigDecimal` view of any Groovy number: a decimal as itself, an
@@ -1088,6 +1128,29 @@ fn b_dec(vm: &mut VM, _argc: u8) -> Value {
     let value = dec_value(decimal::parse(&text).unwrap_or_else(|| decimal::from_i64(0)));
     if let Value::Obj(id) = value {
         DEC_LITERALS.with(|d| d.borrow_mut().insert(text, id));
+    }
+    value
+}
+
+/// `GBIGINT`: pop a `java.math.BigInteger` literal's digits and return its
+/// handle. Interned by text like [`b_dec`], so a literal inside a loop allocates
+/// once rather than on every evaluation.
+fn b_bigint(vm: &mut VM, _argc: u8) -> Value {
+    let text = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let key = format!("{text}G");
+    if let Some(id) = DEC_LITERALS.with(|d| d.borrow().get(&key).copied()) {
+        return Value::Obj(id);
+    }
+    // The lexer already rejected malformed literals, so this parse cannot fail
+    // for compiler-emitted text.
+    let value = bigint_value(decimal::parse(&text).unwrap_or_else(|| decimal::from_i64(0)));
+    if let Value::Obj(id) = value {
+        DEC_LITERALS.with(|d| d.borrow_mut().insert(key, id));
     }
     value
 }
@@ -1607,16 +1670,20 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
         "String" => Value::str(text()),
         // `new BigDecimal("1.5")` / `new BigInteger("12")` parse with Java's own
         // character-level diagnostics.
-        "BigDecimal" | "BigInteger" => match &first() {
-            Value::Int(n) => dec_value(decimal::from_i64(*n)),
-            other => match decimal::parse_java(groovy_str(other).trim()) {
-                Ok(d) => dec_value(d),
-                Err(msg) => {
-                    raise_opt(vm, "NumberFormatException", msg.as_deref());
-                    Value::Undef
-                }
-            },
-        },
+        "BigDecimal" | "BigInteger" => {
+            let big = simple_name_of(class) == "BigInteger";
+            let carry = |d: BigDecimal| if big { bigint_value(d) } else { dec_value(d) };
+            match &first() {
+                Value::Int(n) => carry(decimal::from_i64(*n)),
+                other => match decimal::parse_java(groovy_str(other).trim()) {
+                    Ok(d) => carry(d),
+                    Err(msg) => {
+                        raise_opt(vm, "NumberFormatException", msg.as_deref());
+                        Value::Undef
+                    }
+                },
+            }
+        }
         _ => return None,
     })
 }
@@ -2233,8 +2300,8 @@ fn b_is_case_type(vm: &mut VM, _argc: u8) -> Value {
 /// not the subject — `Object.isCase(Object)` and its overrides. Stack: subject
 /// (deepest), then the label.
 ///
-/// Verified against Apache Groovy 5.0.7: a list (and therefore a materialised
-/// range) label matches when it contains the subject, a closure label matches
+/// Verified against Apache Groovy 5.0.7: a list (and therefore a range) label
+/// matches when it contains the subject, a closure label matches
 /// when calling it with the subject yields a Groovy-true value, a `Pattern`
 /// label matches when the subject's string form matches it *entirely*
 /// (`Matcher.matches`, not `find`), and every other label matches on `equals`.
@@ -2507,13 +2574,14 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         // A `StringBuilder`/`StringBuffer`/`StringWriter` is a `CharSequence`
         // too, which is what `sb instanceof CharSequence` asks.
         "CharSequence" => matches!(value, Value::Str(_)) || as_buffer(value).is_some(),
-        "StringBuilder" | "StringBuffer" | "StringWriter" | "Appendable" => {
-            as_buffer(value).is_some_and(|(c, _)| simple_name_of(c) == short || short == "Appendable")
-        }
+        "StringBuilder" | "StringBuffer" | "StringWriter" | "Appendable" => as_buffer(value)
+            .is_some_and(|(c, _)| simple_name_of(c) == short || short == "Appendable"),
         "Integer" | "Int" | "Long" | "Short" | "Byte" => matches!(value, Value::Int(_)),
         // An unsuffixed Groovy decimal is a `BigDecimal` (a host-heap handle);
-        // only a `d`/`f`-suffixed literal is an IEEE `Double`.
-        "BigDecimal" | "BigInteger" => as_dec(value).is_some(),
+        // only a `d`/`f`-suffixed literal is an IEEE `Double`. A `BigInteger`
+        // is a separate type and satisfies neither the other's test.
+        "BigDecimal" => as_dec(value).is_some() && as_bigint(value).is_none(),
+        "BigInteger" => as_bigint(value).is_some(),
         "Double" | "Float" => matches!(value, Value::Float(_)),
         "Number" => matches!(value, Value::Int(_) | Value::Float(_)) || as_dec(value).is_some(),
         "Boolean" => matches!(value, Value::Bool(_)),
@@ -2703,7 +2771,7 @@ fn b_index(vm: &mut VM, _argc: u8) -> Value {
             .unwrap_or(Value::Undef);
     }
     // Subscripting by a *collection* of indices — which is what a range
-    // subscript is, ranges being materialised lists here. `list[0..1]` is the
+    // subscript is (it is rewritten to its element list above). `list[0..1]` is the
     // sublist and `"abc"[0..1]` the substring at those positions.
     if let Value::Array(idxs) = &index {
         let pick = |len: usize| -> Vec<i64> {
@@ -3197,8 +3265,8 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     dispatch_method(vm, &recv, method, &args)
 }
 
-/// The closure-driven GDK collection methods over a list (or a materialised
-/// range): `each`, `collect`, `findAll`, `find`, `inject`, `sum`. Returns `None`
+/// The closure-driven GDK collection methods over a list (or the elements a
+/// range enumerates): `each`, `collect`, `findAll`, `find`, `inject`, `sum`. Returns `None`
 /// when `method` is not one of these (so the caller falls back to the pure GDK
 /// dispatch), else the faithful result (or a fault message).
 fn dispatch_iteration(
@@ -4565,9 +4633,26 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         .map(|o| decimal::to_groovy_string(&o) == decimal::to_groovy_string(&d))
                         .unwrap_or(false),
                 ),
+                // A `BigInteger` receiver keeps its type through these, which is
+                // what Java's own `BigInteger.abs`/`negate` do.
+                "abs" if as_bigint(recv).is_some() => bigint_value(decimal::abs(&d)),
+                "negate" if as_bigint(recv).is_some() => bigint_value(decimal::neg(&d)),
                 "abs" => dec_value(decimal::abs(&d)),
                 "negate" => dec_value(decimal::neg(&d)),
-                "toBigDecimal" => recv.clone(),
+                "toBigDecimal" => dec_value(d),
+                "toBigInteger" => bigint_value(d),
+                // `intdiv` is Groovy's integer division: exact, truncating, and
+                // (unlike `/`) not promoted to a `BigDecimal`.
+                "intdiv" => match args.first().and_then(as_exact_dec) {
+                    Some(y) => match decimal::divide(&d, &y) {
+                        Some(q) => bigint_value(q),
+                        None => {
+                            raise(vm, "ArithmeticException", "BigInteger divide by zero");
+                            Value::Undef
+                        }
+                    },
+                    None => raise_missing_method(vm, recv, method, args),
+                },
                 // Truncating conversions; `round` goes to the nearest integer.
                 "intValue" | "longValue" | "toInteger" | "toLong" => {
                     Value::int(decimal::truncate_to_i64(&d))
@@ -4696,6 +4781,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
 /// base yields a `BigDecimal` (whose scale is the base's, times the exponent),
 /// and a `double` base stays IEEE.
 fn b_power(vm: &mut VM, _argc: u8) -> Value {
+    // The compiler's static width of the base, pushed above the operands the
+    // same way `<<` and `>>>` receive it — the magnitude of a `Long` small
+    // enough to be an `Integer` cannot say which it is, and the two narrow
+    // their `**` result to different types.
+    let wide = shift_is_wide(vm);
     let exp = vm.stack.pop().unwrap_or(Value::Undef);
     let base = vm.stack.pop().unwrap_or(Value::Undef);
     let e = match as_i64(&exp) {
@@ -4720,23 +4810,29 @@ fn b_power(vm: &mut VM, _argc: u8) -> Value {
         );
         return Value::Undef;
     };
-    // A negative exponent leaves the integers: Groovy answers `1 / base**|e|`
-    // as a BigDecimal, which is exactly what `GDIV` computes.
+    // A negative exponent leaves the integers entirely: Groovy runs
+    // `Math.pow` and answers a `Double` (`2 ** -1` is the `Double` `0.5`, not a
+    // `BigDecimal`). Verified against Apache Groovy 5.0.8.
     if e < 0 {
-        let denom = decimal::pow(&decimal::from_i64(b), -e);
-        return match denom.and_then(|d| decimal::divide(&decimal::from_i64(1), &d)) {
-            Some(r) => dec_value(r),
-            None => Value::float((b as f64).powi(e as i32)),
-        };
+        return Value::float((b as f64).powf(e as f64));
     }
-    match u32::try_from(e).ok().and_then(|e| b.checked_pow(e)) {
-        Some(r) => Value::int(r),
-        // Past `Long`, Groovy promotes to `BigInteger`; the decimal carrier is
-        // the closest exact model groovyrs has.
-        None => match decimal::pow(&decimal::from_i64(b), e) {
-            Some(r) => dec_value(r),
-            None => Value::float((b as f64).powi(e.min(i32::MAX as i64) as i32)),
-        },
+    // Groovy computes an integer power in `BigInteger` and then narrows to the
+    // *base's* type if it fits: an `Integer` base answers an `Integer` while the
+    // result is in 32-bit range and a `BigInteger` past it, so `2 ** 10` is the
+    // `Integer` 1024 and `2 ** 40` is a `BigInteger` even though 1099511627776
+    // is a perfectly good `Long`. A `Long` base narrows to `Long` instead, which
+    // is why `2L ** 40` *is* a `Long`. Verified against Apache Groovy 5.0.8.
+    let Some(exact) = decimal::pow(&decimal::from_i64(b), e) else {
+        return Value::float((b as f64).powi(e.min(i32::MAX as i64) as i32));
+    };
+    let fits = match decimal::to_i64(&exact) {
+        Some(n) if wide => Some(n),
+        Some(n) if i32::try_from(n).is_ok() => Some(n),
+        _ => None,
+    };
+    match fits {
+        Some(n) => Value::int(n),
+        None => bigint_value(exact),
     }
 }
 
@@ -4851,7 +4947,8 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
         .as_str_cow()
         .into_owned();
     let v = vm.stack.pop().unwrap_or(Value::Undef);
-    match simple_name_of(&ty).as_str() {
+    let ty_simple = simple_name_of(&ty);
+    match ty_simple.as_str() {
         // Integral targets truncate toward zero, as Java's narrowing casts do.
         "int" | "Integer" | "long" | "Long" | "short" | "Short" | "byte" | "Byte" => {
             let n = match &v {
@@ -4876,20 +4973,31 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
             },
             _ => Value::float(as_f64(&v)),
         },
-        "BigDecimal" | "BigInteger" => match &v {
-            Value::Str(s) => match decimal::parse_java(s.trim()) {
-                Ok(d) => dec_value(d),
-                Err(msg) => {
-                    raise_opt(vm, "NumberFormatException", msg.as_deref());
-                    Value::Undef
+        "BigDecimal" | "BigInteger" => {
+            // `as BigInteger` truncates any fraction, which is Java's
+            // `BigDecimal.toBigInteger`.
+            let carry = |d: BigDecimal| {
+                if ty_simple == "BigInteger" {
+                    bigint_value(d)
+                } else {
+                    dec_value(d)
                 }
-            },
-            Value::Int(n) => dec_value(decimal::from_i64(*n)),
-            _ => match decimal::from_f64_exact(as_f64(&v)) {
-                Some(d) => dec_value(d),
-                None => v,
-            },
-        },
+            };
+            match &v {
+                Value::Str(s) => match decimal::parse_java(s.trim()) {
+                    Ok(d) => carry(d),
+                    Err(msg) => {
+                        raise_opt(vm, "NumberFormatException", msg.as_deref());
+                        Value::Undef
+                    }
+                },
+                Value::Int(n) => carry(decimal::from_i64(*n)),
+                _ => match as_dec(&v).or_else(|| decimal::from_f64_exact(as_f64(&v))) {
+                    Some(d) => carry(d),
+                    None => v,
+                },
+            }
+        }
         "String" => Value::str(render_value(vm, &v)),
         "boolean" | "Boolean" => Value::bool(groovy_truthy(vm, &v)),
         // A `char` cast takes the code point (`255 as char` is `ÿ`).
@@ -5163,10 +5271,12 @@ fn as_range(v: &Value) -> Option<RangeVal> {
 /// strings — Groovy's `ObjectRange` over characters (`'a'..'e'`).
 fn range_char_ends(r: &RangeVal) -> Option<(i64, i64)> {
     match (&r.from, &r.to) {
-        (Value::Str(a), Value::Str(b)) if a.chars().count() == 1 && b.chars().count() == 1 => Some((
-            a.chars().next().unwrap() as i64,
-            b.chars().next().unwrap() as i64,
-        )),
+        (Value::Str(a), Value::Str(b)) if a.chars().count() == 1 && b.chars().count() == 1 => {
+            Some((
+                a.chars().next().unwrap() as i64,
+                b.chars().next().unwrap() as i64,
+            ))
+        }
         _ => None,
     }
 }
@@ -6105,10 +6215,23 @@ fn decimal_operator(op: NumOp, a: &Value, b: &Value) -> Option<Result<Value, Str
     }
     let (x, y) = (as_exact_dec(a)?, as_exact_dec(b)?);
     let ordering = || decimal::cmp(&x, &y);
+    // `BigInteger op Integer/Long/BigInteger` stays a `BigInteger`; a real
+    // decimal operand widens the result to `BigDecimal`, and `/` always does
+    // (`100G / 3` is `33.3333333333`). So the exact result is built once and
+    // tagged with whichever of the two types it belongs to.
+    let integral =
+        (as_bigint(a).is_some() || as_bigint(b).is_some()) && is_integral(a) && is_integral(b);
+    let exact = |d: BigDecimal| {
+        if integral {
+            bigint_value(d)
+        } else {
+            dec_value(d)
+        }
+    };
     let result = match op {
-        NumOp::Add => dec_value(decimal::add(&x, &y)),
-        NumOp::Sub => dec_value(decimal::sub(&x, &y)),
-        NumOp::Mul => dec_value(decimal::mul(&x, &y)),
+        NumOp::Add => exact(decimal::add(&x, &y)),
+        NumOp::Sub => exact(decimal::sub(&x, &y)),
+        NumOp::Mul => exact(decimal::mul(&x, &y)),
         // `/` lowers to the `GDIV` builtin, but the hook still handles it for
         // completeness (an operand pair fusevm delegates directly).
         NumOp::Div => match decimal::divide(&x, &y) {
@@ -6116,13 +6239,13 @@ fn decimal_operator(op: NumOp, a: &Value, b: &Value) -> Option<Result<Value, Str
             None => return Some(Err(zero_divisor_message(&x).to_string())),
         },
         NumOp::Mod => match decimal::remainder(&x, &y) {
-            Some(r) => dec_value(r),
+            Some(r) => exact(r),
             None => return Some(Err(zero_divisor_message(&x).to_string())),
         },
         // Groovy raises a decimal to an integer power exactly; a negative or
         // fractional exponent falls back to `double`.
         NumOp::Pow => match decimal::to_i64(&y).and_then(|e| decimal::pow(&x, e)) {
-            Some(p) => dec_value(p),
+            Some(p) => exact(p),
             None => Value::float(decimal::to_f64(&x).powf(decimal::to_f64(&y))),
         },
         NumOp::Eq => Value::bool(ordering().is_eq()),

@@ -53,6 +53,10 @@ pub enum Tok {
     /// value and no `f64` can carry it. See [`crate::decimal`].
     Dec(String),
     Str(String),
+    /// An integer literal that is a `java.math.BigInteger`: `G`/`g`-suffixed, or
+    /// unsuffixed with a magnitude past `Long`. Kept as its digits, because no
+    /// machine integer can carry it.
+    BigInt(String),
     /// An interpolating (double-quoted) string that actually contains a `$`
     /// placeholder — a Groovy `GString`. A double-quoted literal with no
     /// placeholder stays a plain [`Tok::Str`], so nothing about existing
@@ -302,10 +306,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             let mut is_double = false;
             // An `L` suffix makes the literal a `Long` whatever its magnitude,
             // so `2000000000L + 2000000000L` is `4000000000` where the
-            // unsuffixed form wraps to `-294967296`. `G` asks for a
-            // `BigInteger`, which groovyrs models at 64 bits — the same
-            // "does not wrap at 32" behaviour, one width short.
+            // unsuffixed form wraps to `-294967296`. A `G` suffix on an integer
+            // literal asks for a `java.math.BigInteger` outright, however small
+            // the value: `123G` is one.
             let mut width = crate::ast::IntWidth::Int;
+            let mut big = false;
             if i < bytes.len()
                 && matches!(
                     bytes[i],
@@ -316,8 +321,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     is_float = true;
                     is_double = true;
                 }
-                if matches!(bytes[i], b'L' | b'l' | b'g' | b'G') {
+                if matches!(bytes[i], b'L' | b'l') {
                     width = crate::ast::IntWidth::Long;
+                }
+                if matches!(bytes[i], b'g' | b'G') {
+                    big = true;
                 }
                 i += 1;
             }
@@ -355,19 +363,35 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     offset: tok_start,
                 });
             } else {
-                let v: i64 = text.parse().map_err(|_| {
-                    format!("groovyrs: bad integer literal `{text}` on line {line}")
-                })?;
-                // An unsuffixed literal too large for 32 bits is a `Long` in
-                // Groovy, so its arithmetic must not wrap at 32.
-                if i32::try_from(v).is_err() {
-                    width = crate::ast::IntWidth::Long;
+                // A `G` suffix, or a magnitude past `Long`, makes the literal a
+                // `java.math.BigInteger` — which no machine integer holds, so it
+                // keeps its digits (`9223372036854775808 + 1` is
+                // `9223372036854775809`, not a wrapped negative).
+                match text.parse::<i64>() {
+                    Ok(v) if !big => {
+                        // An unsuffixed literal too large for 32 bits is a
+                        // `Long` in Groovy, so its arithmetic must not wrap
+                        // at 32.
+                        if i32::try_from(v).is_err() {
+                            width = crate::ast::IntWidth::Long;
+                        }
+                        out.push(Token {
+                            kind: Tok::Int(v, width),
+                            line,
+                            offset: tok_start,
+                        });
+                    }
+                    _ if text.bytes().all(|b| b.is_ascii_digit()) => out.push(Token {
+                        kind: Tok::BigInt(text.to_string()),
+                        line,
+                        offset: tok_start,
+                    }),
+                    _ => {
+                        return Err(format!(
+                            "groovyrs: bad integer literal `{text}` on line {line}"
+                        ))
+                    }
                 }
-                out.push(Token {
-                    kind: Tok::Int(v, width),
-                    line,
-                    offset: tok_start,
-                });
             }
             continue;
         }
@@ -651,6 +675,7 @@ fn ends_expression(t: &Tok) -> bool {
             | Tok::Int(..)
             | Tok::Float(_)
             | Tok::Dec(_)
+            | Tok::BigInt(_)
             | Tok::Str(_)
             | Tok::GStr(_)
             | Tok::Regex(_)

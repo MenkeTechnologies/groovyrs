@@ -90,7 +90,8 @@ reported as parse or compile errors, never silently mis-run.
   transitively — so `impl instanceof I` answers through a superclass that
   implements `I` and through an interface that extends another. An interface
   cannot be instantiated. `trait` is still not implemented.
-- **Closure-driven GDK iteration.** Over lists (and materialised ranges):
+- **Closure-driven GDK iteration.** Over lists (and the elements a `Range`
+  enumerates):
   `each`, `eachWithIndex`, `collect`, `findAll`, `find`, `inject` (both the
   `inject(init){…}` and seedless `inject{…}` forms), `sum` (bare, seeded, and
   closure forms), `sort`, `unique`, `max`, `min`, `groupBy`, `join`, and
@@ -126,9 +127,15 @@ reported as parse or compile errors, never silently mis-run.
   `Too many nonzero exponent digits.`, `Exponent overflow.` — plus the two
   message-*less* forms (an empty string, and an exponent mark with no digits
   after it), where `e.getMessage()` is `null`.
-- **First-class ranges.** `0..5` (inclusive) and `0..<5` (half-open) build a
-  Groovy list of the enumerated integers, so `.size()`, `.contains(x)`, `.each`,
-  and `.collect` apply.
+- **First-class ranges.** `0..5` (inclusive), `0..<5` (half-open), descending
+  (`5..1`) and character (`'a'..'e'`) — a real `groovy.lang.Range` object, not a
+  materialised list: it prints `1..5`, `getClass()` names `IntRange` /
+  `ObjectRange` / `NumberRange` from its endpoints, and `from` / `to` / `step(n)`
+  / `reverse()` / `size()` / `contains(x)` / `isReverse()` are its own members.
+  Because Groovy's `Range` *is* a `java.util.List`, every other call, operator
+  and subscript reads the list it enumerates, so `.each`, `.collect`, `+`,
+  `== [1, 2, 3]`, `in`, `[1..2]` and `instanceof List` all apply. The
+  `for (x in a..b)` loop still lowers to a counted loop and allocates nothing.
 - **Ternary, Elvis, safe navigation.** `c ? t : e`, the Elvis `a ?: b`
   (null/false-coalescing), and `a?.member` / `a?.method()` (yields `null` on a
   `null` receiver rather than faulting). All branch on Groovy truthiness.
@@ -147,6 +154,16 @@ reported as parse or compile errors, never silently mis-run.
   (`1.5e300 * 1.5e300` is `2.25E+600`). A `d`/`f`-suffixed literal stays an IEEE
   double with `Double.toString` rules (`2.5e7d` → `2.5E7`, `5.0d/0.0d` →
   `Infinity`). Value model in `src/decimal.rs`.
+- **`BigInteger`.** A `G`-suffixed integer literal (`123G`), an unsuffixed one
+  past `Long` (`9223372036854775808`), `new BigInteger("12")`, `x as BigInteger`
+  and the overflowing integer `**` are all `java.math.BigInteger`, a distinct
+  type from `BigDecimal`: `getClass()` and `instanceof` say so, and an operator
+  keeps it a `BigInteger` when every operand is integral but widens to
+  `BigDecimal` when a real decimal takes part or the operator is `/`. `**`
+  narrows to the *base's* type where it fits, which is Groovy's own rule and why
+  `2 ** 40` is a `BigInteger` while `2L ** 40` is a `Long`; a negative exponent
+  leaves the integers entirely and answers a `Double`. Magnitude is unbounded
+  (`2 ** 100` is exact).
 - **Groovy truthiness.** `null`, `0`, a zero `BigDecimal` (`0.0`, `0.00`, `0e0`),
   `""`, an empty list, an empty map, and `false` are false; every other value is
   true, and a class decides its own truth with `asBoolean()`. `!x`, `if`,
@@ -227,10 +244,21 @@ reported as parse or compile errors, never silently mis-run.
   is entered only when no label matched. The subject is evaluated once and the
   labels only until one matches. A `switch` is a `break` target but not a
   `continue` target — a `continue` inside one continues the enclosing loop.
-- **`~/…/` regex literals.** A `~/pattern/` is a `java.util.regex.Pattern`
-  value: it prints as its source text and drives a `case` label. Compiled by
-  `fancy-regex`, which covers Java's lookaround and backreferences as well as the
-  linear subset (see the simplification note below).
+- **Regex: `~/…/`, `/…/`, `=~`, `==~`, `Matcher`.** `~/pattern/` is a
+  `java.util.regex.Pattern` (it prints as its source and drives a `case` label);
+  `/pattern/` is a slashy `String`, whose backslashes are literal and which may
+  interpolate and span lines; `s =~ p` is a `java.util.regex.Matcher` and
+  `s ==~ p` a whole-input `Boolean`. The `Matcher` is stateful as Java's is —
+  `find()` moves its cursor, `group(n)` / `start()` / `end()` read the last
+  match, and its own truth is `find()`, so `while (m) { … }` walks — plus
+  `matches()`, `groupCount()`, `pattern()`, `reset()`, `size()` / `count`,
+  `m[i]`, and iteration over its matches. `String` carries `matches`,
+  `replaceAll` / `replaceFirst` (in both the `$n` and closure forms), `findAll`,
+  `find`, and a `split` that follows Java's specified rules. The `/`-versus-
+  division question is settled positionally: `/` opens a literal wherever an
+  expression may begin and divides wherever one has just ended. See
+  `src/regex.rs` for which Java *meanings* are reproduced and which constructs
+  are refused outright.
 - **`do` / `while`.** `do { … } while (cond)` runs its body before the first
   test, so it always executes at least once; `continue` targets the test.
 - **Labeled `break` / `continue`.** `outer: for (…) { … break outer }` and
@@ -269,25 +297,18 @@ reported as parse or compile errors, never silently mis-run.
   `Boolean`, `Character`, `String`, `System`, `BigDecimal`, …) *do* resolve to a
   `java.lang.Class`, so `Math.max(1, 2)`, `Integer.parseInt("42")` and
   `Integer.MAX_VALUE` work.
-- **`java.math.BigInteger` is not a type.** An integer past `Long` range has
-  nowhere to go: `2 ** 40` and `2147483647G + 1` compute the right *value* but
-  report `java.lang.Long`/`java.math.BigDecimal` where Groovy reports
-  `java.math.BigInteger`, and `2 ** 64` exceeds what an `i64` holds at all. The
-  `G` suffix parses and widens the arithmetic to 64 bits, which is as far as the
-  value model reaches.
-- **A `Range` is materialised, not a type.** `0..5` becomes the list of its
-  elements at the point it is written, so it answers every `List` method and
-  `for (x in a..b)` is exact — but `println(1..5)` prints `[1, 2, 3, 4, 5]` where
-  Groovy prints `1..5`, and `Range`-only members (`step(n)`, `from`, `to`,
-  `reverse` as a range) are absent. Descending (`5..1`) and character (`'a'..'e'`)
-  ranges *are* enumerated the way Groovy's are.
-- **`java.util.regex.Matcher` and the `=~` / `==~` operators.** A `~/…/` literal
-  is a value a `switch` label matches and `println` prints, but the match
-  operators, `Matcher.find()` / `group(n)`, and the slashy-string literal form
-  (`/a.b/`) are not implemented.
-- **`StringBuilder` and the other instantiable JDK classes.** `new
-  StringBuilder()` fails to resolve; only the *static* members of the JDK classes
-  listed above are modeled, not their instances.
+- **Java arrays.** `new int[3]` does not resolve: an array is a distinct type
+  from a `List` (it has `.length` where a `List` has `.size()`, and its class
+  name is `[I`), and groovyrs models only the `List`. Modeling it as a `List`
+  would make `[1, 2, 3].length` answer where Groovy raises, so the construct
+  faults instead.
+- **`new Random(…)` / `new Date(…)` and the other stateful JDK classes.**
+  Reproducing them means reproducing Java's exact LCG and clock, so they fault
+  rather than answering a plausible-looking different number. The instantiable
+  classes that *are* modeled: `StringBuilder`, `StringBuffer`, `StringWriter`,
+  `ArrayList`/`LinkedList`/`Vector`, `HashSet`/`LinkedHashSet`/`TreeSet`,
+  `HashMap`/`LinkedHashMap`/`TreeMap`, `Object`, the box types, `BigDecimal`,
+  `BigInteger`, and every modeled throwable.
 - **A `GString` is a `String`.** An interpolated literal produces a plain
   `java.lang.String`, so `"$s".getClass()` reports `java.lang.String` where
   Groovy reports `org.codehaus.groovy.runtime.GStringImpl`.
@@ -334,13 +355,23 @@ reported as parse or compile errors, never silently mis-run.
   script and recording it would put values under the wrong column. `assert
   "v=${x}" == "no"` therefore shows the `==` result but not `x`, where Groovy
   shows both.
-- **`~/…/` uses `fancy-regex`, not `java.util.regex`.** The shared syntax —
-  classes, quantifiers, groups, alternation, anchors, lookaround,
-  backreferences — behaves the same, but Java-only constructs (possessive
-  quantifiers `a*+`, `\p{IsAlphabetic}`-style Unicode script/block properties,
-  `\G`) are not accepted and fault at the literal. A `~/…/` value is modeled far
-  enough to be a `switch` label and to print; the `=~` / `==~` match operators
-  and `Matcher` are not implemented.
+- **A handful of `java.util.regex` constructs are refused, not approximated.**
+  The engine underneath is `fancy-regex`, chosen because Java's flavour is
+  backtracking (backreferences, lookaround) and the linear-time `regex` crate
+  rejects those by construction. `src/regex.rs` rewrites every Java *default*
+  that would otherwise silently answer a different question — ASCII-only
+  `\d`/`\w`/`\s`/`\b`, ASCII-only `(?i)`, `.` excluding all five line
+  terminators, `$` matching before a final terminator, `\Q…\E`, `\h`/`\v`/`\R`,
+  `\Z`, the POSIX `\p{Alpha}` names — so those all behave as Java's do. What has
+  no faithful translation is refused by name at compile time rather than
+  approximated: possessive quantifiers (`a*+`), atomic groups (`(?>…)`),
+  conditionals, comment groups, `\G`, `\X`, `\cX`, `\N{…}`, octal escapes,
+  Unicode *blocks* (`\p{InGreek}`), `\p{javaLowerCase}`-style `Character`
+  predicates, and the `(?m)`/`(?x)`/`(?d)`/`(?u)`/`(?U)` flags. Each raises
+  `java.util.regex.PatternSyntaxException` naming the construct.
+- **`$/…/$` dollar-slashy strings.** The `/…/` slashy form is implemented (and
+  interpolates, and spans lines); the `$/…/$` form, whose only difference is
+  that `/` needs no escape and `$$` escapes a dollar, is not lexed.
 - **A `MissingMethodException` message omits Groovy's `Possible solutions:`
   line.** Groovy appends a fuzzy suggestion list built from the receiver's real
   JDK/GDK method table (`Possible solutions: grep(), next(), size(), …`), which
@@ -428,19 +459,30 @@ reported as parse or compile errors, never silently mis-run.
   arithmetic inside a closure (`[1000000, 1000000].inject(1) { a, b -> a * b }`
   is `-727379968`).
 
+  The tracking is scoped and flow-sensitive: a function or closure body cannot
+  leak the width of a name it declares to a same-named variable outside it, a
+  `def` re-declaration or a plain assignment re-binds the width in *both*
+  directions (`def a = 5L; a = 5; a * 1000000000` wraps at 32 bits, as Groovy
+  does), an explicit `long`/`Long` declaration pins it against that narrowing
+  (`long t = 0; t = 5; t * 2000000000` stays 64-bit), branches merge by union,
+  and a call to a callable whose every `return` is statically `Long` carries
+  that width to the call site (`def f = { -> 5L }; f() * 1000000000`).
+
   What is left is a `Long` the compiler could not see *and* whose value fits an
-  `Integer` — a `1L` returned from a function, stored in a list, or passed
-  through a closure parameter. Its arithmetic then wraps at 32 bits and its
-  `getClass()` answers `java.lang.Integer`. Widening the default instead would
-  trade this for the far commoner error of never wrapping an `Integer` at all,
-  since Groovy's own default for an unsuffixed literal is `Integer`.
-- **A variable that is ever assigned a `Long` is one throughout.** The
-  compiler's width tracking is not flow-sensitive, so `def x = 0L; x = 5; x + 1`
-  keeps 64-bit arithmetic where Groovy has narrowed `x` back to an `Integer`.
-  Observable only when that arithmetic overflows.
-- **`for (x in a..b)` iterates ascending only.** A descending literal range
-  (`5..1`, which Groovy walks downward) runs zero times. The endpoint is
-  evaluated once (a body that mutates it still iterates the original range).
+  `Integer`: one stored in a list (`[5L][0] * 1000000000`), passed through a
+  closure *parameter* (`{ x -> x * 1000000000 }(5L)`), or narrowed by an
+  assignment inside a closure that runs before the use. All three need the width
+  to travel with the value at run time, which fusevm's single integer type
+  cannot carry. Their arithmetic wraps at 32 bits and `getClass()` answers
+  `java.lang.Integer`. Widening the default instead would trade this for the far
+  commoner error of never wrapping an `Integer` at all, since Groovy's own
+  default for an unsuffixed literal is `Integer`.
+- **`for (x in a..b)` iterates ascending only** when the range is written as a
+  bare literal in the loop header, which the parser lowers to a counted loop
+  that allocates nothing. A descending one (`5..1`, which Groovy walks downward)
+  runs zero times in that form; parenthesised (`for (x in (5..1))`) or through a
+  variable it builds a real `Range` and walks downward correctly. The endpoint
+  is evaluated once (a body that mutates it still iterates the original range).
 - **`sort()` / `unique()` write back only through a bare variable.** Groovy's
   `List.sort()` and `List.unique()` mutate the receiver in place and return it.
   A fusevm `Value::Array` is a value, not a reference, so the host can only
@@ -470,9 +512,11 @@ reported as parse or compile errors, never silently mis-run.
   after capture. Capture of a **script** binding (a top-level global) stays
   by-reference, matching Groovy. Boxed-cell by-reference capture across live
   frames is a later wave.
-- **Range values materialise ascending only.** `0..5` / `0..<5` enumerate to a
-  list; a descending literal range (`5..0`) yields an empty list rather than the
-  reverse sequence. `println` of a range value therefore shows the list form.
+- **A `List` has no `.length`.** `"a/b".split(/\//)` answers a `List` where
+  Groovy answers a `String[]` array, so `.length` on the result raises
+  `MissingPropertyException` — `.size()` is the spelling that works. Adding
+  `.length` to every `List` would make `[1, 2, 3].length` answer where Groovy
+  raises, which is the worse of the two errors.
 - **An unbound name reads as `null` instead of raising.** A declared-but-
   uninitialized local (`def x` then `println x`) and an entirely undeclared name
   both yield `null`; Groovy defaults the former to `null` too but raises

@@ -1516,6 +1516,10 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Dec(text))
             }
+            Tok::BigInt(text) => {
+                self.advance();
+                Ok(Expr::BigInt(text))
+            }
             Tok::Str(s) => {
                 self.advance();
                 Ok(Expr::Str(s))
@@ -2006,7 +2010,7 @@ fn expr_text(e: &Expr) -> String {
     match unrecorded(e) {
         Expr::Int(n, _) => n.to_string(),
         Expr::Float(f) => crate::decimal::format_double(*f),
-        Expr::Dec(text) => text.clone(),
+        Expr::Dec(text) | Expr::BigInt(text) => text.clone(),
         // A `String` constant renders unquoted here, unlike the power form.
         Expr::Str(s) => s.clone(),
         Expr::GString(parts) => parts

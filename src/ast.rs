@@ -271,6 +271,10 @@ pub enum Expr {
     /// An unsuffixed decimal literal — a `java.math.BigDecimal`, held as its
     /// exact source text (see [`crate::decimal`]).
     Dec(String),
+    /// A `java.math.BigInteger` literal — `123G`, or an unsuffixed integer whose
+    /// magnitude is past `Long`. Held as its digits for the same reason a
+    /// decimal is: no machine integer carries it.
+    BigInt(String),
     Str(String),
     /// An interpolating string — Groovy's `GString`. The parts render in order
     /// and concatenate; an embedded object renders through its `toString()`,
@@ -392,9 +396,11 @@ pub enum Expr {
     /// (`crate::host::GITER`), which yields a list's elements, a map's entries,
     /// a `String`'s characters, nothing for `null`, and any other value once.
     Iterable(Box<Expr>),
-    /// A first-class integer range `start..end` (inclusive) or `start..<end`
-    /// (half-open). Materialised to a Groovy list of the enumerated integers, so
-    /// `.size()`, `.contains(x)`, `.each`, and `.collect` all apply.
+    /// A range `start..end` (inclusive) or `start..<end` (half-open). Builds a
+    /// `groovy.lang.Range` object, which keeps its endpoints — so it prints
+    /// `1..5`, names `IntRange`/`ObjectRange`/`NumberRange`, and answers
+    /// `from`/`to`/`step`/`reverse`. Every list operation applies to the
+    /// elements it enumerates, because a Groovy `Range` is a `java.util.List`.
     Range {
         start: Box<Expr>,
         end: Box<Expr>,

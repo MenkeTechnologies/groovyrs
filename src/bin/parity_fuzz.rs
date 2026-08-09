@@ -111,6 +111,7 @@ enum Mode {
     Classes,
     Ranges,
     Aliasing,
+    Views,
     Mixed,
 }
 
@@ -134,6 +135,7 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Classes => "classes",
         Mode::Ranges => "ranges",
         Mode::Aliasing => "aliasing",
+        Mode::Views => "views",
         Mode::Mixed => "mixed",
     }
 }
@@ -158,6 +160,7 @@ fn mode_from(s: &str) -> Option<Mode> {
         "classes" => Mode::Classes,
         "ranges" => Mode::Ranges,
         "aliasing" => Mode::Aliasing,
+        "views" => Mode::Views,
         "mixed" => Mode::Mixed,
         _ => return None,
     })
@@ -1101,6 +1104,152 @@ fn gen_aliasing(rng: &mut Rng) -> Vec<String> {
     out
 }
 
+/// Backing lists the `views` generator windows into, each with its length so the
+/// generated `subList` bounds can be derived rather than guessed. Lengths differ
+/// so a window at the very start, the very end, and an empty one are all
+/// reachable; the duplicate-bearing list makes `unique()` through a window an
+/// order-sensitive observation.
+const VIEW_LISTS: &[(&str, usize)] = &[
+    ("[1, 2, 3, 4]", 4),
+    ("[4, 3, 2, 1]", 4),
+    ("[1, 1, 2, 2]", 4),
+    ("[5, 6, 7]", 3),
+    ("[9, 8, 7, 6, 5]", 5),
+];
+
+/// Operations that are **structural** on a `java.util.ArrayList` — each bumps
+/// the list's `modCount`, which is what invalidates a view taken before it.
+/// Applied to the backing list they must make a live view throw
+/// `ConcurrentModificationException`; applied to the view itself they must reach
+/// the backing list and re-sync the window instead.
+const VIEW_STRUCTURAL: &[&str] = &[
+    "add(9)",
+    "add(0, 9)",
+    "remove(0)",
+    "clear()",
+    "addAll([7, 8])",
+    "addAll([])",
+    "push(9)",
+    "pop()",
+    "removeLast()",
+    "sort()",
+    "unique()",
+    "removeAll([1])",
+    "retainAll([1, 2])",
+    "leftShift(9)",
+];
+
+/// Operations that leave `modCount` alone. Through the backing list every one of
+/// them must stay *visible* through a live view (a view is not a copy); through
+/// the view they must reach the backing list without invalidating any sibling.
+const VIEW_PLAIN: &[&str] = &[
+    "set(0, 9)",
+    "swap(0, 1)",
+    "size()",
+    "contains(2)",
+    "indexOf(2)",
+    "isEmpty()",
+    "first()",
+    "last()",
+    "sum()",
+    "collect { it * 2 }",
+    "each { }",
+    "toString()",
+    "reverse()",
+    "sort(false)",
+];
+
+/// A `subList` program: take a window onto a list, then read or write through
+/// one of the two references and print both.
+///
+/// This is the surface `gen_aliasing` does not reach. That mode gives one list a
+/// second *whole-list* name; a window is a second name for **part** of a list,
+/// with its own length, its own class (`java.util.ArrayList$SubList`), and
+/// Java's comodification rule on top — a structural change made to the backing
+/// list through any other reference invalidates the window permanently. Before
+/// this mode `grep -c subList src/bin/parity_fuzz.rs` was 0, so none of that was
+/// generated at all.
+///
+/// Every arm is wrapped in one handler that prints the *class* of whatever
+/// escaped, so a `ConcurrentModificationException` is a printed observation the
+/// comparison keys on rather than only an exit-status difference.
+fn gen_views(rng: &mut Rng) -> Vec<String> {
+    let (base, len) = *pick(rng, VIEW_LISTS);
+    // A window anywhere in the list, including the empty and the whole-list one.
+    let from = rng.below(len as u64 + 1) as usize;
+    let to = from + rng.below((len - from) as u64 + 1) as usize;
+    let mut out = vec![format!("def a = {base}")];
+    out.push("try {".to_string());
+    out.push(format!("  def s = a.subList({from}, {to})"));
+    out.push("  println(s.getClass().getName())".to_string());
+    match rng.below(8) {
+        // Read-only: the window's contents, its length, and the identity rules
+        // (a view is never the backing list, and never a second view of it).
+        0 => {
+            out.push("  println(s)".to_string());
+            out.push("  println(s.size())".to_string());
+            out.push("  println(a.is(s))".to_string());
+            out.push("  println(s.is(s))".to_string());
+            out.push("  println(s.is(a.subList(0, 0)))".to_string());
+        }
+        // A non-structural write through the window reaches the backing list.
+        1 => {
+            out.push(format!("  println(s.{})", pick(rng, VIEW_PLAIN)));
+            out.push("  println(s)".to_string());
+        }
+        // A structural write through the window reaches the backing list AND
+        // keeps the window usable (Java re-syncs it rather than invalidating).
+        2 => {
+            out.push(format!("  println(s.{})", pick(rng, VIEW_STRUCTURAL)));
+            out.push("  println(s)".to_string());
+            out.push("  println(s.size())".to_string());
+        }
+        // A non-structural write to the backing list shows through the window.
+        3 => {
+            out.push(format!("  println(a.{})", pick(rng, VIEW_PLAIN)));
+            out.push("  println(s)".to_string());
+        }
+        // A structural write to the backing list invalidates the window.
+        4 => {
+            out.push(format!("  println(a.{})", pick(rng, VIEW_STRUCTURAL)));
+            out.push("  println(s)".to_string());
+        }
+        // A window onto a window: writes travel all the way to the root list,
+        // and every level of the chain sees them.
+        5 => {
+            let inner = rng.below((to - from) as u64 + 1) as usize;
+            out.push(format!("  def t = s.subList(0, {inner})"));
+            out.push("  println(t.getClass().getName())".to_string());
+            out.push(format!("  println(t.{})", pick(rng, VIEW_STRUCTURAL)));
+            out.push("  println(t)".to_string());
+            out.push("  println(s)".to_string());
+        }
+        // Two windows onto one list: a structural write through one invalidates
+        // the other, a plain one does not.
+        6 => {
+            out.push("  def t = a.subList(0, 1)".to_string());
+            let op = if rng.chance(1, 2) {
+                pick(rng, VIEW_STRUCTURAL)
+            } else {
+                pick(rng, VIEW_PLAIN)
+            };
+            out.push(format!("  println(t.{op})"));
+            out.push("  println(s)".to_string());
+        }
+        // The three bounds outcomes, which are distinct throwables in the JDK
+        // and are checked in the JDK's order.
+        _ => {
+            let bad = *pick(rng, &[(-1i64, 2i64), (0, len as i64 + 3), (2, 1), (9, 5)]);
+            out.push(format!("  println(a.subList({}, {}))", bad.0, bad.1));
+        }
+    }
+    out.push("} catch (Throwable e) {".to_string());
+    out.push("  println(\"EXC:\" + e.getClass().getName())".to_string());
+    out.push("}".to_string());
+    out.push("println a".to_string());
+    out
+}
+
 /// A GDK / spread program: one list or map call, plus a spread expression and a
 /// `for-in` walk over the same value, so the three list surfaces agree.
 fn gen_gdk(rng: &mut Rng) -> Vec<String> {
@@ -1362,6 +1511,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::Classes,
                 Mode::Ranges,
                 Mode::Aliasing,
+                Mode::Views,
             ],
         )
     } else {
@@ -1382,6 +1532,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
         Mode::Classes => gen_classes(&mut rng),
         Mode::Ranges => gen_ranges(&mut rng),
         Mode::Aliasing => gen_aliasing(&mut rng),
+        Mode::Views => gen_views(&mut rng),
         _ => {
             let n = rng.range_i(1, 5) as usize;
             (0..n)
@@ -1409,6 +1560,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         | Mode::Classes
                         | Mode::Ranges
                         | Mode::Aliasing
+                        | Mode::Views
                         | Mode::Mixed => unreachable!(),
                     };
                     println_of(expr)
@@ -1689,7 +1841,7 @@ fn parse_args() -> Args {
                     mode = m;
                 } else {
                     eprintln!(
-                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|faults|switch|asserts|modzero|gdk|conversions|classes|ranges|aliasing|mixed)"
+                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|faults|switch|asserts|modzero|gdk|conversions|classes|ranges|aliasing|views|mixed)"
                     );
                     std::process::exit(2);
                 }
@@ -1700,7 +1852,7 @@ fn parse_args() -> Args {
                      options:\n  \
                      -c, --count N        cases to run (default 1000)\n  \
                      -s, --seed N         base seed (default 1)\n  \
-                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|mixed (default mixed)\n  \
+                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|views|mixed (default mixed)\n  \
                      -j, --jobs N         parallel workers (default = cores)\n  \
                      --once               replay a single --seed, minimize, dump both sides\n  \
                      --timeout-ms N       per-run timeout (default 15000; groovy boots the JVM)\n  \

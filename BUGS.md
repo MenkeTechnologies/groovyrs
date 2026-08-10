@@ -463,6 +463,77 @@ reported as parse or compile errors, never silently mis-run.
   values in that clause are read at failure time, so a variable `&&` short-
   circuited past still reports.
 
+## Aborts a Groovy program survives — open
+
+Round 7 removed the recursion aborts (see the `StackOverflowError` entry above)
+and the deep-nesting one. A differential sweep of ~33,700 degenerate programs
+then found these, which are **still open**. Each line below was run on both
+sides: Apache Groovy 5.0.8 / JVM 21.0.12, and the groovyrs build at
+`294aa8b4e9`. A panic or an abort is a parity divergence even where the happy
+path agrees, because no `catch` can see one.
+
+**Integer overflow in a host builtin panics** (debug-build overflow checks; a
+release build would wrap silently, which is the worse of the two). All seven
+sites are `src/host.rs`:
+
+| program | Groovy | groovyrs |
+|---|---|---|
+| `println Long.MIN_VALUE / -1` | `9223372036854775808` | rc=101, `attempt to calculate the remainder with overflow` |
+| `println([Long.MAX_VALUE, 1].sum())` | `-9223372036854775808` | rc=101, `attempt to add with overflow` |
+| `Long.MAX_VALUE.upto(Long.MAX_VALUE) { println it }` | prints, then loops | rc=101, `attempt to add with overflow` |
+| `Long.MIN_VALUE.times { }` | prints nothing, exits 0 | rc=101, `attempt to subtract with overflow` |
+| `println "abc".getAt(9223372036854775807)` | `MissingMethodException` | rc=101, `attempt to add with overflow` |
+| `println([1,2].withIndex(9223372036854775807))` | `MissingMethodException` | rc=101, `attempt to add with overflow` |
+| `println([1,2].indexed(9223372036854775807))` | `MissingMethodException` | rc=101, `attempt to add with overflow` |
+
+**An unbounded length reaches the allocator.** `println "abc".multiply(Long.MAX_VALUE)`
+is `IllegalArgumentException: multiply() should be called with a number ≥ 0` in
+Groovy and `capacity overflow` (rc=101) here; `def l=[1,2]; l[Long.MAX_VALUE]=1`
+is accepted by Groovy and is `capacity overflow` here; `"abc".padLeft(Long.MAX_VALUE)`
+answers `abc` in Groovy and aborts here with
+`memory allocation of 9223372036854775804 bytes failed` (rc=134). `padRight`,
+`center`, `[1]*2147483647`, `String.format("%2147483647d", 1)` and
+`1.0.round(2147483647)` are the same shape and hang rather than abort.
+
+**A self-referential collection has no cycle detection.** Groovy renders the
+back-edge as `[(this Collection)]` / `[k:(this Map)]`; every groovyrs path that
+walks the elements recurses until the Rust stack is gone:
+
+| program | Groovy | groovyrs |
+|---|---|---|
+| `def a=[]; a<<a; println a` | `[(this Collection)]` | rc=134, stack overflow |
+| `def m=[:]; m.k=m; println m` | `[k:(this Map)]` | rc=134, stack overflow |
+| `def a=[]; a<<a; println (a==a)` | `true` | rc=134, stack overflow |
+| `def a=[]; a<<a; println a.hashCode()` | `StackOverflowError` (catchable) | rc=134, stack overflow |
+| `def a=[]; def b=[a]; a<<b; println a` | `StackOverflowError` (catchable) | rc=134, stack overflow |
+
+37 reproducers dedup to this one cause, across four paths: rendering
+(`toString`, `join`, `inspect`, `dump`, a GString), hashing (`hashCode`,
+`toSet`, a list used as a map key), equality (`==`, `equals`, `contains`,
+`indexOf`), and structural walks (`flatten`, `clone`, `reverse`, `sort`,
+`unique`, `sum`, `max`, `groupBy`, `find`). Note the two rows where Groovy
+raises: `MAX_CALL_DEPTH` does not bound this one, because the recursion is a
+plain Rust function walking the heap rather than a VM frame — it needs its own
+visited-set, which is also what produces `(this Collection)`.
+
+**Non-terminating where Groovy terminates.** `class A extends A {}` and a mutual
+`extends` cycle hang in class resolution (Groovy: a compile error). A `for (x in
+1..1000000000) { break }` materialises the range before the first iteration, so
+the `break` is never reached. A `BigDecimal` with an extreme scale
+(`new BigDecimal("1E+2147483647") + 1`) expands to its full digit string. A
+40,000-entry map literal takes quadratic time to parse (10k entries 2.4 s, 20k
+8.3 s, 40k past 20 s).
+
+**One semantic divergence found in the same sweep.** `class A { def x; def
+getX() { x } }; println new A().x` prints `null` in Groovy — a bare field name
+inside the declaring class reads the field and must not route back through the
+getter — where groovyrs recurses and now raises `StackOverflowError`.
+
+**Not a divergence**, recorded so a later sweep does not re-report them:
+`Long.MAX_VALUE.times {}` and `(1..Long.MAX_VALUE).each {}` loop forever in
+Groovy too, and `while (true) { try { return 1 } finally { continue } }` is an
+infinite loop on both sides.
+
 ## Not implemented (errors today)
 
 - **`trait`.** `class`, `interface`, `extends` (single inheritance for a class,

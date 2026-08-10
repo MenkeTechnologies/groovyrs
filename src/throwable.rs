@@ -49,6 +49,15 @@ const THROWABLES: &[(&str, &str, &str)] = &[
         "java.lang",
     ),
     ("ClassCastException", "RuntimeException", "java.lang"),
+    // What `value as Type` raises when no coercion to `Type` exists. Groovy's
+    // own subclass of the JDK's `ClassCastException`, verified on 5.0.8 by
+    // `GroovyCastException.class.getSuperclass().getName()`, so a script's
+    // `catch (ClassCastException e)` catches a failed cast.
+    (
+        "GroovyCastException",
+        "ClassCastException",
+        "org.codehaus.groovy.runtime.typehandling",
+    ),
     ("InterruptedException", "Exception", "java.lang"),
     ("CloneNotSupportedException", "Exception", "java.lang"),
     ("AssertionError", "Error", "java.lang"),
@@ -111,6 +120,30 @@ mod tests {
     /// it, and a typo here would silently break `catch` matching.
     #[test]
     fn supertypes_are_declared_before_their_subtypes() {
+        // The loop below is doubly vacuous on its own: it asserts nothing if
+        // `all()` yields nothing, and its one assertion is further gated on the
+        // supertype being `Some`. A `THROWABLES` whose supertype column got
+        // blanked — `""` maps to `None` — would pass having compared zero pairs,
+        // and that is exactly the "typo here would silently break `catch`
+        // matching" bug this test exists to catch. Pin that there is a table and
+        // that nearly all of it is parented before walking it.
+        let entries: Vec<_> = all().collect();
+        assert!(
+            entries.len() >= 25,
+            "only {} throwables in the table — it is truncated or `all()` \
+             stopped yielding, so the ordering check below guards nothing",
+            entries.len()
+        );
+        let parented = entries.iter().filter(|(_, sup, _)| sup.is_some()).count();
+        assert_eq!(
+            parented,
+            entries.len() - 1,
+            "exactly one throwable (`Throwable`) may be rootless; {} of {} have \
+             no supertype, so the supertype column has lost entries",
+            entries.len() - parented,
+            entries.len()
+        );
+
         let mut seen: Vec<&str> = Vec::new();
         for (name, sup, _) in all() {
             if let Some(s) = sup {
@@ -134,6 +167,12 @@ mod tests {
         assert_eq!(
             qualified("GroovyRuntimeException"),
             "groovy.lang.GroovyRuntimeException"
+        );
+        // Groovy's own cast failure lives outside both `java.*` and
+        // `groovy.lang` — a script that prints it sees the full path.
+        assert_eq!(
+            qualified("GroovyCastException"),
+            "org.codehaus.groovy.runtime.typehandling.GroovyCastException"
         );
         // A user subclass keeps its bare script name (`MyEx: q` in Groovy).
         assert_eq!(qualified("MyEx"), "MyEx");

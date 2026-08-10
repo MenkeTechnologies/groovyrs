@@ -8,6 +8,18 @@ use std::process::Command;
 /// Run a Groovy source string through the `groovy` binary and return
 /// (stdout, ok).
 fn run(src: &str) -> (String, bool) {
+    let (out, _, ok) = run_full(src);
+    (out, ok)
+}
+
+/// [`run`], keeping **stderr** as well — which is where a fault's class and
+/// message go (`groovyrs: <throwable>: <reason>`).
+///
+/// A test that asserts only `!ok` cannot tell one failure from another: a
+/// dispatch miss, a parse error and a panic all exit non-zero, so the throwable
+/// the test is named for is never actually checked. Pinning stderr is what makes
+/// those tests measure the thing they claim to.
+fn run_full(src: &str) -> (String, String, bool) {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("groovyrs_test_{}.groovy", fasthash(src)));
     std::fs::write(&path, src).unwrap();
@@ -18,6 +30,7 @@ fn run(src: &str) -> (String, bool) {
     let _ = std::fs::remove_file(&path);
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
         out.status.success(),
     )
 }
@@ -308,9 +321,18 @@ fn list_method_chain_on_literal() {
 
 #[test]
 fn unknown_method_is_an_error() {
-    // A dispatch miss must fault, not mis-run.
-    let (_out, ok) = run("def s = \"hi\"\nprintln s.frobnicate()");
+    // A dispatch miss must fault, not mis-run — and the fault has to be the
+    // `MissingMethodException` Groovy raises, naming the method and the
+    // receiver class. `!ok` alone passes for a parse error or a panic too.
+    let (out, err, ok) = run_full("def s = \"hi\"\nprintln s.frobnicate()");
     assert!(!ok, "unknown method should fault");
+    assert_eq!(out, "");
+    assert_eq!(
+        err,
+        "groovyrs: groovy.lang.MissingMethodException: No signature of method: \
+         frobnicate for class: java.lang.String is applicable for argument \
+         types: () values: []\n"
+    );
 }
 
 // ── Closures ──────────────────────────────────────────────────────────────
@@ -441,9 +463,12 @@ fn safe_navigation_short_circuits_on_null() {
 
 #[test]
 fn unresolved_call_still_faults() {
-    // A call through an undefined name (not a closure) remains an error.
-    let (_out, ok) = run("println foo(1)");
+    // A call through an undefined name (not a closure) remains an error, and
+    // the diagnostic names the unresolved name rather than any other failure.
+    let (out, err, ok) = run_full("println foo(1)");
     assert!(!ok, "calling an undefined non-closure must fault");
+    assert_eq!(out, "");
+    assert_eq!(err, "groovyrs: unresolved reference: foo\n");
 }
 
 // ── Nested-closure upvalue capture ──────────────────────────────────────────
@@ -595,15 +620,24 @@ fn closure_in_method_captures_this_for_field_access() {
 
 #[test]
 fn new_of_unknown_class_faults() {
-    let (_out, ok) = run("def x = new Nonexistent()");
+    let (out, err, ok) = run_full("def x = new Nonexistent()");
     assert!(!ok, "constructing an unregistered class must fault");
+    assert_eq!(out, "");
+    assert_eq!(err, "groovyrs: unable to resolve class Nonexistent\n");
 }
 
 #[test]
 fn unknown_method_on_instance_faults() {
     let src = "class C { def v = 1 }\ndef c = new C()\nprintln c.nope()";
-    let (_out, ok) = run(src);
+    let (out, err, ok) = run_full(src);
     assert!(!ok, "an unknown method on an instance must fault");
+    assert_eq!(out, "");
+    // A script-declared class prints bare — no package — in the message.
+    assert_eq!(
+        err,
+        "groovyrs: groovy.lang.MissingMethodException: No signature of method: \
+         nope for class: C is applicable for argument types: () values: []\n"
+    );
 }
 
 // ── Subscript / getAt ───────────────────────────────────────────────────────
@@ -1102,9 +1136,20 @@ fn decimal_accumulates_across_a_loop() {
 fn decimal_division_by_zero_aborts() {
     // Groovy raises ArithmeticException; groovyrs faults, which likewise aborts
     // the script rather than yielding an f64 Infinity.
-    let (out, ok) = run("println 1.0 / 0\nprintln \"unreachable\"");
-    assert!(!ok);
+    let (out, err, ok) = run_full("println 1.0 / 0\nprintln \"unreachable\"");
+    assert!(
+        !ok,
+        "a zero divisor must abort rather than yield an Infinity"
+    );
     assert_eq!(out, "");
+    // `out == ""` alone is satisfied by any pre-`println` failure, including a
+    // parse error on the literal. The class and message are the behaviour under
+    // test: `/` promotes to `BigDecimal`, so this is `BigDecimal.divide`s
+    // `Division by zero` and not the `/ by zero` an integral divide gives.
+    assert_eq!(
+        err,
+        "groovyrs: java.lang.ArithmeticException: Division by zero\n"
+    );
 }
 
 // ── Groovy truthiness ───────────────────────────────────────────────────────
@@ -1305,9 +1350,13 @@ println("before")
 try { throw new Exception("x") } catch (IllegalStateException e) { println("no") }
 println("unreachable")
 "#;
-    let (out, ok) = run(src);
+    let (out, err, ok) = run_full(src);
     assert!(!ok, "an uncaught exception must exit non-zero");
     assert_eq!(out, "before\n");
+    // Which throwable escaped is the point of the test. A handler that matched
+    // the wrong class, or a different exception raised from the same line,
+    // stops execution in exactly the same place and prints the same stdout.
+    assert_eq!(err, "groovyrs: Caught: java.lang.Exception: x\n");
 }
 
 #[test]
@@ -1559,9 +1608,15 @@ println("before")
 try { println("hi".nope()) } catch (IllegalStateException e) { println("no") }
 println("unreachable")
 "#;
-    let (out, ok) = run(src);
+    let (out, err, ok) = run_full(src);
     assert!(!ok, "an unmatched runtime fault must exit non-zero");
     assert_eq!(out, "before\n");
+    assert_eq!(
+        err,
+        "groovyrs: Caught: groovy.lang.MissingMethodException: No signature of \
+         method: nope for class: java.lang.String is applicable for argument \
+         types: () values: []\n"
+    );
 }
 
 #[test]
@@ -1760,8 +1815,15 @@ println("done")
 
 #[test]
 fn a_break_naming_no_enclosing_loop_is_a_compile_error() {
-    let (_out, ok) = run("for (i in 0..2) { break nope }");
+    let (out, err, ok) = run_full("for (i in 0..2) { break nope }");
     assert!(!ok, "a label with no matching loop must not compile");
+    assert_eq!(out, "");
+    // A *compile* error, so it names the label and the line — asserting the
+    // text is what distinguishes it from the runtime faults above.
+    assert_eq!(
+        err,
+        "groovyrs: no enclosing loop labeled `nope` on line 1\n"
+    );
 }
 
 // ── assert (power assert) ───────────────────────────────────────────────────
@@ -1976,9 +2038,13 @@ try { x %= z } catch (ArithmeticException e) { println(e.message) }
 
 #[test]
 fn an_uncaught_modulo_by_zero_exits_nonzero() {
-    let (out, ok) = run("def z = 0\nprintln(\"a\")\nprintln(7 % z)\nprintln(\"b\")");
+    let (out, err, ok) = run_full("def z = 0\nprintln(\"a\")\nprintln(7 % z)\nprintln(\"b\")");
     assert!(!ok, "an uncaught ArithmeticException must exit non-zero");
     assert_eq!(out, "a\n");
+    // `%` on two integers stays integral, so this is the JVM's own `/ by zero`
+    // and not the `Division by zero` that `BigDecimal.divide` carries — the two
+    // wordings are what distinguish the promoted path from the native one.
+    assert_eq!(err, "groovyrs: java.lang.ArithmeticException: / by zero\n");
 }
 
 // ── Interfaces (`interface`, `implements`, `default` methods) ──────────────
@@ -2401,14 +2467,29 @@ fn iterator_is_a_live_cursor_over_a_list_a_map_and_a_string() {
 #[test]
 fn pop_takes_the_first_element_and_remove_last_the_last() {
     // Groovy's `List.pop` is not a stack pop — it removes the *head*. Both it
-    // and `removeLast` raise on an empty list, each naming its own method.
+    // and `removeLast` raise `NoSuchElementException` on an empty list, but they
+    // are NOT symmetric about the message: `pop` explains itself and
+    // `removeLast` throws a bare `new NoSuchElementException()`, whose message
+    // is `null`.
+    //
+    // This test previously expected `Cannot removeLast() an empty List`, which
+    // Groovy has never printed — the implementation interpolated the method name
+    // into `pop`'s sentence and the expectation was written from the
+    // implementation rather than from the reference. Re-verified against Apache
+    // Groovy 5.0.8 on JDK 21, which prints exactly the two lines below.
+    //
+    // The class is now asserted alongside the message. The old expectation read
+    // `getMessage()` only, so it could not have told a `NoSuchElementException`
+    // from any other throwable carrying the same text.
     let (out, _) = run("def a = [1, 2, 3]\nprintln a.pop()\nprintln a\n\
          def b = [1, 2, 3]\nprintln b.removeLast()\nprintln b\n\
-         try { [].pop() } catch (t) { println t.getMessage() }\n\
-         try { [].removeLast() } catch (t) { println t.getMessage() }");
+         try { [].pop() } catch (t) { println t.getClass().getName() + '|' + t.getMessage() }\n\
+         try { [].removeLast() } catch (t) { println t.getClass().getName() + '|' + t.getMessage() }");
     assert_eq!(
         out,
-        "1\n[2, 3]\n3\n[1, 2]\nCannot pop() an empty List\nCannot removeLast() an empty List\n"
+        "1\n[2, 3]\n3\n[1, 2]\n\
+         java.util.NoSuchElementException|Cannot pop() an empty List\n\
+         java.util.NoSuchElementException|null\n"
     );
 }
 
@@ -3162,6 +3243,46 @@ fn a_throw_from_a_declaration_or_a_condition_reaches_the_catch() {
     ));
     assert!(ok);
     assert_eq!(out, "caught:decl\ncaught:if\ncaught:while\n");
+}
+
+#[test]
+fn double_equals_compares_bits_so_nan_equals_itself_and_zero_is_signed() {
+    // `Double.equals(Object)` was missing entirely — every call answered
+    // `MissingMethodException`, including `Double.NaN.equals(Double.NaN)`.
+    //
+    // It is not `==`. It compares `doubleToLongBits`, so it disagrees with `==`
+    // at exactly the two values IEEE treats specially, in opposite directions:
+    // NaN equals itself under `equals` (every payload folds to one canonical
+    // pattern) and `-0.0` does NOT equal `+0.0`, which is the reverse of what
+    // `==` says about both. It is also typed — only another `Double` can be
+    // equal, so the `BigDecimal` `1.5` and the `Integer` `1` are not.
+    //
+    // The last two lines pin the `equals`/`hashCode` contract that the bit rule
+    // exists to keep: two values that are `equals` must hash alike, and the
+    // canonical-NaN fold in `double_hash` is the same fold used here.
+    //
+    // Every line is the stdout of Apache Groovy 5.0.8 on JDK 21.
+    let (out, ok) = run(concat!(
+        "println([ Double.NaN.equals(Double.NaN), (0.0d).equals(-0.0d), (-0.0d).equals(0.0d) ])\n",
+        "println([ (0.0d).equals(0.0d), (1.5d).equals(1.5d), (1.5d).equals(2.0d) ])\n",
+        "println([ (1.5d).equals(1.5), (1.0d).equals(1), (1.5d).equals(\"x\"), (1.5d).equals(null) ])\n",
+        "println([ Double.POSITIVE_INFINITY.equals(Double.POSITIVE_INFINITY), \
+         Double.POSITIVE_INFINITY.equals(Double.NEGATIVE_INFINITY) ])\n",
+        "println([ Double.NaN.equals(Double.NaN), Double.NaN.hashCode() == Double.NaN.hashCode() ])\n",
+        "println([ (0.0d).equals(-0.0d), (0.0d).hashCode() == (-0.0d).hashCode() ])\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[true, false, false]\n",
+            "[true, true, false]\n",
+            "[false, false, false, false]\n",
+            "[true, false]\n",
+            "[true, true]\n",
+            "[false, false]\n",
+        )
+    );
 }
 
 #[test]

@@ -70,6 +70,19 @@ fn examples_match_frozen_groovy_output() {
         expected.len()
     );
 
+    // …but `0 == 0` satisfies that, and the comparison below is a bodyless loop:
+    // an `examples/` glob that stopped matching (an extension rename, a moved
+    // directory) together with a snapshot that parsed to nothing would make this
+    // whole suite green having compared not one program. A corpus that measures
+    // nothing is an error, not a pass — the same rule `parity-scripts/run.sh`
+    // and `fuzz.sh` already enforce for their own corpora.
+    assert!(
+        files.len() >= 20,
+        "only {} examples/*.groovy found — the corpus is missing or the glob \
+         stopped matching, so this test is no longer comparing anything",
+        files.len()
+    );
+
     let mut failures = Vec::new();
     for (f, (exp_name, exp_out)) in files.iter().zip(expected.iter()) {
         let base = f.file_name().unwrap().to_string_lossy().to_string();

@@ -670,9 +670,32 @@ reported as parse or compile errors, never silently mis-run.
   itself (while `<`, `>`, `<=`, `>=` against a NaN are all `false`, as they are
   here). Both operands are numeric, so fusevm answers `==` natively and the
   strict numeric hook — which only sees non-numeric operands — never gets the
-  chance. Intercepting it would mean routing every `==` through a builtin, on
-  the hottest operator in the language, to fix the one value that is not equal
-  to itself. `<=>`, `sort`, `max` and `min` all reproduce Groovy's NaN ordering
+  chance.
+
+  **This is not a fusevm limitation, and the earlier note that called it one was
+  wrong.** The host-side comparator already gets NaN right: `values_equal`
+  reaches `decimal_operator`, and `[Double.NaN].contains(Double.NaN)` and
+  `[Double.NaN] == [Double.NaN]` both answer `true` today. Every path that runs
+  through the host is already correct; the only wrong answer comes from the
+  *compiler* choosing fusevm's native `Op::NumEq` for a bare `==`. Nothing about
+  fixing it requires a fusevm change — it requires the compiler to route `==` to
+  a builtin when an operand may be a `Double`, exactly as `BinOp::Shr` already
+  routes to `GSHR` when `shr_receiver_is_object` says the receiver is not a
+  number.
+
+  What blocks it is that `Compiler` has no static float typing. It tracks
+  `Long`-ness (`is_wide`/`wide_vars`/`pinned_wide`) and object-ness
+  (`obj_vars`), and a `may_be_double` analysis would be the third of that same
+  shape — `d`/`f`-suffixed literals, `Double.*` static reads, `Math.*` results,
+  `as double`, `double`-pinned declarations, and arithmetic over those. The cost
+  is also narrower than previously recorded: only `Double`-typed comparisons
+  would lose the native op, not "every `==` in the language" — an `Integer`,
+  `String` or `BigDecimal` comparison can never be a NaN and keeps `NumEq`, so
+  loop counters are untouched. Sized as a compiler dataflow addition, not a
+  VM change; still open, but open for a different and smaller reason than
+  recorded before.
+
+  `<=>`, `sort`, `max` and `min` all reproduce Groovy's NaN ordering
   (`[1.0d, Double.NaN, 0.5d].sort()` is `[0.5, 1.0, NaN]`, and `max`/`min` both
   answer `NaN`, which is Groovy's own inconsistency — its `sort` uses
   `Double.compare` and its `max`/`min` scan with the primitive `>`/`<`).

@@ -1,0 +1,210 @@
+# Probe corpus for the exception-MESSAGE audit — run it the same way as
+# `probes.txt`:  bash parity-scripts/fuzz.sh parity-scripts/messages.txt
+#
+# Why this file is separate from `probes.txt`. The harness wraps every probe in
+# `catch (Throwable t) { println "EXC:" + t.getClass().getName() }`, so a probe
+# that merely throws is compared on its exception *class* and nothing else. The
+# message text — the part a `format!` in the Rust source produces — is never
+# looked at. A message can be the wording of a JDK that is not the oracle's and
+# still pass every probe in `probes.txt`.
+#
+# That is not hypothetical. `"ab".substring(0, 9)` carried
+# `begin 0, end 9, length 2`, the JDK 17 wording, frozen in the Rust source,
+# while the sibling subscript path already emitted JDK 19's
+# `Range [0, 9) out of bounds for length 2` — two spellings of one bound, from
+# one build. The version gate in `oracle-jvm.sh` cannot see a string frozen in
+# the source, and neither can a probe that only prints a class name.
+#
+# So every probe here prints `class | message`. Each one triggers a distinct
+# message-producing site in `src/host.rs`. Adding a `raise(…)` with new wording
+# means adding the probe that pins it.
+#
+# Probes are separated by a line containing only `%%`.
+# ── String bounds: three separate sites, one JDK wording ──
+try { "ab"[9] } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { "ab".substring(0, 9) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { "ab".substring(5) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { "ab".charAt(9) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { "abcdef".substring(4, 2) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { "ab"[-9] } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+
+%%
+# ── List bounds ──
+try { [1].get(5) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { [1, 2, 3].get(-9) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { [1, 2, 3][-9] } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def a = [1, 2, 3]; a.set(7, 0) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def a = [1, 2, 3]; a.remove(7) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def a = [1, 2, 3]; a.add(9, 0) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+
+%%
+# ── subList: the JDK checks fromIndex, then toIndex, then the ordering ──
+try { [1, 2, 3].subList(-1, 2) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { [1, 2, 3].subList(0, 9) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { [1, 2, 3].subList(2, 1) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+
+%%
+# ── Empty-list access ──
+try { [].first() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { [].last() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { [].head() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { [].pop() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { [].removeLast() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println([].min()) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+
+%%
+# ── null receiver ──
+try { def x = null; x.foo() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def x = null; x.size() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def x = null; x.foo = 1 } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def x = null; println x.foo } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def x = null; int y = x; println y } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def x = null; long y = x; println y } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def x = null; double y = x; println y } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def x = null; boolean y = x; println y } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def x = null; x.foo() } catch (Throwable t) { println t.toString() }
+
+%%
+# ── Arithmetic ──
+try { println 1 / 0 } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1.intdiv(0) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1 % 0 } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1G / 0G } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1G.intdiv(0G) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1.0G / 0.0G } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 0 / 0 } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1.0 / 0.0G } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+
+%%
+# ── Number parsing ──
+try { "zork".toInteger() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { "".toInteger() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { " 12 ".toInteger(); println "ok" } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { "zork".toLong() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { "zork".toDouble() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { "zork".toBigInteger() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { "zork".toBigDecimal() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { Integer.parseInt("zork") } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println (Double.NaN as BigDecimal) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println (Double.POSITIVE_INFINITY as BigDecimal) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+
+%%
+# ── Missing method / missing property: the full Groovy wording ──
+try { "s".zork() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { 1.zork(2, "x") } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { [1, 2].zork() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { [a: 1].zork() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println "s".zork } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1.zork } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println zork } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println (new Object().zork) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { "s".zork() } catch (Throwable t) { println t.toString() }
+%%
+try { println zork } catch (Throwable t) { println t.toString() }
+
+%%
+# ── Operators applied to operands that carry no such operator ──
+try { println 2 ** "x" } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println "x" ** 2 } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1 >> "x" } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1 >>> "x" } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1.0 >> 2 } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1.0 >>> 2 } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1 & "x" } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1 | "x" } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println 1 ^ "x" } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+
+%%
+# ── Casts ──
+try { println ("x" as Integer) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println ([1, 2] as Integer) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { Integer n = (Integer) "x"; println n } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+
+%%
+# ── Regex ──
+try { def m = ("a" =~ /b/); println m.group() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def m = ("a" =~ /a/); m.find(); println m.group(9) } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { println ("a" =~ /(/) } catch (Throwable t) { println t.getClass().getName() }
+
+%%
+# ── Iterator exhaustion / concurrent modification ──
+try { def it = [1].iterator(); it.next(); it.next() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { def a = [1, 2, 3]; def v = a.subList(0, 2); a.add(4); println v.size() } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+
+%%
+# ── assert ──
+try { assert 1 == 2 : "nope" } catch (Throwable t) { println t.getClass().getName() + ' | ' + t.message }
+%%
+try { throw new IllegalStateException("bad") } catch (Throwable t) { println t.toString() }
+%%
+try { throw new IllegalStateException() } catch (Throwable t) { println t.toString() + ' | ' + t.message }
+%%
+try { throw new RuntimeException("r") } catch (Throwable t) { println t.toString() }
+
+%%
+# ── The class names those messages interpolate ──
+println([1, 1L, 1.0, 1.0f, 1.0G, 1G, "s", true, [1], [a: 1], null].collect { it == null ? 'null' : it.getClass().getName() })
+%%
+println([1, 1L, 1.0, 1.0G, 1G, "s", true].collect { it.getClass().getSimpleName() })

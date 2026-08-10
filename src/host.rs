@@ -729,6 +729,149 @@ fn raise_missing_method_wide(
     Value::Undef
 }
 
+/// Is `v` one of Groovy's `Number` types — the receivers a bitwise, shift or
+/// `**` operator is *defined* on? A `Boolean` is deliberately excluded: it
+/// carries its own `and`/`or`/`xor` (so `true & false` is `false`) but is not a
+/// `Number`, and `true & 1` raises `MissingMethodException` naming
+/// `java.lang.Boolean`.
+fn is_number(v: &Value) -> bool {
+    matches!(v, Value::Int(_) | Value::Float(_)) || as_dec(v).is_some()
+}
+
+/// Is `v` an `Integer`/`Long`/`BigInteger` — a number whose bits Java will
+/// actually shift or mask? [`is_integral`] answers the *arithmetic tower*
+/// question and counts a `Boolean`; this one answers the *operator* question
+/// and does not.
+fn is_integral_number(v: &Value) -> bool {
+    matches!(v, Value::Int(_)) || as_bigint(v).is_some()
+}
+
+/// Raise what Groovy raises when a bitwise, shift or `**` operator is applied to
+/// operands it is not defined on. `op` is the Groovy *method* name the operator
+/// desugars to — `leftShift`, `rightShift`, `rightShiftUnsigned`, `and`, `or`,
+/// `xor`, `power`.
+///
+/// Four different throwables, keyed on which operand is wrong and how. All four
+/// verified against Apache Groovy 5.0.8 on JDK 21 (`parity-scripts/messages.txt`
+/// pins each one):
+///
+/// | operands | throwable and message |
+/// |---|---|
+/// | `null >> 2` | `NullPointerException: Cannot invoke method rightShift() on null object` |
+/// | `"x" >> 2`, `1 >> "x"`, `box >> 2` | `MissingMethodException: No signature of method: rightShift for class: java.lang.String is applicable for argument types: (Integer) values: [2]` |
+/// | `1 >> 2.0` | `UnsupportedOperationException: Shift distance must be an integral type, but 2.0 (java.math.BigDecimal) was supplied` |
+/// | `1.0 >> 2`, `1 & 2.0`, `1G >>> 2` | `UnsupportedOperationException: Cannot use rightShift() on this number type: java.math.BigDecimal with value: 1.0` |
+///
+/// Two orderings in that table are load-bearing and were read off the oracle
+/// rather than reasoned out. A non-`Number` right operand outranks everything:
+/// `1G >>> "x"` is the `MissingMethodException`, not the "`BigInteger` has no
+/// `>>>`" `UnsupportedOperationException`. And the mask operators name the
+/// **left** operand even when the right one is what is wrong — `1 & 2.0` reports
+/// `java.lang.Integer with value: 1`, saying nothing about the `2.0`.
+fn raise_operator_operand(vm: &mut VM, op: &str, lhs: &Value, rhs: &Value) -> Value {
+    // A null receiver never gets as far as the operator: it is the same NPE any
+    // method call on `null` raises, named after the method the operator is.
+    if matches!(lhs, Value::Undef) {
+        raise(
+            vm,
+            "NullPointerException",
+            &format!("Cannot invoke method {op}() on null object"),
+        );
+        return Value::Undef;
+    }
+    // A receiver that is not a `Number` has no such method at all, and neither
+    // does a `Number` handed an argument no overload accepts. `**` stops here
+    // for every remaining case: it is defined on *any* pair of `Number`s
+    // (`2G ** 2.0` is `4`), so a `Number` receiver and a `Number` argument
+    // cannot reach the operand-shape errors below.
+    if !is_number(lhs) || !is_number(rhs) || op == "power" {
+        return raise_missing_method(vm, lhs, op, std::slice::from_ref(rhs));
+    }
+    let unsupported_on = |vm: &mut VM, v: &Value| {
+        raise(
+            vm,
+            "UnsupportedOperationException",
+            &format!(
+                "Cannot use {op}() on this number type: {} with value: {}",
+                java_class_name(v),
+                groovy_str(v)
+            ),
+        );
+    };
+    // `BigInteger` is two's-complement but unbounded, so it has no fill width
+    // for `>>>` and Groovy declines the operator outright — while `1G >> 2` and
+    // `1G & 3G` both answer.
+    let no_unsigned_fill = op == "rightShiftUnsigned" && as_bigint(lhs).is_some();
+    if !is_integral_number(lhs) || no_unsigned_fill {
+        unsupported_on(vm, lhs);
+        return Value::Undef;
+    }
+    // An integral receiver and a fractional argument: the shifts blame the
+    // distance, the mask operators blame the receiver.
+    if matches!(op, "leftShift" | "rightShift" | "rightShiftUnsigned") {
+        raise(
+            vm,
+            "UnsupportedOperationException",
+            &format!(
+                "Shift distance must be an integral type, but {} ({}) was supplied",
+                groovy_str(rhs),
+                java_class_name(rhs)
+            ),
+        );
+    } else {
+        unsupported_on(vm, lhs);
+    }
+    Value::Undef
+}
+
+/// The class a `GroovyCastException` names for an `as` target. A *primitive*
+/// target reports its **wrapper** — `[1, 2] as int` blames `java.lang.Integer`,
+/// not `int` — and the numeric wrappers and `java.math` pair carry their
+/// packages. Anything unrecognised is a script-declared class, which prints
+/// bare. Verified against Apache Groovy 5.0.8.
+fn cast_target_class(ty_simple: &str) -> String {
+    match ty_simple {
+        "int" | "Integer" => "java.lang.Integer",
+        "long" | "Long" => "java.lang.Long",
+        "short" | "Short" => "java.lang.Short",
+        "byte" | "Byte" => "java.lang.Byte",
+        "double" | "Double" => "java.lang.Double",
+        "float" | "Float" => "java.lang.Float",
+        "char" | "Character" => "java.lang.Character",
+        "boolean" | "Boolean" => "java.lang.Boolean",
+        "String" => "java.lang.String",
+        "BigDecimal" => "java.math.BigDecimal",
+        "BigInteger" => "java.math.BigInteger",
+        other => other,
+    }
+    .to_string()
+}
+
+/// Raise the `GroovyCastException` a `value as Type` with no such coercion
+/// raises. A **map** source has its own wording — Groovy tries to build the
+/// target from the map's keys first and reports why it could not — while every
+/// other source reports the value and both class names. Both verified against
+/// Apache Groovy 5.0.8:
+///
+/// ```text
+/// [1, 2] as Integer  →  Cannot cast object '[1, 2]' with class 'java.util.ArrayList' to class 'java.lang.Integer'
+/// [a: 1] as Integer  →  Cannot coerce a map to class java.lang.Integer because it is a final class
+/// ```
+fn raise_cast(vm: &mut VM, v: &Value, ty_simple: &str) -> Value {
+    let target = cast_target_class(ty_simple);
+    let message = if as_omap(v).is_some() || matches!(v, Value::Hash(_)) {
+        format!("Cannot coerce a map to class {target} because it is a final class")
+    } else {
+        format!(
+            "Cannot cast object '{}' with class '{}' to class '{target}'",
+            groovy_str(v),
+            java_class_name(v)
+        )
+    };
+    raise(vm, "GroovyCastException", &message);
+    Value::Undef
+}
+
 /// Raise `groovy.lang.MissingPropertyException` for an unresolved `recv.name`.
 fn raise_missing_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     raise(
@@ -2977,7 +3120,22 @@ fn dispatch_matcher_method(
             raise(vm, "IllegalStateException", "No match found");
             Value::Undef
         }
-        "group" => group(args.first().and_then(as_i64).unwrap_or(0).max(0) as usize),
+        // A group index the pattern has no group for is an
+        // `IndexOutOfBoundsException`, not a null: `Matcher.group(int)` range-
+        // checks before it reads. Clamping the index to `0` instead turned
+        // `m.group(9)` into the whole match and `m.group(-1)` into it as well.
+        // The bound is the captured-group vector's length — slot 0 is the whole
+        // match, so `("a" =~ /a/)` has exactly one and `group(1)` is already out.
+        "group" => {
+            let n = args.first().and_then(as_i64).unwrap_or(0);
+            let groups = m.last.as_ref().map_or(0, |h| h.groups.len()) as i64;
+            if n < 0 || n >= groups {
+                raise(vm, "IndexOutOfBoundsException", &format!("No group {n}"));
+                Value::Undef
+            } else {
+                group(n as usize)
+            }
+        }
         "groupCount" => Value::int(match &*crate::regex::compile(&m.source) {
             Ok(p) => p.group_count() as i64,
             Err(_) => 0,
@@ -5668,6 +5826,24 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 Value::Undef
             }
         },
+        // `String.toBigInteger()` is `new BigInteger(text.trim())`, which — unlike
+        // `toBigDecimal` — accepts *only* an integer: `"1.5".toBigInteger()`
+        // raises rather than truncating. Its two failure messages are
+        // `BigInteger`'s own, and the empty string has its own wording rather
+        // than the `For input string:` form. Verified against Apache Groovy
+        // 5.0.8 / JDK 21: `"".toBigInteger()` is `Zero length BigInteger` and
+        // `"1.5".toBigInteger()` is `For input string: "1.5"`.
+        (Value::Str(s), "toBigInteger") => {
+            let t = s.trim();
+            if t.is_empty() {
+                raise(vm, "NumberFormatException", "Zero length BigInteger");
+                return Value::Undef;
+            }
+            match decimal::parse_java(t).ok().filter(|d| d.is_integer()) {
+                Some(d) => bigint_value(d),
+                None => raise_number_format(vm, t),
+            }
+        }
         // Index queries answer a UTF-16 index, matching `String.length()`.
         //
         // Three Java behaviours the previous one-liner dropped: the `fromIndex`
@@ -6379,10 +6555,15 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // both raise on an empty list rather than answering `null`.
         (Value::Array(a), "pop" | "removeLast") => {
             if a.is_empty() {
-                raise(
+                // The two are not symmetric. `pop` explains itself; `removeLast`
+                // throws a bare `new NoSuchElementException()`, whose message is
+                // `null`. Interpolating the method name into one sentence read
+                // as the tidier design and invented a message for `removeLast`
+                // that Groovy has never printed.
+                raise_opt(
                     vm,
                     "NoSuchElementException",
-                    &format!("Cannot {method}() an empty List"),
+                    (method == "pop").then_some("Cannot pop() an empty List"),
                 );
                 return Value::Undef;
             }
@@ -6404,13 +6585,36 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             let mut added = 1usize;
             // `add(index, element)` and `addAll(index, collection)` insert at the
             // index; every other form appends.
+            // The two-argument (positional) forms range-check their index the
+            // way `ArrayList.rangeCheckForAdd` does — and its message is
+            // `Index: 9, Size: 3`, a different spelling from the
+            // `Index 9 out of bounds for length 3` that `get`/`set` carry.
+            // Insertion *at* the end is legal, so the bound is `0..=len`, one
+            // wider than a read's. Clamping instead (`max(0).min(len)`) silently
+            // appended for `add(9, x)` and prepended for `add(-1, x)`.
+            let insert_at = |vm: &mut VM, len: usize| -> Option<usize> {
+                let i = as_i64(&args[0]).unwrap_or(0);
+                if i < 0 || i > len as i64 {
+                    raise(
+                        vm,
+                        "IndexOutOfBoundsException",
+                        &format!("Index: {i}, Size: {len}"),
+                    );
+                    return None;
+                }
+                Some(i as usize)
+            };
             match (method, args.len()) {
                 ("add", 2) => {
-                    let i = (as_i64(&args[0]).unwrap_or(0).max(0) as usize).min(next.len());
+                    let Some(i) = insert_at(vm, next.len()) else {
+                        return Value::Undef;
+                    };
                     next.insert(i, args[1].clone());
                 }
                 ("addAll", 2) => {
-                    let at = (as_i64(&args[0]).unwrap_or(0).max(0) as usize).min(next.len());
+                    let Some(at) = insert_at(vm, next.len()) else {
+                        return Value::Undef;
+                    };
                     let extra = iteration_elements(&args[1]);
                     added = extra.len();
                     next.splice(at..at, extra);
@@ -6528,7 +6732,17 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // it truncates toward zero like Java's `/`.
         (Value::Int(n), "intdiv") => match args.first().and_then(as_i64) {
             Some(0) | None => {
-                raise(vm, "ArithmeticException", "Division by zero");
+                // Three different wordings reach an `ArithmeticException` for a
+                // zero divisor, and which one depends on the *type* that did the
+                // dividing, not on the operator. An `Integer`/`Long` `intdiv`
+                // divides natively, so the message is the JVM's own `/ by zero`
+                // — `Division by zero` is `BigDecimal.divide`'s, which `1 / 0`
+                // reaches because `/` promotes, and `BigInteger divide by zero`
+                // is a third. Verified on Apache Groovy 5.0.8 / JDK 21:
+                // `1.intdiv(0)` and `1L.intdiv(0)` give `/ by zero`,
+                // `1G.intdiv(0G)` gives `BigInteger divide by zero`, and
+                // `1G / 0G` gives `Division by zero`.
+                raise(vm, "ArithmeticException", "/ by zero");
                 Value::Undef
             }
             // `Integer.MIN_VALUE.intdiv(-1)` overflows an `Integer` and wraps
@@ -6636,6 +6850,21 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 std::cmp::Ordering::Greater => 1,
             },
         ),
+        // `Double.equals(Object)` compares `doubleToLongBits`, not `==`, so it
+        // disagrees with `==` at exactly the two values IEEE treats specially:
+        // `Double.NaN.equals(Double.NaN)` is **true** (every NaN payload folds to
+        // one canonical pattern, the same rule [`double_hash`] applies, which is
+        // what keeps `equals`/`hashCode` consistent) and `(0.0d).equals(-0.0d)`
+        // is **false**. It is also typed: only another `Double` can be equal, so
+        // `(1.5d).equals(1.5)` is false against the `BigDecimal` `1.5`, and
+        // `(1.0d).equals(1)` is false against the `Integer`. All four verified
+        // against Apache Groovy 5.0.8 on JDK 21.
+        (Value::Float(f), "equals") => Value::bool(match args.first() {
+            Some(Value::Float(o)) => {
+                (f.is_nan() && o.is_nan()) || (!f.is_nan() && f.to_bits() == o.to_bits())
+            }
+            _ => false,
+        }),
         (Value::Float(f), "isNaN") => Value::bool(f.is_nan()),
         (Value::Float(f), "isInfinite") => Value::bool(f.is_infinite()),
 
@@ -6925,6 +7154,15 @@ fn b_power(vm: &mut VM, _argc: u8) -> Value {
 /// width, which decides whether an integer result narrows to `Integer`.
 fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
     let (base, exp) = (base.clone(), exp.clone());
+    // `**` is `Number.power(Number)`, so a non-`Number` on either side has no
+    // overload at all. Asked before the exponent is read as a number: `as_f64`
+    // answers `NaN` for a `String`, so `2 ** "x"` used to *print* `NaN` where
+    // Groovy raises, and a `String` base reached a hand-written message
+    // (`No signature of method: power() for x`) in neither Groovy's shape nor
+    // its wording.
+    if !is_number(&base) || !is_number(&exp) {
+        return raise_operator_operand(vm, "power", &base, &exp);
+    }
     let e = match as_i64(&exp) {
         Some(e) => e,
         // A fractional exponent has no exact form, so Groovy runs it as a double.
@@ -7043,17 +7281,7 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
                     Value::int(i64::from((a as i32).wrapping_shl(b as u32 & 31)))
                 }
             }
-            _ => {
-                raise(
-                    vm,
-                    "MissingMethodException",
-                    &format!(
-                        "No signature of method: leftShift() for {}",
-                        groovy_str(&lhs)
-                    ),
-                );
-                Value::Undef
-            }
+            _ => raise_operator_operand(vm, "leftShift", &lhs, &rhs),
         },
     }
 }
@@ -7075,19 +7303,18 @@ fn shift_overload(vm: &mut VM, lhs: &Value, rhs: &Value, method: &str) -> Option
             fault(vm, e);
             Some(Value::Undef)
         }
-        None => {
-            raise(
-                vm,
-                "MissingMethodException",
-                &format!(
-                    "No signature of method: {}.{method}() is applicable for argument types: ({}) values: [{}]",
-                    java_class_name(lhs),
-                    java_class_name(rhs),
-                    groovy_str(rhs)
-                ),
-            );
-            Some(Value::Undef)
-        }
+        // An instance whose class declares no such overload raises exactly the
+        // `MissingMethodException` a missing *method* raises — same wording,
+        // same simple-name argument list. This used to build its own
+        // `Klass.rightShift() is applicable for…` variant, which named the
+        // method in the wrong position and printed the argument's *qualified*
+        // class where Groovy prints the simple one.
+        None => Some(raise_missing_method(
+            vm,
+            lhs,
+            method,
+            std::slice::from_ref(rhs),
+        )),
     }
 }
 
@@ -7132,19 +7359,7 @@ fn b_shr(vm: &mut VM, _argc: u8) -> Value {
                 Value::int(i64::from((a as i32) >> (b as u32 & 31)))
             }
         }
-        _ => {
-            raise(
-                vm,
-                "MissingMethodException",
-                &format!(
-                    "No signature of method: {}.rightShift() is applicable for argument types: ({}) values: [{}]",
-                    java_class_name(&lhs),
-                    java_class_name(&rhs),
-                    groovy_str(&rhs)
-                ),
-            );
-            Value::Undef
-        }
+        _ => raise_operator_operand(vm, "rightShift", &lhs, &rhs),
     }
 }
 
@@ -7169,14 +7384,10 @@ fn b_ushr(vm: &mut VM, _argc: u8) -> Value {
                 Value::int(i64::from(((a as i32 as u32) >> (b as u32 & 31)) as i32))
             }
         }
-        _ => {
-            raise(
-                vm,
-                "IllegalArgumentException",
-                "`>>>` needs integer operands",
-            );
-            Value::Undef
-        }
+        // Not two integers. Groovy has four different answers for that, none of
+        // them this one — an `IllegalArgumentException` carrying a sentence
+        // written here rather than by Groovy, which no version has ever printed.
+        _ => raise_operator_operand(vm, "rightShiftUnsigned", &lhs, &rhs),
     }
 }
 
@@ -7257,9 +7468,14 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
                     Err(_) => return raise_number_format(vm, s.trim()),
                 },
                 Value::Float(f) => *f as i64,
+                Value::Int(n) => *n,
                 _ => match as_dec(&v) {
                     Some(d) => decimal::truncate_to_i64(&d),
-                    None => as_i64(&v).unwrap_or(0),
+                    // Not a number and not a parseable `String`, so there is no
+                    // narrowing to perform. `as_i64(&v).unwrap_or(0)` answered
+                    // `0` for a list, a map and a closure alike, and `1` for
+                    // `true` — inventing a conversion Groovy declines.
+                    None => return raise_cast(vm, &v, &ty_simple),
                 },
             };
             // A narrowing cast keeps the target's low bits, so `2147483648L as
@@ -7271,7 +7487,11 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
                 Some(f) => Value::float(f),
                 None => raise_number_format(vm, s.trim()),
             },
-            _ => Value::float(as_f64(&v)),
+            Value::Int(_) | Value::Float(_) => Value::float(as_f64(&v)),
+            // `as_f64` answers `NaN` for everything it cannot read, so a list or
+            // a `Boolean` used to cast to `NaN` rather than raising.
+            _ if as_dec(&v).is_some() => Value::float(as_f64(&v)),
+            _ => raise_cast(vm, &v, &ty_simple),
         },
         "BigDecimal" | "BigInteger" => {
             // `as BigInteger` truncates any fraction, which is Java's

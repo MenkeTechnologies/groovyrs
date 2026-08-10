@@ -1257,6 +1257,9 @@ impl Compiler {
                     self.note_var_width(ty, name, init.as_ref());
                     let store = self.store_op_for_decl(name);
                     self.b.emit(store, self.cur_line);
+                    // `def y = null - 1` raises from the numeric hook, which has
+                    // no check of its own. See the expression-statement arm.
+                    self.emit_exc_check(self.cur_line)?;
                 } else {
                     self.note_var_width(ty, name, None);
                     // An uninitialized local stays unbound (Groovy defaults it to
@@ -1313,6 +1316,9 @@ impl Compiler {
                     }
                 }
                 self.emit_name_store(name, self.cur_line)?;
+                // As for a declaration: `y = null - 1` raises from the numeric
+                // hook, whose throw nothing downstream would notice.
+                self.emit_exc_check(self.cur_line)?;
                 self.set_var_width(name, new_wide);
                 // `f = { it }` binds a closure to an undeclared name as surely as
                 // `def f = { it }` does; a compound `f += …` cannot produce one.
@@ -1371,6 +1377,17 @@ impl Compiler {
             StmtKind::Expr(e) => {
                 self.expr(e)?;
                 self.b.emit(Op::Pop, self.cur_line);
+                // A throw raised by fusevm's numeric hook — `null % 3`, `null + 1`
+                // — has no check of its own: the hook is called from inside the
+                // dispatch loop for a *native* arithmetic op, and only a builtin
+                // call is followed by `emit_exc_check`. In a discarded expression
+                // statement there may be no builtin call after it at all, and the
+                // exception then escapes the enclosing `try` entirely
+                // (`try { def y = println(-7); y % 3 } catch (…)` never entered
+                // the handler). Where a later call did happen to notice it, the
+                // statements in between had already run and printed. Checking at
+                // the end of the statement puts the throw where Groovy raises it.
+                self.emit_exc_check(self.cur_line)?;
                 Ok(())
             }
             StmtKind::If { cond, then, els } => self.branch_stmt(|c| c.if_stmt(cond, then, els)),
@@ -1448,9 +1465,13 @@ impl Compiler {
     fn cond_expr(&mut self, cond: &Expr) -> Result<(), String> {
         self.expr(cond)?;
         if needs_truth(cond) {
-            self.emit_call_builtin(crate::host::GTRUTH, 0, self.cur_line)?;
+            // The truth builtin's own check covers the condition.
+            return self.emit_call_builtin(crate::host::GTRUTH, 0, self.cur_line);
         }
-        Ok(())
+        // A statically-boolean condition emits no builtin, so a throw from
+        // inside it — `if (null % 3 == 0)` — would otherwise reach the jump and
+        // run a branch chosen from a value that was never computed.
+        self.emit_exc_check(self.cur_line)
     }
 
     /// Lower a condition that must *keep* its operand as the expression's value
@@ -2334,16 +2355,30 @@ impl Compiler {
                     // builtin pops the name, the N args, then the receiver. The
                     // safe-navigation form routes through GMETHOD_SAFE, which
                     // returns `null` without dispatching when the receiver is null.
+                    // Java picks an overload by declared parameter width, and
+                    // `16` and `16L` are the one `Value::Int`, so a call whose
+                    // receiver or arguments the compiler can see are `Long`s
+                    // carries their widths beneath the receiver and dispatches
+                    // through `GMETHOD_WIDE`. A call with nothing wide at it —
+                    // nearly every call — is emitted exactly as before.
+                    let widths = if *safe {
+                        0
+                    } else {
+                        self.call_width_mask(recv, args)
+                    };
+                    if widths != 0 {
+                        self.b.emit(Op::LoadInt(i64::from(widths)), *line);
+                    }
                     self.expr(recv)?;
                     for a in args {
                         self.expr(a)?;
                     }
                     let midx = self.b.add_constant(Value::str(method.clone()));
                     self.b.emit(Op::LoadConst(midx), *line);
-                    let id = if *safe {
-                        crate::host::GMETHOD_SAFE
-                    } else {
-                        crate::host::GMETHOD
+                    let id = match (*safe, widths) {
+                        (true, _) => crate::host::GMETHOD_SAFE,
+                        (false, 0) => crate::host::GMETHOD,
+                        (false, _) => crate::host::GMETHOD_WIDE,
                     };
                     self.emit_call_builtin(id, args.len() as u8, *line)?;
                     self.emit_receiver_writeback(recv, method, args)?;
@@ -2690,6 +2725,24 @@ impl Compiler {
         self.b.emit(Op::Shl, line);
         self.b.emit(Op::LoadInt(32), line);
         self.b.emit(Op::Shr, line);
+    }
+
+    /// Which positions of a `recv.method(args)` call the compiler can see are
+    /// statically `Long`: bit 0 the receiver, bit `k+1` argument `k`.
+    ///
+    /// Zero means "no `Long` visible here", not "everything is an `Integer`" —
+    /// [`Compiler::is_wide`] is a conservative static reading, and the host
+    /// treats a clear bit the same cautious way. Positions past the seventh
+    /// argument do not fit the mask byte and stay unmarked; no Java overload
+    /// groovyrs models discriminates that far out.
+    fn call_width_mask(&self, recv: &Expr, args: &[Expr]) -> u8 {
+        let mut mask = u8::from(self.is_wide(recv));
+        for (i, a) in args.iter().enumerate().take(7) {
+            if self.is_wide(a) {
+                mask |= 1 << (i + 1);
+            }
+        }
+        mask
     }
 
     /// Record that the op just emitted at `pos` is `Long` arithmetic, so the

@@ -416,8 +416,10 @@ Next waves, in priority order:
 
 1. **By-reference upvalue capture** — boxed cells so a closure sees a mutation of
    an outer frame local made after capture (capture is by value today).
-2. **Method overloading by parameter type** — today methods and operator methods
-   are keyed by name only, so same-named overloads collapse to the last declared.
+2. **Method overloading, by arity as well as by parameter type** — today methods
+   and operator methods are keyed by name only, so same-named declarations
+   collapse onto the first, which then answers calls of every arity.
+   Constructors already key by arity and are the shape to follow.
 3. **`trait`s** — `interface` and `implements` are modeled (including `default`
    methods); `trait` is not.
 4. **Java arrays.** `new int[3]` does not resolve — an array is a distinct type

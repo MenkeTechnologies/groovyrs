@@ -1867,3 +1867,76 @@ try { println s.equals([2, 3]) } catch (e) { println e.getClass().getName() }
 # A MissingMethodException names a window by its nested simple name.
 def a = [1, 2, 3, 4]; def s = a.subList(1, 3)
 try { 'x'.zork(s) } catch (e) { println e.getMessage().split('Possible')[0].trim() }
+%%
+# `Integer.toString(int)` renders its *argument*, so the receiver is discarded —
+# but a `Long` argument narrows to no overload at all and raises instead. `16`
+# and `16L` are the same value here, so the widths come from the call site.
+try { println(255.toString(16L)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()+'|'+e.getMessage().split('\n')[0]) }
+%%
+println(255.toString(16))
+%%
+# A `Long` receiver has `Long.toString(long)`, which does take the `Long`.
+println(255L.toString(16L))
+%%
+println(255L.toString(16))
+%%
+# The two-argument form is the radix one, and its *second* parameter is an `int`
+# in both classes — so a `Long` radix raises even for a `Long` receiver.
+println(255.toString(16, 2))
+%%
+try { println(255L.toString(16, 2L)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()+'|'+e.getMessage().split('\n')[0]) }
+%%
+try { println(255.toString(16L, 2)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()+'|'+e.getMessage().split('\n')[0]) }
+%%
+# The width travels from a variable's declaration, not just from a literal.
+def r = 16L
+try { println(255.toString(r)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }
+%%
+println(255L.toString(16, 2))
+%%
+# `null as <primitive>` casts to the wrapper and unboxes it, so it is the JVM's
+# unboxing NullPointerException; `null as <wrapper>` is just null.
+def x = null
+try { println(x as int) } catch(e) { println('EXC:'+e.getClass().getName()+'|'+e.getMessage()) }
+%%
+def x = null
+try { println(x as long) } catch(e) { println('EXC:'+e.getClass().getName()+'|'+e.getMessage()) }
+%%
+def x = null
+try { println(x as double) } catch(e) { println('EXC:'+e.getClass().getName()+'|'+e.getMessage()) }
+%%
+def x = null
+try { println(x as char) } catch(e) { println('EXC:'+e.getClass().getName()+'|'+e.getMessage()) }
+%%
+def x = null
+println([x as Integer, x as Long, x as Double, x as String])
+%%
+# `boolean` truth-tests rather than unboxes, and the collections keep the null.
+def x = null
+println([x as boolean, x as List, x as Set, x as BigDecimal])
+%%
+# A throw out of the numeric hook must reach the enclosing handler even when the
+# statement discards its value — there is no builtin call after it to notice.
+def y = null
+try { y % 3 } catch(e) { println('caught:'+e.getClass().getSimpleName()) }
+%%
+# …and must be noticed *before* the next statement runs, not after it printed.
+def y = null
+try { y - 1; println('unreachable') } catch(e) { println('caught:'+e.getClass().getSimpleName()) }
+%%
+# The same throw inside a declaration's initializer.
+def y = null
+try { def z = y * 2; println(z) } catch(e) { println('caught:'+e.getClass().getSimpleName()) }
+%%
+# …inside a plain assignment.
+def y = null
+def z = 0
+try { z = y + 1; println(z) } catch(e) { println('caught:'+e.getClass().getSimpleName()) }
+%%
+# …and inside an `if`/`while` condition, where the branch would otherwise be
+# chosen from a value that was never computed.
+def y = null
+try { if (y % 3 == 0) { println('then') } else { println('else') } } catch(e) { println('caught:'+e.getClass().getSimpleName()) }
+%%
+def y = null
+try { while (y - 1 > 0) { break }; println('after') } catch(e) { println('caught:'+e.getClass().getSimpleName()) }

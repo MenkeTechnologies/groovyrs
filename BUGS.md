@@ -432,17 +432,23 @@ reported as parse or compile errors, never silently mis-run.
   synthetic per-closure class (`Script1$_run_closure1`), whose name depends on
   the enclosing script's name and the closure's position; groovyrs has no such
   class to name.
-- **Method overloading by parameter type.** Methods (and a class's operator
-  methods) are keyed by name only, so two same-named methods with different
-  parameter types collapse to one (the last declared wins). Constructors *are*
-  dispatched, but by arity only, not parameter type.
-- **A `Long` argument where the JDK overload wants an `int`.**
-  `255.toString(16L)` is a `MissingMethodException` in Groovy — the only
-  candidate is the static `Integer.toString(int)`, and a `Long` does not narrow
-  to it — but groovyrs answers `16`. An `Integer` and a `Long` are one
-  `Value::Int` here and the width is read back from the magnitude, so a small
-  `Long` is indistinguishable from an `Integer` at the call. A non-numeric
-  argument (`255.toString('x')`) does raise.
+- **Method overloading, by arity as well as by parameter type.** A class's
+  methods (and its operator methods) are keyed by *name alone* — `ClassMeta`
+  holds a `HashMap<String, u16>`, and the synthetic subroutine each method
+  compiles to is named `$cls_<class>_m_<name>` with no arity in it — so every
+  same-named declaration collapses onto one entry and the **first** declared
+  body answers every call. `class C { def g() { "zero" }; def g(a) { "one" };
+  def g(a, b) { "two" } }` answers `[zero, zero, zero]` where Groovy answers
+  `[zero, one, two]`, and the extra arguments are silently discarded rather
+  than raising. Top-level script functions collapse the same way (`def f() {
+  "f0" }; def f(a) { "f1" }` makes `f(1)` answer `f0`). Constructors are the
+  exception and already work: they are keyed by *arity* (`HashMap<u8, u16>`,
+  `$cls_<class>_ctor_<arity>`), which is the shape the method table needs.
+- **A `BigInteger` argument where the JDK overload wants an `int`.**
+  `255.toString(16G)` answers `16` in Groovy — the `BigInteger` coerces to the
+  `int` the static `Integer.toString(int)` wants — where groovyrs raises
+  `MissingMethodException`. The `Long` spelling of the same call is modeled (see
+  `GMETHOD_WIDE`); only the `BigInteger` coercion is missing.
 - **`++`/`--` do not call `next`/`previous`.** To keep the JIT fast path for
   integer loop counters (`for (i=0; i<n; i++)`), `++`/`--` lower to native
   `+ 1` / `- 1` rather than routing through a builtin (which would abort trace
@@ -466,13 +472,23 @@ reported as parse or compile errors, never silently mis-run.
   overload per arity. The two agree for every call that *omits* the argument;
   they differ when a caller passes an explicit `null`, which groovyrs replaces
   with the default and Groovy keeps as `null`.
-- **Arithmetic on `null` is only catchable through `/`.** `null - 1`, `null % 3`
-  and friends raise the `NullPointerException` Groovy raises, with Groovy's
-  message, but the compiler emits the post-op pending-exception check only under
-  the gate described below, so outside that gate the exception surfaces as a hard
-  `groovyrs: java.lang.NullPointerException: …` fault instead of reaching a
-  `catch`. `null / 2` lowers to the `GDIV` builtin, which is always checked, so
-  that one is catchable everywhere.
+- **A `null` *right* operand of arithmetic on a number.** With `x` null, Groovy
+  raises `groovy.lang.GroovyRuntimeException` ("Ambiguous method overloading for
+  method java.lang.Integer#plus") for `5 + x`, `5 - x`, `5 * x` and `5 / x`, and
+  a `NullPointerException` for `5 % x`. groovyrs concatenates the `+` (`5 + x`
+  answers the string `5null`, and so does `z += x`) and hard-faults the rest
+  (`groovyrs: operator \`Sub\` is not defined for operands \`5\` and \`null\``).
+  A null *left* operand is the modeled direction and agrees with Groovy.
+- **`println(<null arithmetic>)` prints a line before it raises.** `x` null,
+  `try { println(x - 1) }` prints `null` and *then* raises the
+  `NullPointerException`, where Groovy raises first and prints nothing. The
+  exception, its class and the exit status are right; the extra line is not.
+  Every other position tested raises before printing anything — as a discarded
+  statement (`x - 1`), in a declaration (`def q = x - 1`), in an `if`/`while`
+  condition, and with a method call on the result (`println((x - 1).toString())`)
+  — because those are the places the compiler now checks for a pending throw.
+  Only the value handed straight to `println` runs the print first. Same shape
+  and cause as the `ConcurrentModificationException` entry below.
 - **A power assert does not record inside a `GString`.** A placeholder is lexed
   on its own, so its columns are relative to the placeholder rather than the
   script and recording it would put values under the wrong column. `assert
@@ -513,9 +529,9 @@ reported as parse or compile errors, never silently mis-run.
   program runs one more statement before a check finds it, so
   `try { println(s == [2, 3]) }` prints `true` and *then* raises, where Groovy
   raises first and prints nothing. The exception, its class and the exit status
-  are right; the extra line is not. This is the same shape as *Arithmetic on
-  `null` is only catchable through `/`* and has the same cause — `try { println(
-  null - 1) }` already prints `null` before the `NullPointerException`. A program
+  are right; the extra line is not. This is the same shape as
+  *`println(<null arithmetic>)` prints a line before it raises* above, and has
+  the same cause — `try { println(null - 1) }` prints `null` first too. A program
   with **no** `try` in it is exact either way: the raise degrades to a hard fault,
   which halts before the next statement.
 - **A reverse `ObjectRange`'s `subList` differs**, in the one corner where

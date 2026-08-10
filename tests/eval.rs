@@ -3022,3 +3022,144 @@ fn add_all_answers_whether_the_list_changed_and_honours_an_index() {
         )
     );
 }
+
+#[test]
+fn a_long_argument_matches_no_integer_to_string_overload() {
+    // `Integer.toString(int)` renders its argument and discards the receiver, so
+    // `255.toString(16)` is `16`. `255.toString(16L)` reaches no overload at all
+    // — Java resolves on the declared parameter width, and a `Long` does not
+    // narrow to an `int` — where groovyrs used to answer `16` for both, the two
+    // arguments being the one `Value::Int`. The widths ride the call site.
+    let (out, ok) = run(concat!(
+        "println(255.toString(16))\n",
+        "try { println(255.toString(16L)) } catch(e) { println('EXC:'+e.getMessage().split('\\n')[0]) }\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "16\n",
+            "EXC:No signature of method: toString for class: java.lang.Integer \
+             is applicable for argument types: (Long) values: [16]\n"
+        )
+    );
+}
+
+#[test]
+fn a_long_receiver_admits_the_long_argument_that_an_integer_receiver_rejects() {
+    // The four signatures are `Integer.toString(int)`, `Integer.toString(int,
+    // int)`, `Long.toString(long)` and `Long.toString(long, int)`, so a `Long`
+    // fits in exactly one position — the first argument of the `Long` pair. The
+    // radix parameter is an `int` in both classes, which is why the two-argument
+    // `Long` receiver still rejects a `Long` radix.
+    let (out, ok) = run(concat!(
+        "println(255L.toString(16L))\n",
+        "println(255L.toString(16, 2))\n",
+        "try { println(255L.toString(16, 2L)) } catch(e) { println('EXC:'+e.getMessage().split('\\n')[0]) }\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "16\n",
+            "10000\n",
+            "EXC:No signature of method: toString for class: java.lang.Long \
+             is applicable for argument types: (Integer, Long) values: [16, 2]\n"
+        )
+    );
+}
+
+#[test]
+fn the_width_of_a_to_string_argument_survives_a_variable() {
+    // The width is the compiler's static reading of the *expression*, not of the
+    // literal, so a `Long` that reaches the call through a declaration is still
+    // a `Long` at the call.
+    let (out, ok) = run(concat!(
+        "def r = 16L\n",
+        "def s = 16\n",
+        "try { println(255.toString(r)) } catch(e) { println('EXC:'+e.getClass().getSimpleName()) }\n",
+        "println(255.toString(s))\n",
+    ));
+    assert!(ok);
+    assert_eq!(out, "EXC:MissingMethodException\n16\n");
+}
+
+#[test]
+fn casting_null_to_a_primitive_unboxes_and_raises() {
+    // Groovy casts the null to the wrapper and then unboxes it, so `null as int`
+    // is the JVM's unboxing NullPointerException. groovyrs used to coerce the
+    // null instead and answer `0` / `NaN`. The message ends at `because "`: the
+    // helpful-NPE text names the local it read, and the local a cast reads is
+    // synthetic and unnamed.
+    let (out, ok) = run(concat!(
+        "def x = null\n",
+        "try { println(x as int) } catch(e) { println(e.getClass().getName()+'|'+e.getMessage()) }\n",
+        "try { println(x as double) } catch(e) { println(e.getClass().getName()+'|'+e.getMessage()) }\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "java.lang.NullPointerException|Cannot invoke \"java.lang.Integer.intValue()\" because \"\n",
+            "java.lang.NullPointerException|Cannot invoke \"java.lang.Double.doubleValue()\" because \"\n"
+        )
+    );
+}
+
+#[test]
+fn casting_null_to_a_reference_type_keeps_the_null() {
+    // The wrappers, `String`, and the collections take the null unchanged —
+    // `null as List` was `[]` and `null as Integer` was `0`. `boolean` is the one
+    // primitive that does not unbox: Groovy truth-tests it, so it is `false`.
+    let (out, ok) = run(concat!(
+        "def x = null\n",
+        "println([x as Integer, x as Long, x as String, x as List, x as Set])\n",
+        "println(x as boolean)\n",
+    ));
+    assert!(ok);
+    assert_eq!(out, "[null, null, null, null, null]\nfalse\n");
+}
+
+#[test]
+fn a_throw_from_a_discarded_statement_reaches_the_enclosing_catch() {
+    // A throw raised by fusevm's numeric hook has no check of its own — the hook
+    // runs inside the dispatch loop for a *native* arithmetic op, and only a
+    // builtin call is followed by a pending-exception check. A discarded
+    // expression statement may have no builtin call after it, and the throw then
+    // left the `try` entirely.
+    let (out, ok) = run(concat!(
+        "def y = null\n",
+        "try { y % 3 } catch(e) { println('caught:'+e.getClass().getSimpleName()) }\n",
+    ));
+    assert!(ok);
+    assert_eq!(out, "caught:NullPointerException\n");
+}
+
+#[test]
+fn a_discarded_statements_throw_stops_the_statements_after_it() {
+    // Where a later call did happen to notice the pending throw, the statements
+    // in between had already run and printed. The check belongs at the end of the
+    // statement that raised, not at the next call.
+    let (out, ok) = run(concat!(
+        "def y = null\n",
+        "try { y - 1; println('unreachable') } catch(e) { println('caught') }\n",
+    ));
+    assert!(ok);
+    assert_eq!(out, "caught\n");
+}
+
+#[test]
+fn a_throw_from_a_declaration_or_a_condition_reaches_the_catch() {
+    // The same gap in the other two places a native arithmetic result is
+    // consumed without a following builtin call: a variable store, and a
+    // statically-boolean condition — which would otherwise pick a branch from a
+    // value that was never computed.
+    let (out, ok) = run(concat!(
+        "def y = null\n",
+        "try { def z = y * 2; println(z) } catch(e) { println('caught:decl') }\n",
+        "try { if (y % 3 == 0) { println('then') } else { println('else') } } catch(e) { println('caught:if') }\n",
+        "try { while (y - 1 > 0) { break }; println('after') } catch(e) { println('caught:while') }\n",
+    ));
+    assert!(ok);
+    assert_eq!(out, "caught:decl\ncaught:if\ncaught:while\n");
+}

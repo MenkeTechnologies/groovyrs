@@ -304,6 +304,22 @@ pub const GMAKE_LIST: u16 = 762;
 /// instance, so an ordinary shift is untouched. See [`b_shr`].
 pub const GSHR: u16 = 763;
 
+/// Builtin id for `recv.method(args)` at a call site where the compiler saw a
+/// statically-`Long` receiver or argument — [`GMETHOD`] with the widths attached.
+///
+/// Java resolves an overload on the *declared* parameter width, and `16` and
+/// `16L` reach the host as the one `Value::Int`: `255.toString(16)` renders `16`
+/// through the static `Integer.toString(int)`, while `255.toString(16L)` matches
+/// no overload at all and is a `MissingMethodException`. The magnitude rule that
+/// serves [`java_class_name`] cannot separate them, so the widths travel with the
+/// call, exactly as [`GCLASS_LONG`] carries the width of a `getClass()` receiver.
+///
+/// Stack: the width mask (bit 0 the receiver, bit `k+1` argument `k`), then the
+/// receiver, the arguments, and the method name — so the handler pops the plain
+/// [`GMETHOD`] shape and finds the mask beneath it. The compiler emits this only
+/// where the mask is non-zero, which leaves every ordinary call on [`GMETHOD`].
+pub const GMETHOD_WIDE: u16 = 764;
+
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -329,6 +345,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GFFI_COMPILE, b_ffi_compile);
     vm.register_builtin(GFFI_CALL, b_ffi_call);
     vm.register_builtin(GMETHOD, b_method);
+    vm.register_builtin(GMETHOD_WIDE, b_method_wide);
     vm.register_builtin(GPROP, b_prop);
     vm.register_builtin(GMAKE_CLOSURE, b_make_closure);
     vm.register_builtin(GCLOSURE_CALL, b_closure_call);
@@ -669,19 +686,44 @@ fn raise_opt(vm: &mut VM, class: &str, message: Option<&str>) {
 /// and the argument types and values. Returns the placeholder the faulting
 /// builtin hands back — the compiler's post-call check unwinds before it is read.
 fn raise_missing_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Value {
+    raise_missing_method_wide(vm, recv, method, args, 0)
+}
+
+/// [`raise_missing_method`], told which of the receiver and arguments the
+/// compiler saw as a `Long` (the [`GMETHOD_WIDE`] mask).
+///
+/// The message names each participant's class, and the magnitude rule cannot
+/// name a small `Long`: `255.toString(16L)` must report `class: java.lang.Integer`
+/// and `argument types: (Long)`, which are two different readings of two
+/// `Value::Int`s that are numerically 255 and 16. Only the call site knows.
+fn raise_missing_method_wide(
+    vm: &mut VM,
+    recv: &Value,
+    method: &str,
+    args: &[Value],
+    widths: u8,
+) -> Value {
+    let wide_at = |bit: u32| widths & (1 << bit) != 0;
     let types = args
         .iter()
-        .map(simple_class_name)
+        .enumerate()
+        .map(|(i, a)| match a {
+            Value::Int(_) if wide_at(i as u32 + 1) => "Long".to_string(),
+            _ => simple_class_name(a),
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let values = args.iter().map(groovy_str).collect::<Vec<_>>().join(", ");
+    let class = match recv {
+        Value::Int(_) if wide_at(0) => "java.lang.Long".to_string(),
+        _ => java_class_name(recv),
+    };
     raise(
         vm,
         "MissingMethodException",
         &format!(
-            "No signature of method: {method} for class: {} \
-             is applicable for argument types: ({types}) values: [{values}]",
-            java_class_name(recv)
+            "No signature of method: {method} for class: {class} \
+             is applicable for argument types: ({types}) values: [{values}]"
         ),
     );
     Value::Undef
@@ -3915,10 +3957,24 @@ fn b_ffi_call(vm: &mut VM, argc: u8) -> Value {
     }
 }
 
-/// Groovy method-call builtin: the stack holds the receiver (deepest), `argc`
-/// args, and the method name (a `String`) on top. Dispatches a faithful GDK
-/// subset via `dispatch_method`.
-fn b_method(vm: &mut VM, argc: u8) -> Value {
+thread_local! {
+    /// The width mask of the method call being dispatched: bit 0 the receiver,
+    /// bit `k+1` argument `k`, set when the compiler saw that position as a
+    /// statically-`Long`. Zero for every call the compiler saw no `Long` at —
+    /// which is nearly all of them — so a reader must treat a clear bit as "not
+    /// known to be wide", never as "known to be an `Integer`". See
+    /// [`GMETHOD_WIDE`].
+    static CALL_WIDTHS: Cell<u8> = const { Cell::new(0) };
+}
+
+/// The width mask of the call currently dispatching.
+fn call_widths() -> u8 {
+    CALL_WIDTHS.with(|w| w.get())
+}
+
+/// Pop the plain [`GMETHOD`] stack shape: the method name, `argc` arguments, and
+/// the receiver beneath them.
+fn pop_call(vm: &mut VM, argc: u8) -> (String, Vec<Value>, Value) {
     let name = vm
         .stack
         .pop()
@@ -3932,7 +3988,30 @@ fn b_method(vm: &mut VM, argc: u8) -> Value {
     }
     args.reverse();
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    (name, args, recv)
+}
+
+/// Groovy method-call builtin: the stack holds the receiver (deepest), `argc`
+/// args, and the method name (a `String`) on top. Dispatches a faithful GDK
+/// subset via `dispatch_method`.
+fn b_method(vm: &mut VM, argc: u8) -> Value {
+    let (name, args, recv) = pop_call(vm, argc);
+    // No mask was pushed for this call, and the previous call's must not be read
+    // as this one's.
+    CALL_WIDTHS.with(|w| w.set(0));
     dispatch_call(vm, recv, &name, args)
+}
+
+/// [`GMETHOD_WIDE`]: `b_method` with the compiler's width mask pushed beneath
+/// the receiver. The mask is published for the dispatch and cleared after it, so
+/// a nested call the dispatch makes never inherits it.
+fn b_method_wide(vm: &mut VM, argc: u8) -> Value {
+    let (name, args, recv) = pop_call(vm, argc);
+    let mask = vm.stack.pop().map(|m| m.to_int() as u8).unwrap_or(0);
+    CALL_WIDTHS.with(|w| w.set(mask));
+    let out = dispatch_call(vm, recv, &name, args);
+    CALL_WIDTHS.with(|w| w.set(0));
+    out
 }
 
 /// Dispatch `recv.method(args)`, trying the closure-consuming operations first
@@ -6096,10 +6175,33 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // receiver. The two-argument form is the radix one — `255.toString(16, 2)`
         // is `Integer.toString(16, 2)`, `10000`. `Integer.toHexString(255)` is
         // the spelling that converts the receiver.
-        (Value::Int(_), "toString") => match dispatch_static(vm, "Integer", "toString", args) {
-            Some(v) => v,
-            None => raise_missing_method(vm, recv, method, args),
-        },
+        //
+        // Which overloads exist depends on the receiver's own width, and both
+        // widths are invisible in the values: `255.toString(16L)` and
+        // `255L.toString(16)` arrive as the same two `Value::Int`s. The four
+        // signatures are `Integer.toString(int)`, `Integer.toString(int, int)`,
+        // `Long.toString(long)` and `Long.toString(long, int)`, so a `Long` is
+        // admissible in exactly one place — the first argument of the `Long`
+        // pair. Anywhere else it matches nothing and Groovy raises, where
+        // groovyrs used to render base 10 and answer `16`. See [`GMETHOD_WIDE`]
+        // for where the widths come from.
+        (Value::Int(_), "toString") => {
+            let widths = call_widths();
+            let recv_is_long = widths & 1 != 0;
+            let long_arg_at = |i: usize| widths & (1 << (i + 1)) != 0;
+            let unmatched = args.len() > 2
+                || (0..args.len()).any(|i| long_arg_at(i) && !(i == 0 && recv_is_long));
+            let class = if recv_is_long { "Long" } else { "Integer" };
+            let rendered = if unmatched {
+                None
+            } else {
+                dispatch_static(vm, class, "toString", args)
+            };
+            match rendered {
+                Some(v) => v,
+                None => raise_missing_method_wide(vm, recv, method, args, widths),
+            }
+        }
         (Value::Int(n), "toLong" | "longValue") => Value::int(*n),
         // `intValue()` is Java's narrowing conversion, so `3000000000L.intValue()`
         // is `-1294967296`.
@@ -6680,6 +6782,41 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
     // A list handle casts through its transient array form (`as Set`, `as List`).
     let v = deref_list(&vm.stack.pop().unwrap_or(Value::Undef));
     let ty_simple = simple_name_of(&ty);
+    // `null as T` is decided by whether `T` is a *primitive*: Groovy casts the
+    // null to the wrapper and then unboxes it, so `null as int` is the JVM's
+    // unboxing `NullPointerException` while `null as Integer` is just `null`.
+    // groovyrs used to coerce the null instead and answer `0`/`NaN`/`[]`.
+    // `boolean` is the exception — Groovy truth-tests rather than unboxes, and
+    // `null as boolean` is `false`.
+    if matches!(v, Value::Undef) && ty_simple != "boolean" {
+        // The wrapper and accessor the JVM names in the message. The trailing
+        // `because "` is where Groovy 5.0.8's message ends: the helpful-NPE text
+        // names the local it read, and the local the cast reads is synthetic and
+        // unnamed. Verified against the oracle, which prints exactly this.
+        let unbox = match ty_simple.as_str() {
+            "int" => Some("Integer.intValue"),
+            "long" => Some("Long.longValue"),
+            "short" => Some("Short.shortValue"),
+            "byte" => Some("Byte.byteValue"),
+            "double" => Some("Double.doubleValue"),
+            "float" => Some("Float.floatValue"),
+            "char" => Some("Character.charValue"),
+            _ => None,
+        };
+        return match unbox {
+            Some(m) => {
+                raise(
+                    vm,
+                    "NullPointerException",
+                    &format!("Cannot invoke \"java.lang.{m}()\" because \""),
+                );
+                Value::Undef
+            }
+            // Every reference target — the wrappers, `String`, the collections,
+            // `BigDecimal`, `Object` — keeps the null.
+            None => Value::Undef,
+        };
+    }
     match ty_simple.as_str() {
         // Integral targets truncate toward zero, as Java's narrowing casts do.
         "int" | "Integer" | "long" | "Long" | "short" | "Short" | "byte" | "Byte" => {

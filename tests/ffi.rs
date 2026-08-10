@@ -4,8 +4,14 @@
 //! `groovy` binary (the first run invokes `rustc`; a per-body hash caches the
 //! dylib under a private, throwaway `FUSEVM_FFI_DIR` so the suite is hermetic).
 //!
-//! Requires a `rustc` on PATH (present in any Rust CI image). If none is found
-//! the FFI-executing tests are skipped rather than failed.
+//! Requires a `rustc`. These tests used to `return` early when they could not
+//! find one — reporting PASS having executed no assertion at all, so an FFI
+//! bridge that stopped working entirely would still show green on any machine
+//! whose PATH had drifted. A test that cannot run is not a test that passed:
+//! [`rustc_command`] now fails loudly instead, and it resolves the compiler the
+//! way cargo does (`$RUSTC` first, then PATH), so the only way to reach that
+//! failure is a genuinely absent toolchain — which cannot be the case in a
+//! process `cargo test` started.
 
 use std::process::Command;
 
@@ -45,20 +51,29 @@ fn cache_dir(tag: &str) -> std::path::PathBuf {
     d
 }
 
-fn have_rustc() -> bool {
-    Command::new("rustc")
+/// The `rustc` a `rust { … }` block will compile with, resolved the way cargo
+/// resolves it: `$RUSTC` when set (a rustup shim need not be on PATH), else
+/// `rustc` from PATH. Panics rather than answering `None`, because a test that
+/// skips itself here reports a pass having measured nothing.
+fn rustc_command() -> String {
+    let cmd = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let ok = Command::new(&cmd)
         .arg("--version")
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    assert!(
+        ok,
+        "no working rustc at `{cmd}` — a `rust {{ … }}` block cannot compile, so \
+         this test can measure nothing. It used to return here and report a \
+         pass. Set RUSTC, or put rustc on PATH."
+    );
+    cmd
 }
 
 #[test]
 fn rust_block_export_is_callable_and_returns_the_right_value() {
-    if !have_rustc() {
-        eprintln!("skipping: no rustc on PATH");
-        return;
-    }
+    rustc_command();
     let cache = cache_dir("triple");
     let src = "\
 rust {
@@ -74,10 +89,7 @@ println(g_triple(14))
 
 #[test]
 fn multiple_exports_with_multiple_args() {
-    if !have_rustc() {
-        eprintln!("skipping: no rustc on PATH");
-        return;
-    }
+    rustc_command();
     let cache = cache_dir("add");
     let src = "\
 rust {

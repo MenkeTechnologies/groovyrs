@@ -137,8 +137,21 @@ fn builtin_ids_are_unique() {
 /// the same constant replaces the first handler just as a duplicate id does.
 #[test]
 fn each_builtin_is_registered_at_most_once() {
+    let found = registrations();
+    // A duplicate check over an empty list finds no duplicates. `registrations()`
+    // recognises `register_builtin(` textually, so a rename of that method, a
+    // reformat that breaks the call across lines, or `install` moving out of the
+    // two files it reads would all leave this test green having compared
+    // nothing. Pin that there is a registration list before looking for
+    // collisions in it — the same floor `builtin_ids_are_unique` carries.
+    assert!(
+        found.len() > 40,
+        "only {} `register_builtin(` call sites found in src/host.rs + src/lib.rs \
+         — the scan stopped matching, so the collision check below guards nothing",
+        found.len()
+    );
     let mut seen: HashMap<String, Vec<String>> = HashMap::new();
-    for (name, at) in registrations() {
+    for (name, at) in found {
         seen.entry(name).or_default().push(at);
     }
     let mut dupes: Vec<String> = seen
@@ -160,7 +173,19 @@ fn each_builtin_is_registered_at_most_once() {
 #[test]
 fn every_registration_names_a_known_constant() {
     let known: Vec<String> = builtin_id_consts().into_iter().map(|(n, ..)| n).collect();
-    let unknown: Vec<String> = registrations()
+    let found = registrations();
+    // Both halves of this comparison are scraped from source, and an empty
+    // *either* side makes it vacuous: no registrations means nothing to check,
+    // and no constants would flag every registration (so that direction fails
+    // loudly on its own). Only the empty-registrations direction can pass while
+    // measuring nothing, which is what this pins.
+    assert!(
+        found.len() > 40,
+        "only {} `register_builtin(` call sites found — the scan stopped \
+         matching, so this test is no longer checking any registration",
+        found.len()
+    );
+    let unknown: Vec<String> = found
         .into_iter()
         .filter(|(n, _)| !known.contains(n))
         .map(|(n, at)| format!("  {n} at {at}"))

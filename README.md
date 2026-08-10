@@ -339,7 +339,18 @@ Implemented and checked against Apache Groovy:
   Groovy throwable Groovy raises (`MissingMethodException`,
   `MissingPropertyException`, `NullPointerException`,
   `IndexOutOfBoundsException`, `NumberFormatException`) with Groovy's own message
-  text, so `try`/`catch` reaches its handler.
+  text, so `try`/`catch` reaches its handler. Runaway recursion is one of them:
+  it raises `java.lang.StackOverflowError`, which sits under
+  `VirtualMachineError`, so `catch (Exception e)` does not swallow it.
+- **Throwable shape, not just message** — a throwable carries the payload
+  Groovy's handlers read: `getCause` / `initCause` and the
+  `T(message, cause)` / `T(cause)` constructors, `getSuppressed` /
+  `addSuppressed`, and the two throwables Groovy's dynamic dispatch makes
+  ordinary control flow —  `MissingMethodException.getMethod()` /
+  `getType()` / `getArguments()` and `MissingPropertyException.getProperty()` /
+  `getType()`. A type may be named fully qualified wherever a type is named:
+  `catch (groovy.lang.MissingMethodException e)`, a multi-catch arm,
+  `instanceof`, and `new`.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
 overloading by parameter type, script-declared class names as values, Java

@@ -116,6 +116,12 @@ struct Compiler {
     /// call can resolve to a forward-declared function (Groovy lets a script call
     /// a function defined later in the file).
     fn_names: HashSet<String>,
+    /// The subset of [`Compiler::fn_names`] that can reach itself through the
+    /// static call graph. Each of these gets a [`crate::host::GDEPTH`] check in
+    /// its prologue, so runaway native recursion raises a catchable
+    /// `StackOverflowError` instead of growing `vm.frames` until the process is
+    /// killed. See [`recursive_fns`].
+    recursive_fns: HashSet<String>,
     /// The active function scope while lowering a function body; `None` at script
     /// top level (where names are globals).
     scope: Option<FnScope>,
@@ -385,6 +391,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             );
         }
     }
+    let recursive = recursive_fns(prog, &fn_names);
     let mut c = Compiler {
         b: ChunkBuilder::new(),
         loops: Vec::new(),
@@ -393,6 +400,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         debug,
         has_ffi,
         fn_names,
+        recursive_fns: recursive,
         scope: None,
         cur_class_fields: None,
         cur_class_methods: None,
@@ -693,6 +701,17 @@ impl Compiler {
         // paramN-1 on top). Pop them top-down into their slots.
         for i in (0..params.len()).rev() {
             self.b.emit(Op::SetSlot(i as u16), line);
+        }
+
+        // A function that can reach itself checks the call depth here. fusevm's
+        // `Op::Call` costs no Rust stack, so unbounded native recursion does not
+        // overflow the process — it grows `vm.frames` until the process is
+        // killed, which no `catch` can see. Emitted only for the functions
+        // `recursive_fns` found, so every other prologue is unchanged.
+        if self.recursive_fns.contains(name) {
+            self.b.emit(Op::CallBuiltin(crate::host::GDEPTH, 0), line);
+            self.b.emit(Op::Pop, line);
+            self.emit_exc_check(line)?;
         }
 
         self.fn_body(body)?;
@@ -3724,19 +3743,26 @@ fn expr_uses_exceptions(e: &Expr) -> bool {
     }
 }
 
-// ── FFI detection (does the program contain a `rust { ... }` block?) ────────
+// ── Generic AST walk ────────────────────────────────────────────────────────
 
-/// True if any statement in `body` (recursively) evaluates a `__rust_compile`
-/// call — the desugar target of a `rust { ... }` block.
-fn body_has_ffi(body: &[Stmt]) -> bool {
+/// Walk every expression in `body` (and in every nested statement, closure,
+/// class member and function it contains) and answer whether `f` is true of any
+/// of them.
+///
+/// Short-circuits like `||`. A predicate that always answers `false` therefore
+/// visits the whole tree, which is how a *collector* uses this — see
+/// [`recursive_fns`]. `f` is `&mut dyn` rather than a generic: the walk is
+/// mutually recursive with [`expr_any`], and a generic closure parameter would
+/// instantiate infinitely.
+fn body_any(body: &[Stmt], f: &mut dyn FnMut(&Expr) -> bool) -> bool {
     body.iter().any(|s| match &s.kind {
-        StmtKind::Local { init, .. } => init.as_ref().is_some_and(expr_has_ffi),
-        StmtKind::Assign { value, .. } => expr_has_ffi(value),
-        StmtKind::Expr(e) => expr_has_ffi(e),
+        StmtKind::Local { init, .. } => init.as_ref().is_some_and(|e| expr_any(e, f)),
+        StmtKind::Assign { value, .. } => expr_any(value, f),
+        StmtKind::Expr(e) => expr_any(e, f),
         StmtKind::If { cond, then, els } => {
-            expr_has_ffi(cond) || body_has_ffi(then) || body_has_ffi(els)
+            expr_any(cond, f) || body_any(then, f) || body_any(els, f)
         }
-        StmtKind::While { cond, body } => expr_has_ffi(cond) || body_has_ffi(body),
+        StmtKind::While { cond, body } => expr_any(cond, f) || body_any(body, f),
         StmtKind::For {
             init,
             cond,
@@ -3744,18 +3770,18 @@ fn body_has_ffi(body: &[Stmt]) -> bool {
             body,
         } => {
             init.as_deref()
-                .is_some_and(|s| body_has_ffi(std::slice::from_ref(s)))
-                || cond.as_ref().is_some_and(expr_has_ffi)
+                .is_some_and(|s| body_any(std::slice::from_ref(s), f))
+                || cond.as_ref().is_some_and(|e| expr_any(e, f))
                 || update
                     .as_deref()
-                    .is_some_and(|s| body_has_ffi(std::slice::from_ref(s)))
-                || body_has_ffi(body)
+                    .is_some_and(|s| body_any(std::slice::from_ref(s), f))
+                || body_any(body, f)
         }
-        StmtKind::Return { value } => value.as_ref().is_some_and(expr_has_ffi),
-        StmtKind::Function { body, .. } => body_has_ffi(body),
-        StmtKind::SetProperty { recv, value, .. } => expr_has_ffi(recv) || expr_has_ffi(value),
+        StmtKind::Return { value } => value.as_ref().is_some_and(|e| expr_any(e, f)),
+        StmtKind::Function { body, .. } => body_any(body, f),
+        StmtKind::SetProperty { recv, value, .. } => expr_any(recv, f) || expr_any(value, f),
         StmtKind::SetIndex { recv, index, value } => {
-            expr_has_ffi(recv) || expr_has_ffi(index) || expr_has_ffi(value)
+            expr_any(recv, f) || expr_any(index, f) || expr_any(value, f)
         }
         StmtKind::Class {
             fields,
@@ -3765,69 +3791,76 @@ fn body_has_ffi(body: &[Stmt]) -> bool {
         } => {
             fields
                 .iter()
-                .any(|f| f.init.as_ref().is_some_and(expr_has_ffi))
-                || ctors.iter().any(|c| body_has_ffi(&c.body))
-                || methods.iter().any(|m| body_has_ffi(&m.body))
+                .any(|fl| fl.init.as_ref().is_some_and(|e| expr_any(e, f)))
+                || ctors.iter().any(|c| body_any(&c.body, f))
+                || methods.iter().any(|m| body_any(&m.body, f))
         }
         StmtKind::Try {
             body,
             catches,
             finally_body,
         } => {
-            body_has_ffi(body)
-                || body_has_ffi(finally_body)
-                || catches.iter().any(|c| body_has_ffi(&c.body))
+            body_any(body, f)
+                || body_any(finally_body, f)
+                || catches.iter().any(|c| body_any(&c.body, f))
         }
-        StmtKind::Throw(e) => expr_has_ffi(e),
-        StmtKind::DoWhile { body, cond } => expr_has_ffi(cond) || body_has_ffi(body),
+        StmtKind::Throw(e) => expr_any(e, f),
+        StmtKind::DoWhile { body, cond } => expr_any(cond, f) || body_any(body, f),
         StmtKind::Switch { subject, cases } => {
-            expr_has_ffi(subject)
-                || cases
-                    .iter()
-                    .any(|c| c.label.as_ref().is_some_and(expr_has_ffi) || body_has_ffi(&c.body))
+            expr_any(subject, f)
+                || cases.iter().any(|c| {
+                    c.label.as_ref().is_some_and(|e| expr_any(e, f)) || body_any(&c.body, f)
+                })
         }
-        StmtKind::Labeled { stmt, .. } => body_has_ffi(std::slice::from_ref(stmt)),
+        StmtKind::Labeled { stmt, .. } => body_any(std::slice::from_ref(stmt), f),
         StmtKind::Assert { cond, message, .. } => {
-            expr_has_ffi(cond) || message.as_ref().is_some_and(expr_has_ffi)
+            expr_any(cond, f) || message.as_ref().is_some_and(|e| expr_any(e, f))
         }
         StmtKind::Break(_) | StmtKind::Continue(_) => false,
     })
 }
 
-fn expr_has_ffi(e: &Expr) -> bool {
+/// [`body_any`] for a single expression: `f` is applied to `e` itself and to
+/// every expression reachable from it.
+fn expr_any(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
+    if f(e) {
+        return true;
+    }
     match e {
-        Expr::Regex(_) => false,
-        Expr::Iterable(inner) => expr_has_ffi(inner),
-        Expr::Recorded { inner, .. } => expr_has_ffi(inner),
-        Expr::Call { name, args, .. } => name == RUST_COMPILE || args.iter().any(expr_has_ffi),
-        Expr::Unary { rhs, .. } => expr_has_ffi(rhs),
-        Expr::Cast { value, .. } => expr_has_ffi(value),
-        Expr::Binary { lhs, rhs, .. } => expr_has_ffi(lhs) || expr_has_ffi(rhs),
-        Expr::Println { arg, .. } => arg.as_deref().is_some_and(expr_has_ffi),
-        Expr::List(elems) => elems.iter().any(expr_has_ffi),
+        Expr::Iterable(inner) => expr_any(inner, f),
+        Expr::Recorded { inner, .. } => expr_any(inner, f),
+        Expr::Call { args, .. } => args.iter().any(|a| expr_any(a, f)),
+        Expr::Unary { rhs, .. } => expr_any(rhs, f),
+        Expr::Cast { value, .. } => expr_any(value, f),
+        Expr::Binary { lhs, rhs, .. } => expr_any(lhs, f) || expr_any(rhs, f),
+        Expr::Println { arg, .. } => arg.as_deref().is_some_and(|a| expr_any(a, f)),
+        Expr::List(elems) => elems.iter().any(|a| expr_any(a, f)),
         Expr::Map(entries) => entries
             .iter()
-            .any(|(k, v)| expr_has_ffi(k) || expr_has_ffi(v)),
-        Expr::MethodCall { recv, args, .. } => expr_has_ffi(recv) || args.iter().any(expr_has_ffi),
-        Expr::Property { recv, .. } => expr_has_ffi(recv),
-        Expr::Closure { body, .. } => body_has_ffi(body),
-        Expr::Range { start, end, .. } => expr_has_ffi(start) || expr_has_ffi(end),
+            .any(|(k, v)| expr_any(k, f) || expr_any(v, f)),
+        Expr::MethodCall { recv, args, .. } => {
+            expr_any(recv, f) || args.iter().any(|a| expr_any(a, f))
+        }
+        Expr::Property { recv, .. } => expr_any(recv, f),
+        Expr::Closure { body, .. } => body_any(body, f),
+        Expr::Range { start, end, .. } => expr_any(start, f) || expr_any(end, f),
         Expr::GString(parts) => parts.iter().any(|p| match p {
-            GStringPart::Expr(e) => expr_has_ffi(e),
+            GStringPart::Expr(e) => expr_any(e, f),
             GStringPart::Text(_) => false,
         }),
         Expr::Ternary { cond, then, els } => {
-            expr_has_ffi(cond) || expr_has_ffi(then) || expr_has_ffi(els)
+            expr_any(cond, f) || expr_any(then, f) || expr_any(els, f)
         }
-        Expr::Elvis { lhs, rhs } => expr_has_ffi(lhs) || expr_has_ffi(rhs),
+        Expr::Elvis { lhs, rhs } => expr_any(lhs, f) || expr_any(rhs, f),
         Expr::CallValue { callee, args, .. } => {
-            expr_has_ffi(callee) || args.iter().any(expr_has_ffi)
+            expr_any(callee, f) || args.iter().any(|a| expr_any(a, f))
         }
-        Expr::New { args, .. } => args.iter().any(expr_has_ffi),
-        Expr::Index { recv, index, .. } => expr_has_ffi(recv) || expr_has_ffi(index),
-        Expr::SuperCtor { args, .. } => args.iter().any(expr_has_ffi),
-        Expr::InstanceOf { value, .. } => expr_has_ffi(value),
-        Expr::Int(..)
+        Expr::New { args, .. } => args.iter().any(|a| expr_any(a, f)),
+        Expr::Index { recv, index, .. } => expr_any(recv, f) || expr_any(index, f),
+        Expr::SuperCtor { args, .. } => args.iter().any(|a| expr_any(a, f)),
+        Expr::InstanceOf { value, .. } => expr_any(value, f),
+        Expr::Regex(_)
+        | Expr::Int(..)
         | Expr::Float(_)
         | Expr::Dec(_)
         | Expr::BigInt(_)
@@ -3840,6 +3873,74 @@ fn expr_has_ffi(e: &Expr) -> bool {
         | Expr::PostIncDec { .. }
         | Expr::PreIncDec { .. } => false,
     }
+}
+
+// ── FFI detection (does the program contain a `rust { ... }` block?) ────────
+
+/// True if any statement in `body` (recursively) evaluates a `__rust_compile`
+/// call — the desugar target of a `rust { ... }` block.
+fn body_has_ffi(body: &[Stmt]) -> bool {
+    body_any(
+        body,
+        &mut |e| matches!(e, Expr::Call { name, .. } if name == RUST_COMPILE),
+    )
+}
+
+// ── Recursion detection (which functions need a call-depth guard?) ──────────
+
+/// The top-level functions that can reach themselves through the static call
+/// graph — directly (`def f(n) { f(n + 1) }`) or through a cycle
+/// (`def a() { b() }; def b() { a() }`).
+///
+/// Only these carry the [`crate::host::GDEPTH`] prologue check, because only a
+/// native `Op::Call` can recurse without the host seeing it: a closure, a
+/// method, a constructor and an operator overload all run through
+/// `host::run_sub`, which enforces [`crate::host::MAX_CALL_DEPTH`] itself. A
+/// function that cannot reach itself cannot recurse, so it keeps a prologue of
+/// nothing but `SetSlot`s — which matters, because a `CallBuiltin` anywhere in a
+/// region a tracing-JIT recording walks aborts the trace.
+///
+/// The graph counts a call written anywhere in the body, including inside a
+/// nested closure. That over-approximates (the closure may never be invoked),
+/// and over-approximating costs a guard that never fires rather than a recursion
+/// that never raises.
+fn recursive_fns(prog: &Program, fn_names: &HashSet<String>) -> HashSet<String> {
+    let mut callees: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for stmt in &prog.body {
+        let StmtKind::Function { name, body, .. } = &stmt.kind else {
+            continue;
+        };
+        let edges = callees.entry(name.as_str()).or_default();
+        body_any(body, &mut |e| {
+            if let Expr::Call { name: callee, .. } = e {
+                if let Some(known) = fn_names.get(callee) {
+                    edges.insert(known.as_str());
+                }
+            }
+            false
+        });
+    }
+    // Transitive closure by repeated relaxation: the graph has one node per
+    // top-level function, so this converges in at most that many rounds.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for name in callees.keys().copied().collect::<Vec<_>>() {
+            let reached: HashSet<&str> = callees[name]
+                .iter()
+                .flat_map(|c| callees.get(c).into_iter().flatten().copied())
+                .collect();
+            let edges = callees.get_mut(name).expect("key just enumerated");
+            let before = edges.len();
+            edges.extend(reached);
+            changed |= edges.len() != before;
+        }
+    }
+    callees
+        .iter()
+        .filter(|(name, reach)| reach.contains(*name))
+        .map(|(name, _)| (*name).to_string())
+        .collect()
 }
 
 fn compound_op(op: AssignOp) -> Op {

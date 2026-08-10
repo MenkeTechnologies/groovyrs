@@ -16,6 +16,21 @@
 use crate::ast::*;
 use crate::lexer::{GPart, Tok, Token};
 
+/// How deeply source may nest before groovyrs refuses to parse it.
+///
+/// The parser is recursive descent and the compiler walks the AST recursively,
+/// so nesting depth in the source is Rust stack depth twice over — and a third
+/// time when the tree drops. Past this, the program is a compile error rather
+/// than a `fatal runtime error: stack overflow`, which aborts with no
+/// diagnostic and no readable exit status.
+///
+/// Apache Groovy's own parser gives out well below this (measured on 5.0.8 /
+/// JVM 21.0.12: 500 nested parentheses compile and 1000 do not; a 1000-term `+`
+/// chain compiles and a 2000-term one does not), so nothing the reference
+/// accepts is refused here. `crate::INTERPRETER_STACK_BYTES` is what makes a
+/// limit this high servable.
+pub const MAX_NESTING: usize = 5000;
+
 /// Parse Groovy `src` into a [`Program`].
 ///
 /// Any inline `rust { ... }` FFI block is rewritten to a `__rust_compile(...)`
@@ -31,6 +46,7 @@ pub fn parse(src: &str) -> Result<Program, String> {
         tmp: 0,
         recording: None,
         pending: Vec::new(),
+        depth: 0,
     };
     p.program()
 }
@@ -52,6 +68,13 @@ struct Parser {
     /// a multi-declarator `def a = 1, b = 2` or a destructuring `def (a, b) = l`.
     /// Drained by every statement-list site through [`Parser::statements`].
     pending: Vec<Stmt>,
+    /// How deep the AST being built is at this point, bounded by
+    /// [`MAX_NESTING`]. Maintained at the three places source nesting becomes
+    /// tree depth: [`Parser::unary`] (every parenthesised, bracketed, braced or
+    /// prefixed expression funnels through it), [`Parser::block`] (statement
+    /// nesting), and [`Parser::binary_from`]'s fold (a chain of `n` operators is
+    /// an AST `n` deep).
+    depth: usize,
 }
 
 impl Parser {
@@ -183,6 +206,13 @@ impl Parser {
 
     /// Parse a `{ ... }` body already past the opening brace; consumes the `}`.
     fn block(&mut self) -> Result<Vec<Stmt>, String> {
+        self.deepen()?;
+        let r = self.block_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn block_inner(&mut self) -> Result<Vec<Stmt>, String> {
         let mut out = Vec::new();
         self.skip_terminators();
         while !self.is(&Tok::RBrace) && !self.is(&Tok::Eof) {
@@ -802,11 +832,17 @@ impl Parser {
                 Tok::Ident(w) if w == "catch" => {
                     self.advance();
                     self.eat(&Tok::LParen)?;
-                    // `Type [| Type]* name`, or a bare `name`.
-                    let mut words = vec![self.ident()?];
+                    // `Type [| Type]* name`, or a bare `name`. A caught type may
+                    // be written fully qualified — `catch
+                    // (groovy.lang.MissingMethodException e)` — which is the
+                    // only spelling for a type whose simple name a script has
+                    // shadowed, and the one the Groovy docs use for its own
+                    // exceptions. `type_name` reads the dots; a bare `name`
+                    // (the untyped `catch (e)`) has none and reads as itself.
+                    let mut words = vec![self.type_name()?];
                     while self.is(&Tok::Pipe) {
                         self.advance();
-                        words.push(self.ident()?);
+                        words.push(self.type_name()?);
                     }
                     let (types, name) = if self.is(&Tok::RParen) {
                         // `catch (e)` — untyped, catches every Exception.
@@ -1403,15 +1439,31 @@ impl Parser {
     }
 
     /// The precedence-climbing loop, resumed over an already-parsed left side.
-    fn binary_from(&mut self, mut lhs: Expr, min_bp: u8) -> Result<Expr, String> {
+    fn binary_from(&mut self, lhs: Expr, min_bp: u8) -> Result<Expr, String> {
+        // A fold of `n` operators is an AST `n` deep, and every level of it is
+        // one more frame for the compiler's walk and for the tree's own drop —
+        // so the chain counts against the same budget the recursive descent
+        // does. The whole chain is one expression, so the budget is released
+        // when it finishes rather than per operator.
+        let entry = self.depth;
+        let r = self.binary_from_inner(lhs, min_bp);
+        self.depth = entry;
+        r
+    }
+
+    fn binary_from_inner(&mut self, mut lhs: Expr, min_bp: u8) -> Result<Expr, String> {
         loop {
+            self.deepen()?;
             // `value instanceof Type` — relational precedence, recorded under
             // the `instanceof` keyword's column.
             if RELATIONAL_BP >= min_bp && matches!(self.peek(), Tok::Ident(k) if k == "instanceof")
             {
                 let col = self.col_at(0);
                 self.advance();
-                let class = self.ident()?;
+                // Fully qualified is legal here too (`t instanceof
+                // java.io.IOException`), and reads the same way `as` and a
+                // `catch` clause read their type names.
+                let class = self.type_name()?;
                 lhs = self.record(
                     col,
                     Expr::InstanceOf {
@@ -1474,7 +1526,17 @@ impl Parser {
         Ok(name)
     }
 
+    /// Every expression that can *contain* another one reaches here first — a
+    /// parenthesised group, a list or map literal, a closure body, a prefix
+    /// operator — so this is where expression nesting is counted.
     fn unary(&mut self) -> Result<Expr, String> {
+        self.deepen()?;
+        let r = self.unary_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn unary_inner(&mut self) -> Result<Expr, String> {
         match self.peek() {
             Tok::Minus | Tok::Not | Tok::Tilde => {
                 let op = match self.peek() {
@@ -1693,7 +1755,10 @@ impl Parser {
             Tok::New => {
                 let line = self.line();
                 self.advance();
-                let class = self.ident()?;
+                // `new java.io.IOException("q")` — the qualified spelling reads
+                // the same way `as`, `instanceof` and a `catch` clause read
+                // theirs; `host::b_new` resolves the package.
+                let class = self.type_name()?;
                 let args = if self.is(&Tok::LParen) {
                     self.call_args()?
                 } else {
@@ -2013,6 +2078,27 @@ impl Parser {
         Ok(args)
     }
 
+    /// Take one level of the [`MAX_NESTING`] budget, or refuse the program.
+    ///
+    /// Groovy refuses too — its own parser overflows and reports
+    /// `CompilationFailedException: parsing failed`. Measured on Apache Groovy
+    /// 5.0.8 / JVM 21.0.12: `println ((((…1…))))` compiles at 500 nested parens
+    /// and fails at 1000, and `println 1 + 1 + …` compiles at 1000 terms and
+    /// fails at 2000. groovyrs's limit is above both, so nothing the reference
+    /// accepts is refused here. What this replaces is not an error message but a
+    /// `fatal runtime error: stack overflow` — an abort with no diagnostic and
+    /// no exit status a caller can read.
+    fn deepen(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(format!(
+                "groovyrs: expression nesting is deeper than {MAX_NESTING} on line {}",
+                self.line()
+            ));
+        }
+        Ok(())
+    }
+
     fn ident(&mut self) -> Result<String, String> {
         match self.advance() {
             Tok::Ident(s) => Ok(s),
@@ -2312,6 +2398,7 @@ fn parse_interpolation(src: &str) -> Result<Expr, String> {
         // placeholder rather than the script — see BUGS.md.
         recording: None,
         pending: Vec::new(),
+        depth: 0,
     };
     p.skip_newlines();
     let e = p.expression()?;

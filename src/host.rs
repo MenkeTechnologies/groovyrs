@@ -320,6 +320,28 @@ pub const GSHR: u16 = 763;
 /// where the mask is non-zero, which leaves every ordinary call on [`GMETHOD`].
 pub const GMETHOD_WIDE: u16 = 764;
 
+/// Builtin id for the call-depth check a statically recursive function carries
+/// in its prologue. Pushes nothing and pops nothing; it reads `vm.frames.len()`
+/// and raises `java.lang.StackOverflowError` past [`MAX_CALL_DEPTH`]. See
+/// `b_depth`, and `Compiler::recursive_fns` for which functions get one.
+pub const GDEPTH: u16 = 765;
+
+/// The call depth at which groovyrs raises `java.lang.StackOverflowError`.
+///
+/// Groovy's depth is the JVM's: whatever fits in the thread's `-Xss`. Measured
+/// on Apache Groovy 5.0.8 / JVM 21.0.12 with `def r; r = { -> d++; r() }`, a
+/// self-recursive closure reached **1650** frames before `StackOverflowError`.
+/// This sits above that, so every recursion the reference can complete completes
+/// here too, and a runaway one raises the same catchable throwable rather than
+/// growing `vm.frames` until the process is killed.
+///
+/// The measure is `vm.frames.len()`, the one depth both recursion paths share:
+/// fusevm's `Op::Call` pushes a frame, and so does `run_sub`, the host's
+/// nested-`VM::run` entry for closures, methods, constructors and field
+/// initializers. `crate::INTERPRETER_STACK_BYTES` is sized to hold this many
+/// levels of the second kind, which are the ones that cost Rust stack.
+pub const MAX_CALL_DEPTH: usize = 2000;
+
 /// Builtin id for the `--dap` per-statement line marker. Emitted only by the
 /// debug compiler (`compiler::compile_debug`); an ordinary run never registers a
 /// handler for it, so it costs nothing. The debug run path registers a handler
@@ -346,6 +368,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GFFI_CALL, b_ffi_call);
     vm.register_builtin(GMETHOD, b_method);
     vm.register_builtin(GMETHOD_WIDE, b_method_wide);
+    vm.register_builtin(GDEPTH, b_depth);
     vm.register_builtin(GPROP, b_prop);
     vm.register_builtin(GMAKE_CLOSURE, b_make_closure);
     vm.register_builtin(GCLOSURE_CALL, b_closure_call);
@@ -667,8 +690,27 @@ fn raise(vm: &mut VM, class: &str, message: &str) {
 /// inputs, and `e.getMessage()` then answers `null` — a difference a script can
 /// print, so it is modeled rather than flattened to an empty string.
 fn raise_opt(vm: &mut VM, class: &str, message: Option<&str>) {
+    raise_with(vm, class, message, Vec::new);
+}
+
+/// [`raise_opt`], carrying the diagnostic payload the throwable's class exposes:
+/// `MissingMethodException.getMethod()`/`getType()`/`getArguments()` and
+/// `MissingPropertyException.getProperty()`/`getType()`. Groovy's dynamic
+/// dispatch makes those two throwables ordinary control flow, and a handler that
+/// reads the payload is the reason they carry one.
+///
+/// The payload is built only when exception handling is armed — hence the
+/// thunk. An exception-free program still degrades to the hard `groovyrs:`
+/// fault, so it allocates nothing, which matters for `type`: a `Class` is a heap
+/// object and the heap has no collector.
+fn raise_with(
+    vm: &mut VM,
+    class: &str,
+    message: Option<&str>,
+    payload: impl FnOnce() -> Vec<(&'static str, Value)>,
+) {
     if EXC_ARMED.with(|a| a.get()) {
-        set_pending(new_throwable_opt(class, message));
+        set_pending(new_throwable_with(class, message, payload()));
     } else {
         let name = crate::throwable::qualified(class);
         fault(
@@ -679,6 +721,29 @@ fn raise_opt(vm: &mut VM, class: &str, message: Option<&str>) {
             },
         );
     }
+}
+
+/// Raise the message-less `java.lang.StackOverflowError` runaway recursion
+/// raises. The JVM's carries no message (`new StackOverflowError().getMessage()`
+/// and the one a real overflow throws are both `null`, verified on Apache Groovy
+/// 5.0.8 / JVM 21.0.12), so this goes through [`raise_opt`] rather than
+/// [`raise`]. Called from [`run_sub`] and [`b_depth`], the two places
+/// [`MAX_CALL_DEPTH`] is enforced.
+fn raise_stack_overflow(vm: &mut VM) {
+    raise_opt(vm, "StackOverflowError", None);
+}
+
+/// [`GDEPTH`]: the call-depth check a statically recursive function runs in its
+/// prologue. fusevm's `Op::Call` costs no Rust stack — it pushes onto the
+/// heap-allocated `vm.frames` — so unbounded native recursion does not overflow
+/// the process stack; it grows memory until the process is killed (measured
+/// ~250 MB per second on `def r(n) { return r(n + 1) }`). Neither outcome is
+/// catchable, and Groovy's is.
+fn b_depth(vm: &mut VM, _argc: u8) -> Value {
+    if vm.frames.len() >= MAX_CALL_DEPTH {
+        raise_stack_overflow(vm);
+    }
+    Value::Undef
 }
 
 /// Raise `groovy.lang.MissingMethodException` for an unresolved `recv.method(…)`,
@@ -718,13 +783,26 @@ fn raise_missing_method_wide(
         Value::Int(_) if wide_at(0) => "java.lang.Long".to_string(),
         _ => java_class_name(recv),
     };
-    raise(
+    let payload_class = class.clone();
+    let payload_args = args.to_vec();
+    raise_with(
         vm,
         "MissingMethodException",
-        &format!(
+        Some(&format!(
             "No signature of method: {method} for class: {class} \
              is applicable for argument types: ({types}) values: [{values}]"
-        ),
+        )),
+        // Groovy's `MissingMethodException` carries the three things a handler
+        // needs to recover: the name that missed, the receiver's class, and the
+        // arguments it was called with. `getArguments()` is an `Object[]`, which
+        // groovyrs models as the transient list form.
+        || {
+            vec![
+                ("method", Value::str(method.to_string())),
+                ("type", heap_push(HeapObj::ClassRef(payload_class))),
+                ("arguments", Value::array(payload_args)),
+            ]
+        },
     );
     Value::Undef
 }
@@ -874,13 +952,20 @@ fn raise_cast(vm: &mut VM, v: &Value, ty_simple: &str) -> Value {
 
 /// Raise `groovy.lang.MissingPropertyException` for an unresolved `recv.name`.
 fn raise_missing_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
-    raise(
+    let class = java_class_name(recv);
+    let payload_class = class.clone();
+    raise_with(
         vm,
         "MissingPropertyException",
-        &format!(
-            "No such property: {name} for class: {}",
-            java_class_name(recv)
-        ),
+        Some(&format!("No such property: {name} for class: {class}")),
+        // `getProperty()` and `getType()` — what Groovy's own
+        // `MissingPropertyException` exposes to a handler.
+        || {
+            vec![
+                ("property", Value::str(name.to_string())),
+                ("type", heap_push(HeapObj::ClassRef(payload_class))),
+            ]
+        },
     );
     Value::Undef
 }
@@ -961,16 +1046,108 @@ fn simple_name_of(qualified: &str) -> String {
         .to_string()
 }
 
-/// Allocate a built-in throwable instance on the host heap. `None` gives it the
-/// `null` message a message-less `NumberFormatException` carries.
-fn new_throwable_opt(class: &str, message: Option<&str>) -> Value {
+/// Allocate a built-in throwable instance on the host heap. A `None` message is
+/// the `null` a message-less `NumberFormatException` carries.
+///
+/// `payload` is the diagnostic state the throwable's own class
+/// declares — `method`/`type`/`arguments` on a `MissingMethodException`,
+/// `property`/`type` on a `MissingPropertyException`. Groovy exposes each
+/// through both a getter and a property (`e.getMethod()` and `e.method`), and
+/// both read the field this puts on the instance.
+fn new_throwable_with(
+    class: &str,
+    message: Option<&str>,
+    payload: Vec<(&'static str, Value)>,
+) -> Value {
     let cid = find_class(class).unwrap_or(0);
     let mut fields = std::collections::HashMap::new();
     fields.insert(
         "message".to_string(),
         message.map_or(Value::Undef, |m| Value::str(m.to_string())),
     );
+    for (k, v) in payload {
+        fields.insert(k.to_string(), v);
+    }
     heap_push(HeapObj::Instance(Instance { class: cid, fields }))
+}
+
+/// Apply the JDK's `Throwable` constructors to a freshly built built-in
+/// throwable: `T()`, `T(String message)`, `T(String message, Throwable cause)`
+/// and `T(Throwable cause)` — the last taking its message from the cause, so
+/// `new RuntimeException(new IOException("b")).getMessage()` is
+/// `java.io.IOException: b`. Verified against Apache Groovy 5.0.8 / JVM 21.0.12.
+///
+/// Answers `false` for an arity the JDK has no constructor for, which the caller
+/// reports. Shared by `new T(…)` ([`b_new`]) and a user subclass's `super(…)`
+/// ([`b_super_ctor`]).
+fn init_builtin_throwable(handle: &Value, args: &[Value]) -> bool {
+    match args {
+        [] => true,
+        // `T(Throwable cause)`: the message is the cause's `toString()`.
+        [only] if is_throwable_value(only) => {
+            set_instance_field(handle, "message", Value::str(throwable_str(only)));
+            set_instance_field(handle, "cause", only.clone());
+            true
+        }
+        [message] => {
+            set_instance_field(handle, "message", Value::str(groovy_str(message)));
+            true
+        }
+        [message, cause] => {
+            set_instance_field(handle, "message", Value::str(groovy_str(message)));
+            set_instance_field(handle, "cause", cause.clone());
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Is `v` an instance of a class descending from the built-in `Throwable`?
+fn is_throwable_value(v: &Value) -> bool {
+    as_instance(v).is_some_and(|i| is_throwable_class(i.class))
+}
+
+/// The `Throwable` members Groovy answers that are not a plain field read:
+/// `getCause`/`initCause` and `getSuppressed`/`addSuppressed`, plus the
+/// `toString`/`getLocalizedMessage` pair.
+///
+/// `None` means "not one of these", so the caller falls through to its own
+/// dispatch. Reached from a method call (`e.getCause()`) and from a property
+/// read (`e.cause`), which Groovy maps to the same getter.
+fn throwable_member(recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
+    let inst = as_instance(recv)?;
+    let field = |name: &str| inst.fields.get(name).cloned().unwrap_or(Value::Undef);
+    Some(match method {
+        "toString" => Value::str(throwable_str(recv)),
+        "getLocalizedMessage" => field("message"),
+        // `null` until something sets one — never absent, so a script printing
+        // `e.getCause()` on an ordinary throwable prints `null`, as Groovy does.
+        "getCause" => field("cause"),
+        "initCause" => {
+            set_instance_field(recv, "cause", args.first().cloned().unwrap_or(Value::Undef));
+            // `initCause` answers the receiver, so `e.initCause(c).getMessage()`
+            // chains. (The JDK also refuses a second call with an
+            // `IllegalStateException`; groovyrs takes the second one.)
+            recv.clone()
+        }
+        // A `Throwable[]`, which groovyrs models as the transient list form —
+        // the same simplification `args` carries (see the BUGS.md `args` entry).
+        // Empty until something is suppressed, and no heap slot either way.
+        "getSuppressed" => match field("suppressed") {
+            v @ Value::Array(_) => v,
+            _ => Value::array(Vec::new()),
+        },
+        "addSuppressed" => {
+            let mut list = match field("suppressed") {
+                Value::Array(items) => items.to_vec(),
+                _ => Vec::new(),
+            };
+            list.push(args.first().cloned().unwrap_or(Value::Undef));
+            set_instance_field(recv, "suppressed", Value::array(list));
+            Value::Undef
+        }
+        _ => return None,
+    })
 }
 
 /// Register the built-in throwable hierarchy (`Exception`, `IOException`, …) as
@@ -2232,6 +2409,14 @@ fn invoke_closure(vm: &mut VM, clo: &Value, args: &[Value]) -> Result<Value, Str
 /// restored so the enclosing dispatch loop resumes cleanly. Shared by closure,
 /// method, constructor, and field-initializer invocation.
 fn run_sub(vm: &mut VM, entry: usize, stack_base: usize) -> Result<Value, String> {
+    // Every level here is a nested `VM::run` on the *Rust* stack, so unbounded
+    // recursion through a closure, a method, an operator overload or a
+    // constructor overflows the process stack — which aborts, and no `catch`
+    // can see it. Groovy raises a `StackOverflowError` a script can catch.
+    if vm.frames.len() >= MAX_CALL_DEPTH {
+        raise_stack_overflow(vm);
+        return Ok(Value::Undef);
+    }
     let return_ip = vm.chunk.ops.len();
     vm.frames.push(Frame {
         return_ip,
@@ -2696,13 +2881,15 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
     }
     args.reverse();
     // A script-declared class shadows a JDK one of the same name, so the
-    // registry is consulted first.
-    if find_class(&name).is_none() {
+    // registry is consulted first. A *qualified* name (`new
+    // java.io.IOException(…)`) resolves through `resolve_class_name`, which
+    // insists the package be the one groovyrs models for that class.
+    if resolve_class_name(&name).is_none() {
         if let Some(v) = new_jdk(vm, &name, &args) {
             return v;
         }
     }
-    let Some(cid) = find_class(&name) else {
+    let Some(cid) = resolve_class_name(&name) else {
         fault(vm, format!("unable to resolve class {name}"));
         return Value::Undef;
     };
@@ -2748,12 +2935,14 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
     // constructor, which chains to the superclass's no-arg ctor.
     let meta = class_meta(cid).unwrap();
     // A throwable with no matching script-declared constructor uses the modeled
-    // JDK pair `T()` / `T(String message)`, which is what a Groovy script means
-    // by `new Exception("boom")` or `class Plain extends RuntimeException {}`.
-    if !meta.ctors.contains_key(&argc) && is_throwable_class(cid) && argc <= 1 {
-        if let Some(m) = args.first() {
-            set_instance_field(&handle, "message", Value::str(groovy_str(m)));
-        }
+    // JDK set `T()` / `T(String)` / `T(String, Throwable)` / `T(Throwable)`,
+    // which is what a Groovy script means by `new Exception("boom")`,
+    // `new RuntimeException("outer", e)`, or `class Plain extends
+    // RuntimeException {}`.
+    if !meta.ctors.contains_key(&argc)
+        && is_throwable_class(cid)
+        && init_builtin_throwable(&handle, &args)
+    {
         return handle;
     }
     if let Some(ctor_idx) = meta.ctors.get(&argc) {
@@ -2885,12 +3074,10 @@ fn b_super_ctor(vm: &mut VM, argc: u8) -> Value {
         return Value::Undef;
     };
     let Some(idx) = class_meta(super_id).and_then(|m| m.ctors.get(&argc).copied()) else {
-        // `super(message)` into the built-in throwable chain — the modeled
-        // `Throwable(String)` constructor, which a user exception class calls.
-        if is_throwable_class(super_id) && argc <= 1 {
-            if let Some(m) = args.first() {
-                set_instance_field(&this, "message", Value::str(groovy_str(m)));
-            }
+        // `super(message)` / `super(message, cause)` into the built-in throwable
+        // chain — the modeled JDK constructors, which a user exception class
+        // calls.
+        if is_throwable_class(super_id) && init_builtin_throwable(&this, &args) {
             return Value::Undef;
         }
         fault(
@@ -3627,6 +3814,20 @@ fn has_user_hash_code(recv: &Value) -> bool {
 }
 
 /// Whether `value` is an instance of the (user or built-in) type `class`.
+/// Resolve a type name written in a `catch` clause or an `instanceof` to a class
+/// registry id. A simple name is looked up as written; a **qualified** one
+/// (`groovy.lang.MissingMethodException`, `java.io.IOException`) resolves to the
+/// same class only when its package is the one groovyrs models for that name, so
+/// a same-named type from another package still does not match.
+fn resolve_class_name(name: &str) -> Option<u32> {
+    if let Some(id) = find_class(name) {
+        return Some(id);
+    }
+    let (_, short) = name.rsplit_once('.')?;
+    let id = find_class(short)?;
+    (crate::throwable::qualified(short) == name).then_some(id)
+}
+
 fn value_is_a(value: &Value, class: &str) -> bool {
     // `null` is never an instance of anything.
     if matches!(value, Value::Undef) {
@@ -3634,7 +3835,7 @@ fn value_is_a(value: &Value, class: &str) -> bool {
     }
     // A user class instance: the named class must appear in its superclass chain.
     if let Some(inst) = as_instance(value) {
-        if let Some(target) = find_class(class) {
+        if let Some(target) = resolve_class_name(class) {
             return class_chain(inst.class).contains(&target)
                 || interface_closure(inst.class).contains(&target);
         }
@@ -3718,16 +3919,8 @@ fn dispatch_instance_method(
     // The `Throwable` methods a script actually calls, for the modeled built-in
     // hierarchy (a user override was already found by `lookup_method` above).
     if is_throwable_class(inst.class) {
-        match method {
-            "toString" => return Some(Ok(Value::str(throwable_str(recv)))),
-            "getLocalizedMessage" => {
-                return Some(Ok(inst
-                    .fields
-                    .get("message")
-                    .cloned()
-                    .unwrap_or(Value::Undef)))
-            }
-            _ => {}
+        if let Some(v) = throwable_member(recv, method, args) {
+            return Some(Ok(v));
         }
     }
     Some(Ok(raise_missing_method(vm, recv, method, args)))
@@ -3764,6 +3957,15 @@ fn dispatch_instance_prop_get(
     // declared field named `class` (read above) still wins.
     if name == "class" {
         return Some(Ok(class_ref_of(recv)));
+    }
+    // Groovy reads `e.cause` / `e.suppressed` through `getCause()` /
+    // `getSuppressed()`, so a throwable's non-field members answer as properties
+    // too. The field reads above already served `e.message`.
+    if is_throwable_class(inst.class) {
+        let getter = format!("get{}", capitalize(name));
+        if let Some(v) = throwable_member(recv, &getter, &[]) {
+            return Some(Ok(v));
+        }
     }
     Some(Ok(raise_missing_property(vm, recv, name)))
 }
@@ -4120,10 +4322,21 @@ fn b_name_get(vm: &mut VM, _argc: u8) -> Value {
         return vm.globals[gidx].clone();
     }
     let Some(recv) = DELEGATES.with(|d| d.borrow().last().cloned()) else {
-        raise(
+        // The bare-name miss names the *script* class, so `e.getType()` answers
+        // it too — Groovy's `e.type` here is `class p7` for `p7.groovy`.
+        raise_with(
             vm,
             "MissingPropertyException",
-            &format!("No such property: {name} for class: {}", script_class()),
+            Some(&format!(
+                "No such property: {name} for class: {}",
+                script_class()
+            )),
+            || {
+                vec![
+                    ("property", Value::str(name.clone())),
+                    ("type", heap_push(HeapObj::ClassRef(script_class()))),
+                ]
+            },
         );
         return Value::Undef;
     };

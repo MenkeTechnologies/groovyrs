@@ -3687,3 +3687,291 @@ fn the_jdk_lookalikes_answer_javas_rule_not_rusts() {
         )
     );
 }
+
+// ── Runaway recursion is a catchable StackOverflowError ─────────────────────
+//
+// Groovy's depth is the JVM's, and running out of it throws a
+// `java.lang.StackOverflowError` a script can catch. groovyrs has two
+// recursions that are not fusevm's `Op::Call` frame vector — `host::run_sub`'s
+// nested `VM::run` (the Rust stack) and the parser/compiler's tree walk — and
+// before `host::MAX_CALL_DEPTH` both ended in `fatal runtime error: stack
+// overflow`, an abort with no diagnostic that no `catch` could see. The native
+// `Op::Call` path did not abort at all: it grew `vm.frames` until the process
+// was killed. Every expectation below is byte-verified against Apache Groovy
+// 5.0.8 on JVM 21.0.12.
+
+#[test]
+fn runaway_function_recursion_raises_a_catchable_stack_overflow_error() {
+    // The native `Op::Call` path — the one that used to grow memory forever
+    // rather than raise. Both the direct and the mutual cycle are guarded,
+    // because `compiler::recursive_fns` closes the call graph transitively.
+    let (out, ok) = run(
+        "def r(n) { return r(n + 1) }\n\
+         try { println r(0) } catch (StackOverflowError e) { println \"caught \" + e.getClass().getName() + \" msg=\" + e.getMessage() }\n\
+         def a(n) { return b(n + 1) }\n\
+         def b(n) { return a(n + 1) }\n\
+         try { println a(0) } catch (Throwable t) { println \"mutual \" + t.getClass().getName() }\n",
+    );
+    assert!(ok);
+    assert_eq!(
+        out,
+        "caught java.lang.StackOverflowError msg=null\n\
+         mutual java.lang.StackOverflowError\n"
+    );
+}
+
+#[test]
+fn runaway_closure_recursion_raises_a_stack_overflow_error_in_the_right_place() {
+    // The host re-entry path, and the hierarchy that decides what catches it:
+    // `StackOverflowError` is a `VirtualMachineError`, so it is an `Error` and
+    // is *not* an `Exception`.
+    let (out, ok) = run(
+        "def q\n\
+         q = { n -> q(n + 1) }\n\
+         try { println q(0) } catch (Throwable t) { println \"closure \" + t.getClass().getName() + \" isErr=\" + (t instanceof Error) + \" isVME=\" + (t instanceof VirtualMachineError) + \" isExc=\" + (t instanceof Exception) }\n",
+    );
+    assert!(ok);
+    assert_eq!(
+        out,
+        "closure java.lang.StackOverflowError isErr=true isVME=true isExc=false\n"
+    );
+}
+
+#[test]
+fn runaway_method_recursion_raises_a_stack_overflow_error() {
+    let (out, ok) = run(
+        "class R { def go(n) { return go(n + 1) } }\n\
+         try { println new R().go(0) } catch (Throwable t) { println \"method \" + t.getClass().getName() }\n",
+    );
+    assert!(ok);
+    assert_eq!(out, "method java.lang.StackOverflowError\n");
+}
+
+#[test]
+fn a_stack_overflow_error_escapes_catch_exception() {
+    // The whole point of putting `StackOverflowError` under `VirtualMachineError`
+    // rather than raising some convenient `RuntimeException`: a program that
+    // catches `Exception` broadly must not swallow it.
+    let (out, ok) = run(
+        "def r(n) { return r(n + 1) }\n\
+         try { try { r(0) } catch (Exception e) { println \"WRONG: an Error was caught as an Exception\" } }\n\
+         catch (Throwable t) { println \"escaped \" + t.getClass().getName() }\n",
+    );
+    assert!(ok);
+    assert_eq!(out, "escaped java.lang.StackOverflowError\n");
+}
+
+#[test]
+fn recursion_below_the_depth_limit_still_completes() {
+    // The guard must not turn ordinary recursion into an error. 900 deep is
+    // past what a naive Rust-stack recursion survived (63) and inside both
+    // `MAX_CALL_DEPTH` and the JVM's own measured 1650.
+    let (out, ok) = run("def f(n) { if (n <= 0) return 0; return 1 + f(n - 1) }\n\
+         println f(900)\n\
+         def fib(n) { n < 2 ? n : fib(n - 1) + fib(n - 2) }\n\
+         println fib(20)\n");
+    assert!(ok);
+    assert_eq!(out, "900\n6765\n");
+}
+
+#[test]
+fn source_nested_past_the_limit_is_a_compile_error_not_an_abort() {
+    // The third recursion: source nesting is Rust stack in the parser, in the
+    // compiler's walk, and again when the tree drops. Apache Groovy refuses
+    // these too (`CompilationFailedException: parsing failed` at 1000 nested
+    // parentheses and at a 2000-term `+` chain, measured on 5.0.8 / JVM
+    // 21.0.12); what is pinned here is that groovyrs refuses them the same way
+    // — a message and exit 1 — rather than with `fatal runtime error: stack
+    // overflow`, which is what it did before `parser::MAX_NESTING`.
+    let deep_parens = format!("println {}1{}\n", "(".repeat(20_000), ")".repeat(20_000));
+    let (out, err, ok) = run_full(&deep_parens);
+    assert!(!ok, "expected a compile error, got stdout={out:?}");
+    assert!(
+        err.contains("expression nesting is deeper than"),
+        "expected the nesting diagnostic, got stderr={err:?}"
+    );
+    assert!(
+        !err.contains("stack overflow"),
+        "the process aborted instead of reporting: {err:?}"
+    );
+
+    // A left-folded operator chain is the same depth by another spelling, and
+    // it is the shape the recursive-descent counter alone does not see.
+    let long_chain = format!("println 1{}\n", " + 1".repeat(50_000));
+    let (_, err, ok) = run_full(&long_chain);
+    assert!(!ok);
+    assert!(
+        err.contains("expression nesting is deeper than") && !err.contains("stack overflow"),
+        "stderr={err:?}"
+    );
+
+    // …and just under the limit still compiles and runs, so the guard is a
+    // bound and not a ban.
+    let (out, ok) = run(&format!(
+        "println {}1{}\n",
+        "(".repeat(4900),
+        ")".repeat(4900)
+    ));
+    assert!(ok);
+    assert_eq!(out, "1\n");
+}
+
+// ── Throwable shape: cause, suppressed, and the Groovy payloads ─────────────
+
+#[test]
+fn a_throwable_carries_its_cause() {
+    // The JDK's four constructors, `getCause`, `initCause`, and the `cause`
+    // property Groovy reads through `getCause()`. `T(Throwable)` takes its
+    // message from the cause's `toString()`, which is why `wrapped.getMessage()`
+    // below is the qualified name and the inner message.
+    let (out, ok) = run("println new RuntimeException(\"plain\").getCause()\n\
+         def chained = new RuntimeException(\"outer\", new java.io.IOException(\"inner\"))\n\
+         println chained.getMessage()\n\
+         println chained.getCause().getClass().getName()\n\
+         println chained.getCause().getMessage()\n\
+         println chained.cause.message\n\
+         def wrapped = new RuntimeException(new java.io.IOException(\"only\"))\n\
+         println wrapped.getMessage()\n\
+         println wrapped.getCause().getClass().getName()\n\
+         def ic = new RuntimeException(\"a\")\n\
+         ic.initCause(new java.io.IOException(\"b\"))\n\
+         println ic.getCause().getClass().getName()\n");
+    assert!(ok);
+    assert_eq!(
+        out,
+        "null\n\
+         outer\n\
+         java.io.IOException\n\
+         inner\n\
+         inner\n\
+         java.io.IOException: only\n\
+         java.io.IOException\n\
+         java.io.IOException\n"
+    );
+}
+
+#[test]
+fn a_throwable_carries_its_suppressed_list() {
+    // `getSuppressed()` is empty rather than absent on an ordinary throwable —
+    // a script printing it must see `[]`, not `null`.
+    let (out, ok) = run("def e = new Exception(\"x\")\n\
+         println e.getSuppressed().size()\n\
+         println e.getSuppressed()\n\
+         e.addSuppressed(new java.io.IOException(\"s1\"))\n\
+         e.addSuppressed(new IllegalStateException(\"s2\"))\n\
+         println e.getSuppressed().size()\n\
+         println e.getSuppressed()[0].getClass().getName()\n\
+         println e.getSuppressed()[1].getMessage()\n\
+         println e.suppressed.size()\n");
+    assert!(ok);
+    assert_eq!(out, "0\n[]\n2\njava.io.IOException\ns2\n2\n");
+}
+
+#[test]
+fn missing_method_and_missing_property_carry_groovys_payload() {
+    // Groovy's dynamic dispatch makes these two throwables ordinary control
+    // flow, and a handler recovers from one by reading what missed. Answering
+    // the right *message* under a throwable with no `getMethod()` is a
+    // divergence a message audit cannot see.
+    let (out, ok) = run(
+        "try { 5.zork(1, \"a\") } catch (Throwable e) {\n\
+        \x20 println e.getMethod()\n\
+        \x20 println e.getType().getName()\n\
+        \x20 println e.getArguments()\n\
+        \x20 println e.method\n\
+        \x20 println e.type\n\
+         }\n\
+         try { [1, 2].nope() } catch (Throwable e) { println e.getType().getName() + \" \" + e.getMethod() + \" \" + e.getArguments().size() }\n\
+         try { println 5.zork } catch (Throwable e) {\n\
+        \x20 println e.getProperty()\n\
+        \x20 println e.getType().getName()\n\
+        \x20 println e.property\n\
+         }\n",
+    );
+    assert!(ok);
+    assert_eq!(
+        out,
+        "zork\n\
+         java.lang.Integer\n\
+         [1, a]\n\
+         zork\n\
+         class java.lang.Integer\n\
+         java.util.ArrayList nope 0\n\
+         zork\n\
+         java.lang.Integer\n\
+         zork\n"
+    );
+}
+
+#[test]
+fn a_bare_name_miss_names_the_script_class_in_its_payload() {
+    // `getType()` for a bare-name miss is the *script* class, so the answer
+    // depends on the file's stem — the same rule
+    // `the_script_class_name_follows_the_entry_point` pins for the message.
+    let dir = std::env::temp_dir();
+    let path = dir.join("GroovyrsMissingPropertyType.groovy");
+    std::fs::write(
+        &path,
+        "try { println zork } catch (Throwable e) { println e.getProperty() + \" / \" + e.getType().getName() }\n",
+    )
+    .unwrap();
+    let got = Command::new(env!("CARGO_BIN_EXE_groovy"))
+        .arg(&path)
+        .output()
+        .expect("spawn groovy");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        String::from_utf8_lossy(&got.stdout),
+        "zork / GroovyrsMissingPropertyType\n"
+    );
+}
+
+#[test]
+fn a_type_may_be_named_fully_qualified() {
+    // `catch (groovy.lang.MissingMethodException e)` is the spelling the Groovy
+    // docs use for its own exceptions and the only one available when a script
+    // has shadowed the simple name. It was a parse error here, which made every
+    // `groovy.lang.*` handler unreachable. `new`, `instanceof` and a multi-catch
+    // arm read the same grammar.
+    let (out, ok) = run(
+        "try { 5.zork() } catch (groovy.lang.MissingMethodException e) { println \"MME\" }\n\
+         try { println 5.zork } catch (groovy.lang.MissingPropertyException e) { println \"MPE\" }\n\
+         try { 5.zork() } catch (groovy.lang.GroovyRuntimeException e) { println \"GRE\" }\n\
+         try { throw new java.io.IOException(\"q\") } catch (java.io.IOException e) { println \"IOE \" + e.getMessage() }\n\
+         try { 5.zork() } catch (java.io.IOException | groovy.lang.MissingMethodException e) { println \"arm \" + e.getClass().getName() }\n\
+         try { throw new java.io.FileNotFoundException(\"f\") } catch (Throwable t) {\n\
+        \x20 println (t instanceof java.io.IOException)\n\
+        \x20 println (t instanceof java.lang.Exception)\n\
+        \x20 println (t instanceof java.lang.Error)\n\
+         }\n",
+    );
+    assert!(ok);
+    assert_eq!(
+        out,
+        "MME\n\
+         MPE\n\
+         GRE\n\
+         IOE q\n\
+         arm groovy.lang.MissingMethodException\n\
+         true\n\
+         true\n\
+         false\n"
+    );
+}
+
+#[test]
+fn a_qualified_name_from_the_wrong_package_does_not_match() {
+    // The package half of a qualified name is load-bearing: resolving it by
+    // simple name alone would make `catch (com.example.IOException e)` catch a
+    // `java.io.IOException`. (Apache Groovy rejects the unresolvable name at
+    // compile time; groovyrs accepts it and never matches, which is the same
+    // observable for the `catch` and is recorded in BUGS.md.)
+    let (out, ok) = run(
+        "try { throw new java.io.IOException(\"z\") } catch (Throwable t) {\n\
+        \x20 println (t instanceof com.example.IOException)\n\
+        \x20 println (t instanceof java.io.IOException)\n\
+         }\n",
+    );
+    assert!(ok);
+    assert_eq!(out, "false\ntrue\n");
+}

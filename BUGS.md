@@ -325,11 +325,22 @@ reported as parse or compile errors, never silently mis-run.
   the array/string forms), `UnsupportedOperationException`, `ClassCastException`,
   `InterruptedException`, `CloneNotSupportedException`, `AssertionError`,
   `IOException`, `FileNotFoundException`, `NoSuchElementException`,
-  `ConcurrentModificationException`, `GroovyRuntimeException` — so `catch`
+  `ConcurrentModificationException`, `GroovyRuntimeException`,
+  `VirtualMachineError`, `StackOverflowError` — so `catch`
   matching, `instanceof`, and `class MyEx extends Exception { MyEx(String m) {
-  super(m) } }` all run through the one class registry. A throwable prints as
+  super(m) } }` all run through the one class registry. A type may be written
+  **fully qualified** wherever a type is named — `catch
+  (groovy.lang.MissingMethodException e)`, a multi-catch arm, `instanceof`, and
+  `new` — and the package half is checked, so a same-named type from another
+  package does not match. A throwable prints as
   `java.lang.Exception: boom` (bare class name for a script-declared subclass),
-  and `getMessage()` / `.message` / `toString()` work. `finally` runs on every
+  and `getMessage()` / `.message` / `toString()` work — as do the JDK's four
+  constructors (`T()`, `T(String)`, `T(String, Throwable)`, and `T(Throwable)`,
+  whose message is the cause's `toString()`), `getCause()` / `initCause(c)` /
+  `.cause`, and `getSuppressed()` / `addSuppressed(t)` / `.suppressed`. A
+  `getCause()` with no cause answers `null` and `getSuppressed()` an empty
+  list, never absent; `super(message, cause)` reaches the same constructors from
+  a script-declared subclass. `finally` runs on every
   exit path: fall-through, a matched handler, an unmatched rethrow, and an early
   `return` / `break` / `continue` out of the block. Groovy's implicit return
   reaches through a trailing `try` (and a trailing `if`), so a closure whose body
@@ -366,6 +377,40 @@ reported as parse or compile errors, never silently mis-run.
   A fault in a program that uses no `try`/`throw` still aborts (nothing would
   observe the parked throwable), now reporting `groovyrs: <qualified class>:
   <message>` on stderr with the same non-zero exit.
+
+  The two throwables Groovy's dynamic dispatch raises most often carry the
+  payload a handler recovers from, not just the message:
+  `MissingMethodException.getMethod()` / `getType()` / `getArguments()` and
+  `MissingPropertyException.getProperty()` / `getType()`, each also readable as
+  a property (`e.method`, `e.property`). A bare-name miss names the *script*
+  class in `getType()`, the same name its message quotes. The payload is built
+  only when the program has armed exception handling, so a program with no `try`
+  allocates nothing on the fault path.
+
+- **Runaway recursion raises `java.lang.StackOverflowError`.** Groovy's
+  recursion depth is the JVM's, and running out of it throws a catchable
+  `StackOverflowError`. groovyrs raises the same throwable in the same place in
+  the hierarchy (`StackOverflowError` → `VirtualMachineError` → `Error` →
+  `Throwable`), so `catch (Exception e)` does not swallow it. All four shapes
+  are covered — a self-recursive function, a mutual cycle, a closure, and a
+  method — because what is bounded is the *one* depth both recursion paths
+  share, `vm.frames.len()`, at `host::MAX_CALL_DEPTH` (2000, above the JVM's
+  measured 1650 for a self-recursive closure on JDK 21). Two enforcement points:
+  `host::run_sub`, which every closure / method / constructor /
+  operator-overload re-entry passes through, and a `GDEPTH` check the compiler
+  puts in the prologue of each function `compiler::recursive_fns` finds in a
+  call-graph cycle. A function that cannot reach itself gets no check, which is
+  what keeps a hot loop calling one trace-eligible — a `CallBuiltin` in a
+  recorded region aborts the trace.
+
+  Before this the two paths failed differently and neither was catchable: host
+  re-entry overflowed the Rust stack (`fatal runtime error: stack overflow`,
+  SIGABRT, at 63 nested levels on the main thread's 8 MiB), and native
+  `Op::Call` recursion grew `vm.frames` on the heap at ~250 MB/s until the
+  process was killed. The binary now runs on a thread with
+  `groovyrs::INTERPRETER_STACK_BYTES` (512 MiB) of stack, which is what makes a
+  bound of 2000 servable at the measured ~133 KB of Rust stack per host
+  re-entry in a debug build.
 
 - **`switch`.** Groovy's, with its full `isCase` semantics rather than `==`: a
   constant label compares equal (numerically across `Integer`/`BigDecimal`), a
@@ -483,6 +528,55 @@ reported as parse or compile errors, never silently mis-run.
 - **Command-argument chains beyond one arg** (`println a, b`, `foo bar baz`).
 
 ## Modeled with a documented simplification
+
+- **Recursion depth is a fixed 2000 frames, not the JVM's stack.** Groovy's
+  limit is whatever `-Xss` leaves and so varies by JVM, thread and frame size;
+  groovyrs's is the constant `host::MAX_CALL_DEPTH`. It sits above the reference's
+  measured depth (1650 frames for a self-recursive closure on Apache Groovy
+  5.0.8 / JVM 21.0.12), so a recursion the reference completes completes here —
+  but the *depth at which* the two raise differs, and a program that prints a
+  counter before overflowing prints a different number. The counter is also
+  frames, not calls: a recursion that goes through the host (a closure, a
+  method) spends two per level where a plain function call spends one.
+
+- **Source nested deeper than 5000 is refused.** The parser is recursive
+  descent, the compiler walks the AST recursively, and the tree recurses again
+  when it drops, so nesting in the source is Rust stack three times over.
+  `parser::MAX_NESTING` bounds it and the program is the compile error
+  `groovyrs: expression nesting is deeper than 5000 on line N` — where before it
+  was `fatal runtime error: stack overflow`, an abort with no diagnostic.
+  Measured against Apache Groovy 5.0.8 / JVM 21.0.12, the reference's own parser
+  gives out first (500 nested parentheses compile and 1000 do not; a 1000-term
+  `+` chain compiles and a 2000-term one does not), so nothing the reference
+  accepts is refused here. The budget counts three things against one limit:
+  recursive-descent depth, statement-block depth, and the length of a
+  left-folded operator chain, which is AST depth by another spelling.
+
+- **`getSuppressed()` and `getArguments()` answer a `List`, not an array.** Both
+  are arrays in Java (`Throwable[]`, `Object[]`), and groovyrs has no array
+  type — the same absence recorded for `args` and `String.split` below. They
+  print and iterate identically and answer `size()`; what differs is `.length`,
+  which raises `MissingPropertyException`, and `getClass()`, which reports
+  `java.util.ArrayList` rather than `[Ljava.lang.Throwable;`.
+
+- **`initCause` may be called twice.** The JDK refuses the second call with
+  `IllegalStateException: Can't overwrite cause with …`; groovyrs takes it. The
+  first call, which is the one programs make, agrees — including its answering
+  the receiver so `e.initCause(c)` chains.
+
+- **A qualified type name from a package groovyrs does not model is accepted and
+  never matches.** `t instanceof com.example.IOException` is `false` here, where
+  Groovy fails the compile with `unable to resolve class`. The `catch` reading is
+  the same either way (the arm does not fire); what differs is that Groovy
+  refuses the program and groovyrs runs it.
+
+- **`throw 5` — a non-`Throwable` — is a groovyrs fault, not Groovy's
+  `VerifyError`.** Groovy compiles the `throw` and the *JVM verifier* rejects the
+  resulting bytecode at class load, so the program dies with
+  `java.lang.VerifyError`. That throwable is an artifact of JVM bytecode
+  verification with nothing to correspond to here; groovyrs reports
+  `groovyrs: Caught: 5` and exits non-zero. Both refuse the program; only the
+  diagnostic differs.
 
 - **A labeled `break`/`continue` that leaves the loop containing a `try` runs
   its `finally`; Groovy 5.0.7 does not.** groovyrs follows the JLS here. Repro:

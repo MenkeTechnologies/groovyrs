@@ -11,7 +11,20 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => return fail(&e),
     };
+    // Everything after this runs on the interpreter thread: parsing, lowering
+    // and execution all recurse on the Rust stack in proportion to user input,
+    // and every groovyrs thread-local (heap, class registry, pending exception,
+    // script class name) belongs to whichever thread does the work. See
+    // `groovyrs::on_interpreter_stack`.
+    match groovyrs::on_interpreter_stack(move || serve(cli)) {
+        Ok(code) => code,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
 
+/// Everything the `groovy` binary does once its command line has parsed. Runs on
+/// the interpreter thread.
+fn serve(cli: groovyrs::cli::Cli) -> ExitCode {
     if cli.show_version {
         println!("{}", groovyrs::version_banner());
         return ExitCode::SUCCESS;

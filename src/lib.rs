@@ -26,6 +26,50 @@ pub mod tiers;
 pub use banner::version_banner;
 use fusevm::{VMResult, Value, VM};
 
+/// The stack the interpreter thread gets, in bytes.
+///
+/// Two groovyrs recursions live on the **Rust** stack rather than on fusevm's
+/// heap-allocated frame vector, and both are driven by user input:
+///
+/// * **Host re-entry.** A GDK method that runs a closure, a user method, a
+///   constructor and an operator overload all call `host::run_sub`, which drives
+///   a nested `VM::run`. A program that nests those — `go(n) { [1].collect {
+///   go(n - 1) } }` — nests one Rust `VM::run` frame per level. Measured on a
+///   debug build: ~133 KB of stack per level (the main thread's 8 MiB carried 63
+///   of them before `fatal runtime error: stack overflow`).
+/// * **Parsing and lowering.** `parser` is recursive descent and `compiler`
+///   walks the AST recursively, so nesting depth in the *source* is Rust
+///   recursion too.
+///
+/// [`host::MAX_CALL_DEPTH`] and [`parser::MAX_NESTING`] bound both so runaway
+/// input raises a catchable `java.lang.StackOverflowError` instead of aborting
+/// the process — but a bound only helps if the stack can actually hold that many
+/// levels. This is sized for `MAX_CALL_DEPTH` levels of host re-entry at the
+/// measured debug-build cost, with margin. It is address space, not memory: the
+/// pages commit as they are touched.
+pub const INTERPRETER_STACK_BYTES: usize = 512 * 1024 * 1024;
+
+/// Run `f` on a thread with [`INTERPRETER_STACK_BYTES`] of stack, propagating a
+/// panic to the caller.
+///
+/// Every groovyrs thread-local — the object heap, the class registry, the
+/// pending exception, the script class name — belongs to whichever thread runs
+/// the interpreter, so `f` must cover the *whole* job: setting the script class,
+/// parsing, lowering, and running. The `groovy` binary wraps its entire post-CLI
+/// body in one call. An embedder calling [`run_str`] or [`run_file`] directly
+/// runs on its own thread and should wrap the call the same way; a default 2 MiB
+/// thread cannot hold [`host::MAX_CALL_DEPTH`] host re-entries.
+pub fn on_interpreter_stack<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> std::thread::Result<T> {
+    std::thread::Builder::new()
+        .name("groovyrs".to_string())
+        .stack_size(INTERPRETER_STACK_BYTES)
+        .spawn(f)
+        .expect("spawn the groovyrs interpreter thread")
+        .join()
+}
+
 /// Parse Groovy `src` to an AST.
 pub fn parse(src: &str) -> Result<ast::Program, String> {
     parser::parse(src)

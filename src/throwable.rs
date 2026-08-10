@@ -61,6 +61,14 @@ const THROWABLES: &[(&str, &str, &str)] = &[
     ("InterruptedException", "Exception", "java.lang"),
     ("CloneNotSupportedException", "Exception", "java.lang"),
     ("AssertionError", "Error", "java.lang"),
+    // What runaway recursion raises. `StackOverflowError` is a
+    // `VirtualMachineError`, not a plain `Error`, so `catch (VirtualMachineError
+    // e)` catches it and `catch (Exception e)` does not — verified on 5.0.8 by
+    // walking `StackOverflowError.class.getSuperclass()`:
+    // `java.lang.StackOverflowError <- java.lang.VirtualMachineError <-
+    //  java.lang.Error <- java.lang.Throwable`.
+    ("VirtualMachineError", "Error", "java.lang"),
+    ("StackOverflowError", "VirtualMachineError", "java.lang"),
     ("IOException", "Exception", "java.io"),
     ("FileNotFoundException", "IOException", "java.io"),
     ("NoSuchElementException", "RuntimeException", "java.util"),
@@ -129,7 +137,7 @@ mod tests {
         // that nearly all of it is parented before walking it.
         let entries: Vec<_> = all().collect();
         assert!(
-            entries.len() >= 25,
+            entries.len() >= 29,
             "only {} throwables in the table — it is truncated or `all()` \
              stopped yielding, so the ordering check below guards nothing",
             entries.len()
@@ -173,6 +181,17 @@ mod tests {
         assert_eq!(
             qualified("GroovyCastException"),
             "org.codehaus.groovy.runtime.typehandling.GroovyCastException"
+        );
+        // Runaway recursion's throwable, and the `VirtualMachineError` that sits
+        // between it and `Error` — the reason `catch (Exception e)` does not
+        // catch it.
+        assert_eq!(
+            qualified("StackOverflowError"),
+            "java.lang.StackOverflowError"
+        );
+        assert_eq!(
+            qualified("VirtualMachineError"),
+            "java.lang.VirtualMachineError"
         );
         // A user subclass keeps its bare script name (`MyEx: q` in Groovy).
         assert_eq!(qualified("MyEx"), "MyEx");

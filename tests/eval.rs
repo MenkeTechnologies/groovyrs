@@ -3163,3 +3163,307 @@ fn a_throw_from_a_declaration_or_a_condition_reaches_the_catch() {
     assert!(ok);
     assert_eq!(out, "caught:decl\ncaught:if\ncaught:while\n");
 }
+
+#[test]
+fn hashcode_answers_javas_specified_contract_for_every_value_shape() {
+    // `hashCode()` was missing entirely — every receiver answered
+    // `MissingMethodException`. Each line below is the stdout of Apache Groovy
+    // 5.0.8 (JVM 17.0.4.1) on the same expression, so it pins the *rule*, not
+    // just a number: `String` folds UTF-16 code units (the astral case needs the
+    // surrogate pair, not the scalar), `Long` folds its halves where `Integer`
+    // does not, `Double` folds `doubleToLongBits`, `BigDecimal` carries its
+    // scale (1.5 and 1.50 differ), `BigInteger` folds magnitude words
+    // big-endian, `AbstractList` seeds at 1 and multiplies by 31, `AbstractMap`
+    // sums `key ^ value`, `AbstractSet` sums its elements (so a `LinkedHashSet`
+    // and the `TreeSet` of the same elements agree), and `IntRange` uses a
+    // Cantor pairing of its normalised bounds while every other range shape
+    // inherits `AbstractList`'s.
+    let (out, ok) = run(concat!(
+        "println([ \"\".hashCode(), \"a\".hashCode(), \"hello\".hashCode(), \"café éè 中\".hashCode(), \"a😀b\".hashCode() ])\n",
+        "println([ 0.hashCode(), 1.hashCode(), (-1).hashCode(), 2147483647.hashCode(), (-2147483648).hashCode() ])\n",
+        "println([ 4294967296L.hashCode(), 9223372036854775807L.hashCode(), (-9223372036854775808L).hashCode() ])\n",
+        "println([ true.hashCode(), false.hashCode() ])\n",
+        "println([ (1.0d).hashCode(), (-0.0d).hashCode(), (3.14d).hashCode(), Double.NaN.hashCode(), Double.POSITIVE_INFINITY.hashCode(), Double.NEGATIVE_INFINITY.hashCode() ])\n",
+        "println([ (1.5G).hashCode(), (1.50G).hashCode(), (0.1G).hashCode(), (-3.14G).hashCode(), (1.5e10G).hashCode() ])\n",
+        "println([ (0G).hashCode(), (1G).hashCode(), (-1G).hashCode(), (100G).hashCode(), (12345678901234567890G).hashCode(), ((2G)**70).hashCode() ])\n",
+        "println([ [].hashCode(), [1].hashCode(), [1,2,3].hashCode(), [1,[2,3]].hashCode(), [\"a\",\"b\"].hashCode(), [null].hashCode(), [[1,2],[3,4]].hashCode() ])\n",
+        "println([ [:].hashCode(), [a:1].hashCode(), [a:1,b:2].hashCode(), [a:[1,2]].hashCode(), [a:[b:1]].hashCode() ])\n",
+        "println([ ([] as Set).hashCode(), ([1,2,3] as Set).hashCode(), ([1,2,3] as LinkedHashSet).hashCode(), (new TreeSet([1,2,3])).hashCode(), ([[1,2]] as Set).hashCode() ])\n",
+        "println([ (0..0).hashCode(), (1..1).hashCode(), (1..3).hashCode(), (3..1).hashCode(), (1..<3).hashCode(), (0..65535).hashCode(), (46340..46340).hashCode(), (100000..100000).hashCode(), (-5..-1).hashCode() ])\n",
+        "println([ (1..<1).hashCode(), ('a'..'c').hashCode(), ('c'..'a').hashCode(), (1.0..3.0).hashCode(), (1.5G..3.5G).hashCode() ])\n",
+        "println([ [1,2,3,4].subList(1,3).hashCode(), [(1..3)].hashCode(), [true].hashCode(), [1.0d].hashCode(), [1.5G].hashCode(), [4294967296L].hashCode() ])\n",
+        "println([ \"abc\".hashCode() == \"abc\".hashCode(), [1,2] == [1,2], [1,2].hashCode() == [1,2].hashCode(), (1..3).hashCode() == [1,2,3].hashCode() ])\n",
+        "println(\"x\".hashCode().getClass().getName())\n",
+        "def n = null\n",
+        "try { n.hashCode() } catch (e) { println([e.getClass().getName(), e.getMessage()]) }\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[0, 97, 99162322, 1447970315, 57849694]\n",
+            "[0, 1, -1, 2147483647, -2147483648]\n",
+            "[1, -2147483648, -2147483648]\n",
+            "[1231, 1237]\n",
+            "[1072693248, -2147483648, 300063655, 2146959360, 2146435072, -1048576]\n",
+            "[466, 4652, 32, -9732, 456]\n",
+            "[0, 1, -1, 100, -1436577082, 61504]\n",
+            "[1, 32, 30817, 2018, 4066, 31, 32833]\n",
+            "[0, 96, 192, 899, 2]\n",
+            "[0, 6, 6, 6, 994]\n",
+            "[0, 4, 13, 13, 8, 32767, -83416, 672847168, 14]\n",
+            "[1, 126145, 128065, 348844, 502759]\n",
+            "[1026, 44, 1262, 1072693279, 497, 32]\n",
+            "[true, true, true, false]\n",
+            "java.lang.Integer\n",
+            "[java.lang.NullPointerException, Cannot invoke method hashCode() on null object]\n",
+        )
+    );
+}
+
+#[test]
+fn a_user_hashcode_overrides_the_built_in_one() {
+    // The universal hook sits above the per-type branches, so the guard that
+    // keeps it from shadowing a declared `hashCode` is what this pins. The
+    // *identity* answers are not compared to a JVM's — a JVM's own identity hash
+    // varies run to run — only their contract: stable, and equal exactly when
+    // the references are.
+    let (out, ok) = run(concat!(
+        "class P { int v; P(int v) { this.v = v }; int hashCode() { 7 * v } }\n",
+        "println(new P(3).hashCode())\n",
+        "def c = { -> 1 }\n",
+        "println([c.hashCode() == c.hashCode(), c.hashCode() == { -> 1 }.hashCode()])\n",
+        "def b = new StringBuilder('ab')\n",
+        "println([b.hashCode() == b.hashCode(), b.hashCode() == new StringBuilder('ab').hashCode()])\n",
+    ));
+    assert!(ok);
+    assert_eq!(out, "21\n[true, false]\n[true, false]\n");
+}
+
+#[test]
+fn a_biginteger_power_stays_a_biginteger() {
+    // `**`/`power` reached `BigDecimal`'s branch (a `BigInteger` is a scale-0
+    // `BigDecimal`, so the `as_dec` test answered for it) and widened the type:
+    // `2G ** 70` printed the right digits under the wrong class, which
+    // `hashCode` then made visible — `BigDecimal.hashCode` multiplies
+    // `BigInteger`'s by 31. Frozen from Apache Groovy 5.0.8.
+    let (out, ok) = run(concat!(
+        "println([2G ** 70, (2G ** 70).getClass().getName()])\n",
+        "println([(2G).power(10), (2G).power(10).getClass().getName()])\n",
+        "println([2G ** 0, (2G ** 0).getClass().getName()])\n",
+        "println([(-2G) ** 3, ((-2G) ** 3).getClass().getName()])\n",
+        "println([2G ** -1, (2G ** -1).getClass().getName()])\n",
+        "println([1.5G ** 2, (1.5G ** 2).getClass().getName()])\n",
+        "println([1.5G ** 0, (1.5G ** 0).getClass().getName()])\n",
+        "println([2 ** 10, (2 ** 10).getClass().getName()])\n",
+        "println([2 ** 40, (2 ** 40).getClass().getName()])\n",
+        "println([2L ** 40, (2L ** 40).getClass().getName()])\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[1180591620717411303424, java.math.BigInteger]\n",
+            "[1024, java.math.BigInteger]\n",
+            "[1, java.math.BigInteger]\n",
+            "[-8, java.math.BigInteger]\n",
+            "[0.5, java.lang.Double]\n",
+            "[2.25, java.math.BigDecimal]\n",
+            "[1, java.math.BigDecimal]\n",
+            "[1024, java.lang.Integer]\n",
+            "[1099511627776, java.math.BigInteger]\n",
+            "[1099511627776, java.lang.Long]\n",
+        )
+    );
+}
+
+#[test]
+fn reading_a_name_nothing_binds_raises_missing_property() {
+    // Reading an undeclared name answered `null`, so every typo became a silent
+    // `null` that surfaced far from its cause. Groovy raises. The cases that
+    // must *keep* answering are pinned alongside: a `with` delegate is asked for
+    // the property, and `[a: 1].zork` is `null` rather than a raise; a name a
+    // closure wrote is a script binding afterwards; and `null` really assigned
+    // is a value, not an absence. Frozen from Apache Groovy 5.0.8.
+    let (out, ok) = run(concat!(
+        "try { println zork } catch (e) { println([e.getClass().getName(), e.getMessage().startsWith('No such property: zork for class: ')]) }\n",
+        "try { println(zork + 1) } catch (e) { println e.getClass().getName() }\n",
+        "try { def y = zork } catch (e) { println e.getClass().getName() }\n",
+        "try { [1].each { println nope } } catch (e) { println e.getClass().getName() }\n",
+        "try { println it } catch (e) { println e.getClass().getName() }\n",
+        "def m = [a: 1]\n",
+        "m.with { println zork }\n",
+        "m.with { println a }\n",
+        "[1].each { bound = 7 }\n",
+        "println bound\n",
+        "w = null\n",
+        "println w\n",
+        "def d = [a: 1]\n",
+        "d.with { b = 2 }\n",
+        "println d\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[groovy.lang.MissingPropertyException, true]\n",
+            "groovy.lang.MissingPropertyException\n",
+            "groovy.lang.MissingPropertyException\n",
+            "groovy.lang.MissingPropertyException\n",
+            "groovy.lang.MissingPropertyException\n",
+            "null\n",
+            "1\n",
+            "7\n",
+            "null\n",
+            "[a:1, b:2]\n",
+        )
+    );
+}
+
+#[test]
+fn args_is_bound_in_every_script_and_carries_the_launcher_arguments() {
+    // Groovy puts `args` in every script's binding — empty, not absent, when the
+    // launcher was given none — so reading it must not raise now that an unbound
+    // name does. The arguments after the file reach it.
+    let (out, ok) = run("println args\nprintln args.size()\nprintln(args instanceof List)");
+    assert!(ok);
+    assert_eq!(out, "[]\n0\ntrue\n");
+
+    let dir = std::env::temp_dir();
+    let path = dir.join("groovyrs_test_script_args.groovy");
+    std::fs::write(&path, "println args\nprintln args[1]\n").unwrap();
+    let got = Command::new(env!("CARGO_BIN_EXE_groovy"))
+        .arg(&path)
+        .arg("one")
+        .arg("two")
+        .output()
+        .expect("spawn groovy");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(String::from_utf8_lossy(&got.stdout), "[one, two]\ntwo\n");
+}
+
+#[test]
+fn the_script_class_name_follows_the_entry_point() {
+    // The class Groovy compiles a script into is named after the *file's stem*,
+    // and `groovy -e` — which has no file — uses `script_from_command_line`.
+    // That name is what a bare-name `MissingPropertyException` prints, so the
+    // two entry points give the same program two different messages. Both
+    // measured against Apache Groovy 5.0.8.
+    let dir = std::env::temp_dir();
+    let path = dir.join("GroovyrsEntryPointProbe.groovy");
+    let src = "try { println zork } catch (e) { println e.getMessage() }\n";
+    std::fs::write(&path, src).unwrap();
+    let from_file = Command::new(env!("CARGO_BIN_EXE_groovy"))
+        .arg(&path)
+        .output()
+        .expect("spawn groovy");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        String::from_utf8_lossy(&from_file.stdout),
+        "No such property: zork for class: GroovyrsEntryPointProbe\n"
+    );
+
+    let from_eval = Command::new(env!("CARGO_BIN_EXE_groovy"))
+        .arg("-e")
+        .arg(src)
+        .output()
+        .expect("spawn groovy");
+    assert_eq!(
+        String::from_utf8_lossy(&from_eval.stdout),
+        "No such property: zork for class: script_from_command_line\n"
+    );
+}
+
+#[test]
+fn reverse_true_reverses_the_receiver_in_place() {
+    // `List.reverse(boolean mutate)` — the mutating spelling reverses the
+    // receiver and answers it, so `a.is(a.reverse(true))`. `reverse()` and
+    // `reverse(false)` copy, which is why the no-argument form cannot be
+    // gated the way `sort`'s is. `Collections.reverse` reorders through `set`,
+    // so it leaves `modCount` alone and a `subList` window stays live over it —
+    // the last line is what pins that. Frozen from Apache Groovy 5.0.8.
+    let (out, ok) = run(concat!(
+        "def a = [1,2,3]; def b = a.reverse(true); println([a, b, a.is(b)])\n",
+        "def c = [1,2,3]; def d = c.reverse(); println([c, d, c.is(d)])\n",
+        "def e = [1,2,3]; def f = e.reverse(false); println([e, f, e.is(f)])\n",
+        "def g = [1,2,3]; g.reverse(true); println g\n",
+        "def h = [1,2,3,4]; def w = h.subList(1,3); h.reverse(true); println([h, w])\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[[3, 2, 1], [3, 2, 1], true]\n",
+            "[[1, 2, 3], [3, 2, 1], false]\n",
+            "[[1, 2, 3], [3, 2, 1], false]\n",
+            "[3, 2, 1]\n",
+            "[[4, 3, 2, 1], [3, 2]]\n",
+        )
+    );
+}
+
+#[test]
+fn a_bigdecimal_converts_to_a_correctly_rounded_double() {
+    // `BigDecimal::to_f64` scaled by a power of ten in f64, so its error grew
+    // with the exponent and it overflowed early: `1.0e300 as double` printed
+    // `1.0000000000000006E300` and `Double.MAX_VALUE` — exactly representable —
+    // printed `Infinity`. Java's `doubleValue()` is correctly rounded. Frozen
+    // from Apache Groovy 5.0.8 on **JVM 21**: JVM 17 still renders doubles by
+    // the pre-JDK-19 algorithm and would answer `9.999999999999999E22` to the
+    // last line.
+    let (out, ok) = run(concat!(
+        "println((1.0e308) as double)\n",
+        "println((1.7976931348623157e308) as double)\n",
+        "println((1.0e300) as double)\n",
+        "println((0.1) as double)\n",
+        "println((123456789012345678901234567890) as double)\n",
+        "println(1.0e308.toDouble())\n",
+        "println(Double.MIN_VALUE)\n",
+        "println(1.0e23d)\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "1.0E308\n",
+            "1.7976931348623157E308\n",
+            "1.0E300\n",
+            "0.1\n",
+            "1.2345678901234568E29\n",
+            "1.0E308\n",
+            "4.9E-324\n",
+            "1.0E23\n",
+        )
+    );
+}
+
+#[test]
+fn the_boxed_type_constants_are_javas() {
+    // `Double.MIN_VALUE` read Rust's `f64::MIN_POSITIVE`, which is Java's
+    // `MIN_NORMAL` — the smallest *normal*, not the smallest subnormal. The two
+    // names look interchangeable, the table type-checked either way, and nothing
+    // in the build could see the difference. `SIZE`/`BYTES`/`MAX_EXPONENT` were
+    // absent. Frozen from Apache Groovy 5.0.8 / JVM 21.0.12.
+    let (out, ok) = run(concat!(
+        "println([Double.MIN_VALUE, Double.MIN_NORMAL, Double.MAX_VALUE])\n",
+        "println([Double.MAX_EXPONENT, Double.MIN_EXPONENT])\n",
+        "println([Integer.SIZE, Integer.BYTES, Long.SIZE, Long.BYTES])\n",
+        "println([Short.SIZE, Short.BYTES, Byte.SIZE, Byte.BYTES])\n",
+        "println([Double.SIZE, Double.BYTES])\n",
+        "println([Integer.MAX_VALUE, Integer.MIN_VALUE, Long.MAX_VALUE, Long.MIN_VALUE])\n",
+        "println([Double.MIN_VALUE.getClass().getName(), Double.SIZE.getClass().getName()])\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[4.9E-324, 2.2250738585072014E-308, 1.7976931348623157E308]\n",
+            "[1023, -1022]\n",
+            "[32, 4, 64, 8]\n",
+            "[16, 2, 8, 1]\n",
+            "[64, 8]\n",
+            "[2147483647, -2147483648, 9223372036854775807, -9223372036854775808]\n",
+            "[java.lang.Double, java.lang.Integer]\n",
+        )
+    );
+}

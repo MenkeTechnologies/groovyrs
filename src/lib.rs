@@ -76,10 +76,13 @@ pub fn eval_file_debug(path: &str) -> Result<(), String> {
 
 /// Register the groovyrs builtins + strict numeric hook on a fresh VM, enable
 /// the tracing JIT, and run the chunk. Returns the last top-of-stack value.
-fn run_chunk(chunk: fusevm::Chunk) -> Result<Value, String> {
+fn run_chunk(chunk: fusevm::Chunk, argv: &[String]) -> Result<Value, String> {
     let _ = host::take_error(); // clear any stale fault from a prior run
+    let names = chunk.names.clone();
     let mut vm = VM::new(chunk);
     host::install(&mut vm);
+    // After `install`, which resets the object heap the `args` list lives on.
+    host::bind_script_args(&mut vm, &names, argv);
     vm.set_sited_numeric_hook(std::sync::Arc::new(host::sited_numeric_hook));
     vm.enable_tracing_jit();
     // Publish the VM so the numeric hook can re-enter it for operator overloading
@@ -104,13 +107,26 @@ fn run_chunk(chunk: fusevm::Chunk) -> Result<Value, String> {
 
 /// Compile and run a Groovy source string; return the last VM value.
 pub fn run_str(src: &str) -> Result<Value, String> {
-    run_chunk(compile(src)?)
+    run_chunk(compile(src)?, &[])
+}
+
+/// Compile and run a Groovy source string with the launcher arguments the
+/// script sees as `args`.
+pub fn run_str_with_args(src: &str, argv: &[String]) -> Result<Value, String> {
+    run_chunk(compile(src)?, argv)
 }
 
 /// Read and run a `.groovy` file.
 pub fn run_file(path: &str) -> Result<Value, String> {
     let src =
         std::fs::read_to_string(path).map_err(|e| format!("groovyrs: cannot read {path}: {e}"))?;
+    // Groovy names the class it compiles a script file into after the file's
+    // stem, and a `MissingPropertyException` on a bare name prints that name.
+    // The `-e` entry point has no file and uses `script_from_command_line`,
+    // which is what `host` defaults to when this is not called.
+    if let Some(stem) = std::path::Path::new(path).file_stem() {
+        host::set_script_class(&stem.to_string_lossy());
+    }
     run_str(&src)
 }
 

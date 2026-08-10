@@ -1260,9 +1260,17 @@ fn heap_push(obj: HeapObj) -> Value {
     Value::Obj(id)
 }
 
-/// Allocate a Groovy `List`. **The** way a list that escapes to user code is
-/// built — every GDK method answering a `List`, every list literal, and every
-/// coercion to one goes through here, so each of them is aliasable.
+/// Allocate a Groovy `List` behind a heap handle, which is what makes two names
+/// see one list.
+///
+/// A **literal** is built here (via `GMAKE_LIST`), and so is the script binding's
+/// `args`. A GDK method's *result* is not: it comes back as the transient
+/// `Value::Array` the match arms produce, and the compiler's receiver write-back
+/// is what makes `a.sort()` show through `a`. So `def s = [1, 2].collect { it }`
+/// names an array, not a shared list, and a second name for it does not alias —
+/// see the BUGS.md entry. Allocating here for every GDK call instead would push
+/// a heap entry per iteration of any loop that calls one, on a heap that is only
+/// cleared per run.
 fn glist(items: Vec<Value>) -> Value {
     heap_push(HeapObj::ListVal {
         items,
@@ -3301,6 +3309,137 @@ fn values_equal(a: &Value, b: &Value) -> bool {
     groovy_str(a) == groovy_str(b)
 }
 
+/// `java.lang.String.hashCode()`: `s[0]*31^(n-1) + … + s[n-1]` in wrapping
+/// 32-bit arithmetic, over **UTF-16 code units** — an astral character counts as
+/// its two surrogates, which is why `"a😀b".length()` is 4 in Java and the fold
+/// has to run over `encode_utf16` rather than over Rust `char`s.
+fn string_hash(s: &str) -> i32 {
+    s.encode_utf16()
+        .fold(0i32, |h, u| h.wrapping_mul(31).wrapping_add(u as i32))
+}
+
+/// `java.lang.Double.hashCode()`: `(int)(bits ^ (bits >>> 32))` over
+/// `doubleToLongBits`, which collapses every NaN payload to one canonical bit
+/// pattern before folding.
+fn double_hash(f: f64) -> i32 {
+    let bits = if f.is_nan() {
+        0x7ff8_0000_0000_0000u64
+    } else {
+        f.to_bits()
+    };
+    (bits ^ (bits >> 32)) as u32 as i32
+}
+
+/// `Integer.hashCode()` (the value) or `Long.hashCode()`
+/// (`(int)(v ^ (v >>> 32))`), chosen by the same rule [`java_class_name`] uses:
+/// a `Value::Int` inside 32-bit range is an `Integer`, outside it a `Long`. The
+/// case that rule misreads is the same one — a `Long` small enough to be an
+/// `Integer` (`-1L` hashes to 0 as a `Long`, to -1 as an `Integer`) — because
+/// the width is not carried on the value. See BUGS.md.
+fn integer_hash(n: i64) -> i32 {
+    match i32::try_from(n) {
+        Ok(i) => i,
+        Err(_) => ((n as u64) ^ ((n as u64) >> 32)) as u32 as i32,
+    }
+}
+
+/// `java.util.AbstractList.hashCode()`: `hash = 31 * hash + e.hashCode()` from a
+/// seed of 1, with a null element contributing 0.
+fn list_hash(items: &[Value]) -> i32 {
+    items.iter().fold(1i32, |h, e| {
+        h.wrapping_mul(31).wrapping_add(object_hash_code(e))
+    })
+}
+
+/// `groovy.lang.Range.hashCode()`. Only `IntRange` defines its own — the Cantor
+/// pairing of its **normalised inclusive** bounds, `(from + to + 1) * (from + to)
+/// / 2 + to` in `int` arithmetic (read off `IntRange.hashCode`'s bytecode in
+/// groovy-5.0.8.jar). `NumberRange`, `ObjectRange` and `EmptyRange` declare no
+/// `hashCode` at all, so they inherit `AbstractList`'s over the elements they
+/// enumerate.
+fn range_hash(r: &RangeVal) -> i32 {
+    if range_class(r) == "groovy.lang.IntRange" {
+        if let (Some(lo), Some(hi)) = (as_i64(&range_lower(r)), as_i64(&range_upper(r))) {
+            let (lo, hi) = (lo as i32, hi as i32);
+            let sum = lo.wrapping_add(hi);
+            return (sum.wrapping_add(1).wrapping_mul(sum) / 2).wrapping_add(hi);
+        }
+    }
+    list_hash(&range_elements(r))
+}
+
+/// `Object.hashCode()` for every value whose Java class specifies one — which is
+/// every value a Groovy script can write a literal for. A value with no
+/// specified contract (a closure, a `StringBuilder`, a `Pattern`, a user
+/// instance that does not override it) gets Java's *identity* hash, and the heap
+/// handle is groovyrs's identity: stable for the life of the object, equal
+/// exactly when the references are equal. It is not the number a JVM would
+/// print, but a JVM's own identity hash varies run to run, so no value could be.
+fn object_hash_code(v: &Value) -> i32 {
+    // The heap-backed shapes first: they all wear a `Value::Obj` tag, so the
+    // variant alone cannot tell them apart.
+    if let Some(items) = as_list_raw(v) {
+        return list_hash(&items);
+    }
+    if let Some(entries) = as_omap(v) {
+        // `AbstractMap`: the sum over entries of `keyHash ^ valueHash`. Every
+        // groovyrs map key is a `String`, so a non-string key hashes as its
+        // rendering rather than as itself — see BUGS.md.
+        return entries.iter().fold(0i32, |h, (k, val)| {
+            h.wrapping_add(string_hash(k) ^ object_hash_code(val))
+        });
+    }
+    if let Some((k, val)) = as_entry(v) {
+        // `Map.Entry.hashCode()` is that same `keyHash ^ valueHash`.
+        return string_hash(&k) ^ object_hash_code(&val);
+    }
+    if let Some((items, kind)) = as_set(v) {
+        // `AbstractSet`: the *sum* of the elements', so it does not depend on
+        // iteration order and a `LinkedHashSet` matches the `TreeSet` of the
+        // same elements.
+        return set_elements(&items, kind)
+            .iter()
+            .fold(0i32, |h, e| h.wrapping_add(object_hash_code(e)));
+    }
+    if let Some(r) = as_range(v) {
+        return range_hash(&r);
+    }
+    // A `BigInteger` answers `as_dec` too (it is a scale-0 `BigDecimal`), so it
+    // has to be asked about first — the two hash by different rules.
+    if let Some(n) = as_bigint(v) {
+        return decimal::big_integer_hash(&n.as_bigint_and_exponent().0);
+    }
+    if let Some(d) = as_dec(v) {
+        return decimal::big_decimal_hash(&d);
+    }
+    match v {
+        Value::Str(s) => string_hash(s),
+        Value::Int(n) => integer_hash(*n),
+        Value::Float(f) => double_hash(*f),
+        Value::Bool(b) => {
+            if *b {
+                1231
+            } else {
+                1237
+            }
+        }
+        Value::Array(a) => list_hash(a),
+        // Only reachable as an *element*: `null.hashCode()` is an NPE, which the
+        // null receiver branch in `dispatch_call` raises before this is asked.
+        // `AbstractList`/`AbstractMap` score a null member 0.
+        Value::Undef => 0,
+        Value::Obj(id) => *id as i32,
+        other => string_hash(&groovy_str(other)),
+    }
+}
+
+/// Whether `recv` is a class instance whose own `hashCode` overrides the
+/// built-in one — the guard that keeps the universal hook from shadowing a user
+/// method, the way `getClass` is guarded inside `dispatch_instance_method`.
+fn has_user_hash_code(recv: &Value) -> bool {
+    as_instance(recv).is_some_and(|inst| lookup_method(inst.class, "hashCode").is_some())
+}
+
 /// Whether `value` is an instance of the (user or built-in) type `class`.
 fn value_is_a(value: &Value, class: &str) -> bool {
     // `null` is never an instance of anything.
@@ -3790,14 +3929,23 @@ fn owner_bound(vm: &VM, gidx: usize) -> bool {
 /// `with`/`tap` delegate is asked for the *property* of that name, which is what
 /// Groovy's `OWNER_FIRST` resolve strategy does — and asking it as a property
 /// means a delegate answers a bare name exactly as it answers `delegate.name`.
-/// With no delegate running the answer is `null`, the unbound-global read this
-/// replaced.
+/// With no delegate running there is nothing left that could bind the name, so
+/// the read is Groovy's `MissingPropertyException` — `println zork` on an
+/// undeclared `zork` raises rather than printing `null`. A *delegate* that does
+/// not hold the name is a different question and keeps its own answer: a map
+/// answers `null` for a key it lacks, because a bare name inside `with` is asked
+/// of the delegate as a property and `[a: 1].zork` is `null`.
 fn b_name_get(vm: &mut VM, _argc: u8) -> Value {
     let (gidx, name) = pop_name_site(vm);
     if owner_bound(vm, gidx) {
         return vm.globals[gidx].clone();
     }
     let Some(recv) = DELEGATES.with(|d| d.borrow().last().cloned()) else {
+        raise(
+            vm,
+            "MissingPropertyException",
+            &format!("No such property: {name} for class: {}", script_class()),
+        );
         return Value::Undef;
     };
     if let Some(res) = dispatch_instance_prop_get(vm, &recv, &name) {
@@ -3895,6 +4043,47 @@ thread_local! {
     /// surface it as `groovyrs: <reason>` after `VM::run` returns. A builtin
     /// cannot return a `Result`, so it halts the VM and leaves the message here.
     static G_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+
+    /// The name Groovy gives the class it compiles the running script into —
+    /// what a `MissingPropertyException` on a bare name names. It is
+    /// *entry-point dependent*: `groovy Foo.groovy` compiles to class `Foo`,
+    /// while `groovy -e '…'` compiles to `script_from_command_line`, which is
+    /// the default here. [`set_script_class`] installs the file's stem.
+    static SCRIPT_CLASS: RefCell<String> =
+        const { RefCell::new(String::new()) };
+}
+
+/// Name the class the running script compiles into — the file's stem, for the
+/// `groovy <file>` entry point. Leave it unset for `groovy -e`.
+pub fn set_script_class(name: &str) {
+    SCRIPT_CLASS.with(|s| *s.borrow_mut() = name.to_string());
+}
+
+/// Seed the script binding's `args` — the launcher arguments after the script,
+/// which Groovy puts in every script's binding as a `String[]` (empty, not
+/// absent, when there are none). Call after [`install`], which clears the heap
+/// the list is allocated on. `names` is the chunk's name pool; a script that
+/// never mentions `args` has no entry there and nothing is seeded.
+pub fn bind_script_args(vm: &mut VM, names: &[String], argv: &[String]) {
+    let Some(idx) = names.iter().position(|n| n == "args") else {
+        return;
+    };
+    let list = glist(argv.iter().map(|a| Value::str(a.clone())).collect());
+    if let Some(slot) = vm.globals.get_mut(idx) {
+        *slot = list;
+    }
+}
+
+/// The script class name for a diagnostic, defaulting to what `groovy -e` uses.
+fn script_class() -> String {
+    SCRIPT_CLASS.with(|s| {
+        let s = s.borrow();
+        if s.is_empty() {
+            "script_from_command_line".to_string()
+        } else {
+            s.clone()
+        }
+    })
 }
 
 /// Take and clear any pending runtime-fault message (see `G_ERROR`).
@@ -4074,6 +4263,17 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     {
         return Value::bool(values_equal(&recv, &args[0]));
     }
+    // `Object.hashCode()`. Above the per-type branches for the same reason
+    // `equals` is: the `Set` and `Range` branches hand a method they do not
+    // define to the *list* of their elements, and `AbstractSet` (a sum) and
+    // `IntRange` (a Cantor pairing of its bounds) do not hash the way
+    // `AbstractList` does — delegating would answer a list's hash for both. A
+    // user class's own `hashCode` still wins, because `has_user_hash_code`
+    // excludes an instance that declares one and the instance branch below
+    // dispatches it.
+    if method == "hashCode" && args.is_empty() && !has_user_hash_code(&recv) {
+        return Value::int(object_hash_code(&recv) as i64);
+    }
     // `with`/`tap` install the receiver as the closure's *delegate*, and a bare
     // mutator call inside the body (`[1, 2].tap { add(3) }`) has to reach this
     // list — so they run against the handle, further down, not against the
@@ -4102,10 +4302,15 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         // new list (which is why the compiler writes the result back). Same rule
         // as `compiler::Compiler::emit_receiver_writeback`: only the no-argument,
         // `sort(true)` and closure forms mutate; `sort(false)` asks for a copy.
-        let result_mutates = matches!(method, "sort" | "unique")
+        let result_mutates = (matches!(method, "sort" | "unique")
             && args
                 .iter()
-                .all(|a| closure_meta(a).is_some() || matches!(a, Value::Bool(true)));
+                .all(|a| closure_meta(a).is_some() || matches!(a, Value::Bool(true))))
+            // `reverse(true)` is the mutating spelling — it reverses the
+            // receiver and answers it, so `a.is(a.reverse(true))`. Unlike
+            // `sort`, the *no-argument* form copies, so only the explicit
+            // `true` counts. Verified against Apache Groovy 5.0.8.
+            || (method == "reverse" && matches!(args.as_slice(), [Value::Bool(true)]));
         let items = as_list_raw(&recv).unwrap_or_default();
         let structural = bumps_mod_count(method, &args, is_sublist(&recv), items.len());
         let answer = dispatch_call(vm, Value::array(items), method, args);
@@ -4129,10 +4334,12 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         }
         // The methods whose Groovy answer *is* the receiver, so that
         // `a.is(a.sort())` is true and a chained `a << 1 << 2` keeps writing
-        // into the one list. Verified against Groovy 5.0.8; `reverse`,
-        // `sort(false)` and `collect` answer a new list and are absent.
+        // into the one list. Verified against Groovy 5.0.8; `sort(false)`,
+        // `reverse()`/`reverse(false)` and `collect` answer a new list, and are
+        // absent — `reverse` reaches the list below only in its mutating
+        // `reverse(true)` spelling, which `mutated` already gates.
         let answers_receiver = matches!(method, "each" | "eachWithIndex" | "reverseEach")
-            || (mutated && matches!(method, "sort" | "unique" | "leftShift" | "swap"));
+            || (mutated && matches!(method, "sort" | "unique" | "leftShift" | "swap" | "reverse"));
         if answers_receiver && matches!(answer, Value::Array(_)) {
             return recv;
         }
@@ -6512,6 +6719,19 @@ fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
         // A fractional exponent has no exact form, so Groovy runs it as a double.
         None => return Value::float(as_f64(&base).powf(as_f64(&exp))),
     };
+    // A `BigInteger` base keeps its type — `BigInteger.pow` answers a
+    // `BigInteger`, so `2G ** 70` and `(2G).power(10)` are both `BigInteger`
+    // while `1.5G ** 2` is a `BigDecimal`. Asked before `as_dec`, which answers
+    // for a `BigInteger` too (it is a scale-0 `BigDecimal`) and would widen it.
+    // A negative exponent leaves the integers in either case: `decimal::pow`
+    // declines it and Groovy answers the `Double` `0.5` for `2G ** -1`.
+    // Verified against Apache Groovy 5.0.8.
+    if let Some(d) = as_bigint(&base) {
+        return match decimal::pow(&d, e) {
+            Some(r) => bigint_value(r),
+            None => Value::float(as_f64(&base).powf(e as f64)),
+        };
+    }
     if let Some(d) = as_dec(&base) {
         return match decimal::pow(&d, e) {
             Some(r) => dec_value(r),
@@ -7118,10 +7338,28 @@ fn static_field(class: &str, name: &str) -> Option<Value> {
         ("Byte", "MAX_VALUE") => Value::int(i8::MAX as i64),
         ("Byte", "MIN_VALUE") => Value::int(i8::MIN as i64),
         ("Double", "MAX_VALUE") => Value::float(f64::MAX),
-        ("Double", "MIN_VALUE") => Value::float(f64::MIN_POSITIVE),
+        // Java's `Double.MIN_VALUE` is the smallest *subnormal* (4.9E-324);
+        // Rust's `f64::MIN_POSITIVE` is the smallest *normal*, which is Java's
+        // `MIN_NORMAL`. The two names look interchangeable and are not — reading
+        // `MIN_POSITIVE` here answered `2.2250738585072014E-308`.
+        ("Double", "MIN_VALUE") => Value::float(f64::from_bits(1)),
+        ("Double", "MIN_NORMAL") => Value::float(f64::MIN_POSITIVE),
         ("Double", "POSITIVE_INFINITY") => Value::float(f64::INFINITY),
         ("Double", "NEGATIVE_INFINITY") => Value::float(f64::NEG_INFINITY),
         ("Double", "NaN") => Value::float(f64::NAN),
+        ("Double", "MAX_EXPONENT") => Value::int(1023),
+        ("Double", "MIN_EXPONENT") => Value::int(-1022),
+        // `SIZE`/`BYTES` are the width of the *primitive*, and are `int`s.
+        ("Integer", "SIZE") => Value::int(32),
+        ("Integer", "BYTES") => Value::int(4),
+        ("Long", "SIZE") => Value::int(64),
+        ("Long", "BYTES") => Value::int(8),
+        ("Double", "SIZE") => Value::int(64),
+        ("Double", "BYTES") => Value::int(8),
+        ("Short", "SIZE") => Value::int(16),
+        ("Short", "BYTES") => Value::int(2),
+        ("Byte", "SIZE") => Value::int(8),
+        ("Byte", "BYTES") => Value::int(1),
         ("Math", "PI") => Value::float(std::f64::consts::PI),
         ("Math", "E") => Value::float(std::f64::consts::E),
         _ => return None,
@@ -7568,33 +7806,28 @@ fn as_set(v: &Value) -> Option<(Vec<Value>, SetKind)> {
     }
 }
 
-/// Java's `hashCode` for the element kinds a set can order by. `None` for a
-/// value whose hash is the JVM's identity hash — not reproducible here, and not
-/// reproducible across two JVM runs either — which keeps insertion order.
+/// Java's `hashCode` for the element kinds a set can order **by bucket**. The
+/// rules themselves are [`object_hash_code`]'s; what differs is the `None`,
+/// which reports a value whose hash is the JVM's identity hash — not
+/// reproducible here, and not reproducible across two JVM runs either — so
+/// [`hash_order`] leaves it in insertion position rather than bucketing it on a
+/// number Groovy would not have produced. `object_hash_code` has to answer
+/// *something* for those (a script calling `.hashCode()` gets a number), which
+/// is why the two are separate and this one stays narrower.
 fn java_hash(v: &Value) -> Option<i32> {
     match v {
-        // `Integer.hashCode` is the value; `Long.hashCode` folds the halves.
-        Value::Int(n) => Some(if (i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(n) {
-            *n as i32
-        } else {
-            (*n ^ ((*n as u64) >> 32) as i64) as i32
-        }),
-        Value::Bool(b) => Some(if *b { 1231 } else { 1237 }),
+        Value::Int(_) | Value::Bool(_) | Value::Str(_) => Some(object_hash_code(v)),
         // `null` hashes to 0 both as a `HashMap` key and as a `List` element
         // (`Objects.hashCode(null)`), though a bare `null.hashCode()` throws.
         Value::Undef => Some(0),
         // `List.hashCode` — `31 * acc + element.hashCode()` from 1. This is what
         // puts a `HashSet<List>` (`permutations()`, `subsequences()`) in the
         // order Groovy prints. An element with no reproducible hash makes the
-        // whole list's unreproducible too.
+        // whole list's unreproducible too, which is why this cannot just call
+        // `list_hash`.
         Value::Array(items) => items.iter().try_fold(1i32, |h, e| {
             Some(h.wrapping_mul(31).wrapping_add(java_hash(e)?))
         }),
-        // `String.hashCode` — `s[0]*31^(n-1) + …`, wrapping at 32 bits.
-        Value::Str(s) => Some(
-            s.encode_utf16()
-                .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c))),
-        ),
         _ => None,
     }
 }
@@ -9064,7 +9297,9 @@ fn groovy_sub(a: &Value, b: &Value) -> Value {
 fn groovy_mul(a: &Value, b: &Value) -> Value {
     let n = as_i64(b).unwrap_or(0).max(0) as usize;
     match a {
-        Value::Array(xs) => Value::array(std::iter::repeat(xs.to_vec()).take(n).flatten().collect()),
+        Value::Array(xs) => {
+            Value::array(std::iter::repeat(xs.to_vec()).take(n).flatten().collect())
+        }
         other => Value::str(groovy_str(other).repeat(n)),
     }
 }

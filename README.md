@@ -202,7 +202,16 @@ Implemented and checked against Apache Groovy:
   faithful GDK subset routed through a host dispatch. `size`/`length` are
   methods, not properties, so `[1,2].size` raises the way Groovy's does. An
   unknown member raises a catchable `MissingMethodException` /
-  `MissingPropertyException`.
+  `MissingPropertyException`, and so does a bare *name* nothing binds
+  (`println zork`), naming the script class Groovy names — the file's stem, or
+  `script_from_command_line` under `-e`.
+- **`hashCode()`** — Java's specified rule per type, not an approximation:
+  `String` over UTF-16 code units, `Integer` versus `Long`, `Double` over
+  `doubleToLongBits`, `BigDecimal` carrying its scale, `BigInteger` over its
+  magnitude words, `AbstractList` / `AbstractMap` / `AbstractSet`, and
+  `IntRange`'s own Cantor pairing. A user `hashCode` overrides it.
+- **`args`** — every script's binding carries the launcher arguments after the
+  file (empty when there are none), as a `List`.
 - **Closures** — `{ a, b -> … }`, defaulted parameters (`{ a, b = 5 -> … }`),
    the explicit zero-parameter `{ -> … }`, and the implicit `{ it }` form as first-class
   callable values, invoked with `.call(args)` or directly (`def f = { it * 2 };
@@ -454,6 +463,17 @@ dead run. The oracle runs the whole corpus as **one** batched program (the JVM
 starts once); groovyrs runs each probe on its own, so one probe that fails to
 parse cannot swallow the probes after it, and a hang registers as a failure
 rather than stalling the run.
+
+`run.sh` and `fuzz.sh` both gate the oracle before comparing anything. The
+`groovy` launcher is a shell script that resolves its JVM from an ambient
+`JAVA_HOME`, so the same binary answers from a different JVM depending on the
+caller's environment — and `Double.toString` was reimplemented in JDK 19, so a
+pre-19 JVM renders every double differently (`1.0e23` prints
+`9.999999999999999E22` there and `1.0E23` from JDK 19 on). Both harnesses probe
+the resolved oracle, print its Groovy and JVM version alongside the `JAVA_HOME`
+they saw, and exit 2 naming both rather than reporting the JVM's disagreements as
+groovyrs divergences. Run them with `JAVA_HOME` pointing at a JDK 19+ install, or
+unset.
 
 `parity-fuzz` generates grammar-driven, deterministic-output snippets from a
 per-index seed (so any divergence replays with `--seed <N> --once`, then

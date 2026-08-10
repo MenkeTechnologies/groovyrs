@@ -403,6 +403,10 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         closure_depth: 0,
         script_vars: {
             let mut v = HashSet::new();
+            // Groovy puts `args` in every script's binding — an empty
+            // `String[]` when the launcher was given none — so it is bound
+            // whether or not the script assigns it, and reading it never raises.
+            v.insert("args".to_string());
             collect_script_vars(&prog.body, &mut v);
             v
         },
@@ -550,7 +554,15 @@ impl Compiler {
     /// keeps its native `GetVar`/`SetVar`, so an ordinary variable costs nothing
     /// and a hot closure loop keeps its JIT trace eligibility.
     fn needs_delegate(&self, name: &str) -> bool {
-        if self.closure_depth == 0 || name == "this" || name.starts_with('$') {
+        self.closure_depth > 0 && self.nothing_binds(name)
+    }
+
+    /// True when no construct the compiler can see binds `name` — not a slot,
+    /// field, method, function, class, JDK class, or script-level declaration.
+    /// `this` and the `$`-prefixed synthetic names are compiler-owned and never
+    /// resolve this way.
+    fn nothing_binds(&self, name: &str) -> bool {
+        if name == "this" || name.starts_with('$') {
             return false;
         }
         if let Some(scope) = self.scope.as_ref() {
@@ -567,9 +579,18 @@ impl Compiler {
     }
 
     /// Emit the read of a bare `name` — the native slot/global read, or the
-    /// delegate-aware builtin for a name only a delegate could bind.
+    /// checked builtin for a name the compiler cannot bind.
+    ///
+    /// The builtin covers two cases with one op. Inside a closure the name may
+    /// be a `with`/`tap` delegate's property, which is what it is asked for.
+    /// Anywhere, a name nothing binds at *run* time is Groovy's
+    /// `MissingPropertyException`, not `null` — reading an undeclared name is an
+    /// error in Groovy, and answering `null` turned every typo into a silent
+    /// `null` that surfaced far from its cause. A name the compiler *can* bind
+    /// keeps its native `GetVar`/`GetSlot`, so an ordinary variable costs
+    /// nothing and a hot loop keeps its JIT trace eligibility.
     fn emit_name_load(&mut self, name: &str, line: u32) -> Result<(), String> {
-        if !self.needs_delegate(name) {
+        if !self.nothing_binds(name) {
             let get = self.load_op_for(name);
             self.b.emit(get, line);
             return Ok(());
@@ -3052,6 +3073,9 @@ impl Compiler {
             && args
                 .iter()
                 .all(|a| matches!(a, Expr::Closure { .. } | Expr::Bool(true))))
+            // `reverse(true)` reverses the receiver in place; the no-argument
+            // form copies, so unlike `sort` only the explicit `true` writes back.
+            || (method == "reverse" && matches!(args, [Expr::Bool(true)]))
             || matches!(
                 method,
                 "add"

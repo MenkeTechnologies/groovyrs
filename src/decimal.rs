@@ -153,9 +153,23 @@ pub fn from_i64(n: i64) -> BigDecimal {
 }
 
 /// The `f64` view of a decimal, for the paths that must fall back to double
-/// arithmetic (a `d`-suffixed operand, a fractional exponent).
+/// arithmetic (a `d`-suffixed operand, a fractional exponent) — Java's
+/// `BigDecimal.doubleValue()`, which is *correctly rounded*.
+///
+/// `BigDecimal::to_f64` is not: it scales the unscaled value by a power of ten
+/// in `f64`, so the error compounds with the exponent and the result overflows
+/// early — `1.0e300 as double` came back `1.0000000000000006E300` and
+/// `1.7976931348623157e308 as double` (an exactly representable `Double.MAX_VALUE`)
+/// came back `Infinity`. Rust's `str::parse::<f64>` is correctly rounded and
+/// saturates to infinity only where Java does, so the decimal's own scientific
+/// rendering is round-tripped through it. Scientific notation keeps the string
+/// bounded for a large scale either way.
 pub fn to_f64(d: &BigDecimal) -> f64 {
-    d.to_f64().unwrap_or(f64::NAN)
+    d.to_scientific_notation()
+        .parse::<f64>()
+        .ok()
+        .or_else(|| d.to_f64())
+        .unwrap_or(f64::NAN)
 }
 
 /// The exact `i64` value of a decimal, or `None` when it has a fraction part or
@@ -517,6 +531,17 @@ pub fn format_double(f: f64) -> String {
         None => ("", mantissa),
     };
     let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    // `Double.toString` wants at least *two* significant digits and, among the
+    // decimals of that minimal length that round-trip, the one nearest the
+    // value. Rust stops at the shortest round-tripping form, which can be a
+    // single digit, and padding it with a `0` is not always the nearest
+    // two-digit decimal: `4.9406564584124654E-324`'s shortest form is `5e-324`,
+    // where Java prints the nearer `4.9E-324`. Only the extreme denormals — one
+    // ulp spanning a large fraction of the value — can differ.
+    let (digits, exponent) = match digits.len() {
+        1 => nearest_two_digits(f).unwrap_or((digits, exponent)),
+        _ => (digits, exponent),
+    };
     let body = if (-3..7).contains(&exponent) {
         if exponent >= 0 {
             let split = exponent as usize + 1;
@@ -535,6 +560,58 @@ pub fn format_double(f: f64) -> String {
         format!("{}.{fraction}E{exponent}", &digits[..1])
     };
     format!("{sign}{body}")
+}
+
+/// The two-significant-digit decimal nearest `f`, as `(digits, exponent)` in the
+/// same shape `{:e}` produces — `Some(("49", -324))` for the smallest positive
+/// denormal. `None` when the rounded decimal does not read back as `f`, in which
+/// case the caller keeps the shortest form it already has.
+///
+/// `f`'s exact value is a finite decimal (a binary fraction always is), so
+/// `BigDecimal::from_f64` loses nothing and `with_prec(2)` rounds it exactly.
+fn nearest_two_digits(f: f64) -> Option<(String, i64)> {
+    let rounded = BigDecimal::from_f64(f)?.with_prec(2);
+    if to_f64(&rounded) != f {
+        return None;
+    }
+    let (unscaled, scale) = rounded.as_bigint_and_exponent();
+    let digits = unscaled.abs().to_string();
+    // `{:e}`'s exponent is that of the leading digit: `digits.len() - 1 - scale`.
+    // It does not move when trailing zeros are dropped below.
+    let exponent = digits.len() as i64 - 1 - scale;
+    let digits = digits.trim_end_matches('0');
+    // Rounding landed back on the single digit the caller already has (`0.1`
+    // rounds to `0.10`), so its padded form is the nearest two-digit decimal and
+    // substituting would print the padding twice.
+    (digits.len() > 1).then(|| (digits.to_string(), exponent))
+}
+
+/// `java.math.BigInteger.hashCode()`: fold the magnitude's 32-bit words
+/// big-endian with `hash = 31 * hash + word` in wrapping `int` arithmetic, then
+/// multiply by the signum. Zero has an empty magnitude and signum 0, so it
+/// hashes to 0, and `-n` hashes to `-(n.hashCode())`.
+pub fn big_integer_hash(n: &BigInt) -> i32 {
+    let (sign, magnitude) = n.clone().into_parts();
+    // `to_u32_digits` is little-endian; Java's `mag[]` is big-endian.
+    let hash = magnitude
+        .to_u32_digits()
+        .iter()
+        .rev()
+        .fold(0i32, |h, w| h.wrapping_mul(31).wrapping_add(*w as i32));
+    match sign {
+        Sign::Minus => hash.wrapping_neg(),
+        _ => hash,
+    }
+}
+
+/// `java.math.BigDecimal.hashCode()`: `31 * unscaledValue().hashCode() + scale()`.
+/// The scale is part of it, so `1.5` and `1.50` — equal in value, different in
+/// scale — hash differently, exactly as they compare unequal under `equals`.
+pub fn big_decimal_hash(d: &BigDecimal) -> i32 {
+    let (unscaled, scale) = d.as_bigint_and_exponent();
+    big_integer_hash(&unscaled)
+        .wrapping_mul(31)
+        .wrapping_add(scale as i32)
 }
 
 #[cfg(test)]
@@ -718,5 +795,80 @@ mod tests {
         assert_eq!(format_double(-2.5), "-2.5");
         assert_eq!(format_double(0.001), "0.001");
         assert_eq!(format_double(0.0001), "1.0E-4");
+    }
+
+    #[test]
+    fn double_rendering_picks_javas_nearest_two_digit_denormal() {
+        // Java wants at least two significant digits and, among the decimals of
+        // that minimal length that round-trip, the nearest one. Rust's `{:e}`
+        // stops at the shortest round-tripping form, which for these is a single
+        // digit whose padded form is *not* the nearest. Each expectation is the
+        // stdout of Apache Groovy 5.0.8 on JVM 21.0.12 — which matters, because
+        // JVM 17 still renders doubles by the pre-JDK-19 algorithm.
+        assert_eq!(format_double(f64::from_bits(1)), "4.9E-324");
+        assert_eq!(format_double(f64::from_bits(2)), "9.9E-324");
+        assert_eq!(format_double(f64::from_bits(10)), "4.9E-323");
+        assert_eq!(format_double(f64::from_bits(12)), "5.9E-323");
+        assert_eq!(format_double(-f64::from_bits(1)), "-4.9E-324");
+        // The two-digit search must not fire where the padded single digit
+        // already *is* the nearest — these all round to a trailing zero.
+        assert_eq!(format_double(0.1), "0.1");
+        assert_eq!(format_double(1.0e23), "1.0E23");
+        assert_eq!(format_double(f64::from_bits(202)), "1.0E-321");
+        assert_eq!(format_double(1.0e-310), "1.0E-310");
+    }
+
+    #[test]
+    fn to_f64_is_correctly_rounded_like_bigdecimal_doublevalue() {
+        // `BigDecimal::to_f64` scales by a power of ten in f64, so its error
+        // compounds with the exponent: `1.0e300` came back
+        // `1.0000000000000006E300` and `Double.MAX_VALUE` — exactly
+        // representable — came back `Infinity`. Java's `doubleValue()` is
+        // correctly rounded; these are the values `(<literal>) as double` prints
+        // under Apache Groovy 5.0.8 / JVM 21.0.12.
+        assert_eq!(format_double(to_f64(&d("1.0e308"))), "1.0E308");
+        assert_eq!(format_double(to_f64(&d("1.0e300"))), "1.0E300");
+        assert_eq!(
+            to_f64(&d("1.7976931348623157e308")),
+            f64::MAX,
+            "Double.MAX_VALUE is exactly representable and must not overflow"
+        );
+        assert_eq!(format_double(to_f64(&d("0.1"))), "0.1");
+        assert_eq!(
+            format_double(to_f64(&d("123456789012345678901234567890"))),
+            "1.2345678901234568E29"
+        );
+        // Past the top of the range Java does saturate.
+        assert!(to_f64(&d("1e309")).is_infinite());
+    }
+
+    #[test]
+    fn biginteger_hash_folds_the_magnitude_words_big_endian() {
+        // Every expectation is the stdout of `println (<literal>).hashCode()`
+        // under Apache Groovy 5.0.8 / JVM 17.0.4.1. The multi-word cases are the
+        // ones that pin the word order: `2**70` is `[0x40, 0, 0]` big-endian, so
+        // only a big-endian fold reaches 61504, and the 20-digit literal needs
+        // both words *and* the `int` wrap.
+        let bi = |t: &str| big_integer_hash(&d(t).as_bigint_and_exponent().0);
+        assert_eq!(bi("0"), 0);
+        assert_eq!(bi("1"), 1);
+        assert_eq!(bi("-1"), -1);
+        assert_eq!(bi("100"), 100);
+        assert_eq!(bi("1180591620717411303424"), 61504); // 2**70
+        assert_eq!(bi("12345678901234567890"), -1436577082);
+        assert_eq!(bi("-12345678901234567890"), 1436577082);
+    }
+
+    #[test]
+    fn bigdecimal_hash_carries_the_scale() {
+        // Also Groovy 5.0.8's. `1.5` and `1.50` are the pair that shows the
+        // scale is hashed, not just the numeric value.
+        let bd = |t: &str| big_decimal_hash(&d(t));
+        assert_eq!(bd("1.5"), 466);
+        assert_eq!(bd("1.50"), 4652);
+        assert_eq!(bd("1.500"), 46503);
+        assert_eq!(bd("0.1"), 32);
+        assert_eq!(bd("-3.14"), -9732);
+        assert_eq!(bd("1.5e10"), 456);
     }
 }

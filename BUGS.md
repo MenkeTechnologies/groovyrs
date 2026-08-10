@@ -35,8 +35,10 @@ reported as parse or compile errors, never silently mis-run.
   `unique`, and `list[i] = v` — whatever shape the receiver is reached through
   (a bare name, a field, a map entry, a subscript). The methods Groovy answers
   the receiver with (`sort`, `unique`, `<<`, `swap`, `each`, `eachWithIndex`)
-  answer the same reference, so `a.is(a.sort())` is `true`; `reverse`,
-  `sort(false)` and `collect` answer a new list, and are `false`.
+  answer the same reference, so `a.is(a.sort())` is `true`; `reverse()`,
+  `sort(false)` and `collect` answer a new list, and are `false`. `reverse(true)`
+  is the mutating spelling and joins the first group — it reverses the receiver
+  through `set`, so a `subList` window over it stays live.
   `removeAll`/`retainAll` accept Groovy's *predicate closure* as well as a
   collection, and `push` inserts at the front — the end `pop` takes from.
 - **`Object.is()` / `equals()`.** `is()` is handle identity, answered by every
@@ -44,6 +46,20 @@ reported as parse or compile errors, never silently mis-run.
   `equals()` on a collection agrees with `==`, including the two cross-type
   answers: a list never equals a `Set`, and a list does equal the `Range`
   enumerating the same elements.
+- **`Object.hashCode()`.** Java's specified rule for each type, not an
+  approximation: `String` folds UTF-16 code units (so an astral character counts
+  as its surrogate pair), `Integer` is the value while `Long` folds its halves,
+  `Double` folds `doubleToLongBits` with the canonical NaN, `BigDecimal` is
+  `31 * unscaled + scale` (so `1.5` and `1.50` differ, as they do under
+  `equals`), `BigInteger` folds its magnitude words big-endian, `AbstractList`
+  seeds at 1 and multiplies by 31, `AbstractMap` and `Map.Entry` use
+  `key ^ value`, `AbstractSet` *sums* its elements (order-independent, so a
+  `LinkedHashSet` and the `TreeSet` of the same elements agree), and `IntRange`
+  has its own — the Cantor pairing `(from + to + 1) * (from + to) / 2 + to` of
+  its normalised inclusive bounds, read off `IntRange.hashCode`'s bytecode.
+  `NumberRange`, `ObjectRange` and `EmptyRange` declare none and inherit
+  `AbstractList`'s. A user class's own `hashCode` overrides all of it. See the
+  simplification note below for the types groovyrs cannot distinguish.
 - **`java.util.Set`.** `as Set`, `toSet()` and
   `new HashSet`/`LinkedHashSet`/`TreeSet` build a real set behind a handle, not a
   de-duplicated list. `getClass()` names the implementation, `==` ignores order
@@ -331,8 +347,10 @@ reported as parse or compile errors, never silently mis-run.
   emitted with its post-call pending check, so no site can swallow one. Modeled,
   each with Groovy's own message text: `groovy.lang.MissingMethodException` (an
   unknown method, and the `getAt` a subscript on a non-collection desugars to),
-  `groovy.lang.MissingPropertyException` (an unknown property read, and a write
-  to a field the class chain never declared),
+  `groovy.lang.MissingPropertyException` (an unknown property read, a write
+  to a field the class chain never declared, and a bare *name* nothing binds —
+  `println zork` raises rather than printing `null`, naming the script class
+  Groovy names: the file's stem, or `script_from_command_line` under `-e`),
   `java.lang.NullPointerException` (`Cannot invoke method m() on null object` /
   `Cannot get property 'p' on null object` — while `null.toString()` and
   `null.equals(x)` still answer, as Groovy's `NullObject` does),
@@ -425,6 +443,12 @@ reported as parse or compile errors, never silently mis-run.
   `ArrayList`/`LinkedList`/`Vector`, `HashSet`/`LinkedHashSet`/`TreeSet`,
   `HashMap`/`LinkedHashMap`/`TreeMap`, `Object`, the box types, `BigDecimal`,
   `BigInteger`, and every modeled throwable.
+- **`Float.MAX_VALUE` / `Float.MIN_VALUE`.** groovyrs has no `java.lang.Float`,
+  so a 32-bit constant could only be answered as the `Double` nearest it —
+  `3.4028234663852886E38` where Groovy prints `3.4028235E38`. Answering the wrong
+  number is worse than not answering, so the read raises. Every `Double`,
+  `Integer`, `Long`, `Short`, `Byte` and `Math` constant *is* answered, including
+  `MIN_NORMAL`, `MAX_EXPONENT`/`MIN_EXPONENT` and `SIZE`/`BYTES`.
 - **A `GString` is a `String`.** An interpolated literal produces a plain
   `java.lang.String`, so `"$s".getClass()` reports `java.lang.String` where
   Groovy reports `org.codehaus.groovy.runtime.GStringImpl`.
@@ -550,11 +574,10 @@ reported as parse or compile errors, never silently mis-run.
   `OWNER_FIRST` is preserved: a script binding of the same name still wins, and
   a delegate that can hold neither a key nor a field takes no write and raises
   nothing (`[1, 2].with { zork = 1 }` is accepted, as Groovy accepts it).
-  What still differs is reading the name *after* the block: nothing at script
-  level ever bound it, so Groovy raises `MissingPropertyException` where
-  groovyrs answers `null` — the general behaviour of an unbound bare name at
-  script top level, not something `with` introduces.
-  One further difference is positional. Groovy scopes a script variable from its
+  Reading the name *after* the block raises `MissingPropertyException` in both
+  now — nothing at script level ever bound it — which is the general behaviour
+  of an unbound bare name, not something `with` introduces.
+  One difference is positional. Groovy scopes a script variable from its
   declaration onward, while the compiler collects the script's declared names in
   one pass over the whole file, so a delegate key that a *later* line also
   declares as a script variable (`m.with { a }` above a later `def a = 5`)
@@ -694,35 +717,65 @@ reported as parse or compile errors, never silently mis-run.
   `MissingPropertyException` — `.size()` is the spelling that works. Adding
   `.length` to every `List` would make `[1, 2, 3].length` answer where Groovy
   raises, which is the worse of the two errors.
-- **An unbound name reads as `null` instead of raising.** A declared-but-
-  uninitialized local (`def x` then `println x`) and an entirely undeclared name
-  both yield `null`; Groovy defaults the former to `null` too but raises
-  `groovy.lang.MissingPropertyException: No such property: <name> for class:
-  <script>` for the latter.
-
-  The two cases are the *same emitted code*, which is what makes this hard rather
-  than merely unwritten. At script level `def x` with no initializer emits no
-  store at all (`declare_slot` has no scope to declare into), so `def x; println
-  x` and `println x` are byte-identical at runtime and no "is this global bound?"
-  test can separate them. Making the read raise therefore needs the declaration
-  to start emitting a binding *first*.
-
-  The reads themselves come from one syntactic site — the `Expr::Var` arm of
-  `Compiler::expr` — plus twelve helper sites that load a name directly
-  (compound assignment, `++`/`--`, the receiver write-back, `this`, the
-  `$exc_*` try/finally temporaries, the power-assert `Values:` clause, the
-  closure-capture prologue, and the `GCLOSURE_CALL` callee load). Only the first
-  is a user-written strict read; the rest must stay tolerant, and two of them
-  actively depend on the `null`: `b_closure_call` needs an `Undef` callee to fall
-  through to the `with`/`tap` delegate chain and then report its own
-  `unresolved reference`, and a bare *assignment* made inside a closure or a
-  function body (`[1, 2].each { newVar = it }`) legitimately binds a global that
-  a later top-level read must find — so the decision has to be the runtime
-  bound-ness test, never a compile-time `script_vars` membership test. Script-
-  declared class names used as bare values also currently ride this path.
-  fusevm 0.17's `VM::set_undef_hook` supplies the per-site mechanism (groovyrs
-  installs no hook today); the blocker is the uninitialized-declaration case
-  above, not the hook.
+- **A list a GDK method *returns* is not a reference; only a literal is.** A list
+  literal is built behind a heap handle, so every claim in the *Lists are
+  references* entry above holds for one — including a list reached through a map
+  value or as an element of another literal. A GDK method's result is the
+  transient array form instead, and the compiler's receiver write-back is what
+  makes `a.sort()` show through `a`. Three things follow. A second name for a
+  returned list does not alias it: `def r = [1,2].collect { it }; def s = r;
+  s << 9` leaves `r` unchanged where Groovy shows `9` through both. `is()` on one
+  raises `MissingMethodException` (it needs a handle). And a *nested* list inside
+  a returned one cannot be mutated through the outer: `[[1,2],[3,4]].transpose()`
+  then `t[0] << 9` is dropped, where Groovy answers `[[1, 3, 9], [2, 4]]` — the
+  same for `collate`, `withIndex`, `combinations`, `permutations`,
+  `subsequences`, `groupBy` and `split`. Allocating a handle per GDK result would
+  fix all three and cost a heap entry per call, on a heap cleared only per run —
+  a loop calling `collect` would grow it without bound, so the fix is a heap with
+  a reclamation story, not a one-line change at the return site.
+- **`[[1, 2], [3, 4]].sum()` concatenates as strings.** Groovy's `sum()` folds
+  with `plus`, so a list of lists answers the concatenated list `[1, 2, 3, 4]`;
+  groovyrs renders each element and joins, answering the string `[1, 2][3, 4]`.
+- **`collectNested` is not implemented** and raises `MissingMethodException`.
+- **A name a *closure* assigned `null` reads as unbound.** Reading a name
+  nothing binds now raises `MissingPropertyException` the way Groovy does, and
+  the test is the runtime one — the global has been written — so a name bound
+  only inside a closure body (`[1, 2].each { newVar = it }`) is found by a later
+  top-level read. The gap is that a global holds `Undef` both when it was never
+  written and when `null` was written to it, so the *one* shape that still
+  differs is a closure assigning literally `null` and the script reading the
+  name afterwards: `[1].each { z = null }; println z` raises where Groovy prints
+  `null`. A script-level `z = null` is unaffected — the compiler sees the
+  assignment, so the read keeps its plain global op and never asks.
+- **A declared-but-never-executed script variable reads as `null`.** The
+  compiler collects the script's declared names in one pass over the whole file,
+  so `if (false) { neverRun = 1 }; println neverRun` keeps a plain global read
+  and answers `null`, where Groovy raises `MissingPropertyException`. Only a
+  name that appears in *no* script-level declaration or assignment gets the
+  checked read.
+- **`hashCode()` answers Java's contract only for the types groovyrs models.**
+  Every specified rule is implemented and byte-verified (`String` over UTF-16
+  code units, `Integer`/`Long`, `Double`, `Boolean`, `BigDecimal` including its
+  scale, `BigInteger`, `AbstractList`, `AbstractMap`, `AbstractSet`, `Map.Entry`,
+  `IntRange`'s Cantor pairing and the other ranges' inherited `AbstractList`
+  hash). What differs follows from types groovyrs does not model rather than
+  from the hashing: a `Float` literal is a `Double` here, so `(1.0f).hashCode()`
+  answers `Double`'s; a `GString` is a `String`; a map key is always a `String`,
+  so `[(1): 'x'].hashCode()` hashes `"1"` rather than `1`; and a `Long` small
+  enough to be an `Integer` is indistinguishable from one, so `(-1L).hashCode()`
+  answers -1 where Java's `Long` folds the halves to 0. A value with no
+  specified contract — a closure, a `StringBuilder`, a `Pattern`, a user
+  instance that declares no `hashCode` — gets the object's heap handle as its
+  identity hash: stable within a run and equal exactly when the references are,
+  which is the contract, but not the number a JVM prints. A JVM's own identity
+  hash varies run to run, so no value could match it.
+- **`args` is a `List`, not a `String[]`.** Every script's binding carries
+  `args` — the launcher arguments after the script file, empty when there are
+  none — but as the `List` groovyrs models rather than the array Groovy binds.
+  So `args.getClass()` reports `java.util.ArrayList` instead of
+  `[Ljava.lang.String;`, and an out-of-range `args[0]` answers `null` where
+  Groovy raises `ArrayIndexOutOfBoundsException`. Same root as the *Java arrays*
+  entry above.
 - **The paren-less `println <expr>` command form is more permissive** than
   Groovy's command-expression grammar. groovyrs parses the whole following
   expression as the single argument, so `println -42` prints `-42`. Real Groovy

@@ -42,6 +42,13 @@ fn main() -> ExitCode {
         let Some(file) = cli.file.clone() else {
             return fail("no input file (try `groovy --help`)");
         };
+        // Groovy names the class it compiles a script file into after the
+        // file's stem, and that name appears in a `MissingPropertyException` on
+        // a bare name. `-e` has no file and keeps the default,
+        // `script_from_command_line` — the same distinction Groovy makes.
+        if let Some(stem) = std::path::Path::new(&file).file_stem() {
+            groovyrs::host::set_script_class(&stem.to_string_lossy());
+        }
         match std::fs::read_to_string(&file) {
             Ok(s) => s,
             Err(e) => return fail(&format!("cannot read {file}: {e}")),
@@ -67,7 +74,7 @@ fn main() -> ExitCode {
         };
     }
 
-    match groovyrs::run_str(&src) {
+    match groovyrs::run_str_with_args(&src, &cli.argv) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => fail(&e),
     }

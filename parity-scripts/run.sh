@@ -17,6 +17,12 @@ trap 'rm -rf "$TMP"' EXIT
 command -v "$ORACLE" >/dev/null || { echo "parity: no reference '$ORACLE' on PATH"; exit 2; }
 [ -x "$OURS" ] || { echo "parity: $OURS not built (cargo build)"; exit 2; }
 
+# The `groovy` launcher resolves its JVM from an ambient `JAVA_HOME`, and a
+# pre-JDK-19 one renders every double differently. Refuse it rather than
+# reporting its disagreements as groovyrs divergences.
+. "$ROOT/parity-scripts/oracle-jvm.sh"
+oracle_jvm_gate "$ORACLE" parity
+
 pass=0; fail=0
 declare -a misses
 while IFS= read -r f; do

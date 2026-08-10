@@ -28,6 +28,12 @@ command -v "$ORACLE" >/dev/null || { echo "fuzz: no reference '$ORACLE' on PATH"
 [ -x "$OURS" ] || { echo "fuzz: $OURS not built (cargo build)"; exit 2; }
 [ -f "$PROBES" ] || { echo "fuzz: no probe file $PROBES"; exit 2; }
 
+# The `groovy` launcher resolves its JVM from an ambient `JAVA_HOME`, and a
+# pre-JDK-19 one renders every double differently. Refuse it rather than
+# reporting its disagreements as groovyrs divergences.
+. "$ROOT/parity-scripts/oracle-jvm.sh"
+oracle_jvm_gate "$ORACLE" fuzz
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

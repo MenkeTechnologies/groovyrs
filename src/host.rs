@@ -272,13 +272,13 @@ pub const GRANGE: u16 = 755;
 pub const GCLASS_LONG: u16 = 756;
 
 /// Builtin ids for reading and writing a bare name inside a closure body that
-/// the *owner* could not resolve — the name form of what [`b_closure_call`]
+/// the *owner* could not resolve — the name form of what `b_closure_call`
 /// already does for a bare call. Emitted only for a name the compiler could not
 /// tie to a slot, a field, a class, a function, or a script-level declaration,
 /// so an ordinary variable keeps its native `GetVar`/`SetVar` (and with it its
 /// JIT trace eligibility). Stack for the read: the global's name-pool index,
 /// then the name. For the write: the value, the index, then the name.
-/// See [`b_name_get`] / [`b_name_set`].
+/// See `b_name_get` / `b_name_set`.
 pub const GNAME_GET: u16 = 760;
 pub const GNAME_SET: u16 = 761;
 
@@ -288,7 +288,7 @@ pub const GNAME_SET: u16 = 761;
 /// A Groovy list is a *reference* — `def b = a` names one `ArrayList` twice — so
 /// a literal has to allocate a handle rather than leave a fusevm array on the
 /// stack. `Op::MakeArray` still does the element gathering; this only wraps it.
-/// See [`b_make_list`].
+/// See `b_make_list`.
 pub const GMAKE_LIST: u16 = 762;
 
 /// Builtin id for `>>` on a receiver whose `rightShift` is *not* a bit shift —
@@ -301,7 +301,7 @@ pub const GMAKE_LIST: u16 = 762;
 /// six native ops the tracing JIT records (see `Compiler::binary`), and sending
 /// every shift through a builtin would cost each shifting loop its trace. The
 /// compiler emits this only where it can see the left operand is a closure or an
-/// instance, so an ordinary shift is untouched. See [`b_shr`].
+/// instance, so an ordinary shift is untouched. See `b_shr`.
 pub const GSHR: u16 = 763;
 
 /// Builtin id for `recv.method(args)` at a call site where the compiler saw a
@@ -311,7 +311,7 @@ pub const GSHR: u16 = 763;
 /// `16L` reach the host as the one `Value::Int`: `255.toString(16)` renders `16`
 /// through the static `Integer.toString(int)`, while `255.toString(16L)` matches
 /// no overload at all and is a `MissingMethodException`. The magnitude rule that
-/// serves [`java_class_name`] cannot separate them, so the widths travel with the
+/// serves `java_class_name` cannot separate them, so the widths travel with the
 /// call, exactly as [`GCLASS_LONG`] carries the width of a `getClass()` receiver.
 ///
 /// Stack: the width mask (bit 0 the receiver, bit `k+1` argument `k`), then the

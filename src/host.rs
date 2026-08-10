@@ -1855,7 +1855,7 @@ fn omap_set(v: &Value, key: String, val: Value) -> bool {
 fn b_make_list(vm: &mut VM, _argc: u8) -> Value {
     let built = vm.stack.pop().unwrap_or(Value::Undef);
     match built {
-        Value::Array(items) => glist(items),
+        Value::Array(items) => glist(items.to_vec()),
         // Not an array: nothing to wrap (an empty literal still arrives as an
         // array, so this is only reachable if the emitter changes).
         other => other,
@@ -3287,7 +3287,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         let (x, y) = (range_as_list(a), range_as_list(b));
         return match (&x, &y) {
             (Value::Array(p), Value::Array(q)) => {
-                p.len() == q.len() && p.iter().zip(q).all(|(i, j)| values_equal(i, j))
+                p.len() == q.len() && p.iter().zip(q.iter()).all(|(i, j)| values_equal(i, j))
             }
             _ => false,
         };
@@ -3669,7 +3669,7 @@ fn b_setindex(vm: &mut VM, _argc: u8) -> Value {
         };
     }
     match &recv {
-        Value::Array(a) => match list_put(a.clone(), &index, value) {
+        Value::Array(a) => match list_put(a.to_vec(), &index, value) {
             Ok(next) => Value::array(next),
             Err((i, len)) => raise_negative_index(vm, i, len),
         },
@@ -4120,7 +4120,7 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         });
         if result_mutates {
             if let Value::Array(next) = &answer {
-                list_store(id, next.clone(), structural);
+                list_store(id, next.to_vec(), structural);
                 mutated = true;
             }
         }
@@ -4922,7 +4922,7 @@ fn item_args(clo: &Value, item: &Value) -> Vec<Value> {
     let spread = closure_meta(clo).map(|m| m.params).unwrap_or(1) >= 2;
     // The element is a list handle; deref to see the elements to spread.
     match deref_list(item) {
-        Value::Array(a) if spread => a,
+        Value::Array(a) if spread => a.to_vec(),
         _ => vec![item.clone()],
     }
 }
@@ -5741,7 +5741,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
         }
         (Value::Array(a), "reverse") => {
-            let mut r = a.clone();
+            let mut r = a.to_vec();
             r.reverse();
             Value::array(r)
         }
@@ -5796,14 +5796,14 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         }
         (Value::Array(a), "flatten") => Value::array(flatten_values(a)),
         (Value::Array(a), "toList" | "asImmutable" | "asSynchronized" | "clone") => {
-            Value::array(a.clone())
+            Value::array(a.to_vec())
         }
         // `toSet()` is Groovy's `new HashSet<>(self.size())` + `addAll`, so it
         // asks for a table sized to the *element count* — a smaller one than
         // `new HashSet(collection)` asks for, and that difference is visible as
         // a different iteration order for the same elements.
         (Value::Array(a), "toSet") => make_set(
-            a.clone(),
+            a.to_vec(),
             SetKind::Hash {
                 req: table_size_for(a.len()),
             },
@@ -5811,7 +5811,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `toUnique` answers a de-duplicated **List**, not a set.
         (Value::Array(a), "toUnique") => {
             let mut out: Vec<Value> = Vec::new();
-            for v in a {
+            for v in a.iter() {
                 if !out.iter().any(|k| values_equal(k, v)) {
                     out.push(v.clone());
                 }
@@ -5847,7 +5847,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `list * n` — the receiver repeated `n` times.
         (Value::Array(a), "multiply") => {
             let n = args.first().and_then(as_i64).unwrap_or(0).max(0) as usize;
-            Value::array(std::iter::repeat(a.clone()).take(n).flatten().collect())
+            Value::array(std::iter::repeat(a.to_vec()).take(n).flatten().collect())
         }
         // `[[1, 2], [3, 4]].transpose()` == `[[1, 3], [2, 4]]`; the result is as
         // long as the *shortest* row, which is what Groovy's does.
@@ -5890,7 +5890,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `[[1, 3], [2, 3], [1, 4], [2, 4]]`.
         (Value::Array(a), "combinations") => {
             let mut out: Vec<Vec<Value>> = vec![Vec::new()];
-            for e in a {
+            for e in a.iter() {
                 let choices = if is_list(e) {
                     iteration_elements(e)
                 } else {
@@ -5952,7 +5952,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // rides a handle (see `HeapObj::Iter`).
         (Value::Array(a), "iterator" | "listIterator") => heap_push(HeapObj::Iter {
             class: "java.util.ArrayList$Itr",
-            items: a.clone(),
+            items: a.to_vec(),
             pos: 0,
         }),
         (Value::Str(s), "iterator") => heap_push(HeapObj::Iter {
@@ -5985,7 +5985,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             let slot = |n: i64| usize::try_from(n).ok().filter(|u| *u < len);
             match (slot(i), slot(j)) {
                 (Some(x), Some(y)) => {
-                    let mut next = a.clone();
+                    let mut next = a.to_vec();
                     next.swap(x, y);
                     let out = Value::array(next);
                     set_mutated(out.clone());
@@ -6013,7 +6013,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 );
                 return Value::Undef;
             }
-            let mut next = a.clone();
+            let mut next = a.to_vec();
             let gone = if method == "pop" {
                 next.remove(0)
             } else {
@@ -6026,7 +6026,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // Each parks the new contents for the compiler-emitted writeback (see
         // `MUTATED`) and answers what the JDK/GDK call answers.
         (Value::Array(a), "add" | "leftShift" | "push" | "addAll") => {
-            let mut next = a.clone();
+            let mut next = a.to_vec();
             // How many elements the call actually added — what `addAll` answers.
             let mut added = 1usize;
             // `add(index, element)` and `addAll(index, collection)` insert at the
@@ -6073,7 +6073,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             let i = args.first().and_then(as_i64).unwrap_or(0);
             match usize::try_from(i).ok().filter(|u| *u < a.len()) {
                 Some(u) => {
-                    let mut next = a.clone();
+                    let mut next = a.to_vec();
                     let gone = next.remove(u);
                     set_mutated(Value::array(next));
                     gone
@@ -6123,7 +6123,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             let i = args.first().and_then(as_i64).unwrap_or(0);
             match usize::try_from(i).ok().filter(|u| *u < a.len()) {
                 Some(u) => {
-                    let mut next = a.clone();
+                    let mut next = a.to_vec();
                     let old = std::mem::replace(&mut next[u], args[1].clone());
                     set_mutated(Value::array(next));
                     old
@@ -6594,7 +6594,7 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
     }
     match &lhs {
         Value::Array(a) => {
-            let mut next = a.clone();
+            let mut next = a.to_vec();
             next.push(rhs);
             let out = Value::array(next);
             set_mutated(out.clone());
@@ -7909,7 +7909,7 @@ fn formatted(vm: &mut VM, argc: u8) -> String {
     };
     // A lone list argument is the argument *vector*, not one `%s` operand.
     let rest: Vec<Value> = match rest {
-        [Value::Array(a)] => a.clone(),
+        [Value::Array(a)] => a.to_vec(),
         other => other.to_vec(),
     };
     java_format(vm, &groovy_str(spec), &rest)
@@ -7999,7 +7999,7 @@ fn subsequences_of(items: &[Value]) -> Vec<Value> {
         };
         for it in &seen {
             let mut extended = match it {
-                Value::Array(a) => a.clone(),
+                Value::Array(a) => a.to_vec(),
                 _ => continue,
             };
             extended.push(h.clone());
@@ -8328,7 +8328,7 @@ fn iteration_elements(v: &Value) -> Vec<Value> {
     }
     match v {
         Value::Undef => Vec::new(),
-        Value::Array(a) => a.clone(),
+        Value::Array(a) => a.to_vec(),
         Value::Str(s) => s.chars().map(|c| Value::str(c.to_string())).collect(),
         other => vec![other.clone()],
     }
@@ -9005,7 +9005,7 @@ fn groovy_add(a: &Value, b: &Value) -> Value {
         );
     }
     if let Value::Array(xs) = a {
-        let mut out = xs.clone();
+        let mut out = xs.to_vec();
         match b {
             Value::Array(ys) => out.extend(ys.iter().cloned()),
             // `List.plus` has a `Collection` overload and an `Object` one, and
@@ -9064,7 +9064,7 @@ fn groovy_sub(a: &Value, b: &Value) -> Value {
 fn groovy_mul(a: &Value, b: &Value) -> Value {
     let n = as_i64(b).unwrap_or(0).max(0) as usize;
     match a {
-        Value::Array(xs) => Value::array(std::iter::repeat(xs.clone()).take(n).flatten().collect()),
+        Value::Array(xs) => Value::array(std::iter::repeat(xs.to_vec()).take(n).flatten().collect()),
         other => Value::str(groovy_str(other).repeat(n)),
     }
 }

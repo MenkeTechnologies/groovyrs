@@ -19,9 +19,13 @@
 //! correct runtime. The generator stays clear of the two *documented*
 //! simplifications (see BUGS.md) so a reported divergence is a real parity gap:
 //!
-//! * integer arithmetic only (`+ - * %`), with small operands so no result
-//!   overflows `int` (Groovy wraps an overflowing `Integer` at 32 bits, groovyrs
-//!   at 64);
+//! * integer arithmetic only (`+ - * %`), with small operands. The reason is no
+//!   longer that the two runtimes disagree past `Integer` range — groovyrs
+//!   reproduces the 32-bit wrap (`Integer.MAX_VALUE + 1` is `-2147483648` in
+//!   both, measured), and this comment claimed the opposite long after that
+//!   landed. Small operands keep the generated *expression* about the operator
+//!   under test rather than about the width inference, which BUGS.md documents
+//!   separately and which has its own probes;
 //! * every `/` in the arithmetic modes keeps a non-zero right operand, since a
 //!   zero divisor aborts an unarmed program in both runtimes and a mutual abort
 //!   teaches nothing. `%` by zero has its own dedicated mode (`modzero`), which
@@ -349,10 +353,11 @@ fn gen_format_value(rng: &mut Rng) -> String {
 /// strings (including `""` and `"0"`, which fusevm reads shell-style), `null`,
 /// booleans, and empty / non-empty lists and maps.
 ///
-/// Ranges are deliberately absent: groovyrs materialises a range value to a list
-/// (a *documented* simplification — see BUGS.md), so `println(0..2)` prints
-/// `[0, 1, 2]` where Groovy prints `0..2`. Emitting one here would report that
-/// known gap instead of a truthiness one.
+/// Ranges are absent because a range is never falsey, so it would add no
+/// truthiness case. (This comment used to say groovyrs materialises a range to a
+/// list and prints `[0, 1, 2]` for `println(0..2)`. It does not, and has not
+/// since ranges became a real `groovy.lang.Range`: both runtimes print `0..2`,
+/// measured. The `ranges` mode covers them properly.)
 fn gen_truthy_value(rng: &mut Rng) -> String {
     const VALUES: &[&str] = &[
         "0", "1", "-3", "0.0", "0.00", "1.50", "-2.5", "0.0d", "2.5d", "0e0", "\"\"", "\"0\"",
@@ -1623,6 +1628,64 @@ fn resolve_oracle() -> String {
     std::process::exit(2);
 }
 
+/// Refuse an oracle whose JVM or default locale would make its answers the wrong
+/// reference — the same gate `parity-scripts/oracle-jvm.sh` applies to the shell
+/// harnesses, which this binary did not have.
+///
+/// The `groovy` launcher resolves its JVM from an ambient `JAVA_HOME`, so which
+/// JVM answers depends on the caller's environment rather than on which `groovy`
+/// is on PATH. A pre-JDK-19 JVM renders every double by the old
+/// `Double.toString` algorithm (`1.0e23` prints `9.999999999999999E22`), and a
+/// non-en-US locale changes `String.format`'s separators and `toUpperCase`'s
+/// case mapping. Either one reports divergences on correct groovyrs output —
+/// and worse, invites "fixing" groovyrs to match the wrong oracle.
+///
+/// Exits 2 (fails closed) rather than returning, so no caller can continue past
+/// a refusal.
+fn gate_oracle(oracle: &str) {
+    const PROBE: &str = concat!(
+        "println 1.0e23d\n",
+        "println Double.MIN_VALUE\n",
+        "println String.format('%,.2f', 1234.5)\n",
+        "println 'hi'.toUpperCase()\n",
+    );
+    let out = Command::new(oracle).arg("-e").arg(PROBE).output();
+    let text = match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Err(e) => {
+            eprintln!("parity-fuzz: cannot run oracle {oracle}: {e}");
+            std::process::exit(2);
+        }
+    };
+    let want: [(&str, &str); 4] = [
+        (
+            "1.0E23",
+            "a JVM predating the JDK 19 Double.toString rewrite",
+        ),
+        (
+            "4.9E-324",
+            "a JVM predating the JDK 19 Double.toString rewrite",
+        ),
+        (
+            "1,234.50",
+            "a default locale that is not en-US (number format)",
+        ),
+        ("HI", "a default locale that is not en-US (case mapping)"),
+    ];
+    for (needle, why) in want {
+        if !text.lines().any(|l| l == needle) {
+            eprintln!("parity-fuzz: REFUSING oracle {oracle} — {why}.");
+            eprintln!("parity-fuzz:   {}", version_of(oracle).unwrap_or_default());
+            eprintln!(
+                "parity-fuzz:   JAVA_HOME={}",
+                std::env::var("JAVA_HOME").unwrap_or_else(|_| "<unset>".into())
+            );
+            eprintln!("parity-fuzz:   expected a line {needle:?}; got {:?}", text);
+            std::process::exit(2);
+        }
+    }
+}
+
 fn version_of(prog: &str) -> Option<String> {
     let o = Command::new(prog).arg("--version").output().ok()?;
     let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -1885,6 +1948,7 @@ fn main() {
     let args = parse_args();
     let bin = ours_bin();
     let oracle = resolve_oracle();
+    gate_oracle(&oracle);
     let timeout = Duration::from_millis(args.timeout_ms);
 
     if !bin.exists() {

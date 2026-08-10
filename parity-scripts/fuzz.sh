@@ -61,42 +61,66 @@ if [ "$N" -eq 0 ]; then
   echo "fuzz: probe file $PROBES yielded 0 probes — nothing to compare"; exit 2
 fi
 
-# Batched oracle programs: marker, probe, marker, probe, …
-#
-# The batch is split across several programs rather than being one, because a
-# Groovy script body compiles to a single `run()` method and the JVM caps a
-# method at 64KB of bytecode. At ~700 probes one batch stopped compiling at all
-# ("Method too large: all.run()"), which the rc gate below correctly refused —
-# but refusing is not measuring, and shrinking the corpus to fit is the wrong
-# direction. Chunking keeps every probe AND keeps the amortisation that the
-# batching exists for: the cost is one JVM start per chunk, not per probe.
-#
-# Every chunk's rc is checked, so the guarantee is stronger than the single
-# batch's was — there are now more ways to fail closed, and none to fail open.
-CHUNK="${GROOVYRS_PARITY_CHUNK:-100}"
-: > "$TMP/oracle.out"
-: > "$TMP/oracle.err"
-for ((base=0; base<N; base+=CHUNK)); do
-  src="$TMP/batch$base.groovy"
-  : > "$src"
-  for ((i=base; i<base+CHUNK && i<N; i++)); do
-    {
-      printf 'println "##P%d"\ntry {\n' "$i"
-      cat "$TMP/p$i.body"
-      printf '\n} catch (Throwable t) { println "EXC:" + t.getClass().getName() }\n'
-    } >> "$src"
-  done
-  timeout 300 "$ORACLE" "$src" >> "$TMP/oracle.out" 2>>"$TMP/oracle.err"
-  orc=$?
-  # A non-zero oracle rc is fatal even when it left partial output behind. Every
-  # probe the chunk never reached would otherwise become a SKIP, and a run that
-  # skipped everything used to still exit 0 — a truncated oracle reading as a
-  # clean sweep. `timeout` (rc 124) is the case that actually bit us.
-  if [ $orc -ne 0 ]; then
-    echo "fuzz: oracle batch at probe $base failed (rc=$orc) — probes after the failure are unmeasured:"
-    head -20 "$TMP/oracle.err"; exit 2
-  fi
+# Write the file each probe is *run from* — the same bytes on both sides.
+for ((i=0; i<N; i++)); do
+  {
+    printf 'try {\n'
+    cat "$TMP/p$i.body"
+    printf '\n} catch (Throwable t) { println "EXC:" + t.getClass().getName() }\n'
+  } > "$TMP/p$i.groovy"
 done
+
+# The oracle runs each probe in its OWN script, from one JVM.
+#
+# It used to concatenate the probes into a handful of batched programs. That
+# amortised the JVM's ~3.5s start-up (854 standalone runs is ~50 minutes) but it
+# put every probe in one script `run()` method, sharing one `Binding` — so an
+# undeclared assignment leaked forward. `counter = 0` in one probe and
+# `counter += 1` in a later one printed `2` batched and raised
+# `MissingPropertyException` standalone, and groovyrs, which runs each probe on
+# its own, was being compared against the wrong answer. No probe in the corpus
+# depended on it, so the hazard was latent rather than active — but "no probe
+# does today" is not a property the harness enforces, and a probe added later
+# would have been silently mismeasured.
+#
+# A driver that hands each probe to its own `GroovyShell` fixes it without
+# giving up the amortisation: a fresh `GroovyShell` carries a fresh `Binding`,
+# so `counter += 1` raises exactly as it does standalone. `parse(text, name)`
+# additionally gives the script the class name a standalone run would derive
+# from the filename, so `this.getClass().getName()` answers `p7` either way, and
+# the `Binding` is seeded with the empty `args` the launcher supplies.
+#
+# The driver reads the probe files at run time rather than embedding them, so
+# its own `run()` is a constant handful of bytecode — the 64KB method limit that
+# forced the chunking is gone, and there is no chunk boundary left to tune.
+#
+# What one JVM still shares is process-wide state: system properties, the
+# default locale, static initialisers. That is unreachable from this corpus and
+# is the residual difference from 854 separate processes.
+cat > "$TMP/driver.groovy" <<'DRIVER'
+def dir = new File(args[0])
+def n = args[1] as int
+for (int i = 0; i < n; i++) {
+  println "##P$i"
+  def name = "p${i}.groovy"
+  try {
+    def shell = new GroovyShell(new Binding([args: new String[0]]))
+    shell.parse(new File(dir, name).getText("UTF-8"), name).run()
+  } catch (Throwable t) {
+    println "EXC:" + t.getClass().getName()
+  }
+}
+DRIVER
+timeout 900 "$ORACLE" "$TMP/driver.groovy" "$TMP" "$N" > "$TMP/oracle.out" 2>"$TMP/oracle.err"
+orc=$?
+# A non-zero oracle rc is fatal even when it left partial output behind. Every
+# probe the run never reached would otherwise become a SKIP, and a run that
+# skipped everything used to still exit 0 — a truncated oracle reading as a
+# clean sweep. `timeout` (rc 124) is the case that actually bit us.
+if [ $orc -ne 0 ]; then
+  echo "fuzz: oracle driver failed (rc=$orc) — the corpus is unmeasured:"
+  head -20 "$TMP/oracle.err"; exit 2
+fi
 
 # Split the oracle's stdout back out into per-probe expected files.
 command perl -e '
@@ -110,18 +134,18 @@ command perl -e '
   close $out if $out;
 ' "$TMP/oracle.out" "$TMP"
 
-# The batch has to have reached every probe. One marker per probe is the only
+# The driver has to have reached every probe. One marker per probe is the only
 # evidence of that; a short count means the oracle died partway and the rest of
 # the corpus was never run, so the comparison below would measure a truncated
 # set and report it as a full sweep.
 markers=$(grep -c '^##P' "$TMP/oracle.out")
 if [ "$markers" -ne "$N" ]; then
-  echo "fuzz: oracle emitted $markers/$N probe markers — batch truncated, corpus unmeasured"
+  echo "fuzz: oracle emitted $markers/$N probe markers — run truncated, corpus unmeasured"
   exit 2
 fi
 
 # A probe only counts as a comparison if the ORACLE ran it: it has to have
-# emitted its `##P` marker (so the batch reached it) and then printed something.
+# emitted its `##P` marker (so the driver reached it) and then printed something.
 # A probe the reference never executed measures nothing — our side failing too
 # would read as agreement — so those are reported as SKIPPED, never as passes.
 # A run of ours that has to be killed is a MISS whatever the oracle printed;
@@ -136,11 +160,8 @@ for ((i=0; i<N; i++)); do
     head -3 "$TMP/p$i.body"
     continue
   fi
-  {
-    printf 'try {\n'
-    cat "$TMP/p$i.body"
-    printf '\n} catch (Throwable t) { println "EXC:" + t.getClass().getName() }\n'
-  } > "$TMP/p$i.groovy"
+  # `$TMP/p$i.groovy` is the same file the oracle's driver parsed, byte for byte
+  # and under the same script name.
   timeout 20 "$OURS" "$TMP/p$i.groovy" > "$TMP/p$i.got" 2>"$TMP/p$i.err"
   rc=$?
   if [ $rc -ne 124 ] && cmp -s "$TMP/p$i.exp" "$TMP/p$i.got"; then

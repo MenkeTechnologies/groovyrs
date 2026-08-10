@@ -10,9 +10,14 @@
 //! (`stackTrace`/`scopes`/`variables`/`continue`/`next`/`stepIn`/`stepOut`) from
 //! stdin until a resume command, then returns control to the VM.
 //!
-//! groovyrs (slice 1) runs a single script frame with no user functions, so the
-//! call stack is always one frame ("script") and `next`/`stepIn`/`stepOut` all
-//! stop at the next executed marker. Locals are read straight off the VM
+//! The adapter reports one frame, always named "script", and `next` / `stepIn` /
+//! `stepOut` all stop at the next executed marker. This used to be described as
+//! "groovyrs runs a single script frame with no user functions", which is no
+//! longer true of the *runtime* — `def f(a, b) { … }` compiles to a real
+//! subroutine over the native `Op::Call` frame ABI, and recursion works. It is
+//! still true of the *adapter*: a breakpoint inside a function pauses, but the
+//! stack it reports is the one script frame rather than the call chain, so
+//! `stepOut` of a function behaves like `next`. Locals are read straight off the VM
 //! (`vm.globals` indexed by `vm.chunk.names`), so no host object heap is needed.
 //! Program stdout is redirected to a pipe during the run and forwarded as
 //! `output` events, so `println`/`print` never corrupt the JSON protocol channel

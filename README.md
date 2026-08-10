@@ -252,12 +252,17 @@ Implemented and checked against Apache Groovy:
   `combinations`, `permutations` and `subsequences` (both answering the
   `java.util.HashSet<List>` Groovy does, in the JDK's bucket order),
   `withIndex`, `indexed`, `iterator`, `toSet`, `subList`,
-  `toList` and the mutators; strings answer `indexOf`, `replace`, `split`,
-  `tokenize`, `charAt`, `substring`, `padLeft`/`padRight`/`center`, `capitalize`,
-  `take`/`drop`, `multiply`, `minus`, `startsWith`/`endsWith`, `tr`,
-  `stripIndent`, `stripMargin`, `expand`, `normalize`/`denormalize`, `formatted`
-  and the `isInteger`/`isLong`/`isDouble`/`isBigDecimal`/`isBigInteger`/`isNumber`
-  predicates; maps answer `put`, `remove`, `getOrDefault`, `entrySet`, `keySet`,
+  `toList` and the mutators; strings answer `indexOf`/`lastIndexOf` (with the
+  `fromIndex` and code-point overloads), `replace`, `split`, `tokenize`,
+  `charAt`, `substring`, `compareTo`, `padLeft`/`padRight`/`center`,
+  `capitalize`, `take`/`drop`, `multiply`, `minus`, `startsWith`/`endsWith`,
+  `tr`, `trim`, `strip`/`stripLeading`/`stripTrailing`/`isBlank`, `stripIndent`,
+  `stripMargin`, `expand`, `normalize`/`denormalize`, `formatted` and the
+  `isInteger`/`isLong`/`isDouble`/`isBigDecimal`/`isBigInteger`/`isNumber`
+  predicates. Every index is a **UTF-16 code unit** the way Java's is, so
+  `"a😀b".length()` is 4 and `indexOf("b")` is 3; `trim` strips code points
+  `<= U+0020` while `strip` strips `Character.isWhitespace`, which are different
+  sets. Maps answer `put`, `remove`, `getOrDefault`, `entrySet`, `keySet`,
   `values`, `subMap`, `spread`, `minus`, `intersect`, `iterator`,
   `containsValue`, `putAll`, `clear`. Numbers answer `power`, the scaled
   `round(n)` and `trunc([n])`, `intdiv`, `abs` and the conversions.
@@ -265,14 +270,25 @@ Implemented and checked against Apache Groovy:
   with no `compareTo` are not, so `[1, 2] <=> [1, 3]` raises the
   `IllegalArgumentException` Groovy raises (even for two equal lists) rather than
   inventing an order. `null` still orders before everything.
-- **JDK statics** — `Math` (`max`, `min`, `abs`, `round`, `sqrt`, `floor`,
-  `ceil`, `pow`, the trig and log family, `PI`, `E`), `Integer` / `Long`
-  (`parseInt` / `parseLong` / `valueOf` with an optional radix, `toString` with
-  one, `toHexString` / `toBinaryString` / `toOctalString` filling to the named
-  class's width, `MAX_VALUE` / `MIN_VALUE`), `Double`, `Boolean`, and
-  `String.format` / `String.valueOf`, plus the script-scope `printf` / `sprintf`
-  over a `java.util.Formatter` subset (`%s %d %f %x %o %b %n %%`, width,
-  precision and left-justification).
+- **JDK statics** — `Math` (`max`, `min`, `abs`, `round`, `signum`, `sqrt`,
+  `floor`, `ceil`, `rint`, `pow`, `hypot`, `atan2`, the trig and log family,
+  `floorDiv` / `floorMod`, `IEEEremainder`, `ulp`, `copySign`, `nextUp` /
+  `nextDown` / `nextAfter`, `getExponent`, the `addExact` / `subtractExact` /
+  `multiplyExact` / `toIntExact` throwing family, `PI`, `E`), `Integer` / `Long`
+  (`parseInt` / `parseLong` / `valueOf` with an optional radix and the named
+  class's range check, `toString` with one, `toHexString` / `toBinaryString` /
+  `toOctalString` filling to the named class's width, `compare`, `signum`,
+  `sum`, `max` / `min`, `bitCount`, `numberOfLeadingZeros` /
+  `numberOfTrailingZeros`, `highestOneBit` / `lowestOneBit`, `reverse` /
+  `reverseBytes`, `MAX_VALUE` / `MIN_VALUE`), `Double` (`compare`, `isNaN` /
+  `isInfinite` / `isFinite`, `sum`, `max` / `min`, `doubleToLongBits` /
+  `doubleToRawLongBits` / `longBitsToDouble`), `Boolean`, `BigDecimal` /
+  `BigInteger` `ZERO` / `ONE` / `TWO` / `TEN`, and `String.format` /
+  `String.valueOf`, plus the script-scope `printf` / `sprintf` over a
+  `java.util.Formatter` subset (`%s %d %f %x %o %b %n %%`, width, precision and
+  left-justification). `Math.round`, `Math.signum`, `Math.max` / `Math.min` and
+  `Double.compare` follow Java's rules rather than the same-named Rust ones,
+  which differ on ties, signed zeros and NaN.
 - **Spread `*.`** — `list*.member` / `list*.method(args)` applies the member to
   every element (null-safe, so a `null` element spreads to `null`).
 - **`getClass()` / `.class`** — a `java.lang.Class` value that prints
@@ -452,36 +468,57 @@ cargo run --bin parity                 # diff examples/*.groovy vs live `groovy`
 cargo run --bin parity-fuzz -- \
     --mode control --count 2000        # fuzz: groovy -e <s> vs groovyrs -e <s>
 bash parity-scripts/run.sh -v          # byte-parity over the regression corpus
-bash parity-scripts/fuzz.sh            # diff the probe corpus, batched JVM starts
+bash parity-scripts/fuzz.sh            # diff the probe corpus, one JVM start
 ```
 
 `fuzz.sh` diffs `parity-scripts/probes.txt` — several hundred small snippets
 covering division and `BigDecimal` scale, number formatting, `GString`
 interpolation, the list/map/string GDK, closures, ranges and control flow. Every
 probe is wrapped in a `try`, so a throw is a comparable observation rather than a
-dead run. The oracle runs the whole corpus as **one** batched program (the JVM
-starts once); groovyrs runs each probe on its own, so one probe that fails to
-parse cannot swallow the probes after it, and a hang registers as a failure
-rather than stalling the run.
+dead run.
 
-`run.sh` and `fuzz.sh` both gate the oracle before comparing anything. The
-`groovy` launcher is a shell script that resolves its JVM from an ambient
-`JAVA_HOME`, so the same binary answers from a different JVM depending on the
-caller's environment — and `Double.toString` was reimplemented in JDK 19, so a
-pre-19 JVM renders every double differently (`1.0e23` prints
-`9.999999999999999E22` there and `1.0E23` from JDK 19 on). Both harnesses probe
-the resolved oracle, print its Groovy and JVM version alongside the `JAVA_HOME`
-they saw, and exit 2 naming both rather than reporting the JVM's disagreements as
-groovyrs divergences. Run them with `JAVA_HOME` pointing at a JDK 19+ install, or
-unset.
+Both sides run each probe **in isolation**. groovyrs starts in milliseconds, so
+it runs one process per probe; the oracle would need ~50 minutes to do the same,
+so it runs a driver that hands each probe to its own `GroovyShell` from a single
+JVM. A fresh shell carries a fresh `Binding`, so an undeclared assignment cannot
+leak into the next probe (`counter = 0` then `counter += 1` raises
+`MissingPropertyException`, as it does standalone — concatenating the probes into
+one script made it print `2`), and parsing under the probe's own filename gives
+the script the class name a standalone run would derive from it. What one JVM
+still shares is process-wide state: system properties, the default locale, static
+initialisers.
+
+`run.sh`, `fuzz.sh`, `parity` and `parity-fuzz` all gate the oracle before
+comparing anything, on two axes.
+
+The **JVM**: the `groovy` launcher is a shell script that resolves its JVM from
+an ambient `JAVA_HOME`, so the same binary answers from a different JVM depending
+on the caller's environment — and `Double.toString` was reimplemented in JDK 19,
+so a pre-19 JVM renders every double differently (`1.0e23` prints
+`9.999999999999999E22` there and `1.0E23` from JDK 19 on).
+
+The **locale**: the JVM reads `user.language`/`user.country` from the environment,
+and two frozen behaviours move with them — number formatting
+(`String.format("%,.2f", 1234.5)` is `1,234.50` under en-US and `1.234,50` under
+de-DE) and case mapping (`"hi".toUpperCase()` is `HI` under en-US and `Hİ` under
+tr-TR). `examples/GStrings.groovy` prints a `toUpperCase()`, so the frozen
+snapshot really does depend on it.
+
+Each harness probes the resolved oracle, prints its Groovy and JVM version
+alongside the `JAVA_HOME` it saw, and exits 2 naming the axis that failed rather
+than reporting the oracle's disagreements as groovyrs divergences. Run them with
+`JAVA_HOME` pointing at a JDK 19+ install (or unset) and an en-US default locale.
 
 `parity-fuzz` generates grammar-driven, deterministic-output snippets from a
 per-index seed (so any divergence replays with `--seed <N> --once`, then
 auto-minimizes). It stays strictly inside groovyrs's implemented surface and away
-from the documented simplifications (32-bit integer overflow, `/` by zero), so
-every divergence it reports is a real parity gap — the class of bug the slice-1
-`continue`-codegen fix was. Decimal literals, scales, and exponent forms are
-generated without restriction now that the `BigDecimal` model is exact. Modes:
+from the documented simplifications (`/` by zero), so every divergence it reports
+is a real parity gap — the class of bug the slice-1 `continue`-codegen fix was.
+It compares stdout and success-versus-failure; stderr and the exact exit code are
+not compared, so a divergence in a diagnostic's *text* is invisible to it (the
+probe corpus covers those by catching and printing the throwable's class).
+Decimal literals, scales, and exponent forms are generated without restriction
+now that the `BigDecimal` model is exact. Modes:
 `arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
 `gstring`, `exceptions`, `faults`, `switch`, `asserts`, `modzero`, `gdk`,
 `conversions`, `classes`, `ranges`, `aliasing`, `views`, `mixed`.

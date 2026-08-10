@@ -328,6 +328,42 @@ pub fn to_radix_string(d: &BigDecimal, radix: i64) -> String {
 }
 
 /// `intValue()` / `toInteger()`: truncate toward zero.
+/// `BigDecimal.intValue()`: the fraction dropped, then the **low 32 bits** of
+/// the resulting `BigInteger` — Java discards the high bits rather than
+/// saturating, so `(1e30G).intValue()` is `1073741824`, not `Integer.MAX_VALUE`.
+/// (`Double.intValue()` *does* saturate; the two conversions differ.)
+pub fn low_i32(d: &BigDecimal) -> i32 {
+    low_bits(d, 32) as i32
+}
+
+/// `BigDecimal.longValue()`: the same rule at 64 bits, so `(1e30G).longValue()`
+/// is `5076944270305263616` rather than a saturated `Long.MAX_VALUE`.
+pub fn low_i64(d: &BigDecimal) -> i64 {
+    low_bits(d, 64)
+}
+
+/// The low `width` bits of `d`'s integral part, as a sign-correct two's
+/// complement value. The magnitude is taken from the `BigInt`'s little-endian
+/// 32-bit digits and negated afterwards, which is what discarding the high bits
+/// of a negated two's complement value comes to.
+fn low_bits(d: &BigDecimal, width: u32) -> i64 {
+    let (unscaled, _) = to_big_integer(d).into_bigint_and_exponent();
+    let (sign, digits) = unscaled.to_u32_digits();
+    let lo = u64::from(digits.first().copied().unwrap_or(0));
+    let hi = u64::from(digits.get(1).copied().unwrap_or(0));
+    let magnitude = (lo | (hi << 32)) as i64;
+    let value = if sign == Sign::Minus {
+        magnitude.wrapping_neg()
+    } else {
+        magnitude
+    };
+    if width == 32 {
+        i64::from(value as i32)
+    } else {
+        value
+    }
+}
+
 pub fn truncate_to_i64(d: &BigDecimal) -> i64 {
     d.with_scale_round(0, RoundingMode::Down)
         .to_i64()

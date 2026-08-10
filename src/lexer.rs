@@ -418,9 +418,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 }
                 if bytes[i] == b'\\' && i + 1 < bytes.len() {
                     // `\$` is a literal dollar, so an escape never interpolates.
-                    i += 1;
-                    s.push(unescape(bytes[i] as char));
-                    i += 1;
+                    let (text, next) = scan_escape(bytes, i + 1);
+                    s.push_str(&text);
+                    i = next;
                     continue;
                 }
                 if interpolating && bytes[i] == b'$' && i + 1 < bytes.len() {
@@ -706,15 +706,28 @@ fn scan_slashy(src: &str, start: usize, line: u32) -> Result<(Vec<GPart>, usize,
     let mut parts: Vec<GPart> = Vec::new();
     while i < bytes.len() && bytes[i] != b'/' {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            // Only the delimiter is unescaped; every other backslash is part of
-            // the pattern and both characters survive.
+            // Only the delimiter and `\uXXXX` are unescaped; every other
+            // backslash is part of the pattern and both characters survive.
+            // Groovy really does decode `\u` here — `/aAb/` is `aAb` — even
+            // though `/\d+/` keeps its backslash.
             if bytes[i + 1] == b'/' {
                 text.push('/');
+                i += 2;
+            } else if bytes[i + 1] == b'u' {
+                let (decoded, next) = scan_escape(bytes, i + 1);
+                if next == i + 2 {
+                    // Not a well-formed `\uXXXX`; keep both characters.
+                    text.push('\\');
+                    text.push('u');
+                } else {
+                    text.push_str(&decoded);
+                }
+                i = next;
             } else {
                 text.push('\\');
                 text.push(bytes[i + 1] as char);
+                i += 2;
             }
-            i += 2;
             continue;
         }
         if bytes[i] == b'$' && i + 1 < bytes.len() {
@@ -948,16 +961,84 @@ fn scan_radix_int(
     Ok(Some((value, j, width)))
 }
 
-fn unescape(c: char) -> char {
-    match c {
-        'n' => '\n',
-        't' => '\t',
-        'r' => '\r',
-        '0' => '\0',
-        '\\' => '\\',
-        '"' => '"',
-        '\'' => '\'',
-        '$' => '$',
-        other => other,
+/// Decode the escape starting at `bytes[i]` — the character *after* the
+/// backslash — into its text, and answer the index just past it.
+///
+/// Groovy's set is Java's, and three parts of it were missing: `\b`/`\f`, the
+/// one-to-three-digit **octal** escape (`"\101"` is `"A"`, not `"101"`), and
+/// `\uXXXX`, which Groovy admits with any number of `u`s (`\uu0041`). Unlike
+/// Java, Groovy does *not* preprocess `\u` over the whole source — `def A`
+/// is a lexer error there — so this is a string-literal rule, not a source one.
+///
+/// A `\uXXXX` naming a high surrogate combines with a following `\uXXXX` low
+/// surrogate into the one code point they encode. A surrogate with no partner
+/// cannot be a Rust `char` and becomes the replacement character.
+///
+/// An escape naming none of those keeps the character (`"\q"` is `"q"`), which
+/// is what Groovy's lexer does.
+fn scan_escape(bytes: &[u8], i: usize) -> (String, usize) {
+    let one = |c: char, next: usize| (c.to_string(), next);
+    match bytes[i] {
+        b'n' => one('\n', i + 1),
+        b't' => one('\t', i + 1),
+        b'r' => one('\r', i + 1),
+        b'b' => one('\u{8}', i + 1),
+        b'f' => one('\u{c}', i + 1),
+        b'\\' => one('\\', i + 1),
+        b'"' => one('"', i + 1),
+        b'\'' => one('\'', i + 1),
+        b'$' => one('$', i + 1),
+        b'u' => {
+            let (unit, mut j) = match scan_u_escape(bytes, i) {
+                Some(v) => v,
+                None => return one('u', i + 1),
+            };
+            // A high surrogate takes its partner with it; the pair is one code
+            // point, and only the pair can be represented.
+            if (0xD800..0xDC00).contains(&unit)
+                && j + 1 < bytes.len()
+                && bytes[j] == b'\\'
+                && bytes[j + 1] == b'u'
+            {
+                if let Some((low, k)) = scan_u_escape(bytes, j + 1) {
+                    if (0xDC00..0xE000).contains(&low) {
+                        j = k;
+                        let combined = String::from_utf16_lossy(&[unit, low]);
+                        return (combined, j);
+                    }
+                }
+            }
+            (String::from_utf16_lossy(&[unit]), j)
+        }
+        b'0'..=b'7' => {
+            // One to three octal digits, and never past `\377` — a leading digit
+            // above 3 caps the run at two, exactly as Java's grammar does.
+            let max = if bytes[i] <= b'3' { 3 } else { 2 };
+            let mut j = i;
+            let mut val = 0u32;
+            while j < bytes.len() && j - i < max && (b'0'..=b'7').contains(&bytes[j]) {
+                val = val * 8 + u32::from(bytes[j] - b'0');
+                j += 1;
+            }
+            (char::from_u32(val).unwrap_or('\u{fffd}').to_string(), j)
+        }
+        other => one(other as char, i + 1),
     }
+}
+
+/// Read `u`+ followed by four hex digits at `bytes[i]` (which is the `u`), and
+/// answer the code unit and the index just past the last digit.
+fn scan_u_escape(bytes: &[u8], i: usize) -> Option<(u16, usize)> {
+    let mut j = i;
+    while j < bytes.len() && bytes[j] == b'u' {
+        j += 1;
+    }
+    if j + 4 > bytes.len() {
+        return None;
+    }
+    let hex = std::str::from_utf8(&bytes[j..j + 4]).ok()?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((u16::from_str_radix(hex, 16).ok()?, j + 4))
 }

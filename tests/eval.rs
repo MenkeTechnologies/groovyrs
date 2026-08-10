@@ -3467,3 +3467,102 @@ fn the_boxed_type_constants_are_javas() {
         )
     );
 }
+
+#[test]
+fn the_jdk_lookalikes_answer_javas_rule_not_rusts() {
+    // A sweep of every mapping where the Rust name resembles the Java one and
+    // means something else. `Math.signum` is `f64::signum` in name only (Rust
+    // answers ±1.0 for ±0.0, Java returns the zero unchanged); `Math.round` was
+    // the pre-Java-7 `floor(a + 0.5)`, which answers 1 for
+    // `0.49999999999999994`; `Math.max`/`min` were `fmax`/`fmin`, which ignore a
+    // NaN operand; `sort` compared with `partial_cmp`, which reports NaN as
+    // `Equal` and `-0.0` as equal to `+0.0`; `String.length`/`indexOf`/
+    // `substring`/`charAt` counted code points where Java counts UTF-16 units;
+    // `String.trim` used Rust's Unicode-whitespace trim rather than Java's
+    // `<= U+0020`; `String.compareTo` answered a normalised sign rather than the
+    // code-unit difference; `Double.intValue` never narrowed to 32 bits;
+    // `Integer.parseInt` neither range-checked nor rejected surrounding space;
+    // `new BigDecimal(double)` and `as BigDecimal` were the wrong way round.
+    //
+    // `substring`'s bounds message was the JDK *17* wording (`begin 0, end 9,
+    // length 2`); JDK 19 rewrote it to `Range [0, 9) out of bounds for length 2`,
+    // which the sibling subscript path already emitted. The harness's JVM gate
+    // cannot see a version-stale string frozen inside the implementation.
+    //
+    // Every line below was captured from Apache Groovy 5.0.8 on JVM 21.0.12 by
+    // running this exact source through it; the two outputs are byte-identical.
+    let (out, ok) = run(concat!(
+        "println([Math.signum(0.0d), Math.signum(-0.0d), Math.signum(-3.5d), Math.signum(Double.NaN)])\n",
+        "println([Math.round(0.49999999999999994d), Math.round(2.5d), Math.round(-2.5d), Math.round(-1.5d)])\n",
+        "println([Math.max(Double.NaN, 1.0d), Math.min(Double.NaN, 1.0d)])\n",
+        "println([Math.max(-0.0d, 0.0d), Math.min(-0.0d, 0.0d)])\n",
+        "println([Math.floorDiv(-7, 2), Math.floorMod(-7, 2), Math.floorDiv(7, -2), Math.floorMod(7, -2)])\n",
+        "println([Double.compare(Double.NaN, 1.0d), Double.compare(-0.0d, 0.0d), Integer.compare(1, 2)])\n",
+        "println([Integer.bitCount(255), Integer.highestOneBit(100), Integer.reverse(1), Long.reverse(1L)])\n",
+        "println([(1e10d).intValue(), (-1e10d).intValue(), (1.0d/0).intValue(), (1e10d).longValue()])\n",
+        "println([1.compareTo(2.5), 1.compareTo(0.5), 1.equals(true), 1.equals(1)])\n",
+        "println([1.5d.compareTo(2.0d), 1.5G.compareTo(2.0G), 1.0G.compareTo(1.00G)])\n",
+        "println([(1e30G).intValue(), (1e30G).longValue()])\n",
+        "println([[1.0d, Double.NaN, 0.5d].sort(), [Double.NaN, 1.0d].max(), [Double.NaN, 1.0d].min()])\n",
+        "println(\"a\\u0041b\" + \"|\" + 'a\\u0041b' + \"|\" + \"\"\"a\\u0041b\"\"\" + \"|\" + /a\\u0041b/)\n",
+        "println([\"\\uD83D\\uDE00\".length(), \"\\101\".length(), \"\\101\", \"a\\bb\".length()])\n",
+        "println([\"a😀b\".length(), \"a😀b\".indexOf(\"b\"), \"a😀b\".size()])\n",
+        "println(\"a😀b\".substring(1, 3) == \"😀\")\n",
+        "println([\"abc\".indexOf(\"b\", 2), \"abcb\".indexOf(\"b\", 2), \"abc\".indexOf(97), \"abcb\".lastIndexOf(\"b\", 2)])\n",
+        "println([\"a\".compareTo(\"c\"), \"abc\".compareTo(\"abd\"), \"abc\".compareTo(\"abc\")])\n",
+        "println([\"\\u00A0x\".trim() + \"|\", \"\\u0000x\".trim() + \"|\", \"\\u00A0x\".strip() + \"|\", \"  \".isBlank()])\n",
+        "println([\"a\\u00A0b\".tokenize(), \"a b\\tc\".tokenize()])\n",
+        "println([\"ßx\".capitalize(), \"abc\".capitalize(), \"ABC\".uncapitalize()])\n",
+        "println([\"inf\".isDouble(), \"NaN\".isDouble(), \"1.5\".isDouble()])\n",
+        "try { Integer.parseInt(\"3000000000\") } catch (e) { println(e.getClass().getName() + \": \" + e.getMessage()) }\n",
+        "try { Integer.parseInt(\" 5 \") } catch (e) { println(e.getClass().getName() + \": \" + e.getMessage()) }\n",
+        "println([Long.parseLong(\"3000000000\"), Integer.parseInt(\"ff\", 16)])\n",
+        "try { \"abc\".substring(-1) } catch (e) { println(e.getClass().getName() + \": \" + e.getMessage()) }\n",
+        "try { \"ab\".substring(0, 9) } catch (e) { println(e.getClass().getName() + \": \" + e.getMessage()) }\n",
+        "try { \"abc\".substring(2, 1) } catch (e) { println(e.getClass().getName() + \": \" + e.getMessage()) }\n",
+        "println([new BigDecimal(0.555d).toString(), (0.555d as BigDecimal).toString()])\n",
+        "println([BigDecimal.ZERO, BigDecimal.TEN, BigInteger.TWO, BigInteger.TEN])\n",
+        "println([Math.ulp(1.0d), Math.copySign(3.0d, -1.0d), Math.nextUp(1.0d), Math.getExponent(1.0d)])\n",
+        "println([Math.toIntExact(5L), Math.addExact(1, 2)])\n",
+        "try { Math.addExact(Integer.MAX_VALUE, 1) } catch (e) { println(e.getClass().getName() + \": \" + e.getMessage()) }\n",
+    ));
+    assert!(ok);
+    assert_eq!(
+        out,
+        concat!(
+            "[0.0, -0.0, -1.0, NaN]\n",
+            "[0, 3, -2, -1]\n",
+            "[NaN, NaN]\n",
+            "[0.0, -0.0]\n",
+            "[-4, 1, -4, -1]\n",
+            "[1, -1, -1]\n",
+            "[8, 64, -2147483648, -9223372036854775808]\n",
+            "[2147483647, -2147483648, 2147483647, 10000000000]\n",
+            "[-1, 1, false, true]\n",
+            "[-1, -1, 0]\n",
+            "[1073741824, 5076944270305263616]\n",
+            "[[0.5, 1.0, NaN], NaN, NaN]\n",
+            "aAb|aAb|aAb|aAb\n",
+            "[2, 1, A, 3]\n",
+            "[4, 3, 4]\n",
+            "true\n",
+            "[-1, 3, 0, 1]\n",
+            "[-2, -1, 0]\n",
+            "[ x|, x|,  x|, true]\n",
+            "[[a b], [a, b, c]]\n",
+            "[ßx, Abc, aBC]\n",
+            "[false, true, true]\n",
+            "java.lang.NumberFormatException: For input string: \"3000000000\"\n",
+            "java.lang.NumberFormatException: For input string: \" 5 \"\n",
+            "[3000000000, 255]\n",
+            "java.lang.StringIndexOutOfBoundsException: Range [-1, 3) out of bounds for length 3\n",
+            "java.lang.StringIndexOutOfBoundsException: Range [0, 9) out of bounds for length 2\n",
+            "java.lang.StringIndexOutOfBoundsException: Range [2, 1) out of bounds for length 3\n",
+            "[0.55500000000000004884981308350688777863979339599609375, 0.555]\n",
+            "[0, 10, 2, 10]\n",
+            "[2.220446049250313E-16, -3.0, 1.0000000000000002, 0]\n",
+            "[5, 3]\n",
+            "java.lang.ArithmeticException: integer overflow\n",
+        )
+    );
+}

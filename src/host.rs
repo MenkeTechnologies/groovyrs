@@ -1094,8 +1094,20 @@ enum HeapObj {
     /// `Value::Array` survives as the *transient* element-vector representation:
     /// [`deref_list`] hands one to the GDK read arms, which pattern-match it, and
     /// internal sequences (a range's enumeration, a spread's intermediate) never
-    /// allocate a handle. The invariant is that a list which **escapes to user
-    /// code** is built by [`glist`] and nothing else.
+    /// allocate a handle.
+    ///
+    /// This used to claim the invariant is that a list which **escapes to user
+    /// code** is built by [`glist`] and nothing else. That is false, and the
+    /// falsehood is load-bearing: a *literal* gets a handle, but a list a GDK
+    /// method **returns** escapes as a bare `Value::Array`, so `collect`,
+    /// `transpose`, `collate`, `withIndex`, `combinations`, `permutations`,
+    /// `subsequences`, `groupBy` and `split` all answer something a second name
+    /// cannot observe a mutation through. BUGS.md carries the entry ("Lists a
+    /// GDK method returns are not references"); reading this comment as the
+    /// invariant it announced would hide it. Allocating a handle per GDK result
+    /// is what would make the claim true, and it needs heap reclamation the host
+    /// heap does not have — a loop calling `collect` would grow it without
+    /// bound.
     ///
     /// `mod_count` is `java.util.ArrayList`'s own field: a counter bumped by
     /// every *structural* modification (one that changes the length — plus the
@@ -2394,11 +2406,27 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
         "String" => Value::str(text()),
         // `new BigDecimal("1.5")` / `new BigInteger("12")` parse with Java's own
         // character-level diagnostics.
+        //
+        // `new BigDecimal(double)` is the *exact* binary expansion —
+        // `new BigDecimal(0.555d)` is
+        // `0.55500000000000004884981308350688777863979339599609375`, and the
+        // gap between it and `0.555d as BigDecimal` (which is
+        // `BigDecimal.valueOf`, the shortest round-tripping decimal) is the
+        // classic Java surprise the constructor's Javadoc warns about. The two
+        // were the wrong way round here: the constructor rendered the double
+        // and re-parsed it, and the `as` coercion took the exact expansion.
         "BigDecimal" | "BigInteger" => {
             let big = simple_name_of(class) == "BigInteger";
             let carry = |d: BigDecimal| if big { bigint_value(d) } else { dec_value(d) };
             match &first() {
                 Value::Int(n) => carry(decimal::from_i64(*n)),
+                Value::Float(f) => match decimal::from_f64_exact(*f) {
+                    Some(d) => carry(d),
+                    None => {
+                        raise(vm, "NumberFormatException", "Infinite or NaN");
+                        Value::Undef
+                    }
+                },
                 other => match decimal::parse_java(groovy_str(other).trim()) {
                     Ok(d) => carry(d),
                     Err(msg) => {
@@ -3743,26 +3771,19 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
         // end is a `StringIndexOutOfBoundsException` naming the `[i, i+1)` range.
         Value::Str(s) => {
             let i = index.to_int();
-            let chars: Vec<char> = s.chars().collect();
-            let idx = if i < 0 { chars.len() as i64 + i } else { i };
+            let len = utf16_len(s);
+            let idx = if i < 0 { len as i64 + i } else { i };
             if idx < 0 {
-                raise_negative_index(vm, i, chars.len())
+                raise_negative_index(vm, i, len)
+            } else if idx < len as i64 {
+                Value::str(utf16_slice(s, idx as usize, idx as usize + 1))
             } else {
-                match chars.get(idx as usize) {
-                    Some(c) => Value::str(c.to_string()),
-                    None => {
-                        raise(
-                            vm,
-                            "StringIndexOutOfBoundsException",
-                            &format!(
-                                "Range [{idx}, {}) out of bounds for length {}",
-                                idx + 1,
-                                chars.len()
-                            ),
-                        );
-                        Value::Undef
-                    }
-                }
+                raise(
+                    vm,
+                    "StringIndexOutOfBoundsException",
+                    &format!("Range [{idx}, {}) out of bounds for length {len}", idx + 1),
+                );
+                Value::Undef
             }
         }
         // Groovy has no `getAt` for this receiver, so the subscript is reported
@@ -5484,11 +5505,76 @@ fn b_prop(vm: &mut VM, _argc: u8) -> Value {
     dispatch_property(vm, &recv, &name)
 }
 
+/// `Character.isWhitespace` — which `String.strip()` and `isBlank()` use, and
+/// which is **not** Unicode `White_Space`.
+///
+/// Java excludes the three non-breaking space characters (U+00A0, U+2007,
+/// U+202F) that the Unicode property includes, and includes the file/group/
+/// record/unit separators (U+001C..U+001F) that it does not. Rust's
+/// `char::is_whitespace` is the Unicode property, so `"\u{a0}x".strip()` would
+/// lose the NBSP that Java keeps.
+fn java_is_whitespace(c: char) -> bool {
+    match c {
+        '\u{a0}' | '\u{2007}' | '\u{202f}' => false,
+        '\u{1c}'..='\u{1f}' => true,
+        _ => c.is_whitespace(),
+    }
+}
+
+/// Java's `String.length()`: the count of UTF-16 **code units**, so an astral
+/// character counts as its surrogate pair and `"a😀b".length()` is 4.
+///
+/// Rust's `chars().count()` counts code *points* and answers 3 for the same
+/// string. The two names look interchangeable and type-check either way, which
+/// is why every index this file hands to or takes from a Groovy script goes
+/// through this function rather than `chars()`. [`string_hash`] already folded
+/// over `encode_utf16` for exactly this reason; the index family did not, and
+/// the two contradicted each other on any string outside the BMP.
+fn utf16_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+/// `s` sliced by UTF-16 code units, `[from, to)`, decoded back to a `String`.
+///
+/// A slice that lands inside a surrogate pair decodes that half to the
+/// replacement character: groovyrs has no `java.lang.Character` type that could
+/// hold a lone surrogate, and a Rust `char` cannot represent one. Java keeps the
+/// unpaired half; this is the one place the UTF-16 index model is lossy, and it
+/// is only reachable by slicing an astral character in two.
+fn utf16_slice(s: &str, from: usize, to: usize) -> String {
+    let units: Vec<u16> = s.encode_utf16().collect();
+    let lo = from.min(units.len());
+    let hi = to.clamp(lo, units.len());
+    String::from_utf16_lossy(&units[lo..hi])
+}
+
+/// The UTF-16 index of the byte offset `b` in `s`.
+fn utf16_index_of_byte(s: &str, b: usize) -> usize {
+    s[..b].encode_utf16().count()
+}
+
+/// The byte offset at UTF-16 index `i`, or `None` past the end. An index inside
+/// a surrogate pair answers the offset of the character containing it, so a
+/// search bounded by it still starts at a character boundary.
+fn byte_at_utf16_index(s: &str, i: usize) -> Option<usize> {
+    if i == 0 {
+        return Some(0);
+    }
+    let mut units = 0usize;
+    for (b, c) in s.char_indices() {
+        if units >= i {
+            return Some(b);
+        }
+        units += c.len_utf16();
+    }
+    (units >= i).then_some(s.len())
+}
+
 /// The element/character count of a Groovy value: characters for a `String`,
 /// element count for a list, entry count for a map.
 fn value_size(v: &Value) -> i64 {
     match v {
-        Value::Str(s) => s.chars().count() as i64,
+        Value::Str(s) => utf16_len(s) as i64,
         Value::Array(a) => a.len() as i64,
         Value::Hash(h) => h.len() as i64,
         _ => as_omap(v).map(|m| m.len() as i64).unwrap_or(0),
@@ -5532,10 +5618,23 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (_, "size") => Value::int(value_size(recv)),
 
         // ── String ──
-        (Value::Str(s), "length") => Value::int(s.chars().count() as i64),
+        (Value::Str(s), "length") => Value::int(utf16_len(s) as i64),
         (Value::Str(s), "toUpperCase") => Value::str(s.to_uppercase()),
         (Value::Str(s), "toLowerCase") => Value::str(s.to_lowercase()),
-        (Value::Str(s), "trim") => Value::str(s.trim().to_string()),
+        // `String.trim()` strips code points `<= U+0020` — *not* Unicode
+        // whitespace. Rust's `str::trim` strips the `White_Space` property, and
+        // the two disagree in both directions: it strips NBSP (U+00A0), which
+        // Java keeps, and keeps NUL (U+0000), which Java strips. `strip()` is
+        // the Java method whose rule really is Unicode whitespace.
+        (Value::Str(s), "trim") => Value::str(s.trim_matches(|c| c <= ' ').to_string()),
+        (Value::Str(s), "strip") => Value::str(s.trim_matches(java_is_whitespace).to_string()),
+        (Value::Str(s), "stripLeading") => {
+            Value::str(s.trim_start_matches(java_is_whitespace).to_string())
+        }
+        (Value::Str(s), "stripTrailing") => {
+            Value::str(s.trim_end_matches(java_is_whitespace).to_string())
+        }
+        (Value::Str(s), "isBlank") => Value::bool(s.chars().all(java_is_whitespace)),
         (Value::Str(s), "reverse") => Value::str(s.chars().rev().collect::<String>()),
         (Value::Str(s), "isEmpty") => Value::bool(s.is_empty()),
         (Value::Str(s), "contains") => {
@@ -5569,17 +5668,44 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 Value::Undef
             }
         },
-        // Index queries run over *characters*, matching `String.length()`.
+        // Index queries answer a UTF-16 index, matching `String.length()`.
+        //
+        // Three Java behaviours the previous one-liner dropped: the `fromIndex`
+        // overload (`"abc".indexOf("b", 2)` is `-1`, not `1`); the `int ch`
+        // overload, where the argument is a code point rather than text
+        // (`"abc".indexOf(97)` is `0`, not the index of the literal `"97"`); and
+        // that `lastIndexOf`'s `fromIndex` is an upper bound, not a lower one.
         (Value::Str(s), "indexOf" | "lastIndexOf") => {
-            let needle: String = args.first().map(groovy_str).unwrap_or_default();
+            // `indexOf(int)` searches for the code point. Only an `Int`
+            // argument selects it — a one-character `Str` is still text.
+            let needle: String = match args.first() {
+                Some(Value::Int(n)) => u32::try_from(*n)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .map(String::from)
+                    .unwrap_or_default(),
+                other => other.map(groovy_str).unwrap_or_default(),
+            };
+            let len = utf16_len(s);
+            let from = args.get(1).and_then(as_i64);
             let byte_pos = if method == "indexOf" {
-                s.find(&needle)
+                // A negative `fromIndex` is treated as 0; one past the end
+                // finds only the empty needle at the end.
+                let start = from.unwrap_or(0).clamp(0, len as i64) as usize;
+                byte_at_utf16_index(s, start).and_then(|b| s[b..].find(&needle).map(|p| b + p))
             } else {
-                s.rfind(&needle)
+                // `lastIndexOf(str, fromIndex)` searches at or before
+                // `fromIndex`, so the window ends `needle.len()` units past it.
+                let end = match from {
+                    Some(f) if f < 0 => return Value::int(-1),
+                    Some(f) => (f as usize).saturating_add(utf16_len(&needle)).min(len),
+                    None => len,
+                };
+                byte_at_utf16_index(s, end).and_then(|b| s[..b].rfind(&needle))
             };
             Value::int(
                 byte_pos
-                    .map(|b| s[..b].chars().count() as i64)
+                    .map(|b| utf16_index_of_byte(s, b) as i64)
                     .unwrap_or(-1),
             )
         }
@@ -5608,45 +5734,61 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 .map(|o| groovy_str(o).to_lowercase() == s.to_lowercase())
                 .unwrap_or(false),
         ),
+        // `String.compareTo` answers the *difference* of the first differing
+        // UTF-16 code units, or the length difference — not a normalised sign.
+        // `"a".compareTo("c")` is `-2`. Rust's `str::cmp` answers an `Ordering`,
+        // and normalising it to `-1/0/1` (which is what `<=>` wants) is the
+        // wrong answer for the method a script calls directly.
         (Value::Str(s), "compareTo") => {
             let other = args.first().map(groovy_str).unwrap_or_default();
-            Value::int(match s.as_ref().as_str().cmp(other.as_str()) {
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-                std::cmp::Ordering::Greater => 1,
-            })
+            let (a, b): (Vec<u16>, Vec<u16>) =
+                (s.encode_utf16().collect(), other.encode_utf16().collect());
+            let diff = a
+                .iter()
+                .zip(b.iter())
+                .find(|(x, y)| x != y)
+                .map(|(x, y)| i64::from(*x) - i64::from(*y))
+                .unwrap_or(a.len() as i64 - b.len() as i64);
+            Value::int(diff)
         }
         (Value::Str(s), "charAt") => {
             let i = args.first().and_then(as_i64).unwrap_or(0);
-            match usize::try_from(i).ok().and_then(|u| s.chars().nth(u)) {
-                Some(c) => Value::str(c.to_string()),
-                None => {
-                    raise(
-                        vm,
-                        "StringIndexOutOfBoundsException",
-                        &format!("Index {i} out of bounds for length {}", s.chars().count()),
-                    );
-                    Value::Undef
-                }
-            }
-        }
-        (Value::Str(s), "substring") => {
-            let chars: Vec<char> = s.chars().collect();
-            let from = args.first().and_then(as_i64).unwrap_or(0).max(0) as usize;
-            let to = args
-                .get(1)
-                .and_then(as_i64)
-                .map(|n| n.max(0) as usize)
-                .unwrap_or(chars.len());
-            if from > chars.len() || to > chars.len() || from > to {
+            let len = utf16_len(s);
+            let in_range = (0..len as i64).contains(&i);
+            if in_range {
+                Value::str(utf16_slice(s, i as usize, i as usize + 1))
+            } else {
                 raise(
                     vm,
                     "StringIndexOutOfBoundsException",
-                    &format!("begin {from}, end {to}, length {}", chars.len()),
+                    &format!("Index {i} out of bounds for length {len}"),
+                );
+                Value::Undef
+            }
+        }
+        // `substring` indexes UTF-16 code units, and its bounds check is
+        // `checkBoundsBeginEnd`: `begin < 0 || end > length || begin > end`,
+        // reported as `Range [begin, end) out of bounds for length n` — with the
+        // raw indices, so a negative `begin` shows as written.
+        //
+        // The message used to read `begin {from}, end {to}, length {n}`, which
+        // is the JDK *17* wording. JDK 19 rewrote it, and the harness gate added
+        // for `Double.toString` does not see a string frozen inside the
+        // implementation. The sibling subscript path (`"ab"[9]`) already emitted
+        // the current form, so the two contradicted each other.
+        (Value::Str(s), "substring") => {
+            let len = utf16_len(s) as i64;
+            let from = args.first().and_then(as_i64).unwrap_or(0);
+            let to = args.get(1).and_then(as_i64).unwrap_or(len);
+            if from < 0 || to > len || from > to {
+                raise(
+                    vm,
+                    "StringIndexOutOfBoundsException",
+                    &format!("Range [{from}, {to}) out of bounds for length {len}"),
                 );
                 return Value::Undef;
             }
-            Value::str(chars[from..to].iter().collect::<String>())
+            Value::str(utf16_slice(s, from as usize, to as usize))
         }
         // `String.multiply(n)` is the `"x" * n` operator.
         (Value::Str(s), "multiply") => {
@@ -5742,8 +5884,13 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                     .filter(|p| !p.is_empty())
                     .map(|p| Value::str(p.to_string()))
                     .collect(),
+                // The no-argument form is `StringTokenizer`'s default delimiter
+                // set — exactly `" \t\n\r\f"`. Rust's `split_whitespace` splits
+                // on the Unicode `White_Space` property, which additionally
+                // breaks on NBSP and the vertical tab.
                 None => s
-                    .split_whitespace()
+                    .split(|c| " \t\n\r\u{c}".contains(c))
+                    .filter(|p| !p.is_empty())
                     .map(|p| Value::str(p.to_string()))
                     .collect(),
             };
@@ -5859,7 +6006,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             Value::bool(match method {
                 "isInteger" => t.parse::<i32>().is_ok(),
                 "isLong" => t.parse::<i64>().is_ok(),
-                "isDouble" | "isFloat" => t.parse::<f64>().is_ok(),
+                // `Double.valueOf`'s grammar, not Rust's: `"inf"`, `"infinity"`
+                // and `"+nan"` all parse as an `f64` and none of them is a Java
+                // double literal. [`parse_java_double`] is the same parser
+                // `toDouble()` uses, so the predicate and the conversion agree.
+                "isDouble" | "isFloat" => parse_java_double(t).is_some(),
                 // `new BigInteger(t)` takes only an integer literal; the rest
                 // ask `new BigDecimal(t)`, which is Java's decimal grammar.
                 "isBigInteger" => {
@@ -5869,13 +6020,28 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 _ => crate::decimal::parse_java(t).is_ok(),
             })
         }
+        // Groovy's `capitalize` calls `Character.toUpperCase(char)`, a
+        // *single-character* mapping that leaves anything with no single-char
+        // uppercase alone — `'ß'` stays `'ß'`. Rust's `char::to_uppercase` is the
+        // full Unicode mapping and expands it to `SS`.
         (Value::Str(s), "capitalize" | "uncapitalize") => {
             let mut cs = s.chars();
-            match cs.next() {
-                Some(c) if method == "capitalize" => {
-                    Value::str(c.to_uppercase().collect::<String>() + cs.as_str())
+            let one = |c: char, up: bool| {
+                let mapped: Vec<char> = if up {
+                    c.to_uppercase().collect()
+                } else {
+                    c.to_lowercase().collect()
+                };
+                match mapped[..] {
+                    [m] => m,
+                    _ => c,
                 }
-                Some(c) => Value::str(c.to_lowercase().collect::<String>() + cs.as_str()),
+            };
+            match cs.next() {
+                Some(c) => {
+                    let head = one(c, method == "capitalize");
+                    Value::str(head.to_string() + cs.as_str())
+                }
                 None => Value::str(String::new()),
             }
         }
@@ -6418,10 +6584,25 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         }
         (Value::Int(n), "toBigDecimal") => dec_value(BigDecimal::from(*n)),
         (Value::Int(n), "toBigInteger") => bigint_value(BigDecimal::from(*n)),
-        (Value::Int(n), "equals") => Value::bool(args.first().and_then(as_i64) == Some(*n)),
+        // `Integer.equals(Object)` is `false` for anything that is not an
+        // `Integer` of the same value. `as_i64` reads a `Boolean` as 0/1, which
+        // made `1.equals(true)` answer `true`.
+        (Value::Int(n), "equals") => {
+            Value::bool(matches!(args.first(), Some(Value::Int(o)) if o == n))
+        }
+        // `compareTo` compares the numeric values, so a non-integral argument
+        // has to be read as a `double` rather than dropped: `as_i64` answered
+        // `None` for `2.5` and the `unwrap_or(0)` then compared `1` against `0`,
+        // making `1.compareTo(2.5)` answer `1` where Groovy answers `-1`.
         (Value::Int(n), "compareTo") => {
-            let other = args.first().and_then(as_i64).unwrap_or(0);
-            Value::int((*n > other) as i64 - (*n < other) as i64)
+            let arg = args.first().unwrap_or(&Value::Undef);
+            match as_i64(arg) {
+                Some(other) => Value::int((*n > other) as i64 - (*n < other) as i64),
+                None => {
+                    let (a, b) = (*n as f64, as_f64(arg));
+                    Value::int((a > b) as i64 - (a < b) as i64)
+                }
+            }
         }
         // ── Double ──
         (Value::Float(f), "abs") => Value::float(f.abs()),
@@ -6438,12 +6619,25 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 scaled.trunc() / scale
             })
         }
-        (Value::Float(f), "toInteger" | "toLong" | "intValue" | "longValue") => {
-            Value::int(*f as i64)
-        }
+        // `intValue()`/`toInteger()` narrow to 32 bits, `longValue()` to 64. Both
+        // casts *saturate* in Java, so `(1e10).intValue()` is `Integer.MAX_VALUE`
+        // — reading both through `as i64` answered `10000000000`.
+        (Value::Float(f), "toInteger" | "intValue") => Value::int(java_double_to_int(*f)),
+        (Value::Float(f), "toLong" | "longValue") => Value::int(*f as i64),
         (Value::Float(f), "toDouble" | "doubleValue" | "toFloat" | "floatValue") => {
             Value::float(*f)
         }
+        // `Double.compareTo` is `Double.compare`, so NaN is greater than
+        // everything and `-0.0` below `+0.0`.
+        (Value::Float(f), "compareTo") => Value::int(
+            match java_compare_f64(*f, as_f64(args.first().unwrap_or(&Value::Undef))) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            },
+        ),
+        (Value::Float(f), "isNaN") => Value::bool(f.is_nan()),
+        (Value::Float(f), "isInfinite") => Value::bool(f.is_infinite()),
 
         // ── BigDecimal (host heap) ──
         _ if as_dec(recv).is_some() => {
@@ -6486,8 +6680,25 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                     None => raise_missing_method(vm, recv, method, args),
                 },
                 // Truncating conversions; `round` goes to the nearest integer.
-                "intValue" | "longValue" | "toInteger" | "toLong" => {
-                    Value::int(decimal::truncate_to_i64(&d))
+                //
+                // `intValue()` keeps the **low 32 bits** of the truncated value
+                // — it does not saturate the way a `double`'s `(int)` cast does.
+                // `(1e30G).intValue()` is `1073741824`, and reading it through
+                // an `i64` that saturates at the *long* bounds answered `0`.
+                "longValue" | "toLong" => Value::int(decimal::low_i64(&d)),
+                "intValue" | "toInteger" => Value::int(i64::from(decimal::low_i32(&d))),
+                // `compareTo` is scale-insensitive (`1.0G.compareTo(1.00G)` is
+                // `0`) and answers a sign, not a difference.
+                "compareTo" => {
+                    let other = args.first().and_then(as_exact_dec);
+                    match other {
+                        Some(o) => Value::int(match decimal::cmp(&d, &o) {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        }),
+                        None => raise_missing_method(vm, recv, method, args),
+                    }
                 }
                 "round" if args.is_empty() => Value::int(decimal::round_to_i64(&d)),
                 // `round(n)` keeps `n` decimal places (half-up, Groovy's mode);
@@ -7081,6 +7292,22 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
                     }
                 },
                 Value::Int(n) => carry(decimal::from_i64(*n)),
+                // `as BigDecimal` on a double is `BigDecimal.valueOf`, which
+                // goes through `Double.toString` — `0.555d as BigDecimal` is
+                // `0.555`, *not* the exact binary expansion the `new
+                // BigDecimal(double)` constructor gives.
+                // A non-finite double renders as `Infinity`/`NaN`, which
+                // `BigDecimal`'s parser rejects character by character — the
+                // same `NumberFormatException` Groovy raises.
+                Value::Float(f) if as_dec(&v).is_none() => {
+                    match decimal::parse_java(&decimal::format_double(*f)) {
+                        Ok(d) => carry(d),
+                        Err(msg) => {
+                            raise_opt(vm, "NumberFormatException", msg.as_deref());
+                            Value::Undef
+                        }
+                    }
+                }
                 _ => match as_dec(&v).or_else(|| decimal::from_f64_exact(as_f64(&v))) {
                     Some(d) => carry(d),
                     None => v,
@@ -7242,7 +7469,7 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
             let pick_max = method == "max";
             match (as_i64(&arg0), args.get(1).and_then(as_i64)) {
                 (Some(a), Some(b)) => Value::int(if pick_max { a.max(b) } else { a.min(b) }),
-                _ => Value::float(if pick_max { f0.max(f1) } else { f0.min(f1) }),
+                _ => Value::float(java_extreme_f64(f0, f1, pick_max)),
             }
         }
         ("Math", "sqrt") => Value::float(f0.sqrt()),
@@ -7250,7 +7477,7 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         ("Math", "floor") => Value::float(f0.floor()),
         ("Math", "ceil") => Value::float(f0.ceil()),
         ("Math", "rint") => Value::float(f0.round_ties_even()),
-        ("Math", "signum") => Value::float(f0.signum()),
+        ("Math", "signum") => Value::float(java_signum(f0)),
         ("Math", "exp") => Value::float(f0.exp()),
         ("Math", "log") => Value::float(f0.ln()),
         ("Math", "log10") => Value::float(f0.log10()),
@@ -7263,20 +7490,159 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         ("Math", "toDegrees") => Value::float(f0.to_degrees()),
         ("Math", "pow") => Value::float(f0.powf(as_f64(args.get(1)?))),
         ("Math", "random") => return None,
+        // `asin`/`acos`/`atan`/`sinh`/`cosh`/`tanh`/`log1p`/`expm1` are
+        // deliberately absent. Each is one `f64` method call away, and each was
+        // measured against the oracle disagreeing in the last bit on ordinary
+        // inputs (`Math.asin(0.5)` is `0.5235987755982989` on the JVM and
+        // `…88` through the platform's libm). Answering within an ulp is a wrong
+        // answer; `MissingMethodException` is not. See BUGS.md for the same
+        // divergence in the transcendentals that *are* modeled.
+        ("Math", "ulp") => Value::float(java_ulp(f0)),
+        ("Math", "copySign") => Value::float(f0.copysign(as_f64(args.get(1)?))),
+        ("Math", "nextUp") => Value::float(next_after(f0, f64::INFINITY)),
+        ("Math", "nextDown") => Value::float(next_after(f0, f64::NEG_INFINITY)),
+        ("Math", "nextAfter") => Value::float(next_after(f0, as_f64(args.get(1)?))),
+        ("Math", "getExponent") => Value::int(i64::from(java_get_exponent(f0))),
+        ("Math", "IEEEremainder") => {
+            let y = as_f64(args.get(1)?);
+            Value::float(f0 - y * (f0 / y).round_ties_even())
+        }
+        // `floorDiv`/`floorMod` round the quotient toward negative infinity,
+        // where `/` and `%` truncate: `Math.floorDiv(-7, 2)` is `-4` and
+        // `Math.floorMod(-7, 2)` is `1`. Rust's `div_euclid`/`rem_euclid` are
+        // *Euclidean*, not floored — they differ from Java's whenever the
+        // divisor is negative (`floorMod(7, -2)` is `-1`, `7.rem_euclid(-2)` is
+        // `1`), so the sign correction is written out.
+        ("Math", "floorDiv" | "floorMod") => {
+            let (a, b) = (as_i64(&arg0)?, args.get(1).and_then(as_i64)?);
+            if b == 0 {
+                raise(vm, "ArithmeticException", "/ by zero");
+                return Some(Value::Undef);
+            }
+            let (q, r) = (a.wrapping_div(b), a.wrapping_rem(b));
+            let adjust = r != 0 && (r < 0) != (b < 0);
+            Value::int(if method == "floorDiv" {
+                if adjust {
+                    q - 1
+                } else {
+                    q
+                }
+            } else if adjust {
+                r + b
+            } else {
+                r
+            })
+        }
+        // The `…Exact` family throws on overflow rather than wrapping. The width
+        // is the class's, not the value's, so `Math.addExact` is the `int` form
+        // and `toIntExact` narrows a `long`.
+        ("Math", "addExact" | "subtractExact" | "multiplyExact") => {
+            let (a, b) = (as_i64(&arg0)?, args.get(1).and_then(as_i64)?);
+            let wide = match method {
+                "addExact" => a.checked_add(b),
+                "subtractExact" => a.checked_sub(b),
+                _ => a.checked_mul(b),
+            };
+            match wide.filter(|n| i32::try_from(*n).is_ok()) {
+                Some(n) => Value::int(n),
+                None => {
+                    raise(vm, "ArithmeticException", "integer overflow");
+                    return Some(Value::Undef);
+                }
+            }
+        }
+        ("Math", "toIntExact") => match as_i64(&arg0).filter(|n| i32::try_from(*n).is_ok()) {
+            Some(n) => Value::int(n),
+            None => {
+                raise(vm, "ArithmeticException", "integer overflow");
+                return Some(Value::Undef);
+            }
+        },
+
+        // `Double.compare` is not `<`/`>`: NaN is greater than everything and
+        // `-0.0` is below `+0.0`. See [`java_compare_f64`].
+        ("Double" | "Float", "compare") => {
+            Value::int(match java_compare_f64(f0, as_f64(args.get(1)?)) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            })
+        }
+        ("Double" | "Float", "isNaN") => Value::bool(f0.is_nan()),
+        ("Double" | "Float", "isInfinite") => Value::bool(f0.is_infinite()),
+        ("Double" | "Float", "isFinite") => Value::bool(f0.is_finite()),
+        ("Double", "sum") => Value::float(f0 + as_f64(args.get(1)?)),
+        ("Double", "max" | "min") => {
+            Value::float(java_extreme_f64(f0, as_f64(args.get(1)?), method == "max"))
+        }
+        // `doubleToLongBits` collapses every NaN payload to one canonical
+        // pattern; `doubleToRawLongBits` does not.
+        ("Double", "doubleToLongBits") => Value::int(if f0.is_nan() {
+            0x7ff8_0000_0000_0000u64 as i64
+        } else {
+            f0.to_bits() as i64
+        }),
+        ("Double", "doubleToRawLongBits") => Value::int(f0.to_bits() as i64),
+        ("Double", "longBitsToDouble") => Value::float(f64::from_bits(as_i64(&arg0)? as u64)),
+
+        // The bit-twiddling statics take their width from the class name, which
+        // is the one place a width is not invisible in a `Value::Int`.
+        ("Integer" | "Long", "compare" | "compareUnsigned") => {
+            let (a, b) = (as_i64(&arg0)?, args.get(1).and_then(as_i64)?);
+            let (a, b) = if method == "compareUnsigned" {
+                (a as u64 as i64 ^ i64::MIN, b as u64 as i64 ^ i64::MIN)
+            } else {
+                (a, b)
+            };
+            Value::int((a > b) as i64 - (a < b) as i64)
+        }
+        ("Integer" | "Long", "sum") => {
+            let (a, b) = (as_i64(&arg0)?, args.get(1).and_then(as_i64)?);
+            let sum = a.wrapping_add(b);
+            Value::int(if class == "Integer" {
+                i64::from(sum as i32)
+            } else {
+                sum
+            })
+        }
+        ("Integer" | "Long", "max" | "min") => {
+            let (a, b) = (as_i64(&arg0)?, args.get(1).and_then(as_i64)?);
+            Value::int(if method == "max" { a.max(b) } else { a.min(b) })
+        }
+        ("Integer" | "Long", "signum") => Value::int(as_i64(&arg0)?.signum()),
+        // Split across two arms so neither pattern needs a continuation line
+        // starting with a string literal — `dispatch_names_are_unique` reads
+        // such a line as a second arm and then reports every name on it twice.
+        ("Integer" | "Long", "bitCount" | "numberOfLeadingZeros" | "numberOfTrailingZeros") => {
+            java_bit_static(class, method, as_i64(&arg0)?)
+        }
+        ("Integer" | "Long", "highestOneBit" | "lowestOneBit" | "reverse" | "reverseBytes") => {
+            java_bit_static(class, method, as_i64(&arg0)?)
+        }
 
         // `parseInt`/`parseLong`/`valueOf` take an optional radix, so
         // `Integer.parseInt("ff", 16)` is `255` — the second argument used to be
         // dropped, which turned every non-decimal parse into a
         // `NumberFormatException`.
+        // The parse is *not* lenient: `Integer.parseInt(" 5 ")` throws in Java
+        // (`Long.parseLong` too), so the text goes in untrimmed. And the result
+        // has to fit the named class — `Integer.parseInt("3000000000")` is a
+        // `NumberFormatException`, not the `long` the digits spell.
         ("Integer" | "Long" | "Short" | "Byte", "parseInt" | "parseLong" | "valueOf") => {
             let text = groovy_str(&arg0);
             let parsed = match args.get(1).and_then(as_i64) {
                 Some(radix) => java_parse_radix(&text, radix),
-                None => text.trim().parse::<i64>().ok(),
+                None => text.parse::<i64>().ok(),
             };
-            match parsed {
+            let fits = |n: i64| match class {
+                "Integer" => i64::from(i32::MIN) <= n && n <= i64::from(i32::MAX),
+                "Short" => i64::from(i16::MIN) <= n && n <= i64::from(i16::MAX),
+                "Byte" => i64::from(i8::MIN) <= n && n <= i64::from(i8::MAX),
+                _ => true,
+            };
+            match parsed.filter(|n| fits(*n)) {
                 Some(n) => Value::int(n),
-                None => raise_number_format(vm, text.trim()),
+                None => raise_number_format(vm, &text),
             }
         }
         // Java's overload resolution admits `255.toString(16)` as the *static*
@@ -7362,6 +7728,16 @@ fn static_field(class: &str, name: &str) -> Option<Value> {
         ("Byte", "BYTES") => Value::int(1),
         ("Math", "PI") => Value::float(std::f64::consts::PI),
         ("Math", "E") => Value::float(std::f64::consts::E),
+        // `BigDecimal`'s constants keep scale 0, and `BigInteger`'s stay
+        // `BigInteger`s — the two are distinct types in every later operation.
+        ("BigDecimal", "ZERO") => dec_value(decimal::from_i64(0)),
+        ("BigDecimal", "ONE") => dec_value(decimal::from_i64(1)),
+        ("BigDecimal", "TWO") => dec_value(decimal::from_i64(2)),
+        ("BigDecimal", "TEN") => dec_value(decimal::from_i64(10)),
+        ("BigInteger", "ZERO") => bigint_value(decimal::from_i64(0)),
+        ("BigInteger", "ONE") => bigint_value(decimal::from_i64(1)),
+        ("BigInteger", "TWO") => bigint_value(decimal::from_i64(2)),
+        ("BigInteger", "TEN") => bigint_value(decimal::from_i64(10)),
         _ => return None,
     })
 }
@@ -8156,8 +8532,163 @@ fn pad_text(pad: &str, n: usize) -> String {
 
 /// `Math.round`'s half-up rule: ties go toward positive infinity, so
 /// `round(-1.5)` is `-1`, not `-2`.
+///
+/// Not `(f + 0.5).floor()`. That was `Math.round`'s implementation before Java
+/// 7, and it is wrong for the doubles where `f + 0.5` rounds *up* to the next
+/// representable value: `Math.round(0.49999999999999994)` is `0` in Java and `1`
+/// under the old formula (JDK-8010430). Java 7 replaced it with a bit-level
+/// truncate-then-adjust, which this reproduces as `floor(f)` plus one when the
+/// fraction is at least a half — computed without ever forming `f + 0.5`.
 fn java_round(f: f64) -> i64 {
-    (f + 0.5).floor() as i64
+    if f.is_nan() {
+        return 0;
+    }
+    let floor = f.floor();
+    let rounded = if f - floor >= 0.5 { floor + 1.0 } else { floor };
+    // `as` saturates at the i64 bounds, which is what Java's `(long)` cast and
+    // `Math.round`'s own clamp both do for an infinity or a huge magnitude.
+    rounded as i64
+}
+
+/// `Math.signum`: the sign as a `double`, with the **zero returned unchanged**
+/// so `signum(-0.0)` is `-0.0` and `signum(0.0)` is `0.0`.
+///
+/// Rust's `f64::signum` answers `±1.0` for `±0.0` — same name, different
+/// function. NaN agrees (both answer NaN).
+fn java_signum(f: f64) -> f64 {
+    if f == 0.0 || f.is_nan() {
+        f
+    } else {
+        f.signum()
+    }
+}
+
+/// `Math.max`/`Math.min` on doubles, which are **not** `f64::max`/`f64::min`.
+///
+/// Rust's are IEEE `fmax`/`fmin`: they *ignore* a NaN operand and answer the
+/// other one, and they do not distinguish `-0.0` from `+0.0`. Java's are
+/// specified in terms of `Double.compare`: a NaN operand makes the answer NaN,
+/// `max(-0.0, +0.0)` is `+0.0`, and `min(-0.0, +0.0)` is `-0.0`.
+fn java_extreme_f64(a: f64, b: f64, want_max: bool) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return f64::NAN;
+    }
+    if a == 0.0 && b == 0.0 {
+        // Both zeros: the sign bit decides, which `==` cannot see.
+        let a_neg = a.is_sign_negative();
+        return if want_max == a_neg { b } else { a };
+    }
+    if want_max {
+        if a > b {
+            a
+        } else {
+            b
+        }
+    } else if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+/// The `Integer`/`Long` bit-twiddling statics. The width comes from the class
+/// name — the one place in this file where a width is *not* invisible in a
+/// `Value::Int` — so `Integer.reverse(1)` answers `-2147483648` where
+/// `Long.reverse(1)` answers `-9223372036854775808`.
+fn java_bit_static(class: &str, method: &str, n: i64) -> Value {
+    if class == "Integer" {
+        let u = n as i32 as u32;
+        let highest = if u == 0 {
+            0
+        } else {
+            1u32 << (31 - u.leading_zeros())
+        };
+        Value::int(match method {
+            "bitCount" => i64::from(u.count_ones()),
+            "numberOfLeadingZeros" => i64::from(u.leading_zeros()),
+            "numberOfTrailingZeros" => i64::from(u.trailing_zeros()),
+            "highestOneBit" => i64::from(highest as i32),
+            "lowestOneBit" => i64::from((u & u.wrapping_neg()) as i32),
+            "reverse" => i64::from(u.reverse_bits() as i32),
+            _ => i64::from(u.swap_bytes() as i32),
+        })
+    } else {
+        let u = n as u64;
+        let highest = if u == 0 {
+            0
+        } else {
+            1u64 << (63 - u.leading_zeros())
+        };
+        Value::int(match method {
+            "bitCount" => i64::from(u.count_ones()),
+            "numberOfLeadingZeros" => i64::from(u.leading_zeros()),
+            "numberOfTrailingZeros" => i64::from(u.trailing_zeros()),
+            "highestOneBit" => highest as i64,
+            "lowestOneBit" => (u & u.wrapping_neg()) as i64,
+            "reverse" => u.reverse_bits() as i64,
+            _ => u.swap_bytes() as i64,
+        })
+    }
+}
+
+/// `Math.ulp`: the distance from `f` to the next representable double away from
+/// zero.
+fn java_ulp(f: f64) -> f64 {
+    if f.is_nan() {
+        return f64::NAN;
+    }
+    if f.is_infinite() {
+        return f64::INFINITY;
+    }
+    let a = f.abs();
+    next_after(a, f64::INFINITY) - a
+}
+
+/// `Math.nextAfter`: the adjacent double in the direction of `toward`, walked
+/// through the bit pattern the way the JDK does.
+fn next_after(f: f64, toward: f64) -> f64 {
+    if f.is_nan() || toward.is_nan() {
+        return f64::NAN;
+    }
+    if f == toward {
+        return toward;
+    }
+    if f == 0.0 {
+        return if toward > 0.0 {
+            f64::from_bits(1)
+        } else {
+            -f64::from_bits(1)
+        };
+    }
+    let bits = f.to_bits();
+    let up = (toward > f) == (f > 0.0);
+    f64::from_bits(if up { bits + 1 } else { bits - 1 })
+}
+
+/// `Math.getExponent`: the unbiased exponent, with the JDK's answers for the
+/// special cases (`MAX_EXPONENT + 1` for a NaN or infinity, `MIN_EXPONENT - 1`
+/// for zero and the subnormals).
+fn java_get_exponent(f: f64) -> i32 {
+    if f.is_nan() || f.is_infinite() {
+        return 1024;
+    }
+    let raw = ((f.to_bits() >> 52) & 0x7ff) as i32;
+    if raw == 0 {
+        -1023
+    } else {
+        raw - 1023
+    }
+}
+
+/// Java's `(int)` cast applied to a `double` — what `Double.intValue()` does.
+///
+/// The cast saturates at the `int` bounds (it does **not** wrap), and NaN
+/// becomes 0. Rust's `as i32` on an `f64` has the same saturating semantics, but
+/// going through `as i64` first (which saturates at the *long* bounds) and
+/// stopping there answers `10000000000` for `(1e10).intValue()` where Java
+/// answers `2147483647`.
+fn java_double_to_int(f: f64) -> i64 {
+    i64::from(f as i32)
 }
 
 /// Every nested list flattened away, depth-first — Groovy's `List.flatten()`.
@@ -8700,21 +9231,46 @@ fn java_to_string(vm: &mut VM, v: &Value) -> String {
 }
 
 /// Groovy's natural ordering for two values with no user `compareTo`: a decimal
-/// operand compares exactly (scale-insensitively), other numbers compare as
-/// doubles, and anything else compares by its rendered form (Groovy's `String`
-/// ordering). An incomparable pair (a NaN) reports `Equal`, which keeps a sort
-/// stable rather than panicking.
+/// operand compares exactly (scale-insensitively), other numbers compare the way
+/// `Double.compare` does, and anything else compares by its rendered form.
+///
+/// Two Rust names look right here and are not. `f64::partial_cmp` answers `None`
+/// for a NaN — folding it to `Equal` left `[1.0d, NaN, 0.5d].sort()` unsorted,
+/// where `Double.compare` makes NaN greater than everything and Groovy answers
+/// `[0.5, 1.0, NaN]`. And `partial_cmp` reports `-0.0 == 0.0`, where
+/// `Double.compare(-0.0, 0.0)` is `-1`. `f64::total_cmp` is the Rust spelling of
+/// `Double.compare`, and it agrees on both.
+///
+/// `String::cmp` is UTF-8 **byte** order; Java's `String.compareTo` is UTF-16
+/// **code-unit** order. They invert for an astral character against
+/// `U+E000..U+FFFF`, so the fallback encodes before comparing.
 fn natural_order(a: &Value, b: &Value) -> std::cmp::Ordering {
-    let ord = match (as_dec(a).is_some() || as_dec(b).is_some())
-        .then(|| (as_exact_dec(a), as_exact_dec(b)))
-    {
-        Some((Some(x), Some(y))) => Some(decimal::cmp(&x, &y)),
+    match (as_dec(a).is_some() || as_dec(b).is_some()).then(|| (as_exact_dec(a), as_exact_dec(b))) {
+        Some((Some(x), Some(y))) => decimal::cmp(&x, &y),
         _ => match (as_num(a), as_num(b)) {
-            (Some(x), Some(y)) => x.partial_cmp(&y),
-            _ => Some(groovy_str(a).cmp(&groovy_str(b))),
+            (Some(x), Some(y)) => java_compare_f64(x, y),
+            _ => utf16_cmp(&groovy_str(a), &groovy_str(b)),
         },
-    };
-    ord.unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
+/// `Double.compare`: NaN is greater than everything (including `+Infinity`) and
+/// equal to itself whatever its sign bit, and `-0.0` sorts below `+0.0`.
+///
+/// `total_cmp` alone would order a *negative* NaN below `-Infinity`, and the
+/// sign of the NaN `0.0d/0.0d` produces is platform-dependent.
+fn java_compare_f64(x: f64, y: f64) -> std::cmp::Ordering {
+    match (x.is_nan(), y.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => x.total_cmp(&y),
+    }
+}
+
+/// `String.compareTo`'s ordering: by UTF-16 code unit, then by length.
+fn utf16_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    a.encode_utf16().cmp(b.encode_utf16())
 }
 
 /// Compare two values the way a GDK `sort`/`max`/`min` with no closure does: a
@@ -8797,6 +9353,39 @@ fn sort_values(vm: &mut VM, items: &[Value], order: &OrderBy) -> Result<Vec<Valu
     Ok(out)
 }
 
+/// Whether `candidate` displaces `best` in a `max`/`min` scan.
+///
+/// With no closure Groovy's `max`/`min` over a collection do **not** use the
+/// comparator its `sort` uses: `DefaultGroovyMethods.max`/`min` scan with the
+/// primitive `>`/`<`, where every comparison against a NaN is `false`. So
+/// `[Double.NaN, 1.0d].max()` and `.min()` both answer `NaN` — the first element
+/// is never displaced — while `[1.0d, NaN, 0.5d].sort()` puts NaN last, because
+/// sorting goes through `NumberAwareComparator` and `Double.compare`. The two
+/// disagree in Groovy itself; reproducing one with the other gets `min` wrong.
+fn prefers(
+    vm: &mut VM,
+    order: &OrderBy,
+    candidate: &Value,
+    best: &Value,
+    want: std::cmp::Ordering,
+) -> Result<bool, String> {
+    // Only for a plain `Int`/`Float` pair: a `BigDecimal` operand still compares
+    // exactly through [`natural_order`], and neither can be a NaN anyway.
+    let plain = |v: &Value| matches!(v, Value::Int(_) | Value::Float(_));
+    if matches!(order, OrderBy::Natural) && plain(candidate) && plain(best) {
+        let (c, b) = (as_f64(candidate), as_f64(best));
+        if c.is_nan() || b.is_nan() {
+            return Ok(false);
+        }
+        return Ok(if want == std::cmp::Ordering::Greater {
+            c > b
+        } else {
+            c < b
+        });
+    }
+    Ok(order.apply(vm, candidate, best)? == want)
+}
+
 /// The extreme element under `order` — `max` when `want` is `Greater`, `min`
 /// when it is `Less`. Groovy keeps the *first* element on a tie, and answers
 /// `null` for an empty collection.
@@ -8811,7 +9400,7 @@ fn extreme_value(
         best = Some(match best {
             None => it.clone(),
             Some(b) => {
-                if order.apply(vm, it, &b)? == want {
+                if prefers(vm, order, it, &b, want)? {
                     it.clone()
                 } else {
                     b

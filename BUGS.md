@@ -647,7 +647,58 @@ reported as parse or compile errors, never silently mis-run.
   touch the heap).
 - **`float`/`Float` is modeled as a `double`.** An `f`-suffixed literal parses to
   an `f64`, so it prints and computes with `double` precision: `0.1f + 0.2f` is
-  `0.30000000000000004` where Groovy's `Float` prints `0.30000000447034836`.
+  `0.30000000000000004` where Groovy's `Float` prints `0.30000000447034836`. The
+  same absence makes `floatValue()` a no-op: `(16777217).floatValue()` keeps
+  every digit and prints `1.6777217E7` where Java rounds through `f32` and
+  prints `1.6777216E7`.
+- **The transcendental `Math` functions can differ in the last bit.**
+  `Math.sin`, `cos`, `tan`, `exp`, `log`, `log10` and `cbrt` call the platform's
+  libm; the JVM's are fdlibm-derived (and intrinsified). Java specifies them
+  only to within 1 ulp, so both are conforming and they disagree on some inputs:
+  measured against Apache Groovy 5.0.8 on JVM 21.0.12, `Math.sin(1.5)` is
+  `0.9974949866040543` there and `…44` here, `Math.exp(1.0)` is
+  `2.7182818284590455` there and `…45` here. `sqrt`, `hypot`, `atan2`, `pow`,
+  `rint`, `floor`, `ceil`, `signum`, `toRadians`, `toDegrees`, `ulp`, `nextUp`,
+  `nextDown`, `getExponent` and `IEEEremainder` were all measured exact over the
+  same sweep. `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `log1p` and
+  `expm1` are each one method call away and are deliberately **not** modeled:
+  each was measured off by an ulp, and answering within an ulp is a wrong
+  answer, so they raise `MissingMethodException` instead. Closing this needs a
+  port of the JDK's fdlibm, not a different libm call.
+- **`Double.NaN == Double.NaN` is `false`; Groovy answers `true`.** Groovy's `==`
+  on two `Number`s goes through `Double.compare`-style equality, so a NaN equals
+  itself (while `<`, `>`, `<=`, `>=` against a NaN are all `false`, as they are
+  here). Both operands are numeric, so fusevm answers `==` natively and the
+  strict numeric hook — which only sees non-numeric operands — never gets the
+  chance. Intercepting it would mean routing every `==` through a builtin, on
+  the hottest operator in the language, to fix the one value that is not equal
+  to itself. `<=>`, `sort`, `max` and `min` all reproduce Groovy's NaN ordering
+  (`[1.0d, Double.NaN, 0.5d].sort()` is `[0.5, 1.0, NaN]`, and `max`/`min` both
+  answer `NaN`, which is Groovy's own inconsistency — its `sort` uses
+  `Double.compare` and its `max`/`min` scan with the primitive `>`/`<`).
+- **`Math.abs(-2147483648L)` answers `-2147483648`; Java answers `2147483648`.**
+  `Math.abs` is overloaded on width and `Integer.MIN_VALUE` is the one value
+  whose `int` and `long` answers differ. The compiler's call-site width mask
+  (`GMETHOD_WIDE`) is emitted for *instance* calls only, so a static call
+  arrives with both widths erased and the value-based rule picks the `int`
+  overload. Same family as the `Long`-versus-`Integer` entry below.
+- **`charAt` and `toCharArray` cannot answer half a surrogate pair.** Every
+  string index is a UTF-16 code unit, matching Java, but there is no
+  `java.lang.Character` type and no Rust `char` can hold a lone surrogate, so
+  `"a😀b".charAt(1)` answers the replacement character where Java answers the
+  high surrogate `0xD83D`. `toCharArray()`/`chars()` answer a list of
+  one-character strings rather than a `char[]` of code units, so their length is
+  the code-point count.
+- **A compound assignment to an unbound name raises the wrong throwable.**
+  `counter += 1` with nothing bound reads `null` and then faults on the
+  arithmetic, so it raises `NullPointerException` where Groovy raises
+  `MissingPropertyException` from the read. The plain read (`println counter`)
+  is right; only the read-modify-write path is not.
+- **`this` is not bound at script level.** `this.getClass().getName()` answers
+  `org.codehaus.groovy.runtime.NullObject` where Groovy answers the script
+  class (`p7` for `p7.groovy`). The script class *name* is modeled — a
+  `MissingPropertyException` message quotes it — but there is no `this`
+  receiver to hang it on.
 - **A `Long` small enough to be an `Integer` is one, except where the compiler
   looked.** Groovy's integer width is a property of the value — `Integer op
   Integer` wraps at 32 bits, anything with a `Long` in it at 64 — and fusevm has

@@ -2041,3 +2041,226 @@ try { "z".toInteger() } catch (Throwable t) { println([t.getClass().getName(), t
 try { def a = [1,2,3,4]; def s = a.subList(1,3); a.add(9); println s.size() } catch (Throwable t) { println([t.getClass().getName(), t instanceof RuntimeException]) }
 %%
 try { try { throw new java.io.IOException("a") } finally { throw new IllegalStateException("b") } } catch (Throwable t) { println([t.getClass().getName(), t.getSuppressed().size()]) }
+%%
+# ── Round 8: `grep`, which filters by the *filter's* `isCase`, not by `==` ──
+# The five filter shapes a `switch` label also takes, plus the no-argument form
+# (`Closure.IDENTITY`) that keeps the Groovy-true elements.
+println([1,2,3,4].grep { it > 2 })
+%%
+println([1,2,3,4].grep(2))
+%%
+println([1,'a',2].grep(Integer))
+%%
+println(['ab','cd','ax'].grep(~/a./))
+%%
+println([1,2,3,4,5].grep(2..3))
+%%
+# A collection filter is a *membership* test, so `[[1,2],[3]].grep([1,2])` keeps
+# nothing — `[1,2]` does not contain `[1,2]`.
+println([[1,2],[3]].grep([1,2]))
+%%
+println([1,'a',null,0].grep())
+%%
+println([1,2,3].grep(null))
+%%
+println([null, 1, null].grep(null))
+%%
+# `grep` on a map has no `Map` overload, so it iterates the entry set and answers
+# a **list** of entries — not the map `findAll` answers.
+println([a:1, b:0].grep { it.value })
+%%
+println([a:1].grep())
+%%
+# A String greps its characters, a Range its elements, and a Set keeps its type.
+println("abcd".grep { it > 'b' })
+%%
+println((1..5).grep { it % 2 == 1 })
+%%
+println(([1,2,3] as Set).grep { it > 1 })
+%%
+# `grep` is defined on `Object`: a receiver that is not a collection iterates as
+# a single element.
+println(5.grep { it > 1 })
+%%
+println(5.grep { it > 9 })
+%%
+# ── `inspect()` — the verbose rendering, where `toString()` is the plain one ──
+println([1, 'a', [1,2], null, 1.5].inspect())
+%%
+println(['a':1, 'b':[1,'x']].inspect())
+%%
+println(["hi".inspect(), 5.inspect(), null.inspect()])
+%%
+# A `Set` quotes its elements too; a `Range` overrides `inspect` and answers its
+# bounds rather than the elements it enumerates.
+println(([1,'a'] as Set).inspect())
+%%
+println([(1..5).inspect(), (1..<5).inspect(), ('a'..'c').inspect(), ('a'..<'e').inspect()])
+%%
+# `toListString`/`toMapString` are the *plain* rendering under another name.
+println([[1,'a'].toListString(), [a:1,b:'x'].toMapString()])
+%%
+# ── `putAt` — the subscript assignment spelled out, and `void` where `set`
+# and `put` answer what they displaced.
+def l = [1,2,3]; def r = l.putAt(1, 'x'); println([r, l])
+%%
+def m = [a:1]; def r = m.putAt('b', 2); println([r, m])
+%%
+def l = [1,2,3]; l.putAt(-1, 'z'); println l
+%%
+def l = [1,2]; l.putAt(4, 'z'); println l
+%%
+# ── The bit and shift operators as *methods* ──
+println([5.and(3), 5.or(3), 5.xor(3), 5.bitwiseNegate()])
+%%
+println([5.leftShift(2), 5.rightShift(1), 5.rightShiftUnsigned(1), (-8).rightShiftUnsigned(1)])
+%%
+# The fill width is the receiver's Java type, which the value does not carry.
+println([(-1).rightShiftUnsigned(28), (-1L).rightShiftUnsigned(60), 1L.leftShift(40)])
+%%
+# ── BigInteger's bit and shift operators, which have no width at all ──
+# fusevm's native ops read a heap handle as `0`, so every one of these was `0`.
+println([1G & 3G, 7G | 8G, 7G ^ 3G, ~7G])
+%%
+println([1G & 3, 1 & 3G, 255G & 15G, (-1G) & 255G])
+%%
+def a = 1G; println(a & 3G)
+%%
+println([4G >> 1, (-8G) >> 1, 4G << 1])
+%%
+println(12345678901234567890G & 255G)
+%%
+println(12345678901234567890G << 2)
+%%
+println(1G << 100)
+%%
+println([7G.and(3G), 7G.or(8G), 7G.xor(3G), 7G.bitwiseNegate(), 1G.shiftLeft(3)])
+%%
+# A `BigDecimal` has no bits, and Groovy declines rather than truncating.
+try { println(1.5G & 1G) } catch (Throwable t) { println([t.getClass().getName(), t.getMessage()]) }
+%%
+try { println(4G >>> 1) } catch (Throwable t) { println([t.getClass().getName(), t.getMessage()]) }
+%%
+# ── BigInteger / BigDecimal's Java-named arithmetic, which is not the operator ──
+# `7G.divide(3G)` truncates where `7G / 3G` promotes, and `1.0G.divide(3.0G)`
+# raises where `1.0G / 3.0G` approximates to ten digits.
+println([7G.divide(3G), (-7G).divide(3G), 7G.mod(3G), (-7G).mod(3G), 7G.remainder(3G), (-7G).remainder(3G)])
+%%
+try { println(1.0G.divide(3.0G)) } catch (Throwable t) { println([t.getClass().getName(), t.getMessage()]) }
+%%
+println([1.5G.divide(3G), 7.5G.divide(2G), 7.5G.remainder(2G)])
+%%
+try { println(1G.divide(0G)) } catch (Throwable t) { println([t.getClass().getName(), t.getMessage()]) }
+%%
+println([7.5G.add(1G), 7.5G.subtract(1G), 7.5G.multiply(2G), 7.5G.pow(2)])
+%%
+println([7G.add(1G), 7G.pow(2), 7G.add(1G).getClass().getName()])
+%%
+# ── java.lang.Character's statics ──
+println([Character.isDigit('5' as char), Character.isLetter('a' as char), Character.isLetterOrDigit('_' as char), Character.isWhitespace(' ' as char), Character.isUpperCase('A' as char), Character.isLowerCase('A' as char)])
+%%
+println([Character.toUpperCase('a' as char), Character.toLowerCase('A' as char), Character.toString('a' as char), Character.compare('a' as char, 'b' as char)])
+%%
+# The `int` overloads take a code point.
+println([Character.isDigit(53), Character.getNumericValue('7' as char), Character.getNumericValue('z' as char), Character.getNumericValue('!' as char)])
+%%
+println([Character.MIN_RADIX, Character.MAX_RADIX])
+%%
+# ── java.util.Collections and Arrays ──
+println([Collections.emptyList(), Collections.emptyMap(), Collections.emptySet()])
+%%
+println([Collections.singletonList(1), Collections.nCopies(3, 'x')])
+%%
+# The mutators write *through* the handle and answer `void`.
+def l = [3,1,2]; def r = Collections.sort(l); println([r, l])
+%%
+def l = [1,2,3]; Collections.reverse(l); println l
+%%
+println([Collections.max([1,5,2]), Collections.min([1,5,2]), Collections.max(['b','a'])])
+%%
+println([Collections.frequency([1,1,2], 1), Collections.disjoint([1],[2]), Collections.disjoint([1],[1])])
+%%
+println([Arrays.asList(1,2,3), Arrays.asList()])
+%%
+# ── java.lang.System's property readers ──
+println([System.lineSeparator() == "\n", System.getProperty("file.separator"), System.getProperty("path.separator")])
+%%
+println([System.getProperty("nope.nope.nope"), System.getProperty("nope.nope.nope", "dflt")])
+%%
+# ── java.lang.Math and the wrapper statics the corpus had not reached ──
+println([Math.cbrt(27.0), Math.cbrt(-8.0), Math.hypot(3, 4), Math.atan2(0, -1)])
+%%
+println([Math.log(1), Math.log10(1000), Math.toRadians(180), Math.toDegrees(Math.PI)])
+%%
+println([Math.signum(-3.5), Math.ulp(1.0), Math.nextUp(1.0), Math.nextDown(1.0), Math.copySign(3.0, -1.0)])
+%%
+println([Math.IEEEremainder(5.0, 3.0), Math.floorDiv(-7, 2), Math.floorMod(-7, 3), Math.floorMod(7, -3)])
+%%
+println([Math.addExact(1, 2), Math.subtractExact(1, 2), Math.multiplyExact(3, 4), Math.getExponent(8.0)])
+%%
+try { println Math.addExact(Integer.MAX_VALUE, 1) } catch (Throwable t) { println([t.getClass().getName(), t.getMessage()]) }
+%%
+try { println Math.toIntExact(9999999999L) } catch (Throwable t) { println([t.getClass().getName(), t.getMessage()]) }
+%%
+println([Double.doubleToLongBits(1.0), Double.doubleToRawLongBits(-0.0), Double.longBitsToDouble(4607182418800017408L)])
+%%
+println([Integer.bitCount(255), Integer.highestOneBit(100), Integer.lowestOneBit(12), Integer.numberOfLeadingZeros(1)])
+%%
+println([Integer.reverse(1), Integer.reverseBytes(1), Integer.compare(1, 2), Integer.compareUnsigned(-1, 1)])
+%%
+println([Double.parseDouble("1.5"), Float.parseFloat("2.5"), Boolean.parseBoolean("TRUE"), Boolean.parseBoolean("yes")])
+%%
+# ── String GDK the corpus had not reached ──
+println("abc".capitalize() + "|" + "Hello".uncapitalize() + "|" + "".capitalize())
+%%
+println(["Hi".equalsIgnoreCase("hI"), "".isBlank(), "  ".isBlank(), " x ".isBlank()])
+%%
+println(["  x  ".stripLeading() + "|", "  x  ".stripTrailing() + "|"])
+%%
+println(["abcabc".lastIndexOf("b"), "abcabc".lastIndexOf("z"), "abcabc".indexOf("b", 2)])
+%%
+println(["12".isNumber(), "1.5".isNumber(), "x".isNumber(), "1e3".isNumber()])
+%%
+println(["12".toLong(), "1.5".toFloat(), "1.5".toDouble(), "12".toBigInteger()])
+%%
+println(["a\nb\nc".readLines(), "".readLines(), "a\n".readLines()])
+%%
+# `takeWhile`/`dropWhile` answer a **String**, not the character list every other
+# closure-driven String method answers.
+println(["abcdef".takeWhile { it < 'd' }, "abcdef".dropWhile { it < 'd' }])
+%%
+# ── java.util.Formatter's grouping flag ──
+println([String.format("%,d", 1234567), String.format("%,d", -1234567), String.format("%,d", 123)])
+%%
+println(String.format("%,.2f", 1234.5))
+%%
+# ── Matcher.group(String) — the named-group overload, a different method from
+# the index one, and an `IllegalArgumentException` for a name the pattern lacks.
+def m = ("a1b2" =~ /(?<L>[a-z])(?<D>\d)/); m.find(); println([m.group('L'), m.group('D'), m.group(0)])
+%%
+def m = ("a1" =~ /(?<L>[a-z])/); m.find(); try { m.group('Z') } catch (Throwable t) { println([t.getClass().getName(), t.getMessage()]) }
+%%
+# ── `iterator()` and `listIterator()` are two different ArrayList inner classes
+println([[1,2,3].iterator().getClass().getName(), [1,2,3].listIterator().getClass().getName()])
+%%
+# ── `sum(seed)` where the seed is a collection: `List.plus`, not concatenation
+println([[1,2],[3]].sum([]))
+%%
+println([[[1,2],[3]].sum(), [1,2].sum(10), ['a','b'].sum('')])
+%%
+# ── The other collection GDK the corpus had not reached ──
+println([[1,2,3].containsAll([1,2]), [1,2,3].containsAll([1,9]), [1,2,3].containsAll([])])
+%%
+println([[a:1, b:2].containsValue(1), [a:1].containsValue(9)])
+%%
+def m = [a:1]; m.putAll([b:2, c:3]); println m
+%%
+println([[1,2],[3,4]].collectMany { it })
+%%
+println([a:1, b:2].collectMany { k, v -> [k, v] })
+%%
+def l = [1,2,3]; println([l.removeAt(1), l])
+%%
+def l = [1,2,3]; println([l.removeElement(2), l, l.removeElement(9)])
+%%
+def e = [a:1].entrySet().iterator().next(); println([e.getKey(), e.getValue(), e.key, e.value])

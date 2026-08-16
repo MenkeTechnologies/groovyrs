@@ -3975,3 +3975,392 @@ fn a_qualified_name_from_the_wrong_package_does_not_match() {
     assert!(ok);
     assert_eq!(out, "false\ntrue\n");
 }
+
+#[test]
+fn a_continue_in_a_c_style_for_runs_the_update_clause() {
+    // The `continue` in a three-clause `for` targets the **step label** emitted
+    // after the body, so the update clause still runs and the loop terminates.
+    // Targeting the loop top instead — the `while` rule — skips `i++` and spins
+    // forever on the first index the guard accepts; that lowering bug shipped in
+    // this frontend's template lineage, and the corpus's `%%`-separated probes
+    // cannot catch a hang, only a wrong answer.
+    //
+    // Each case below would not terminate under it: the first `continue`s on an
+    // even index, the second on the very first, the third `continue`s out of an
+    // inner three-clause loop.
+    let src = r#"
+def a = ''
+for (int i = 0; i < 6; i++) { if (i % 2 == 0) continue; a += i }
+println a
+def b = ''
+for (int i = 0; i < 4; i++) { if (i == 0) continue; b += i }
+println b
+def c = ''
+for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) { if (j == 1) continue; c += "$i$j," } }
+println c
+def d = ''
+outer: for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) { if (j == 1) continue outer; d += "$i$j," } }
+println d
+def e = ''
+for (int i = 0; i < 4; i++) { try { if (i == 2) continue; e += i } finally { e += 'f' } }
+println e
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "135\n123\n00,02,10,12,20,22,\n00,10,20,\n0f1ff3f\n");
+}
+
+#[test]
+fn grep_filters_by_the_filters_is_case_not_by_equality() {
+    // `grep(filter)` is specified as `filter.isCase(element)`, so the filter's
+    // *type* picks the test: a closure calls, a `Class` is `isInstance`, a
+    // `Pattern` matches the whole string, and a collection or range is
+    // membership. `grep()` with no filter is `Closure.IDENTITY` — the
+    // Groovy-true elements. A collection filter is why `[[1,2],[3]].grep([1,2])`
+    // keeps nothing: `[1,2]` does not *contain* `[1,2]`.
+    let src = r#"
+println([1,2,3,4].grep { it > 2 })
+println([1,2,3,4].grep(2))
+println([1,'a',2].grep(Integer))
+println(['ab','cd','ax'].grep(~/a./))
+println([1,2,3,4,5].grep(2..3))
+println([[1,2],[3]].grep([1,2]))
+println([1,'a',null,0].grep())
+println([null, 1, null].grep(null))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[3, 4]\n[2]\n[1, 2]\n[ab, ax]\n[2, 3]\n[]\n[1, a]\n[null, null]\n"
+    );
+}
+
+#[test]
+fn grep_takes_the_receivers_shape_from_the_receiver() {
+    // A map has no `Map` overload of `grep`, so it reaches the `Object` one and
+    // answers a **list of entries** — not the map `findAll` answers. A String
+    // greps its characters, a `Set` keeps its type, and a receiver that is not a
+    // collection at all iterates as a single element.
+    let src = r#"
+println([a:1, b:0].grep { it.value })
+println([a:1, b:0].findAll { it.value })
+println("abcd".grep { it > 'b' })
+println(([1,2,3] as Set).grep { it > 1 })
+println((1..5).grep { it % 2 == 1 })
+println(5.grep { it > 1 })
+println(5.grep { it > 9 })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[a=1]\n[a:1]\n[c, d]\n[2, 3]\n[1, 3, 5]\n[5]\n[]\n");
+}
+
+#[test]
+fn inspect_is_the_verbose_rendering_and_a_range_overrides_it() {
+    // `inspect()` quotes Strings and recurses into collections, where
+    // `toString()` does not. A `Range` declares its own and answers its bounds
+    // rather than the elements it enumerates — with the bounds themselves
+    // rendered verbosely, so a String-bounded range quotes them.
+    let src = r#"
+println([1, 'a', [1,2], null, 1.5].inspect())
+println([1, 'a'].toString())
+println(['a':1, 'b':[1,'x']].inspect())
+println(([1,'a'] as Set).inspect())
+println("hi".inspect() + '|' + 5.inspect() + '|' + null.inspect())
+println([(1..5).inspect(), (1..<5).inspect(), ('a'..'c').inspect(), ('a'..<'e').inspect()])
+println([[1,'a'].toListString(), [a:1,b:'x'].toMapString()])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[1, 'a', [1, 2], null, 1.5]\n\
+         [1, a]\n\
+         ['a':1, 'b':[1, 'x']]\n\
+         [1, 'a']\n\
+         'hi'|5|null\n\
+         [1..5, 1..<5, 'a'..'c', 'a'..'d']\n\
+         [[1, a], [a:1, b:x]]\n"
+    );
+}
+
+#[test]
+fn put_at_is_the_subscript_assignment_and_answers_null() {
+    // `putAt` is `[i] =` spelled out — same negative-index and grow-past-the-end
+    // rules — and is `void`, where `List.set` and `Map.put` answer what they
+    // displaced. The list form writes through the handle, so a second name sees
+    // it.
+    let src = r#"
+def l = [1,2,3]
+println([l.putAt(1, 'x'), l])
+def alias = l
+alias.putAt(0, 'y')
+println(l)
+l.putAt(-1, 'z')
+println(l)
+def g = [1,2]
+g.putAt(4, 'q')
+println(g)
+def m = [a:1]
+println([m.putAt('b', 2), m])
+println([m.put('a', 9), m])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[null, [1, x, 3]]\n\
+         [y, x, 3]\n\
+         [y, x, z]\n\
+         [1, 2, null, null, q]\n\
+         [null, [a:1, b:2]]\n\
+         [1, [a:9, b:2]]\n"
+    );
+}
+
+#[test]
+fn the_bit_and_shift_operators_answer_under_their_method_names_too() {
+    // `5.and(3)` is `5 & 3` and `5.leftShift(2)` is `5 << 2`. The shifts fill to
+    // the receiver's Java type, which the value does not carry — the compiler
+    // marks the width on the call, so `(-1).rightShiftUnsigned(28)` is the
+    // 32-bit `15` while `(-1L)`'s of 60 is the 64-bit one.
+    let src = r#"
+println([5.and(3), 5.or(3), 5.xor(3), 5.bitwiseNegate()])
+println([5.leftShift(2), 5.rightShift(1), 5.rightShiftUnsigned(1)])
+println([(-8).rightShiftUnsigned(1), (-1).rightShiftUnsigned(28), (-1L).rightShiftUnsigned(60)])
+println(1L.leftShift(40))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[1, 7, 6, -6]\n[20, 2, 2]\n[2147483644, 15, 15]\n1099511627776\n"
+    );
+}
+
+#[test]
+fn big_integer_bit_and_shift_operators_run_at_arbitrary_precision() {
+    // fusevm's native `Op::BitAnd` reads its operands with `Value::to_int`,
+    // which answers `0` for the `Value::Obj` a `BigInteger` rides — so every one
+    // of these evaluated to `0`, silently and at every magnitude. They route to
+    // the host builtin instead, which is two's-complement and unbounded:
+    // `(-1G) & 255G` is `255` and `1G << 100` keeps all 31 digits.
+    let src = r#"
+println([1G & 3G, 7G | 8G, 7G ^ 3G, ~7G])
+println([1G & 3, 1 & 3G, 255G & 15G, (-1G) & 255G])
+def a = 1G
+println(a & 3G)
+println([4G >> 1, (-8G) >> 1, 4G << 1])
+println(12345678901234567890G & 255G)
+println(12345678901234567890G << 2)
+println(1G << 100)
+println([7G.and(3G), 7G.or(8G), 7G.xor(3G), 7G.bitwiseNegate(), 1G.shiftLeft(3)])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[1, 15, 4, -8]\n\
+         [1, 1, 15, 255]\n\
+         1\n\
+         [2, -4, 8]\n\
+         210\n\
+         49382715604938271560\n\
+         1267650600228229401496703205376\n\
+         [3, 15, 4, -8, 8]\n"
+    );
+}
+
+#[test]
+fn a_big_decimal_has_no_bits_and_groovy_declines_rather_than_truncating() {
+    // The mask operators are defined on the integral types only. A `BigDecimal`
+    // operand is an `UnsupportedOperationException` naming the *left* operand,
+    // and `>>>` has no fill width for an unbounded `BigInteger` at all.
+    let (out, ok) = run(
+        "try { println(1.5G & 1G) } catch (Throwable t) { println([t.getClass().getName(), t.getMessage()]) }\n\
+         try { println(4G >>> 1) } catch (Throwable t) { println([t.getClass().getName(), t.getMessage()]) }\n",
+    );
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[java.lang.UnsupportedOperationException, Cannot use and() on this number type: java.math.BigDecimal with value: 1.5]\n\
+         [java.lang.UnsupportedOperationException, Cannot use rightShiftUnsigned() on this number type: java.math.BigInteger with value: 4]\n"
+    );
+}
+
+#[test]
+fn the_java_named_arithmetic_methods_are_not_the_groovy_operators() {
+    // `7G.divide(3G)` is `BigInteger.divide` — truncating — where `7G / 3G`
+    // promotes to `2.3333333333`, and `1.0G.divide(3.0G)` demands an exact
+    // quotient where the operator approximates to ten digits. `mod` is
+    // `BigInteger`'s alone and is never negative; `remainder` takes the
+    // dividend's sign.
+    let src = r#"
+println([7G.divide(3G), 7G / 3G])
+println([(-7G).divide(3G), 7G.mod(3G), (-7G).mod(3G), 7G.remainder(3G), (-7G).remainder(3G)])
+try { println(1.0G.divide(3.0G)) } catch (Throwable t) { println([t.getClass().getName(), t.getMessage()]) }
+println(1.0G / 3.0G)
+println([1.5G.divide(3G), 7.5G.divide(2G), 7.5G.remainder(2G)])
+println([7.5G.add(1G), 7.5G.subtract(1G), 7.5G.multiply(2G), 7.5G.pow(2)])
+println([7G.add(1G), 7G.pow(2), 7G.add(1G).getClass().getName()])
+try { println(1G.divide(0G)) } catch (Throwable t) { println([t.getClass().getName(), t.getMessage()]) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[2, 2.3333333333]\n\
+         [-2, 1, 2, 1, -1]\n\
+         [java.lang.ArithmeticException, Non-terminating decimal expansion; no exact representable decimal result.]\n\
+         0.3333333333\n\
+         [0.5, 3.75, 1.5]\n\
+         [8.5, 6.5, 15.0, 56.25]\n\
+         [8, 49, java.math.BigInteger]\n\
+         [java.lang.ArithmeticException, BigInteger divide by zero]\n"
+    );
+}
+
+#[test]
+fn matcher_group_by_name_is_a_different_overload_from_group_by_index() {
+    // `Matcher.group(String)` reads the group `(?<name>…)` declared. Falling
+    // through to the index arm read the argument with `as_i64`, which answers
+    // `None` for text and defaulted to `0` — so every named read silently
+    // returned the whole match.
+    let src = r#"
+def m = ("a1b2" =~ /(?<L>[a-z])(?<D>\d)/)
+m.find()
+println([m.group('L'), m.group('D'), m.group(0), m.group(1)])
+def n = ("a1" =~ /(?<L>[a-z])/)
+n.find()
+try { n.group('Z') } catch (Throwable t) { println([t.getClass().getName(), t.getMessage()]) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[a, 1, a1, a]\n[java.lang.IllegalArgumentException, No group with name <Z>]\n"
+    );
+}
+
+#[test]
+fn the_format_grouping_flag_separates_thousands() {
+    // `%,d` / `%,f` are `java.util.Formatter`'s locale grouping, which under the
+    // en-US locale groovyrs models is a comma every three digits of the integer
+    // part only — the sign, the fraction and the exponent are untouched.
+    let src = r#"
+println(String.format("%,d", 1234567))
+println(String.format("%,d", -1234567))
+println(String.format("%,d", 123))
+println(String.format("%d", 1234567))
+println(String.format("%,.2f", 1234.5))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "1,234,567\n-1,234,567\n123\n1234567\n1,234.50\n");
+}
+
+#[test]
+fn take_while_and_drop_while_answer_a_string_for_a_string_receiver() {
+    // Every other closure-driven String method answers the character list, and
+    // these two were handed that raw vector — `"abcdef".takeWhile { it < 'd' }`
+    // printed `[a, b, c]` where `StringGroovyMethods` answers `abc`.
+    let src = r#"
+println("abcdef".takeWhile { it < 'd' })
+println("abcdef".dropWhile { it < 'd' })
+println("abcdef".findAll { it < 'd' })
+println([1,2,3,4].takeWhile { it < 3 })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "abc\ndef\n[a, b, c]\n[1, 2]\n");
+}
+
+#[test]
+fn sum_with_a_collection_seed_concatenates_through_the_handle() {
+    // `sum(seed)` folds with `plus`, and a list `plus` a list concatenates. A
+    // list reaches the fold as a *handle*, which the concatenation arm did not
+    // read — so `[[1,2],[3]].sum([])` fell through to the string fallback and
+    // rendered `[][1, 2][3]`.
+    let src = r#"
+println([[1,2],[3]].sum([]))
+println([[1,2],[3]].sum())
+println([1,2].sum(10))
+println(['a','b'].sum(''))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[1, 2, 3]\n[1, 2, 3]\n13\nab\n");
+}
+
+#[test]
+fn character_collections_and_system_statics_answer() {
+    // The `int` overloads of the `Character` predicates take a code point, so
+    // `Character.isDigit(53)` asks about `'5'`. `Collections`' mutators write
+    // through the handle and answer `void`.
+    let src = r#"
+println([Character.isDigit('5' as char), Character.isLetterOrDigit('_' as char), Character.isDigit(53)])
+println([Character.toUpperCase('a' as char), Character.getNumericValue('7' as char), Character.getNumericValue('!' as char)])
+println([Character.MIN_RADIX, Character.MAX_RADIX])
+println([Collections.emptyList(), Collections.emptyMap(), Collections.singletonList(1), Collections.nCopies(3, 'x')])
+def l = [3,1,2]
+println([Collections.sort(l), l])
+Collections.reverse(l)
+println(l)
+println([Collections.max([1,5,2]), Collections.min([1,5,2]), Collections.frequency([1,1,2], 1), Collections.disjoint([1],[2])])
+println(Arrays.asList(1,2,3))
+println([System.lineSeparator() == "\n", System.getProperty("file.separator"), System.getProperty("nope.nope"), System.getProperty("nope.nope", "d")])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[true, false, true]\n\
+         [A, 7, -1]\n\
+         [2, 36]\n\
+         [[], [:], [1], [x, x, x]]\n\
+         [null, [1, 2, 3]]\n\
+         [3, 2, 1]\n\
+         [5, 1, 2, true]\n\
+         [1, 2, 3]\n\
+         [true, /, null, d]\n"
+    );
+}
+
+#[test]
+fn iterator_and_list_iterator_are_two_different_inner_classes() {
+    // `getClass()` tells `ArrayList$Itr` from `ArrayList$ListItr`; the two used
+    // to share a name because they share an implementation here.
+    let (out, ok) = run(
+        "println([[1,2,3].iterator().getClass().getName(), [1,2,3].listIterator().getClass().getName()])",
+    );
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[java.util.ArrayList$Itr, java.util.ArrayList$ListItr]\n"
+    );
+}
+
+#[test]
+fn map_collect_many_spreads_the_entry_but_grep_does_not() {
+    // `collectMany` has a `Map` overload and goes through
+    // `callClosureForMapEntry`, so its closure takes `(key, value)`. `grep` has
+    // none, reaches the `Object` overload, and hands the whole `Map.Entry` over.
+    let src = r#"
+println([a:1, b:2].collectMany { k, v -> [k, v] })
+println([[1,2],[3,4]].collectMany { it })
+println([a:1, b:0].grep { it.value })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[a, 1, b, 2]\n[1, 2, 3, 4]\n[a=1]\n");
+}
+
+#[test]
+fn string_read_lines_splits_on_the_line_terminators() {
+    let (out, ok) = run(
+        "println([\"a\\nb\\nc\".readLines(), \"\".readLines(), \"a\\n\".readLines(), \"a\\r\\nb\".readLines()])",
+    );
+    assert!(ok);
+    assert_eq!(out, "[[a, b, c], [], [a], [a, b]]\n");
+}

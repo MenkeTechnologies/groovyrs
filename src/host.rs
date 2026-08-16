@@ -326,6 +326,22 @@ pub const GMETHOD_WIDE: u16 = 764;
 /// `b_depth`, and `Compiler::recursive_fns` for which functions get one.
 pub const GDEPTH: u16 = 765;
 
+/// Builtin id for `&`/`|`/`^` where an operand is not a plain integer. Stack:
+/// left, right, and the operator's Groovy method name (`and`/`or`/`xor`).
+///
+/// fusevm's `Op::BitAnd` and friends read their operands with `Value::to_int`,
+/// which answers `0` for a `Value::Obj` — so `1G & 3G` (two `BigInteger`
+/// handles) evaluated to `0` on the native lowering, silently and at every
+/// width. `NumOp` has no bitwise member for the strict numeric hook to carry,
+/// so the same escape the shifts use applies: `Compiler::bit_operand_is_object`
+/// spots the operands that need arbitrary precision and routes only those here.
+pub const GBITOP: u16 = 766;
+
+/// Builtin id for `~` where the operand is not a plain integer — the unary
+/// sibling of [`GBITOP`], and `0` on the native lowering for the same reason.
+/// Stack: the operand.
+pub const GBITNOT: u16 = 767;
+
 /// The call depth at which groovyrs raises `java.lang.StackOverflowError`.
 ///
 /// Groovy's depth is the JVM's: whatever fits in the thread's `-Xss`. Measured
@@ -408,6 +424,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GSHL, b_shl);
     vm.register_builtin(GSHR, b_shr);
     vm.register_builtin(GUSHR, b_ushr);
+    vm.register_builtin(GBITOP, b_bitop);
+    vm.register_builtin(GBITNOT, b_bitnot);
     vm.register_builtin(GIN, b_in);
     vm.register_builtin(GCAST, b_cast);
     vm.register_builtin(GCLASSREF, b_classref);
@@ -3313,6 +3331,30 @@ fn dispatch_matcher_method(
         // `m.group(9)` into the whole match and `m.group(-1)` into it as well.
         // The bound is the captured-group vector's length — slot 0 is the whole
         // match, so `("a" =~ /a/)` has exactly one and `group(1)` is already out.
+        // `m.group("name")` is `Matcher.group(String)`, a *different* overload
+        // from the index one: it reads the group `(?<name>…)` declared, and a
+        // name the pattern never declared is an `IllegalArgumentException`.
+        // Falling through to the index arm read the argument as `as_i64`, which
+        // answers `None` for text and defaulted to `0` — so every named read
+        // silently returned the whole match.
+        "group" if matches!(args.first(), Some(Value::Str(_))) => {
+            let name = groovy_str(&args[0]);
+            let found = match &*crate::regex::compile(&m.source) {
+                Ok(p) => p.group_index(&name),
+                Err(_) => None,
+            };
+            match found {
+                Some(i) => group(i),
+                None => {
+                    raise(
+                        vm,
+                        "IllegalArgumentException",
+                        &format!("No group with name <{name}>"),
+                    );
+                    Value::Undef
+                }
+            }
+        }
         "group" => {
             let n = args.first().and_then(as_i64).unwrap_or(0);
             let groups = m.last.as_ref().map_or(0, |h| h.groups.len()) as i64;
@@ -3405,8 +3447,23 @@ fn b_is_case_type(vm: &mut VM, _argc: u8) -> Value {
 fn b_is_case(vm: &mut VM, _argc: u8) -> Value {
     let label = vm.stack.pop().unwrap_or(Value::Undef);
     let subject = vm.stack.pop().unwrap_or(Value::Undef);
+    is_case(vm, &label, &subject)
+}
+
+/// `Object.isCase(Object)` as a plain call rather than a stack builtin, so the
+/// GDK methods that are *specified* in terms of it — `grep`, and the `switch`
+/// lowering above — share one implementation. A `java.lang.Class` label is an
+/// `isInstance` test (`[1, 'a'].grep(Integer)` keeps the integers); the
+/// `switch` lowering never reaches that arm because the compiler resolves a
+/// bare type name to [`GIS_CASE_TYPE`] before emitting, but a `grep` argument
+/// is an ordinary expression and arrives here as a `ClassRef`.
+fn is_case(vm: &mut VM, label: &Value, subject: &Value) -> Value {
+    if let Some(class) = as_class_ref(label) {
+        return Value::bool(value_is_a(subject, &class));
+    }
     // A `Range` label contains — `case 1..5:` and `x in 1..5` both ask that.
-    let label = range_as_list(&label);
+    let label = range_as_list(label);
+    let subject = subject.clone();
     // A null subject never matches a pattern; Groovy matches the rest against
     // their `toString`, which is exactly what `println` renders.
     if let Some(hit) = regex_matches(&label, &groovy_str(&subject)) {
@@ -4608,6 +4665,9 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     if matches!(recv, Value::Undef) {
         return match method {
             "toString" => Value::str("null".to_string()),
+            // `inspect()` is a GDK method on `Object`, and `NullObject` answers
+            // it rather than raising: `null.inspect()` is the text `null`.
+            "inspect" => Value::str(inspect_value(&recv)),
             "equals" => Value::bool(matches!(args.first(), None | Some(Value::Undef))),
             // Groovy routes `null.getClass()` to `NullObject`, which answers.
             "getClass" => class_ref_of(&recv),
@@ -4859,6 +4919,27 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             };
         }
     }
+    // `grep` is defined on `Object`, not just on collections: Groovy iterates
+    // the receiver with `InvokerHelper.asIterator`, which yields a *single*
+    // element for anything that is not one. So `5.grep { it > 1 }` is `[5]`, and
+    // `5.grep { it > 9 }` is `[]`. The collection receivers were handled above.
+    if method == "grep"
+        && args.len() <= 1
+        && !matches!(recv, Value::Array(_) | Value::Str(_))
+        && as_omap(&recv).is_none()
+        && as_set(&recv).is_none()
+        && as_range(&recv).is_none()
+    {
+        if let Some(res) = dispatch_iteration(vm, std::slice::from_ref(&recv), method, &args) {
+            return match res {
+                Ok(v) => v,
+                Err(e) => {
+                    fault(vm, e);
+                    Value::Undef
+                }
+            };
+        }
+    }
     // `String.replaceAll`/`replaceFirst`, whose replacement is either Java's
     // `$n`/`${name}` grammar or — Groovy's addition — a closure called with each
     // match. The closure form re-enters the VM, which is why this sits here
@@ -4940,6 +5021,18 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
                 Ok(v) => {
                     if matches!(method, "each" | "eachWithIndex" | "reverseEach") {
                         recv
+                    } else if matches!(method, "takeWhile" | "dropWhile") {
+                        // `StringGroovyMethods.takeWhile`/`dropWhile` answer a
+                        // **String**, not the character list every other
+                        // closure-driven String method answers — `"abcdef"
+                        // .takeWhile { it < 'd' }` is `abc`, and `[a, b, c]` was
+                        // this branch handing back the raw element vector.
+                        Value::str(
+                            iteration_elements(&v)
+                                .iter()
+                                .map(groovy_str)
+                                .collect::<String>(),
+                        )
                     } else {
                         v
                     }
@@ -5086,6 +5179,44 @@ fn dispatch_iteration(
                 }
                 if pending_exc() {
                     return Some(Ok(Value::Undef));
+                }
+            }
+            Some(Ok(Value::array(out)))
+        }
+        // `list.grep(filter)` — keep the elements the **filter** accepts, where
+        // "accepts" is `filter.isCase(element)`, not `element == filter`. So a
+        // closure filter calls the closure, a `Class` filter is an `isInstance`
+        // test, a `Pattern` filter is a whole-string match, and a collection or
+        // range filter is a membership test — the same five rules a `switch`
+        // label follows, which is why this shares [`is_case`] with it.
+        //
+        // The no-argument `grep()` is Groovy's `grep(Closure.IDENTITY)`: keep
+        // the elements that are Groovy-true, so `[1, 'a', null, 0].grep()` is
+        // `[1, 'a']`.
+        //
+        // It lives among the closure-driven arms rather than in the pure GDK
+        // table because the closure form re-enters the VM; the other four forms
+        // do not, but splitting one method across two dispatch tables by the
+        // *shape of its argument* is how a filter ends up meaning two different
+        // things.
+        "grep" => {
+            if args.len() > 1 {
+                return None;
+            }
+            let mut out = Vec::new();
+            for it in items {
+                let keep = match args.first() {
+                    Some(filter) => {
+                        let hit = is_case(vm, filter, it);
+                        if pending_exc() {
+                            return Some(Ok(Value::Undef));
+                        }
+                        groovy_truthy(vm, &hit)
+                    }
+                    None => groovy_truthy(vm, it),
+                };
+                if keep {
+                    out.push(it.clone());
                 }
             }
             Some(Ok(Value::array(out)))
@@ -5619,6 +5750,42 @@ fn dispatch_map_iteration(
             }
             Some(Ok(heap_push(HeapObj::OrderedMap(entries.to_vec()))))
         }
+        // `map.grep(filter)` has no `Map` overload, so Groovy reaches the
+        // `Object` one: it iterates the map as its entry set and builds an
+        // `ArrayList`. `[a:1, b:0].grep { it.value }` is therefore the **list**
+        // `[a=1]`, not the map `[a:1]` that `findAll` answers — and the closure
+        // is called with the whole `Map.Entry`, never with `(key, value)`, since
+        // that spread is `callClosureForMapEntry`'s and only the methods with a
+        // real `Map` overload go through it.
+        "grep" => {
+            let listed: Vec<Value> = entries
+                .iter()
+                .map(|(k, v)| heap_push(HeapObj::Entry(k.clone(), v.clone())))
+                .collect();
+            dispatch_iteration(vm, &listed, method, args)
+        }
+        // `map.collectMany { k, v -> … }` *does* have a `Map` overload, so it
+        // takes the `(key, value)` spread and flattens each result into one
+        // list: `[a:1, b:2].collectMany { k, v -> [k, v] }` is `[a, 1, b, 2]`.
+        // (`map.entrySet().collectMany { k, v -> … }` is a
+        // `MissingMethodException` in Groovy for exactly the opposite reason —
+        // an entry set is a plain collection, so the two-parameter closure never
+        // matches its single `Map.Entry` argument.)
+        "collectMany" => {
+            let clo = clo?;
+            let mut out: Vec<Value> = Vec::new();
+            for (k, v) in entries {
+                let r = match invoke_closure(vm, clo, &entry_args(clo, k, v)) {
+                    Ok(r) => r,
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                out.extend(iteration_elements(&r));
+            }
+            Some(Ok(Value::array(out)))
+        }
         // `map.collectEntries { k, v -> … }` rebuilds a map from each closure
         // result (a `[key, value]` pair or a whole map).
         "collectEntries" => {
@@ -5961,6 +6128,26 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
     // `getClass()` answers on every value, so it precedes the per-type table.
     if method == "getClass" && args.is_empty() {
         return class_ref_of(recv);
+    }
+    // `inspect()` is `InvokerHelper.inspect`, which is the *verbose* rendering
+    // [`inspect_value`] already produces for the power-assert layout: a String
+    // is quoted and a collection's elements are rendered the same way
+    // recursively, so `[1, 'a'].inspect()` is `[1, 'a']` where `toString()` is
+    // `[1, a]`. It answers on every value — a `Range` overrides it below,
+    // because `groovy.lang.Range` declares its own `inspect` and answers
+    // `1..5` / `'a'..'c'` rather than the elements it enumerates.
+    if method == "inspect" && args.is_empty() && as_range(recv).is_none() {
+        return Value::str(inspect_value(recv));
+    }
+    // `toListString()` / `toMapString()` are *not* `inspect`: they are
+    // `FormatHelper.toString(coll, false)`, the same rendering `println` uses,
+    // under a receiver-specific name — `[1, 'a'].toListString()` is `[1, a]`
+    // where `inspect()` is `[1, 'a']`.
+    if args.is_empty()
+        && ((method == "toListString" && (is_list(recv) || as_set(recv).is_some()))
+            || (method == "toMapString" && as_omap(recv).is_some()))
+    {
+        return Value::str(groovy_str(recv));
     }
     // A `Range` answers its own members and hands everything else to the list it
     // enumerates — which is faithful, because Groovy's `Range` is a `List`.
@@ -6360,6 +6547,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (Value::Str(s), "normalize" | "denormalize") => {
             Value::str(s.replace("\r\n", "\n").replace('\r', "\n"))
         }
+        // `readLines()` is `StringGroovyMethods.readLines` — the same line split
+        // `eachLine` and `stripIndent` already use here, answered as a list.
+        (Value::Str(s), "readLines") => {
+            Value::array(read_lines(s).into_iter().map(Value::str).collect())
+        }
         // `s.minus(x)` drops the *first* occurrence — of a literal string, or of
         // whatever a `Pattern` argument first matches.
         (Value::Str(s), "minus") => match args.first() {
@@ -6712,8 +6904,17 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         }
         // `list.iterator()` — a live cursor over the elements. Stateful, so it
         // rides a handle (see `HeapObj::Iter`).
+        // `list.iterator()` and `list.listIterator()` are two *different*
+        // `ArrayList` inner classes, and `getClass()` tells them apart:
+        // `ArrayList$Itr` for the plain cursor, `ArrayList$ListItr` for the
+        // bidirectional one. Only the forward half is modeled, so they share an
+        // implementation, but they must not share a name.
         (Value::Array(a), "iterator" | "listIterator") => heap_push(HeapObj::Iter {
-            class: "java.util.ArrayList$Itr",
+            class: if method == "listIterator" {
+                "java.util.ArrayList$ListItr"
+            } else {
+                "java.util.ArrayList$Itr"
+            },
             items: a.to_vec(),
             pos: 0,
         }),
@@ -6932,6 +7133,19 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             set_mutated(Value::array(Vec::new()));
             Value::Undef
         }
+        // `list.putAt(i, v)` is `list[i] = v` spelled out — same negative-index
+        // and grow-past-the-end rules, shared with the subscript through
+        // [`list_put`]. Unlike `set`, whose `List.set` contract answers the
+        // element it displaced, the GDK's `putAt` is `void`, so it answers null.
+        (Value::Array(a), "putAt") if args.len() == 2 => {
+            match list_put(a.to_vec(), &args[0], args[1].clone()) {
+                Ok(next) => {
+                    set_mutated(Value::array(next));
+                    Value::Undef
+                }
+                Err((i, len)) => raise_negative_index(vm, i, len),
+            }
+        }
 
         // ── Map ──
         (Value::Hash(h), "isEmpty") => Value::bool(h.is_empty()),
@@ -7002,6 +7216,35 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 None => raise_missing_method_wide(vm, recv, method, args, widths),
             }
         }
+        // The shift *methods* — `5.leftShift(2)` is what `5 << 2` desugars to,
+        // and answers the same 20. The width the fill and the count mask use is
+        // the receiver's Java type, which the values do not carry; the compiler
+        // marks it on the call (see [`GMETHOD_WIDE`]), which is how
+        // `(-1).rightShiftUnsigned(28)` is `15` while `(-1L)`'s of 60 is too.
+        (Value::Int(n), "leftShift" | "rightShift" | "rightShiftUnsigned") => {
+            match args.first().and_then(as_i64).filter(|_| args.len() == 1) {
+                Some(b) => java_shift(method, call_widths() & 1 != 0, *n, b),
+                None => {
+                    raise_operator_operand(vm, method, recv, args.first().unwrap_or(&Value::Undef))
+                }
+            }
+        }
+        // The mask *methods* — `5.and(3)` is `5 & 3`. Unlike the shifts these
+        // need no width: `&`, `|` and `^` of two sign-extended 32-bit values
+        // give the same 64-bit pattern either way, and so does `~`.
+        (Value::Int(n), "and" | "or" | "xor") => {
+            match args.first().and_then(as_i64).filter(|_| args.len() == 1) {
+                Some(b) => Value::int(match method {
+                    "and" => n & b,
+                    "or" => n | b,
+                    _ => n ^ b,
+                }),
+                None => {
+                    raise_operator_operand(vm, method, recv, args.first().unwrap_or(&Value::Undef))
+                }
+            }
+        }
+        (Value::Int(n), "bitwiseNegate") if args.is_empty() => Value::int(!*n),
         (Value::Int(n), "toLong" | "longValue") => Value::int(*n),
         // `intValue()` is Java's narrowing conversion, so `3000000000L.intValue()`
         // is `-1294967296`.
@@ -7159,6 +7402,124 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 "doubleValue" | "toDouble" | "floatValue" | "toFloat" => {
                     Value::float(decimal::to_f64(&d))
                 }
+                // The mask and shift *methods*: `7G.and(3G)` is `7G & 3G`, and
+                // `1G.shiftLeft(3)` is Java's own name for `1G << 3`. All of
+                // them go through the same arbitrary-precision paths the
+                // operators do.
+                "and" | "or" | "xor" => {
+                    bit_op_values(vm, method, recv, args.first().unwrap_or(&Value::Undef))
+                }
+                "bitwiseNegate" | "not" if args.is_empty() => {
+                    match decimal::bit_not(&d).filter(|_| as_bigint(recv).is_some()) {
+                        Some(r) => bigint_value(r),
+                        None => raise_operator_operand(vm, "bitwiseNegate", recv, recv),
+                    }
+                }
+                "leftShift" | "rightShift" | "shiftLeft" | "shiftRight" => {
+                    let left = matches!(method, "leftShift" | "shiftLeft");
+                    match bigint_shift(left, recv, args.first().unwrap_or(&Value::Undef)) {
+                        Some(v) => v,
+                        None => raise_operator_operand(
+                            vm,
+                            if left { "leftShift" } else { "rightShift" },
+                            recv,
+                            args.first().unwrap_or(&Value::Undef),
+                        ),
+                    }
+                }
+                // Java's own arithmetic method names, which a script reaches
+                // past the operators. `pow` is `BigInteger`/`BigDecimal.pow`;
+                // Groovy's `**` is `power`, already above.
+                "add" | "subtract" | "multiply" | "pow" => {
+                    let Some(y) = args
+                        .first()
+                        .and_then(as_exact_dec)
+                        .filter(|_| args.len() == 1)
+                    else {
+                        return raise_missing_method(vm, recv, method, args);
+                    };
+                    let big = as_bigint(recv).is_some() && is_integral(&args[0]);
+                    let r = match method {
+                        "add" => decimal::add(&d, &y),
+                        "subtract" => decimal::sub(&d, &y),
+                        "multiply" => decimal::mul(&d, &y),
+                        _ => match args
+                            .first()
+                            .and_then(as_i64)
+                            .and_then(|e| decimal::pow(&d, e))
+                        {
+                            Some(p) => p,
+                            None => return raise_missing_method(vm, recv, method, args),
+                        },
+                    };
+                    if big {
+                        bigint_value(r)
+                    } else {
+                        dec_value(r)
+                    }
+                }
+                // `divide`/`remainder`/`mod` are the *Java* methods, not the
+                // Groovy operators, and the two disagree on the receiver's type:
+                //
+                // - a `BigInteger` divides toward zero, so `7G.divide(3G)` is
+                //   `2` where `7G / 3G` is `2.3333333333`;
+                // - a `BigDecimal` demands an **exact** quotient, so
+                //   `1.0G.divide(3.0G)` raises `ArithmeticException` where
+                //   `1.0G / 3.0G` is the ten-digit approximation
+                //   [`decimal::divide`] produces for the operator.
+                // - `mod` is `BigInteger`'s alone and is never negative:
+                //   `(-7G).mod(3G)` is `2` while `(-7G).remainder(3G)` is `-1`.
+                "divide" | "remainder" | "mod" => {
+                    let big = as_bigint(recv).is_some();
+                    let Some(y) = args
+                        .first()
+                        .and_then(as_exact_dec)
+                        .filter(|_| args.len() == 1 && (big || method != "mod"))
+                    else {
+                        return raise_missing_method(vm, recv, method, args);
+                    };
+                    if y.is_zero() {
+                        let what = if big { "BigInteger" } else { "BigDecimal" };
+                        raise(vm, "ArithmeticException", &format!("{what} divide by zero"));
+                        return Value::Undef;
+                    }
+                    match (method, big) {
+                        ("divide", true) => bigint_value(decimal::divide(&d, &y).unwrap_or(d)),
+                        ("divide", false) => match decimal::exact_divide(&d, &y) {
+                            Some(q) => dec_value(q),
+                            None => {
+                                raise(
+                                    vm,
+                                    "ArithmeticException",
+                                    "Non-terminating decimal expansion; \
+                                     no exact representable decimal result.",
+                                );
+                                Value::Undef
+                            }
+                        },
+                        // `BigInteger.mod` takes the sign of the *modulus*,
+                        // which is always positive here; `remainder` takes the
+                        // dividend's.
+                        ("mod", _) => {
+                            let r = decimal::remainder(&d, &y).unwrap_or_else(|| d.clone());
+                            let negative =
+                                decimal::cmp(&r, &decimal::from_i64(0)) == std::cmp::Ordering::Less;
+                            bigint_value(if negative {
+                                decimal::add(&r, &decimal::abs(&y))
+                            } else {
+                                r
+                            })
+                        }
+                        (_, big) => {
+                            let r = decimal::remainder(&d, &y).unwrap_or_else(|| d.clone());
+                            if big {
+                                bigint_value(r)
+                            } else {
+                                dec_value(r)
+                            }
+                        }
+                    }
+                }
                 _ => raise_missing_method(vm, recv, method, args),
             }
         }
@@ -7312,6 +7673,14 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         .unwrap_or(Value::Undef);
                     omap_set(recv, k, args.get(1).cloned().unwrap_or(Value::Undef));
                     old
+                }
+                // `m.putAt(k, v)` is `m[k] = v` spelled out. It is `Map.put`'s
+                // `void` sibling, so it answers null where `put` answers the
+                // value it displaced.
+                "putAt" => {
+                    let k = args.first().map(groovy_str).unwrap_or_default();
+                    omap_set(recv, k, args.get(1).cloned().unwrap_or(Value::Undef));
+                    Value::Undef
                 }
                 "putAll" => {
                     for (k, v) in args.first().map(entry_pairs).unwrap_or_default() {
@@ -7483,19 +7852,104 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
             out
         }
         Value::Str(s) => Value::str(format!("{s}{}", groovy_str(&rhs))),
-        _ => match (as_i64(&lhs), as_i64(&rhs)) {
-            // An `Integer` shifts at 32 bits with the count masked to 5, so
-            // `1 << 31` is `-2147483648` and `1 << 32` is `1` again; a `Long`
-            // shifts at 64 with the count masked to 6.
-            (Some(a), Some(b)) => {
-                if wide {
-                    Value::int(a.wrapping_shl(b as u32 & 63))
-                } else {
-                    Value::int(i64::from((a as i32).wrapping_shl(b as u32 & 31)))
-                }
-            }
-            _ => raise_operator_operand(vm, "leftShift", &lhs, &rhs),
+        _ => match bigint_shift(true, &lhs, &rhs) {
+            Some(v) => v,
+            None => match (as_i64(&lhs), as_i64(&rhs)) {
+                (Some(a), Some(b)) => java_shift("leftShift", wide, a, b),
+                _ => raise_operator_operand(vm, "leftShift", &lhs, &rhs),
+            },
         },
+    }
+}
+
+/// `GBITOP`: `&`/`|`/`^` on operands the native ops cannot read.
+///
+/// Two integers take Java's own answer, which is width-independent for the mask
+/// operators — `&`, `|` and `^` of two sign-extended 32-bit values give the same
+/// 64-bit pattern either way. A `BigInteger` operand takes the arbitrary-
+/// precision two's-complement answer ([`decimal::bit_op`]), so `(-1G) & 255G` is
+/// `255`. Anything else — a `BigDecimal`, a String, a null — raises what Groovy
+/// raises for that operand shape ([`raise_operator_operand`]).
+fn b_bitop(vm: &mut VM, _argc: u8) -> Value {
+    let op = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let rhs = vm.stack.pop().unwrap_or(Value::Undef);
+    let lhs = vm.stack.pop().unwrap_or(Value::Undef);
+    bit_op_values(vm, &op, &lhs, &rhs)
+}
+
+/// The body of [`b_bitop`], shared with the `a.and(b)` method spellings.
+fn bit_op_values(vm: &mut VM, op: &str, lhs: &Value, rhs: &Value) -> Value {
+    if let (Some(a), Some(b)) = (plain_int(lhs), plain_int(rhs)) {
+        return Value::int(match op {
+            "and" => a & b,
+            "or" => a | b,
+            _ => a ^ b,
+        });
+    }
+    // A `BigInteger` on either side widens the whole operation; an `Integer`
+    // partner converts exactly.
+    if as_bigint(lhs).is_some() || as_bigint(rhs).is_some() {
+        if let (Some(a), Some(b)) = (as_exact_dec(lhs), as_exact_dec(rhs)) {
+            if let Some(r) = decimal::bit_op(op, &a, &b) {
+                return bigint_value(r);
+            }
+        }
+    }
+    raise_operator_operand(vm, op, lhs, rhs)
+}
+
+/// `GBITNOT`: `~x` where `x` is not a plain integer — a `BigInteger`'s
+/// two's-complement `not`, which is `-x - 1` at any width.
+fn b_bitnot(vm: &mut VM, _argc: u8) -> Value {
+    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    if let Some(n) = plain_int(&v) {
+        return Value::int(!n);
+    }
+    if as_bigint(&v).is_some() {
+        if let Some(r) = as_exact_dec(&v).and_then(|d| decimal::bit_not(&d)) {
+            return bigint_value(r);
+        }
+    }
+    // Groovy's `~` desugars to `bitwiseNegate()`, and reports the operand under
+    // that name. It is unary, so the "argument" it blames is the operand itself.
+    raise_operator_operand(vm, "bitwiseNegate", &v, &v)
+}
+
+/// The `i64` behind a value that really is an `Integer`/`Long` — *not* what
+/// [`as_i64`] answers, which also reads a `Boolean` and a decimal handle. The
+/// bitwise builtins need the narrow question: a decimal must take the
+/// arbitrary-precision path rather than a lossy 64-bit one.
+fn plain_int(v: &Value) -> Option<i64> {
+    match v {
+        Value::Int(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// Java's three integer shifts at the left operand's own width: 32 bits for an
+/// `Integer`, 64 for a `Long`, with the count masked to that width's bit index.
+/// So `1 << 32` is `1` again, `-1 >>> 28` is `15`, and `-1L >>> 60` is `15` too.
+///
+/// Shared by the operator builtins ([`b_shl`], [`b_shr`], [`b_ushr`]) and by the
+/// method spellings `a.leftShift(b)` / `rightShift` / `rightShiftUnsigned`,
+/// which are the same operation under the name the operator desugars to.
+fn java_shift(op: &str, wide: bool, a: i64, b: i64) -> Value {
+    let count = b as u32 & if wide { 63 } else { 31 };
+    match (op, wide) {
+        ("leftShift", true) => Value::int(a.wrapping_shl(count)),
+        ("leftShift", false) => Value::int(i64::from((a as i32).wrapping_shl(count))),
+        ("rightShift", true) => Value::int(a >> count),
+        ("rightShift", false) => Value::int(i64::from((a as i32) >> count)),
+        (_, true) => Value::int(((a as u64) >> count) as i64),
+        // The result of an `int >>> n` is an `int`, so it carries the sign of its
+        // low 32 bits: `Integer.MIN_VALUE >>> 0` is `Integer.MIN_VALUE`, not
+        // `2147483648`.
+        (_, false) => Value::int(i64::from(((a as i32 as u32) >> count) as i32)),
     }
 }
 
@@ -7561,19 +8015,24 @@ fn b_shr(vm: &mut VM, _argc: u8) -> Value {
     if let Some(v) = shift_overload(vm, &lhs, &rhs, "rightShift") {
         return v;
     }
+    if let Some(v) = bigint_shift(false, &lhs, &rhs) {
+        return v;
+    }
     match (as_i64(&lhs), as_i64(&rhs)) {
-        // Same widths the native lowering uses: an `Integer` shifts its
-        // sign-extended low 32 bits with the count masked to 5, a `Long` all 64
-        // with the count masked to 6.
-        (Some(a), Some(b)) => {
-            if wide {
-                Value::int(a >> (b as u32 & 63))
-            } else {
-                Value::int(i64::from((a as i32) >> (b as u32 & 31)))
-            }
-        }
+        (Some(a), Some(b)) => java_shift("rightShift", wide, a, b),
         _ => raise_operator_operand(vm, "rightShift", &lhs, &rhs),
     }
+}
+
+/// `bigInteger << n` / `>> n` — the arbitrary-precision shifts, which have no
+/// width to mask the count against and lose no bits: `1G << 100` is the full
+/// 31-digit power of two and `12345678901234567890G << 2` keeps all 20 digits.
+/// `None` when the left operand is not a `BigInteger` (so the caller's own
+/// `Integer`/`Long` rules apply) or when the count is not an integer.
+fn bigint_shift(left: bool, lhs: &Value, rhs: &Value) -> Option<Value> {
+    as_bigint(lhs)?;
+    let n = plain_int(rhs)?;
+    decimal::shift(left, &as_exact_dec(lhs)?, n).map(bigint_value)
 }
 
 /// `GUSHR`: Java's `>>>`. The fill width is the left operand's Java type — 32
@@ -7587,16 +8046,7 @@ fn b_ushr(vm: &mut VM, _argc: u8) -> Value {
     let rhs = vm.stack.pop().unwrap_or(Value::Undef);
     let lhs = vm.stack.pop().unwrap_or(Value::Undef);
     match (as_i64(&lhs), as_i64(&rhs)) {
-        (Some(a), Some(b)) => {
-            if wide {
-                Value::int(((a as u64) >> (b as u32 & 63)) as i64)
-            } else {
-                // The result of an `int >>> n` is an `int`, so it carries the
-                // sign of its low 32 bits: `Integer.MIN_VALUE >>> 0` is
-                // `Integer.MIN_VALUE`, not `2147483648`.
-                Value::int(i64::from(((a as i32 as u32) >> (b as u32 & 31)) as i32))
-            }
-        }
+        (Some(a), Some(b)) => java_shift("rightShiftUnsigned", wide, a, b),
         // Not two integers. Groovy has four different answers for that, none of
         // them this one — an `IllegalArgumentException` carrying a sentence
         // written here rather than by Groovy, which no version has ever printed.
@@ -8121,6 +8571,158 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         }
         ("String", "valueOf") => Value::str(render_value(vm, &arg0)),
         ("String", "format") => Value::str(java_format(vm, &groovy_str(&arg0), &args[1..])),
+
+        // `java.lang.Character`'s classification statics. A Groovy `char` is a
+        // one-character `String` here, and the `int` overloads take a code
+        // point — `Character.isDigit(53)` is `true`, the same as `'5'`.
+        //
+        // Only the overloads Groovy's own dispatch admits are modeled.
+        // `Character.isAlphabetic(c)`, `digit(c, radix)` and `forDigit(d, radix)`
+        // are deliberately absent: all three are `MissingMethodException` under
+        // Apache Groovy 5.1.0, so answering them would be a divergence in the
+        // other direction.
+        ("Character", "isDigit" | "isLetter" | "isLetterOrDigit" | "isWhitespace") => {
+            let c = java_char_arg(&arg0)?;
+            Value::bool(match method {
+                "isDigit" => c.is_numeric(),
+                "isLetter" => c.is_alphabetic(),
+                "isLetterOrDigit" => c.is_alphanumeric(),
+                _ => java_is_whitespace(c),
+            })
+        }
+        ("Character", "isUpperCase" | "isLowerCase") => {
+            let c = java_char_arg(&arg0)?;
+            Value::bool(if method == "isUpperCase" {
+                c.is_uppercase()
+            } else {
+                c.is_lowercase()
+            })
+        }
+        // These answer a `char`, which prints as the bare character.
+        ("Character", "toUpperCase" | "toLowerCase" | "toString") => {
+            let c = java_char_arg(&arg0)?;
+            Value::str(match method {
+                "toUpperCase" => c.to_uppercase().to_string(),
+                "toLowerCase" => c.to_lowercase().to_string(),
+                _ => c.to_string(),
+            })
+        }
+        ("Character", "compare") => {
+            let (a, b) = (java_char_arg(&arg0)?, java_char_arg(args.get(1)?)?);
+            Value::int(a as i64 - b as i64)
+        }
+        // `getNumericValue` answers the digit a character spells — `-1` for one
+        // that spells none.
+        ("Character", "getNumericValue") => {
+            let c = java_char_arg(&arg0)?;
+            Value::int(c.to_digit(36).map(i64::from).unwrap_or(-1))
+        }
+
+        // `java.util.Collections`. The three mutators write **through the
+        // handle**, which is what makes `Collections.sort(l)` reorder the caller's
+        // list, and answer `void` — `null` — rather than the list.
+        ("Collections", "emptyList" | "emptySet") => Value::array(Vec::new()),
+        ("Collections", "emptyMap") => heap_push(HeapObj::OrderedMap(Vec::new())),
+        ("Collections", "singletonList" | "singleton") => Value::array(vec![arg0]),
+        ("Collections", "nCopies") => {
+            let n = as_i64(&arg0)?.max(0) as usize;
+            Value::array(vec![args.get(1)?.clone(); n])
+        }
+        // `unmodifiableList`/`unmodifiableMap` answer the same elements; the
+        // wrapper *type* is not modeled, so a write through the result is not
+        // rejected. See BUGS.md.
+        ("Collections", "unmodifiableList" | "unmodifiableCollection") => {
+            Value::array(iteration_elements(&arg0))
+        }
+        ("Collections", "sort" | "reverse") => {
+            let id = list_id(&arg0)?;
+            let mut items = iteration_elements(&arg0);
+            if method == "sort" {
+                items = match sort_values(vm, &items, &OrderBy::Natural) {
+                    Ok(sorted) => sorted,
+                    Err(e) => {
+                        fault(vm, e);
+                        return Some(Value::Undef);
+                    }
+                };
+            } else {
+                items.reverse();
+            }
+            list_store(id, items, false);
+            Value::Undef
+        }
+        // `Collections.max`/`min` order by the natural comparator — not the
+        // primitive `>`/`<` scan `DefaultGroovyMethods.max` uses (see
+        // [`prefers`]), so they are the sort's endpoints rather than that scan's.
+        ("Collections", "max" | "min") => {
+            let items = iteration_elements(&arg0);
+            let sorted = match sort_values(vm, &items, &OrderBy::Natural) {
+                Ok(sorted) => sorted,
+                Err(e) => {
+                    fault(vm, e);
+                    return Some(Value::Undef);
+                }
+            };
+            if method == "max" {
+                sorted.last()?.clone()
+            } else {
+                sorted.first()?.clone()
+            }
+        }
+        ("Collections", "frequency") => {
+            let want = args.get(1)?;
+            Value::int(
+                iteration_elements(&arg0)
+                    .iter()
+                    .filter(|v| values_equal(v, want))
+                    .count() as i64,
+            )
+        }
+        ("Collections", "disjoint") => {
+            let (a, b) = (iteration_elements(&arg0), iteration_elements(args.get(1)?));
+            Value::bool(!a.iter().any(|x| b.iter().any(|y| values_equal(x, y))))
+        }
+        // `Arrays.asList(a, b, c)` — the varargs form, the only one a Groovy
+        // script without real arrays can write.
+        ("Arrays", "asList") => Value::array(args.to_vec()),
+
+        // `java.lang.System`'s property readers. `getProperty(name)` answers
+        // null for a name the JVM does not carry, and the two-argument form
+        // answers the supplied default instead.
+        ("System", "lineSeparator") => Value::str("\n".to_string()),
+        ("System", "getProperty") => match java_system_property(&groovy_str(&arg0)) {
+            Some(v) => Value::str(v.to_string()),
+            None => args.get(1).cloned().unwrap_or(Value::Undef),
+        },
+        ("System", "getenv") => match std::env::var(groovy_str(&arg0)) {
+            Ok(v) => Value::str(v),
+            Err(_) => Value::Undef,
+        },
+        _ => return None,
+    })
+}
+
+/// The `char` an argument to a `java.lang.Character` static denotes. A Groovy
+/// `char` is a one-character `String` here; an `int` argument selects the
+/// code-point overload, so `Character.isDigit(53)` asks about `'5'`.
+fn java_char_arg(v: &Value) -> Option<char> {
+    match v {
+        Value::Int(n) => char::from_u32(u32::try_from(*n).ok()?),
+        Value::Str(s) => s.chars().next(),
+        _ => None,
+    }
+}
+
+/// The `System.getProperty` names groovyrs answers. Deliberately a short list
+/// rather than a passthrough to the process environment: the values a script can
+/// depend on are the ones whose answer is a property of the platform, and
+/// inventing an answer for `java.version` (or leaking the host's) would be worse
+/// than the `null` Java gives for an unset name.
+fn java_system_property(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "line.separator" => "\n",
+        "file.separator" => "/",
+        "path.separator" => ":",
         _ => return None,
     })
 }
@@ -8161,6 +8763,10 @@ fn static_field(class: &str, name: &str) -> Option<Value> {
         ("Byte", "BYTES") => Value::int(1),
         ("Math", "PI") => Value::float(std::f64::consts::PI),
         ("Math", "E") => Value::float(std::f64::consts::E),
+        // The radix bounds `Integer.parseInt`/`toString` clamp to (see
+        // [`java_radix_string`]), and `int`s rather than `char`s.
+        ("Character", "MIN_RADIX") => Value::int(2),
+        ("Character", "MAX_RADIX") => Value::int(36),
         // `BigDecimal`'s constants keep scale 0, and `BigInteger`'s stay
         // `BigInteger`s — the two are distinct types in every later operation.
         ("BigDecimal", "ZERO") => dec_value(decimal::from_i64(0)),
@@ -8246,6 +8852,15 @@ fn java_format(vm: &mut VM, spec: &str, args: &[Value]) -> String {
             }
             _ => groovy_str(&arg),
         };
+        // The `,` flag is Java's locale grouping separator, which under en-US
+        // (the only locale groovyrs models — see `parity-scripts/oracle-jvm.sh`)
+        // is a comma every three digits of the integer part. It applies to the
+        // integral and the floating conversions, and to nothing else.
+        let body = if flags.contains(',') && matches!(conv, 'd' | 'f' | 'e' | 'g') {
+            group_integer_digits(&body)
+        } else {
+            body
+        };
         let w: usize = width.parse().unwrap_or(0);
         if body.chars().count() >= w {
             out.push_str(&body);
@@ -8263,6 +8878,29 @@ fn java_format(vm: &mut VM, spec: &str, args: &[Value]) -> String {
         }
     }
     out
+}
+
+/// Insert `,` every three digits of `text`'s integer part, leaving a sign, a
+/// fraction and an exponent alone: `1234567` becomes `1,234,567` and
+/// `-1234.5678` becomes `-1,234.5678`. This is `%,d` / `%,f`'s en-US grouping.
+fn group_integer_digits(text: &str) -> String {
+    let (sign, rest) = match text.strip_prefix('-') {
+        Some(r) => ("-", r),
+        None => ("", text),
+    };
+    let cut = rest.find(['.', 'e', 'E']).unwrap_or(rest.len());
+    let (int_part, tail) = rest.split_at(cut);
+    if !int_part.chars().all(|c| c.is_ascii_digit()) {
+        return text.to_string();
+    }
+    let mut grouped = String::with_capacity(int_part.len() + int_part.len() / 3);
+    for (i, c) in int_part.chars().enumerate() {
+        if i > 0 && (int_part.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    format!("{sign}{grouped}{tail}")
 }
 
 /// `GRANGE`: build a range literal's `groovy.lang.Range` object.
@@ -8497,7 +9135,8 @@ fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]
         // of the endpoints, not of the `..<` form: `(1..<5).isReverse()` is
         // false.
         "isReverse" => Value::bool(range_reported_reverse(r)),
-        "toString" | "inspect" => Value::str(range_str(r)),
+        "toString" => Value::str(range_str(r)),
+        "inspect" => Value::str(range_inspect(r)),
         "size" | "getSize" => Value::int(range_size(r)),
         "step" => {
             let n = args.first().and_then(as_i64).unwrap_or(1);
@@ -8764,7 +9403,11 @@ fn dispatch_set_method(
     let other = || args.first().map(iteration_elements).unwrap_or_default();
     Some(match method {
         "getClass" => heap_push(HeapObj::ClassRef(set_class(kind).to_string())),
-        "toString" | "inspect" => Value::str(groovy_str(recv)),
+        // `inspect()` is deliberately absent here: a set's is the quoted
+        // rendering `([1, 'a'] as Set).inspect()` == `[1, 'a']`, which
+        // `dispatch_method` answers for every value ahead of this table. It used
+        // to share this arm with `toString`, which prints `[1, a]`.
+        "toString" => Value::str(groovy_str(recv)),
         "size" | "getSize" => Value::int(items.len() as i64),
         "isEmpty" => Value::bool(items.is_empty()),
         "contains" => Value::bool(items.iter().any(|v| values_equal(v, &first_arg(args)))),
@@ -8890,6 +9533,19 @@ fn range_as_list(v: &Value) -> Value {
 /// `Range.toString()` — the source form (`1..5`, `1..<5`, `5..1`, `a..e`), which
 /// is also how `println` and `String +` render one.
 fn range_str(r: &RangeVal) -> String {
+    range_rendered(r, groovy_str)
+}
+
+/// `Range.inspect()`. Same layout as [`range_str`] with the endpoints rendered
+/// *verbosely*, so a `String`-bounded range quotes them: `('a'..'c').inspect()`
+/// is `'a'..'c'` where its `toString()` is `a..c`. The numeric ranges render
+/// identically either way.
+fn range_inspect(r: &RangeVal) -> String {
+    range_rendered(r, inspect_value)
+}
+
+/// The shared `from..to` layout, with `render` deciding how an endpoint prints.
+fn range_rendered(r: &RangeVal, render: impl Fn(&Value) -> String) -> String {
     // An `ObjectRange` renders the values it actually walks — `('a'..<'e')`
     // prints `a..d` — where the numeric ranges keep the form they were written
     // in. An empty range keeps its `..<` whatever its class.
@@ -8899,13 +9555,13 @@ fn range_str(r: &RangeVal) -> String {
         } else {
             successor(&r.to, range_is_reverse(r)).unwrap_or_else(|| r.to.clone())
         };
-        return format!("{}..{}", groovy_str(&r.from), groovy_str(&last));
+        return format!("{}..{}", render(&r.from), render(&last));
     }
     format!(
         "{}{}{}",
-        groovy_str(&r.from),
+        render(&r.from),
         if r.inclusive { ".." } else { "..<" },
-        groovy_str(&r.to)
+        render(&r.to)
     )
 }
 
@@ -10259,6 +10915,13 @@ fn groovy_add(a: &Value, b: &Value) -> Value {
             kind,
         );
     }
+    // A list reaches here in either representation — a literal rides a handle,
+    // a GDK result is a transient `Value::Array` — and `List.plus` is the same
+    // operation for both. Reading only the transient form left the handle form
+    // to the string fallback below, which is why `[[1, 2], [3]].sum([])`
+    // rendered `[][1, 2][3]` instead of concatenating to `[1, 2, 3]`.
+    let (da, db) = (deref_list(a), deref_list(b));
+    let (a, b) = (&da, &db);
     if let Value::Array(xs) = a {
         let mut out = xs.to_vec();
         match b {

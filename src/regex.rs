@@ -205,6 +205,15 @@ impl Pattern {
         self.re.captures_len().saturating_sub(1)
     }
 
+    /// The index of the group `(?<name>…)` declares, which is what
+    /// `Matcher.group(String)` reads. `None` for a name the pattern does not
+    /// declare — Java's `IllegalArgumentException`, which the caller raises.
+    pub fn group_index(&self, name: &str) -> Option<usize> {
+        self.re
+            .capture_names()
+            .position(|declared| declared == Some(name))
+    }
+
     /// Every match in `text`, walked left to right. A zero-width match advances
     /// by one character so the walk terminates.
     pub fn find_all(&self, text: &str) -> Result<Vec<Match>, String> {

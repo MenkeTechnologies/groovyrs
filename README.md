@@ -222,7 +222,7 @@ Implemented and checked against Apache Groovy:
   `each`, `eachWithIndex`, `reverseEach`, `collect`, `collectMany`,
   `collectEntries`, `findAll`, `find`, `findResult`, `findIndexOf`, `any`,
   `every`, `count`, `countBy`, `inject`, `sum`, `sort`, `toSorted`, `unique`,
-  `toUnique`, `max`, `min`, `groupBy`, `split`, `takeWhile`, `dropWhile`,
+  `toUnique`, `max`, `min`, `groupBy`, `split`, `takeWhile`, `dropWhile`, `grep`,
   `findIndexValues`, `join`, `reverse`
   (`[1,2,3].collect { it * 2 }` → `[2, 4, 6]`), plus `with`/`tap` on any value
   and the `Number` loops `times` / `upto` / `downto` / `step`. A one-parameter
@@ -231,9 +231,17 @@ Implemented and checked against Apache Groovy:
   do; a multi-parameter closure receives a list element *spread* across its
   parameters (`[[1,2],[3,4]].collect { a, b -> a + b }` → `[3, 7]`). Over maps:
   `each`, `collect`, `collectEntries`, `findAll`, `find`, `any`, `every`,
-  `groupBy`, `countBy`, `count`, `inject`, `sort`, `max`, `min`, `withDefault` —
-  a two-parameter closure gets `(key, value)`, a one-parameter closure a
-  `Map.Entry`.
+  `groupBy`, `countBy`, `count`, `inject`, `sort`, `max`, `min`, `withDefault`,
+  `collectMany` — a two-parameter closure gets `(key, value)`, a one-parameter
+  closure a `Map.Entry`.
+- **`grep` filters by the filter's `isCase`, not by `==`** — the same five rules
+  a `switch` label follows, so the filter's *type* picks the test: a closure
+  calls, a `Class` is `isInstance` (`[1, 'a'].grep(Integer)` → `[1, 2]`), a
+  `Pattern` matches the whole string, and a collection or range is membership.
+  The no-argument `grep()` keeps the Groovy-true elements. It is defined on
+  `Object`, so a receiver that is not a collection iterates as a single element
+  (`5.grep { it > 1 }` → `[5]`), and on a map it answers the **list** of
+  accepted entries rather than the map `findAll` answers.
 - **`with` / `tap` delegate the closure to the receiver** — a bare call *and* a
   bare name the script cannot resolve both dispatch against it
   (`[:].with { put('a', 1) }`, `'abc'.with { toUpperCase() }`,
@@ -251,21 +259,33 @@ Implemented and checked against Apache Groovy:
   `plus(index, other)` splice), `disjoint`, `transpose`, `collate`,
   `combinations`, `permutations` and `subsequences` (both answering the
   `java.util.HashSet<List>` Groovy does, in the JDK's bucket order),
-  `withIndex`, `indexed`, `iterator`, `toSet`, `subList`,
-  `toList` and the mutators; strings answer `indexOf`/`lastIndexOf` (with the
+  `withIndex`, `indexed`, `iterator`/`listIterator`, `toSet`, `subList`,
+  `toList`, `containsAll`, `putAt`, `removeAt`/`removeElement` and the mutators,
+  and every value answers `inspect()` (the *verbose* rendering, so
+  `[1, 'a'].inspect()` is `[1, 'a']` where `toString()` is `[1, a]`) with
+  `toListString`/`toMapString` as the plain-rendering aliases;
+  strings answer `indexOf`/`lastIndexOf` (with the
   `fromIndex` and code-point overloads), `replace`, `split`, `tokenize`,
   `charAt`, `substring`, `compareTo`, `padLeft`/`padRight`/`center`,
   `capitalize`, `take`/`drop`, `multiply`, `minus`, `startsWith`/`endsWith`,
   `tr`, `trim`, `strip`/`stripLeading`/`stripTrailing`/`isBlank`, `stripIndent`,
-  `stripMargin`, `expand`, `normalize`/`denormalize`, `formatted` and the
+  `stripMargin`, `expand`, `normalize`/`denormalize`, `readLines`, `formatted`,
+  `equalsIgnoreCase`, `uncapitalize` and the
   `isInteger`/`isLong`/`isDouble`/`isBigDecimal`/`isBigInteger`/`isNumber`
   predicates. Every index is a **UTF-16 code unit** the way Java's is, so
   `"a😀b".length()` is 4 and `indexOf("b")` is 3; `trim` strips code points
   `<= U+0020` while `strip` strips `Character.isWhitespace`, which are different
   sets. Maps answer `put`, `remove`, `getOrDefault`, `entrySet`, `keySet`,
   `values`, `subMap`, `spread`, `minus`, `intersect`, `iterator`,
-  `containsValue`, `putAll`, `clear`. Numbers answer `power`, the scaled
-  `round(n)` and `trunc([n])`, `intdiv`, `abs` and the conversions.
+  `containsValue`, `putAt`, `putAll`, `clear`. Numbers answer `power`, the scaled
+  `round(n)` and `trunc([n])`, `intdiv`, `abs`, the conversions, and the operator
+  method names — `and`/`or`/`xor`/`bitwiseNegate` and
+  `leftShift`/`rightShift`/`rightShiftUnsigned`, which fill to the receiver's
+  Java width. A `BigDecimal`/`BigInteger` additionally answers Java's own
+  `add`/`subtract`/`multiply`/`divide`/`remainder`/`mod`/`pow`, which are **not**
+  the Groovy operators: `7G.divide(3G)` truncates to `2` where `7G / 3G` is
+  `2.3333333333`, and `1.0G.divide(3.0G)` raises `ArithmeticException` where the
+  operator approximates.
 - **`<=>` needs a `Comparable`** — a list, a map, a set, a range and a user class
   with no `compareTo` are not, so `[1, 2] <=> [1, 3]` raises the
   `IllegalArgumentException` Groovy raises (even for two equal lists) rather than
@@ -283,10 +303,18 @@ Implemented and checked against Apache Groovy:
   `reverseBytes`, `MAX_VALUE` / `MIN_VALUE`), `Double` (`compare`, `isNaN` /
   `isInfinite` / `isFinite`, `sum`, `max` / `min`, `doubleToLongBits` /
   `doubleToRawLongBits` / `longBitsToDouble`), `Boolean`, `BigDecimal` /
-  `BigInteger` `ZERO` / `ONE` / `TWO` / `TEN`, and `String.format` /
-  `String.valueOf`, plus the script-scope `printf` / `sprintf` over a
-  `java.util.Formatter` subset (`%s %d %f %x %o %b %n %%`, width, precision and
-  left-justification). `Math.round`, `Math.signum`, `Math.max` / `Math.min` and
+  `BigInteger` `ZERO` / `ONE` / `TWO` / `TEN`, `Character` (`isDigit` /
+  `isLetter` / `isLetterOrDigit` / `isWhitespace` / `isUpperCase` /
+  `isLowerCase`, `toUpperCase` / `toLowerCase` / `toString`, `compare`,
+  `getNumericValue`, `MIN_RADIX` / `MAX_RADIX` — each with the `int` code-point
+  overload), `Collections` (`emptyList` / `emptyMap` / `emptySet`,
+  `singletonList`, `nCopies`, `unmodifiableList`, the in-place `sort` / `reverse`,
+  `max` / `min`, `frequency`, `disjoint`), `Arrays.asList`, `System`
+  (`lineSeparator`, `getProperty` with and without a default, `getenv`), and
+  `String.format` / `String.valueOf`, plus the script-scope `printf` / `sprintf`
+  over a `java.util.Formatter` subset (`%s %d %f %x %o %b %n %%`, width,
+  precision, left-justification and the `,` grouping flag, so `%,d` of `1234567`
+  is `1,234,567`). `Math.round`, `Math.signum`, `Math.max` / `Math.min` and
   `Double.compare` follow Java's rules rather than the same-named Rust ones,
   which differ on ties, signed zeros and NaN.
 - **Spread `*.`** — `list*.member` / `list*.method(args)` applies the member to
@@ -464,7 +492,13 @@ Next waves, in priority order:
 5. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
    `"$s".getClass()` reports `java.lang.String` where Groovy reports
    `org.codehaus.groovy.runtime.GStringImpl`.
-6. **Command-argument chains beyond one argument** — `println a, b` and
+6. **A `List`/`Map` implementation kind.** A set carries one, so a `TreeSet`
+   sorts; a list and a map do not, so `new LinkedList([1,2]).getClass()` reports
+   `java.util.ArrayList` and — the behaviour difference, not just a name —
+   `new TreeMap([b:2, a:1])` prints in insertion order rather than key order.
+   The same missing kind is why `asImmutable()` takes a write instead of raising
+   `UnsupportedOperationException`.
+7. **Command-argument chains beyond one argument** — `println a, b` and
    `foo bar baz` do not parse; the parenthesised call always does.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
@@ -482,11 +516,12 @@ bash parity-scripts/run.sh -v          # byte-parity over the regression corpus
 bash parity-scripts/fuzz.sh            # diff the probe corpus, one JVM start
 ```
 
-`fuzz.sh` diffs `parity-scripts/probes.txt` — several hundred small snippets
-covering division and `BigDecimal` scale, number formatting, `GString`
-interpolation, the list/map/string GDK, closures, ranges and control flow. Every
-probe is wrapped in a `try`, so a throw is a comparable observation rather than a
-dead run.
+`fuzz.sh` diffs `parity-scripts/probes.txt` — many hundreds of small snippets
+covering division and `BigDecimal` scale, the bit and shift operators at every
+width (including `BigInteger`'s unbounded ones), number formatting, `GString`
+interpolation, the list/map/string GDK, the JDK statics, `Matcher`, closures,
+ranges, throwables and control flow. Every probe is wrapped in a `try`, so a
+throw is a comparable observation rather than a dead run.
 
 Both sides run each probe **in isolation**. groovyrs starts in milliseconds, so
 it runs one process per probe; the oracle would need ~50 minutes to do the same,

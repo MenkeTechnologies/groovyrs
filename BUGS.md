@@ -558,7 +558,20 @@ infinite loop on both sides.
   classes that *are* modeled: `StringBuilder`, `StringBuffer`, `StringWriter`,
   `ArrayList`/`LinkedList`/`Vector`, `HashSet`/`LinkedHashSet`/`TreeSet`,
   `HashMap`/`LinkedHashMap`/`TreeMap`, `Object`, the box types, `BigDecimal`,
-  `BigInteger`, and every modeled throwable.
+  `BigInteger`, and every modeled throwable. The `List` and `Map` names in that
+  list *construct*, but they all construct the one implementation — see **A
+  `List` is always an `ArrayList` and a `Map` always a `LinkedHashMap`** below,
+  which is a real behaviour difference for `TreeMap`, not only a name.
+- **`java.util.UUID`.** `UUID.fromString` and `UUID.randomUUID` are not
+  modeled: a UUID is its own type (`getClass()` names `java.util.UUID`, and it
+  compares and hashes as 128 bits, not as its text), and answering the string
+  instead would get all three wrong. The class *name* resolves, so the call
+  raises `MissingMethodException` rather than failing to compile.
+- **`Closure.parameterTypes`.** A closure's declared parameter *types* are not
+  kept — `ClosureMeta` carries the count and nothing else — so the list Groovy
+  answers (`[class java.lang.Object]` for an untyped parameter, the declared
+  class for a typed one) cannot be built. `maximumNumberOfParameters` is
+  answered, since the count is what is kept.
 - **`Float.MAX_VALUE` / `Float.MIN_VALUE`.** groovyrs has no `java.lang.Float`,
   so a 32-bit constant could only be answered as the `Double` nearest it —
   `3.4028234663852886E38` where Groovy prints `3.4028235E38`. Answering the wrong
@@ -1022,3 +1035,52 @@ infinite loop on both sides.
   throws. Wrap the argument — `println(-42)` — for exact parity; the parenthesised
   form is unambiguous on both. (The differential fuzzer only ever emits the
   parenthesised form, so it never reports this.)
+- **A `List` is always an `ArrayList` and a `Map` always a `LinkedHashMap`.**
+  `HeapObj::ListVal` and `HeapObj::OrderedMap` carry no implementation kind the
+  way `HeapObj::SetVal` carries [`SetKind`], so every list and map names one
+  class whatever built it. `new LinkedList([1,2]).getClass()` and
+  `new Vector([1,2]).getClass()` both report `java.util.ArrayList`, and
+  `Arrays.asList(1,2,3)` reports it too where Groovy reports
+  `java.util.Arrays$ArrayList`.
+
+  For a **`TreeMap` this is a behaviour difference, not only a name**: a
+  `TreeMap` iterates in key order, so `new TreeMap([b:2, a:1])` prints
+  `[a:1, b:2]` in Groovy and `[b:2, a:1]` here, and the same holds for
+  `[b:2, a:1] as TreeMap` and for keys added after construction. The `Set` side
+  does not have this gap — `TreeSet` sorts, because a set carries its kind.
+- **`asImmutable()` / `asSynchronized()` / `Collections.unmodifiableList` answer
+  a plain copy.** All three answer the same *elements*, so a read through the
+  result is right, but the wrapper type is not modeled: `getClass()` names
+  `java.util.ArrayList` rather than
+  `java.util.Collections$UnmodifiableRandomAccessList` or
+  `$SynchronizedRandomAccessList`, and — the observable one — a
+  mutation through the result **succeeds** where Groovy raises
+  `UnsupportedOperationException`. Same root as the entry above: a list has no
+  kind to carry the immutability in. `Collections.emptyList`, `singletonList`
+  and `nCopies` have the same name divergence (`Collections$EmptyList`,
+  `$SingletonList`, `$CopiesList`) but no behaviour one, since nothing in the
+  corpus mutates them.
+- **`toArray()` and `toCharArray()` answer a `List`.** Same root as the *Java
+  arrays* entry: `[1,2,3].toArray().getClass()` reports `java.util.ArrayList`
+  where Groovy reports `[Ljava.lang.Object;`, `"abc".toCharArray()` reports it
+  where Groovy reports `[C`, and `.length` on either raises where Groovy
+  answers. `String.bytes` and `"abc".chars()` are not modeled at all for the
+  same reason — a `byte[]` and an `IntStream` are types groovyrs has no value
+  for.
+- **A closure is called with the arguments it is given, padded with nulls.**
+  Groovy resolves a closure call against the declared parameter count and raises
+  `MissingMethodException` when nothing matches, so
+  `[a:1].entrySet().collect { k, v -> "$k=$v" }` throws — an entry set is a
+  plain collection, and its single `Map.Entry` element matches no
+  two-parameter signature. groovyrs passes the entry as `k` and `null` as `v`
+  and answers `[a=1=null]`. The methods that really do spread — `map.each`,
+  `map.collect`, `map.collectMany`, and the rest with a genuine `Map` overload —
+  are modeled and answer Groovy's `(key, value)`.
+- **The bitwise operators need to *see* a decimal operand.**
+  `Compiler::bit_operand_is_object` decides statically whether `&`/`|`/`^`/`~`/
+  `>>` route to the host builtin that handles `BigInteger`s; a `G` literal, a
+  name bound to one, and any expression containing either are spotted. An
+  operand the compiler cannot see — `def a = f(); def b = g(); a & b`, where
+  neither side names a decimal — keeps the native lowering, which reads the
+  heap handle as `0`. Naming either operand's decimal-ness anywhere in the
+  expression is enough to route it correctly.

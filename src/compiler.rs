@@ -2304,10 +2304,17 @@ impl Compiler {
                     self.cond_expr(rhs)?;
                     self.b.emit(Op::LogNot, self.cur_line);
                 }
-                // `~x` is the bitwise complement, a plain native op.
+                // `~x` is the bitwise complement — a plain native op on an
+                // integer, and the [`crate::host::GBITNOT`] builtin on an
+                // operand that may ride a handle (`~7G` is `-8`, where the
+                // native op read the handle as `0` and answered `-1`).
                 UnOp::BitNot => {
                     self.expr(rhs)?;
-                    self.b.emit(Op::BitNot, self.cur_line);
+                    if self.bit_operand_is_object(rhs) {
+                        self.emit_call_builtin(crate::host::GBITNOT, 1, self.cur_line)?;
+                    } else {
+                        self.b.emit(Op::BitNot, self.cur_line);
+                    }
                 }
             },
             Expr::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs)?,
@@ -2827,8 +2834,10 @@ impl Compiler {
     /// re-binding to anything else clears the name again (`def f = { it }; f = 8`
     /// leaves `f >> 1` on the native shift). See [`Compiler::obj_vars`].
     fn set_var_obj(&mut self, ty: &str, name: &str, init: Option<&Expr>) {
-        let is_obj =
-            matches!(ty, "Closure") || init.is_some_and(|e| self.shr_receiver_is_object(e));
+        // `bit_operand_is_object`, not `shr_receiver_is_object`: a name bound to
+        // a decimal (`def a = 1G`) is also a handle, and `a & 3G` / `a >> 1`
+        // read it as `0` on the native lowering.
+        let is_obj = matches!(ty, "Closure") || init.is_some_and(|e| self.bit_operand_is_object(e));
         if is_obj {
             self.obj_vars.insert(name.to_string());
         } else {
@@ -2862,6 +2871,37 @@ impl Compiler {
                 self.shr_receiver_is_object(lhs) || self.shr_receiver_is_object(rhs)
             }
             _ => false,
+        }
+    }
+
+    /// Can the compiler see that this expression's value may ride a heap handle
+    /// rather than being a plain `Value::Int` — the operands fusevm's native
+    /// bitwise ops read as `0`?
+    ///
+    /// Conservative in the same direction as [`Compiler::shr_receiver_is_object`]
+    /// and for the same reason: a `true` still gets the right answer (the
+    /// builtin performs the ordinary integer operation when the guess was
+    /// wrong), it only costs that one site its native lowering. A `false` on a
+    /// decimal that the compiler could not see — `def a = f(); def b = g();
+    /// a & b`, where neither side names a decimal — keeps the native op and
+    /// still answers `0`; BUGS.md carries that residue.
+    fn bit_operand_is_object(&self, e: &Expr) -> bool {
+        match e {
+            // Every `G` literal and every unsuffixed decimal is a handle.
+            Expr::Dec(_) | Expr::BigInt(_) => true,
+            Expr::Var(name) => self.obj_vars.contains(name),
+            Expr::Recorded { inner, .. } => self.bit_operand_is_object(inner),
+            Expr::Unary { rhs, .. } => self.bit_operand_is_object(rhs),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.bit_operand_is_object(lhs) || self.bit_operand_is_object(rhs)
+            }
+            Expr::Ternary { then, els, .. } => {
+                self.bit_operand_is_object(then) || self.bit_operand_is_object(els)
+            }
+            Expr::Elvis { lhs, rhs } => {
+                self.bit_operand_is_object(lhs) || self.bit_operand_is_object(rhs)
+            }
+            other => self.shr_receiver_is_object(other),
         }
     }
 
@@ -2943,6 +2983,38 @@ impl Compiler {
             // fallback a mis-typed receiver lands on.
             let wide = self.is_wide(lhs);
             self.b.emit(Op::LoadInt(i64::from(wide)), self.cur_line);
+            self.emit_call_builtin(crate::host::GSHR, 3, self.cur_line)?;
+            return Ok(());
+        }
+        // `&`/`|`/`^` where an operand may be a `BigInteger`. fusevm's native
+        // `Op::BitAnd` reads its operands with `Value::to_int`, which answers
+        // `0` for the `Value::Obj` a decimal rides — so `1G & 3G` evaluated to
+        // `0`, silently. `NumOp` has no bitwise member for the numeric hook to
+        // carry, so those operands take the [`crate::host::GBITOP`] builtin the
+        // same way an object-receiver `>>` takes `GSHR`; `int & int` keeps its
+        // native lowering and its JIT trace.
+        if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
+            && (self.bit_operand_is_object(lhs) || self.bit_operand_is_object(rhs))
+        {
+            self.expr(lhs)?;
+            self.expr(rhs)?;
+            let name = match op {
+                BinOp::BitAnd => "and",
+                BinOp::BitOr => "or",
+                _ => "xor",
+            };
+            let idx = self.b.add_constant(Value::str(name.to_string()));
+            self.b.emit(Op::LoadConst(idx), self.cur_line);
+            self.emit_call_builtin(crate::host::GBITOP, 3, self.cur_line)?;
+            return Ok(());
+        }
+        // A `>>` whose left operand may be a `BigInteger` needs the builtin for
+        // the same reason: the native shift reads the handle as `0`.
+        if matches!(op, BinOp::Shr) && self.bit_operand_is_object(lhs) {
+            self.expr(lhs)?;
+            self.expr(rhs)?;
+            self.b
+                .emit(Op::LoadInt(i64::from(self.is_wide(lhs))), self.cur_line);
             self.emit_call_builtin(crate::host::GSHR, 3, self.cur_line)?;
             return Ok(());
         }
@@ -3105,6 +3177,7 @@ impl Compiler {
                     | "removeAll"
                     | "retainAll"
                     | "set"
+                    | "putAt"
                     | "clear"
                     | "push"
                     | "pop"

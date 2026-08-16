@@ -308,6 +308,57 @@ pub fn abs(a: &BigDecimal) -> BigDecimal {
     a.abs()
 }
 
+/// The three `java.math.BigInteger` mask operators — `and`, `or`, `xor`, which
+/// Groovy spells `&`, `|`, `^` — at arbitrary precision and in two's complement,
+/// so `(-1G) & 255G` is `255` and `12345678901234567890G & 255G` is `210`.
+///
+/// The receivers are `BigInteger`s carried as scale-0 [`BigDecimal`]s; `None`
+/// for anything with a fraction part, which is Groovy's
+/// `UnsupportedOperationException` (a `BigDecimal` has no bits) and is the
+/// caller's to raise.
+pub fn bit_op(op: &str, a: &BigDecimal, b: &BigDecimal) -> Option<BigDecimal> {
+    let (x, y) = (integer_part(a)?, integer_part(b)?);
+    Some(BigDecimal::from(match op {
+        "and" => x & y,
+        "or" => x | y,
+        "xor" => x ^ y,
+        _ => return None,
+    }))
+}
+
+/// `~a` — `BigInteger.not`, which in two's complement is `-a - 1`: `~7G` is
+/// `-8`. `None` for a value with a fraction part, as [`bit_op`].
+pub fn bit_not(a: &BigDecimal) -> Option<BigDecimal> {
+    Some(BigDecimal::from(!integer_part(a)?))
+}
+
+/// `a << n` / `a >> n` on a `BigInteger`, which — unlike the `Integer` and
+/// `Long` shifts — has no width to mask the count against and no bits to lose:
+/// `1G << 100` is the full 31-digit power of two. A negative count shifts the
+/// other way, as `BigInteger.shiftLeft` does. `None` for a fraction part.
+pub fn shift(left: bool, a: &BigDecimal, n: i64) -> Option<BigDecimal> {
+    let x = integer_part(a)?;
+    let left = if n < 0 { !left } else { left };
+    let n = n.unsigned_abs();
+    // A shift wider than the value is zero (or -1 for a negative), and building
+    // the intermediate for an absurd count would exhaust memory first.
+    if left && n > MAX_SHIFT_BITS {
+        return None;
+    }
+    Some(BigDecimal::from(if left { x << n } else { x >> n }))
+}
+
+/// The exact integer behind a scale-0 `BigDecimal`, or `None` when the value
+/// carries a fraction — the case Groovy declines outright rather than truncating.
+fn integer_part(d: &BigDecimal) -> Option<BigInt> {
+    d.is_integer()
+        .then(|| d.with_scale(0).into_bigint_and_exponent().0)
+}
+
+/// The largest left-shift distance computed exactly. Past this the result is
+/// measured in gigabytes of digits; [`shift`] declines, exactly as [`pow`] does.
+const MAX_SHIFT_BITS: u64 = 1 << 24;
+
 /// `BigDecimal.toBigInteger()`: the value with its fraction part dropped, still
 /// carried as a scale-0 [`BigDecimal`] so it keeps its unbounded magnitude
 /// (unlike [`truncate_to_i64`], which saturates). This is what a
@@ -430,7 +481,11 @@ pub fn divide(a: &BigDecimal, b: &BigDecimal) -> Option<BigDecimal> {
 /// otherwise — `1.000 / 4` is `0.250` (padded to the preferred scale 3) while
 /// `2.5e7 / 1000` is `2.5E+4` (scale -3, because the preferred -6 cannot
 /// represent 25000). `None` when the expansion does not terminate.
-fn exact_divide(a: &BigDecimal, b: &BigDecimal) -> Option<BigDecimal> {
+///
+/// Public because it is also the whole of the *method* `BigDecimal.divide(y)`,
+/// which — unlike Groovy's `/` operator, which is [`divide`] — raises
+/// `ArithmeticException` rather than approximating when the expansion runs on.
+pub fn exact_divide(a: &BigDecimal, b: &BigDecimal) -> Option<BigDecimal> {
     let (ua, sa) = a.as_bigint_and_exponent();
     let (ub, sb) = b.as_bigint_and_exponent();
     let preferred = sa - sb;

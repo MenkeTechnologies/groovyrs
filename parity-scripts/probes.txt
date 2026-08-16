@@ -2264,3 +2264,151 @@ def l = [1,2,3]; println([l.removeAt(1), l])
 def l = [1,2,3]; println([l.removeElement(2), l, l.removeElement(9)])
 %%
 def e = [a:1].entrySet().iterator().next(); println([e.getKey(), e.getValue(), e.key, e.value])
+%%
+# ── Map implementation kinds (HeapObj::OrderedMap's MapKind) ──
+# A TreeMap presents its entries in key order, whatever order they arrived in —
+# through toString, iteration, and every GDK read.
+println(new TreeMap([b:2, a:1, c:3]))
+%%
+def m = new TreeMap([b:2, a:1]); m.c = 3; m['d'] = 4; println m
+%%
+def m = new TreeMap(); m.putAll([c:3, a:1, b:2]); println m
+%%
+println([new TreeMap([b:2, a:1]).keySet(), new TreeMap([b:2, a:1]).values()])
+%%
+println(new TreeMap([b:2, a:1, c:3]).entrySet())
+%%
+def m = new TreeMap([b:2, a:1, c:3]); def out = ''; m.each { k, v -> out += k }; println out
+%%
+println(new TreeMap([b:2, a:1, c:3]).collect { k, v -> k })
+%%
+println(new TreeMap([b:2, a:1, c:3]).inject('') { a, e -> a + e.key })
+%%
+def m = new TreeMap([b:2, a:1, c:3]); def out = ''; for (e in m) { out += e.key }; println out
+%%
+println(new TreeMap([b:2, a:1, c:3]).groupBy { k, v -> v % 2 })
+%%
+println(new TreeMap([b:2, a:1, c:3]).collectEntries { k, v -> [k, v * 2] })
+%%
+println(new TreeMap([b:2, a:1, c:3]) + [d: 4])
+%%
+# The class each construction path names, and the JDK hierarchy `instanceof`
+# walks: LinkedHashMap extends HashMap, and SortedMap/NavigableMap are TreeMap's.
+println([new TreeMap([:]).getClass().getName(), new HashMap([:]).getClass().getName(), new LinkedHashMap([:]).getClass().getName(), [:].getClass().getName()])
+%%
+println([new TreeMap([b:2, a:1]).getClass().getSimpleName(), new HashMap([b:2]).getClass().getSimpleName()])
+%%
+def m = new TreeMap([b:2, a:1]); println([m instanceof Map, m instanceof TreeMap, m instanceof SortedMap, m instanceof NavigableMap, m instanceof LinkedHashMap])
+%%
+def m = new HashMap([b:2, a:1]); println([m instanceof Map, m instanceof HashMap, m instanceof LinkedHashMap, m instanceof TreeMap])
+%%
+def m = [b:2, a:1]; println([m instanceof LinkedHashMap, m instanceof HashMap, m instanceof TreeMap])
+%%
+# `as` re-homes a map only when it is not already an instance of the target:
+# `[a:1] as HashMap` stays a LinkedHashMap because LinkedHashMap *is* a HashMap.
+println([([b:2, a:1] as TreeMap).getClass().getName(), ([a:1] as HashMap).getClass().getName(), (new TreeMap([b:2, a:1]) as HashMap).getClass().getName(), (new TreeMap([b:2, a:1]) as LinkedHashMap).getClass().getName()])
+%%
+println([b:2, a:1] as TreeMap)
+%%
+# Which derived map keeps the receiver's class. `each`/`clone`/`plus` keep it
+# exactly; `findAll`/`collectEntries`/`minus`/`take` go through Groovy's
+# createSimilarMap (TreeMap stays sorted, everything else becomes LinkedHashMap);
+# `sort()` always builds a TreeMap and `sort(closure)`/`toSorted()` never do.
+def m = new TreeMap([b:2, a:1, c:3])
+println([m.clone().getClass().getName(), m.each { }.getClass().getName(), (m + [d:4]).getClass().getName()])
+%%
+def m = new HashMap([b:2, a:1, c:3])
+println([m.clone().getClass().getName(), m.each { }.getClass().getName()])
+%%
+def t = new TreeMap([b:2, a:1, c:3]); def h = new HashMap([b:2, a:1, c:3])
+println([t.findAll { k, v -> true }.getClass().getName(), h.findAll { k, v -> true }.getClass().getName()])
+%%
+def t = new TreeMap([b:2, a:1, c:3]); def h = new HashMap([b:2, a:1, c:3])
+println([t.collectEntries { k, v -> [k, v] }.getClass().getName(), h.collectEntries { k, v -> [k, v] }.getClass().getName()])
+%%
+def t = new TreeMap([b:2, a:1, c:3]); def h = new HashMap([b:2, a:1, c:3])
+println([t.minus([a:1]).getClass().getName(), h.minus([a:1]).getClass().getName(), t.intersect([a:1]).getClass().getName()])
+%%
+println([[b:2, a:1].sort().getClass().getName(), new HashMap([b:2, a:1]).sort().getClass().getName(), [b:2, a:1].sort { it.value }.getClass().getName(), [b:2, a:1].toSorted().getClass().getName()])
+%%
+println([[b:2, a:1].sort(), [b:2, a:1].toSorted(), new TreeMap([b:2, a:1, c:3]).sort { -it.value }])
+%%
+println([new TreeMap([b:2, a:1, c:3]).groupBy { k, v -> 1 }.getClass().getName(), new TreeMap([b:2, a:1]).countBy { k, v -> 1 }.getClass().getName()])
+%%
+# `subMap(keys)` is the GDK key selection on every map and answers a
+# LinkedHashMap; on a TreeMap the two- and four-argument forms are instead
+# NavigableMap's half-open key *range*.
+println([new TreeMap([b:2, a:1, c:3]).subMap(['a','c']), new TreeMap([b:2, a:1, c:3]).subMap(['a','c']).getClass().getName()])
+%%
+println([[b:2, a:1].subMap('a', 'b'), new TreeMap([b:2, a:1, c:3]).subMap('a', 'c')])
+%%
+# subMap(keys) follows the *argument's* order, not the receiver's, and drops a
+# key the map does not hold.
+println([[b:2, a:1, c:3].subMap(['c', 'a']), [a:1].subMap(['a', 'zz'])])
+%%
+println(new TreeMap([b:2, a:1, c:3]).subMap('a', true, 'c', true))
+%%
+# ── java.util.NavigableMap: TreeMap's own methods, a MissingMethodException on
+# every other map.
+def m = new TreeMap([b:2, a:1, c:3])
+println([m.firstKey(), m.lastKey(), m.lowerKey('b'), m.higherKey('b'), m.floorKey('b'), m.ceilingKey('b')])
+%%
+def m = new TreeMap([b:2, a:1, c:3])
+println([m.lowerKey('a'), m.higherKey('c'), m.floorKey('0'), m.ceilingKey('z')])
+%%
+def m = new TreeMap([b:2, a:1, c:3])
+println([m.lowerEntry('b'), m.floorEntry('b'), m.ceilingEntry('bb'), m.higherEntry('c')])
+%%
+def m = new TreeMap([b:2, a:1, c:3])
+println([m.headMap('c'), m.tailMap('b'), m.headMap('c', true), m.tailMap('b', false), m.headMap('a'), m.tailMap('z')])
+%%
+def m = new TreeMap([b:2, a:1, c:3]); println([m.descendingMap(), m.descendingKeySet(), m.navigableKeySet()])
+%%
+def m = new TreeMap([b:2, a:1, c:3]); println([m.pollFirstEntry(), m])
+%%
+def m = new TreeMap([b:2, a:1, c:3]); println([m.pollLastEntry(), m])
+%%
+println([new TreeMap([b:2, a:1]).comparator(), new TreeMap([:]).firstEntry()])
+%%
+try { new TreeMap([:]).firstKey() } catch (Throwable t) { println t.getClass().getName() }
+%%
+try { [b:2, a:1].firstKey() } catch (Throwable t) { println t.getClass().getName() }
+%%
+try { new HashMap([b:2, a:1]).comparator() } catch (Throwable t) { println t.getClass().getName() }
+%%
+# ── The GDK map methods defined on *every* map, unlike the NavigableMap pair.
+println([[b:2, a:1].firstEntry(), [b:2, a:1].lastEntry(), [:].firstEntry()])
+%%
+def m = [b:2, a:1]; println([m.pollFirstEntry(), m])
+%%
+println([[b:2, a:1].take(1), [b:2, a:1].drop(1), new TreeMap([b:2, a:1, c:3]).take(2)])
+%%
+def m = [b:2, a:1]; def out = ''; def r = m.reverseEach { k, v -> out += k }; println([out, r])
+%%
+# ── java.util.HashMap's bucket order. The table is pre-sized by the JDK's
+# putMapEntries — Math.ceil(size / 0.75) — which is *not* HashSet's rule, so
+# five entries land in an 8-slot table here and a 16-slot one in a HashSet.
+println(new HashMap([one:1, two:2, three:3, four:4, five:5]))
+%%
+println(new HashMap([apple:1, banana:2, cherry:3, date:4, elder:5, fig:6]))
+%%
+println(new HashMap([one:1, two:2, three:3, four:4, five:5, six:6, seven:7]))
+%%
+println(new HashMap([z:1, y:2, x:3]))
+%%
+def m = new HashMap(); m.put('one',1); m.put('two',2); m.put('three',3); m.put('four',4); m.put('five',5); println m
+%%
+def m = new HashMap([a:1, b:2]); m.c = 3; m.d = 4; println m
+%%
+println([new HashMap([b:2, a:1, c:3]).keySet(), new HashMap([b:2, a:1, c:3]).entrySet()])
+%%
+println([new HashMap([:]), new TreeMap([:])])
+%%
+# ── Map.equals is by entry set: it ignores order *and* implementation, so a
+# TreeMap equals the LinkedHashMap of the same entries. Comparing the rendered
+# forms answered false for both, which was a silent wrong answer on plain literals.
+println([[b:2, a:1] == [a:1, b:2], [b:2, a:1].equals([a:1, b:2]), [a:1] == [a:1, b:2], [a:1, b:2] == [a:1, b:3]])
+%%
+println([new TreeMap([b:2, a:1]) == [a:1, b:2], [a:1, b:2] == new TreeMap([b:2, a:1]), new TreeMap([b:2, a:1]).equals([a:1, b:2])])
+%%
+println([([a:1] as Set) == [a:1], [a:1] == [1], [a:1] != [a:2]])

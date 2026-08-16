@@ -558,10 +558,10 @@ infinite loop on both sides.
   classes that *are* modeled: `StringBuilder`, `StringBuffer`, `StringWriter`,
   `ArrayList`/`LinkedList`/`Vector`, `HashSet`/`LinkedHashSet`/`TreeSet`,
   `HashMap`/`LinkedHashMap`/`TreeMap`, `Object`, the box types, `BigDecimal`,
-  `BigInteger`, and every modeled throwable. The `List` and `Map` names in that
-  list *construct*, but they all construct the one implementation — see **A
-  `List` is always an `ArrayList` and a `Map` always a `LinkedHashMap`** below,
-  which is a real behaviour difference for `TreeMap`, not only a name.
+  `BigInteger`, and every modeled throwable. The three `Map` names build the
+  implementation they name — a `TreeMap` sorts, a `HashMap` buckets — as the
+  three `Set` names do. The three `List` names all build the one implementation:
+  see **A `List` is always an `ArrayList`** below.
 - **`java.util.UUID`.** `UUID.fromString` and `UUID.randomUUID` are not
   modeled: a UUID is its own type (`getClass()` names `java.util.UUID`, and it
   compares and hashes as 128 bits, not as its text), and answering the string
@@ -1035,19 +1035,39 @@ infinite loop on both sides.
   throws. Wrap the argument — `println(-42)` — for exact parity; the parenthesised
   form is unambiguous on both. (The differential fuzzer only ever emits the
   parenthesised form, so it never reports this.)
-- **A `List` is always an `ArrayList` and a `Map` always a `LinkedHashMap`.**
-  `HeapObj::ListVal` and `HeapObj::OrderedMap` carry no implementation kind the
-  way `HeapObj::SetVal` carries [`SetKind`], so every list and map names one
-  class whatever built it. `new LinkedList([1,2]).getClass()` and
+- **A `List` is always an `ArrayList`.** `HeapObj::ListVal` carries no
+  implementation kind the way `HeapObj::SetVal` carries [`SetKind`] and
+  `HeapObj::OrderedMap` carries [`MapKind`], so every list names one class
+  whatever built it. `new LinkedList([1,2]).getClass()` and
   `new Vector([1,2]).getClass()` both report `java.util.ArrayList`, and
   `Arrays.asList(1,2,3)` reports it too where Groovy reports
   `java.util.Arrays$ArrayList`.
 
-  For a **`TreeMap` this is a behaviour difference, not only a name**: a
-  `TreeMap` iterates in key order, so `new TreeMap([b:2, a:1])` prints
-  `[a:1, b:2]` in Groovy and `[b:2, a:1]` here, and the same holds for
-  `[b:2, a:1] as TreeMap` and for keys added after construction. The `Set` side
-  does not have this gap — `TreeSet` sorts, because a set carries its kind.
+  The `Map` side no longer has this gap — `HeapObj::OrderedMap` carries a
+  [`MapKind`], so a `TreeMap` sorts and a `HashMap` buckets — and neither does
+  the `Set` side. What remains of it for maps is the three entries below.
+- **A `TreeMap` orders non-`String` keys as their rendered text.** A map key is
+  stored as `groovy_str` of the key, so the key's *type* is gone by the time
+  `MapKind::Tree` sorts. That is exactly `String.compareTo` and so is right for
+  every `String`-keyed `TreeMap`, but a numeric-keyed one sorts lexically:
+  `new TreeMap([10:'a', 9:'b', 100:'c'])` is `[9:b, 10:a, 100:c]` in Groovy and
+  `[10:a, 100:c, 9:b]` here. Fixing it means carrying the key `Value` alongside
+  its rendered form through every map construction site, not a change to the
+  ordering itself. The same stringification is why `[1:'a']` and `['1':'a']` are
+  one map here and two in Groovy.
+- **A map's `keySet()`/`entrySet()`/`values()` answer a plain `List`, and a
+  `TreeMap`'s range views a plain map.** The *contents* and their order are
+  right; the view type is not modeled, so `getClass()` names
+  `java.util.ArrayList` where Groovy names `java.util.TreeMap$KeySet`,
+  `$EntrySet` or `$Values`, and `headMap`/`tailMap`/`subMap`/`descendingMap`
+  name a `java.util.TreeMap` (or, for the descending one, a `LinkedHashMap`)
+  where Groovy names `TreeMap$AscendingSubMap`/`$DescendingSubMap`. A real view
+  would also be *live* — a write through it reaching the backing map — which is
+  the behaviour half of the gap and needs the same machinery
+  [`HeapObj::SubList`] has on the list side. `Map.Entry` has the same shape of
+  gap: it carries no class, so `getClass()` on one names `java.lang.Object`
+  rather than `java.util.LinkedHashMap$Entry`, `TreeMap$Entry`, or the
+  `AbstractMap$SimpleImmutableEntry` that `firstEntry`/`pollFirstEntry` answer.
 - **`asImmutable()` / `asSynchronized()` / `Collections.unmodifiableList` answer
   a plain copy.** All three answer the same *elements*, so a read through the
   result is right, but the wrapper type is not modeled: `getClass()` names
@@ -1056,7 +1076,13 @@ infinite loop on both sides.
   `$SynchronizedRandomAccessList`, and — the observable one — a
   mutation through the result **succeeds** where Groovy raises
   `UnsupportedOperationException`. Same root as the entry above: a list has no
-  kind to carry the immutability in. `Collections.emptyList`, `singletonList`
+  kind to carry the immutability in. Maps now have a kind but still no
+  *wrapper* kind, so the same holds there — `asImmutable()` on a `TreeMap`
+  answers a mutable `java.util.TreeMap` rather than
+  `Collections$UnmodifiableNavigableMap`, and `withDefault { … }` answers a
+  plain `LinkedHashMap` rather than `groovy.lang.MapWithDefault` (its
+  *behaviour* is modeled — see `MAP_DEFAULTS` — only its class is not).
+  `Collections.emptyList`, `singletonList`
   and `nCopies` have the same name divergence (`Collections$EmptyList`,
   `$SingletonList`, `$CopiesList`) but no behaviour one, since nothing in the
   corpus mutates them.

@@ -4364,3 +4364,290 @@ fn string_read_lines_splits_on_the_line_terminators() {
     assert!(ok);
     assert_eq!(out, "[[a, b, c], [], [a], [a, b]]\n");
 }
+
+#[test]
+fn a_tree_map_presents_its_entries_in_key_order_through_every_read() {
+    // `HeapObj::OrderedMap` carries a `MapKind`, and `as_omap` applies it — so
+    // one accessor puts a `TreeMap` in key order everywhere at once. This pins
+    // the *read paths*, which is where the old gap was a silent wrong answer:
+    // the entries were all present, only in the wrong order, so nothing threw.
+    //
+    // Keys are added in three different ways (constructor, property write,
+    // `putAll`) because storage stays insertion-ordered and presentation is
+    // derived; a fix that sorted only at construction would pass line 1 alone.
+    let src = r#"
+def m = new TreeMap([b:2, a:1, c:3])
+println m
+m.e = 5
+m.putAll([d:4])
+println m
+println([m.keySet(), m.values(), m.entrySet()])
+def order = ''
+m.each { k, v -> order += k }
+for (entry in m) { order += entry.key }
+println order
+println([m.collect { k, v -> k }, m.inject('') { acc, e -> acc + e.key }])
+println([m.firstKey(), m.lastKey(), m.iterator().next()])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[a:1, b:2, c:3]\n\
+         [a:1, b:2, c:3, d:4, e:5]\n\
+         [[a, b, c, d, e], [1, 2, 3, 4, 5], [a=1, b=2, c=3, d=4, e=5]]\n\
+         abcdeabcde\n\
+         [[a, b, c, d, e], abcde]\n\
+         [a, e, a=1]\n"
+    );
+}
+
+#[test]
+fn a_tree_map_stays_sorted_across_many_writes_and_through_a_second_name() {
+    // A probe corpus only ever exercises a handful of keys in one statement.
+    // This drives enough writes that a fix which sorted the *storage* on each
+    // one — rather than deriving presentation — would drift, and it reads the
+    // result through an alias to prove the kind rides the handle rather than
+    // the variable.
+    let src = r#"
+def m = new TreeMap()
+(1..200).each { m["k${(217 * it) % 200}"] = it }
+def alias = m
+def keys = alias.keySet()
+println([keys.size(), keys == keys.toSorted(), alias.firstKey(), alias.lastKey()])
+println([alias.getClass().getName(), alias.is(m)])
+alias.a = 0
+println([m.firstKey(), m.size()])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[200, true, k0, k99]\n\
+         [java.util.TreeMap, true]\n\
+         [a, 201]\n"
+    );
+}
+
+#[test]
+fn map_equality_ignores_both_order_and_implementation() {
+    // `Map.equals` is by entry set. groovyrs compared the *rendered* forms, so
+    // `[b:2, a:1] == [a:1, b:2]` was `false` — a silent wrong answer on plain
+    // map literals, independent of any TreeMap. Modeling map kinds made it
+    // worse, since a sorted and an insertion-ordered map now render differently
+    // by design, which is why this is pinned rather than left to the corpus.
+    let src = r#"
+println([[b:2, a:1] == [a:1, b:2], [b:2, a:1].equals([a:1, b:2])])
+println([new TreeMap([b:2, a:1]) == [a:1, b:2], [a:1, b:2] == new TreeMap([b:2, a:1])])
+println([[a:1] == [a:1, b:2], [a:1, b:2] == [a:1, b:3], [a:1] != [a:2]])
+println([([a:1] as Set) == [a:1], [a:1] == [1], [a:1] == 'a'])
+println([[a:[1, 2]] == [a:[1, 2]], [a:[b:1]] == [a:[b:1]]])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[true, true]\n\
+         [true, true]\n\
+         [false, false, true]\n\
+         [false, false, false]\n\
+         [true, true]\n"
+    );
+}
+
+#[test]
+fn a_hash_map_iterates_in_bucket_order_with_the_maps_own_table_pre_size() {
+    // `HashMap` lays its keys out in a power-of-two table, so its iteration
+    // order is neither insertion nor sorted. The table size is the JDK's
+    // `putMapEntries` pre-size, `Math.ceil(size / 0.75)` — deliberately *not*
+    // `HashSet(Collection)`'s `max(size / 0.75 + 1, 16)`. The two differ for
+    // five entries (an 8-slot table against a 16-slot one) and would otherwise
+    // look interchangeable, so both construction paths are pinned here.
+    let src = r#"
+println(new HashMap([one:1, two:2, three:3, four:4, five:5]))
+def built = new HashMap()
+['one','two','three','four','five'].eachWithIndex { k, i -> built.put(k, i + 1) }
+println built
+println(new HashMap([z:1, y:2, x:3]))
+println([new HashMap([:]), new HashMap([x:1])])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[two:2, three:3, five:5, four:4, one:1]\n\
+         [four:4, one:1, two:2, three:3, five:5]\n\
+         [x:3, y:2, z:1]\n\
+         [[:], [x:1]]\n"
+    );
+}
+
+#[test]
+fn a_derived_map_takes_its_class_from_which_gdk_method_built_it() {
+    // Three different rules, which is why guessing one of them gets the others
+    // wrong: `each`/`clone`/`plus` answer the receiver's exact implementation;
+    // `findAll`/`collectEntries`/`minus`/`take` go through Groovy's
+    // `createSimilarMap`, which preserves sortedness only (so a `HashMap`
+    // receiver yields a `LinkedHashMap`); and `sort()` always builds a `TreeMap`
+    // while `sort(closure)`/`toSorted()` never do.
+    let src = r#"
+def t = new TreeMap([b:2, a:1, c:3])
+def h = new HashMap([b:2, a:1, c:3])
+def cls = { it.getClass().getName() }
+println([cls(t.clone()), cls(t.each { }), cls(t + [d:4]), cls(h.clone()), cls(h.each { })])
+println([cls(t.findAll { k, v -> true }), cls(h.findAll { k, v -> true })])
+println([cls(t.collectEntries { k, v -> [k, v] }), cls(h.collectEntries { k, v -> [k, v] })])
+println([cls(t.minus([a:1])), cls(h.minus([a:1])), cls(t.take(2)), cls(h.take(2))])
+println([cls([b:2, a:1].sort()), cls(h.sort()), cls([b:2, a:1].sort { it.value }), cls([b:2, a:1].toSorted())])
+println([cls(t.groupBy { k, v -> 1 }), cls(t.countBy { k, v -> 1 })])
+println([t + [d:4], t.collectEntries { k, v -> [k, v * 2] }])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[java.util.TreeMap, java.util.TreeMap, java.util.TreeMap, java.util.HashMap, java.util.HashMap]\n\
+         [java.util.TreeMap, java.util.LinkedHashMap]\n\
+         [java.util.TreeMap, java.util.LinkedHashMap]\n\
+         [java.util.TreeMap, java.util.LinkedHashMap, java.util.TreeMap, java.util.LinkedHashMap]\n\
+         [java.util.TreeMap, java.util.TreeMap, java.util.LinkedHashMap, java.util.LinkedHashMap]\n\
+         [java.util.LinkedHashMap, java.util.LinkedHashMap]\n\
+         [[a:1, b:2, c:3, d:4], [a:2, b:4, c:6]]\n"
+    );
+}
+
+#[test]
+fn navigable_map_methods_reach_a_tree_map_and_no_other_map() {
+    // These are `java.util.NavigableMap`'s, so offering them to every map would
+    // turn a `MissingMethodException` Groovy raises into an answer. The negative
+    // half is the point of the test: `firstKey` on a `LinkedHashMap` must still
+    // throw, and it must throw *that* — which is why stderr is pinned rather
+    // than just a non-zero exit.
+    let src = r#"
+def m = new TreeMap([b:2, a:1, c:3])
+println([m.firstKey(), m.lastKey(), m.lowerKey('b'), m.higherKey('b'), m.floorKey('b'), m.ceilingKey('b')])
+println([m.lowerKey('a'), m.higherKey('c'), m.floorKey('0'), m.ceilingKey('z')])
+println([m.lowerEntry('b'), m.floorEntry('b'), m.ceilingEntry('bb'), m.higherEntry('c')])
+println([m.headMap('c'), m.tailMap('b'), m.headMap('c', true), m.tailMap('b', false)])
+println([m.subMap('a', 'c'), m.subMap('a', true, 'c', true), m.headMap('a'), m.tailMap('z')])
+println([m.descendingMap(), m.descendingKeySet(), m.navigableKeySet(), m.comparator()])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[a, c, a, c, b, b]\n\
+         [null, null, null, null]\n\
+         [a=1, b=2, c=3, null]\n\
+         [[a:1, b:2], [b:2, c:3], [a:1, b:2, c:3], [c:3]]\n\
+         [[a:1, b:2], [a:1, b:2, c:3], [:], [:]]\n\
+         [[c:3, b:2, a:1], [c, b, a], [a, b, c], null]\n"
+    );
+
+    for (recv, method) in [
+        ("[b:2, a:1]", "firstKey()"),
+        ("[b:2, a:1]", "headMap('b')"),
+        ("new HashMap([b:2, a:1])", "comparator()"),
+        ("new HashMap([b:2, a:1])", "descendingMap()"),
+    ] {
+        let (_, err, ok) = run_full(&format!("println({recv}.{method})"));
+        assert!(!ok, "{recv}.{method} should not dispatch");
+        assert!(
+            err.contains("groovy.lang.MissingMethodException"),
+            "{recv}.{method} raised {err:?}"
+        );
+    }
+
+    // `firstKey` on an *empty* TreeMap raises where `firstEntry` answers null —
+    // a JDK asymmetry, not an oversight.
+    let (_, err, ok) = run_full("println(new TreeMap([:]).firstKey())");
+    assert!(!ok);
+    assert!(err.contains("NoSuchElementException"), "{err:?}");
+}
+
+#[test]
+fn the_gdk_end_entry_methods_reach_every_map_unlike_the_navigable_key_pair() {
+    // `firstEntry`/`lastEntry`/`pollFirstEntry`/`pollLastEntry` are the GDK's
+    // and are defined on any map — the mirror image of `firstKey`, which is
+    // NavigableMap's. Gating these on the kind too would have been the natural
+    // mistake. The polls also have to mutate through the handle.
+    let src = r#"
+println([[b:2, a:1].firstEntry(), [b:2, a:1].lastEntry(), [:].firstEntry(), [:].pollFirstEntry()])
+def m = [b:2, a:1, c:3]
+println([m.pollFirstEntry(), m])
+println([m.pollLastEntry(), m])
+def t = new TreeMap([b:2, a:1, c:3])
+println([t.pollFirstEntry(), t])
+println([[b:2, a:1].take(1), [b:2, a:1].drop(1), new TreeMap([b:2, a:1, c:3]).take(2)])
+def seen = ''
+def back = [b:2, a:1].reverseEach { k, v -> seen += k }
+println([seen, back])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[b=2, a=1, null, null]\n\
+         [b=2, [a:1, c:3]]\n\
+         [c=3, [a:1]]\n\
+         [a=1, [b:2, c:3]]\n\
+         [[b:2], [a:1], [a:1, b:2]]\n\
+         [ab, [b:2, a:1]]\n"
+    );
+}
+
+#[test]
+fn a_map_as_cast_re_homes_only_when_it_is_not_already_that_class() {
+    // `asType` hands back an operand that already *is* the target, and
+    // `LinkedHashMap extends HashMap` — so `[a:1] as HashMap` stays a
+    // `LinkedHashMap` and keeps insertion order. Casting the kind
+    // unconditionally gets this wrong in the way that is hardest to notice: the
+    // entries are identical, only the print order moves.
+    let src = r#"
+def cls = { it.getClass().getName() }
+println([cls([b:2, a:1] as TreeMap), cls([a:1] as HashMap), cls([a:1] as LinkedHashMap), cls([a:1] as Map)])
+println([cls(new TreeMap([b:2, a:1]) as HashMap), cls(new TreeMap([b:2, a:1]) as LinkedHashMap)])
+println([[b:2, a:1] as TreeMap, new TreeMap([b:2, a:1]) as LinkedHashMap])
+def m = new TreeMap([b:2, a:1])
+println([m instanceof Map, m instanceof TreeMap, m instanceof SortedMap, m instanceof NavigableMap, m instanceof LinkedHashMap, m instanceof HashMap])
+def h = new HashMap([b:2, a:1])
+println([h instanceof HashMap, h instanceof LinkedHashMap, h instanceof TreeMap])
+println([[b:2, a:1] instanceof LinkedHashMap, [b:2, a:1] instanceof HashMap, [b:2, a:1] instanceof TreeMap])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[java.util.TreeMap, java.util.LinkedHashMap, java.util.LinkedHashMap, java.util.LinkedHashMap]\n\
+         [java.util.HashMap, java.util.LinkedHashMap]\n\
+         [[a:1, b:2], [a:1, b:2]]\n\
+         [true, true, true, true, false, false]\n\
+         [true, false, false]\n\
+         [true, true, false]\n"
+    );
+}
+
+#[test]
+fn sub_map_selects_in_the_arguments_order_not_the_receivers() {
+    // The GDK walks the requested keys and puts each into a fresh map, so the
+    // result follows the argument. Filtering the receiver's entries instead
+    // reads identically whenever the two orders agree — which every sorted
+    // receiver does, so only an out-of-order request catches it.
+    //
+    // On a TreeMap the two- and four-argument spellings are NavigableMap's
+    // half-open *range* instead, so the same name means two different things
+    // depending on the receiver's kind.
+    let src = r#"
+println([[b:2, a:1, c:3].subMap(['c', 'a']), [b:2, a:1].subMap('a', 'b'), [a:1].subMap(['a', 'zz'])])
+println([new TreeMap([b:2, a:1, c:3]).subMap(['c', 'a']), new TreeMap([b:2, a:1, c:3]).subMap('a', 'c')])
+println([b:2, a:1, c:3].subMap(['c', 'a']).getClass().getName())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[[c:3, a:1], [a:1, b:2], [a:1]]\n\
+         [[c:3, a:1], [a:1, b:2]]\n\
+         java.util.LinkedHashMap\n"
+    );
+}

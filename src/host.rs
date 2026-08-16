@@ -1036,7 +1036,7 @@ fn java_class_name(v: &Value) -> String {
         _ if as_list_raw(v).is_some() => "java.util.ArrayList",
         _ if as_bigint(v).is_some() => "java.math.BigInteger",
         _ if as_dec(v).is_some() => "java.math.BigDecimal",
-        _ if as_omap(v).is_some() => "java.util.LinkedHashMap",
+        _ if omap_kind(v).is_some() => map_class(omap_kind(v).unwrap()),
         _ if closure_meta(v).is_some() => "groovy.lang.Closure",
         _ if as_iter(v).is_some() => return as_iter(v).unwrap().0.to_string(),
         _ => "java.lang.Object",
@@ -1340,10 +1340,23 @@ fn with_vm<R>(f: impl FnOnce(&mut VM) -> R) -> Option<R> {
 enum HeapObj {
     Closure(ClosureMeta),
     Instance(Instance),
-    /// A Groovy map: insertion-ordered key/value pairs (a `LinkedHashMap`
-    /// equivalent). Lives on the heap so `println` order is Groovy's and
-    /// `m.k = v` mutates in place through the shared handle.
-    OrderedMap(Vec<(String, Value)>),
+    /// A Groovy map. Entries are *stored* in insertion order whatever the
+    /// implementation; [`MapKind`] decides the order they are iterated and
+    /// printed in, exactly as [`SetKind`] does for a set.
+    ///
+    /// Lives on the heap so `println` order is Groovy's and `m.k = v` mutates in
+    /// place through the shared handle.
+    ///
+    /// Keeping storage in insertion order and deriving presentation from `kind`
+    /// is what makes one accessor ([`as_omap`]) fix every read at once: `println`,
+    /// `each`, `collect`, `keySet`, `values`, `entrySet`, `iterator`, `inject`
+    /// and `groupBy` all go through it, so a `TreeMap` sorts in all of them
+    /// without a per-method sort. It also keeps `omap_set` a plain append —
+    /// re-sorting on every write would make `m.c = 3` O(n log n).
+    OrderedMap {
+        entries: Vec<(String, Value)>,
+        kind: MapKind,
+    },
     /// A `java.math.BigDecimal` — every unsuffixed Groovy decimal. fusevm's
     /// `Value::Float` is an `f64` and cannot carry a decimal's scale or its
     /// unbounded magnitude, so decimals ride a handle like any other host
@@ -1486,6 +1499,25 @@ enum HeapObj {
         len: usize,
         exp_mod: u64,
     },
+}
+
+/// Which `java.util.Map` implementation a map handle is, which is exactly the
+/// question of what order it presents its entries in. The set-side twin of
+/// [`SetKind`], and it reuses that side's ordering machinery — a map's keys are
+/// bucketed by [`hash_order`] and sorted by [`natural_order`] the same way a
+/// set's elements are.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MapKind {
+    /// `java.util.LinkedHashMap` — insertion order. Every map literal, and what
+    /// a GDK method that rebuilds a map answers.
+    Linked,
+    /// `java.util.HashMap` — the JDK's bucket order (see [`hash_order`]). `req`
+    /// is the initial capacity the construction path asked for; a bare
+    /// `new HashMap()` takes the default 16 and `new HashMap(Map)` pre-sizes
+    /// from the argument (see [`hash_req_for_map`]).
+    Hash { req: usize },
+    /// `java.util.TreeMap` — ascending key order.
+    Tree,
 }
 
 /// Which `java.util.Set` implementation a set handle is, which is exactly the
@@ -2175,14 +2207,226 @@ fn b_truth_keep(vm: &mut VM, _argc: u8) -> Value {
     Value::bool(groovy_truthy(vm, &v))
 }
 
-/// Clone the entries of an ordered-map handle, if `v` is one.
+/// The entries of an ordered-map handle **in the order it presents them** — what
+/// iterating it yields and what `toString` lays out. The map-side twin of
+/// [`set_elements`], and the single choke point that makes a `TreeMap` sort
+/// everywhere: every read arm in the GDK reaches its entries through here.
+///
+/// A caller that needs *storage* order (only the mutators, which append) works
+/// against the heap directly.
 fn as_omap(v: &Value) -> Option<Vec<(String, Value)>> {
+    let (entries, kind) = as_omap_kind(v)?;
+    Some(map_order(entries, kind))
+}
+
+/// The entries of an ordered-map handle in **storage** (insertion) order, with
+/// the kind that decides how they are presented.
+fn as_omap_kind(v: &Value) -> Option<(Vec<(String, Value)>, MapKind)> {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
-            Some(HeapObj::OrderedMap(m)) => Some(m.clone()),
+            Some(HeapObj::OrderedMap { entries, kind }) => Some((entries.clone(), *kind)),
             _ => None,
         }),
         _ => None,
+    }
+}
+
+/// Just the implementation kind of an ordered-map handle.
+fn omap_kind(v: &Value) -> Option<MapKind> {
+    as_omap_kind(v).map(|(_, k)| k)
+}
+
+/// Reorder insertion-ordered entries into the order `kind` presents them in.
+/// A `HashMap` buckets its **keys** through the very same [`hash_order`] a
+/// `HashSet` buckets its elements with, and a `TreeMap` sorts them through
+/// [`natural_order`] — which, because a map key is stored as its rendered form,
+/// is `String.compareTo` (see the `TreeMap` note in BUGS.md for the numeric-key
+/// consequence).
+fn map_order(entries: Vec<(String, Value)>, kind: MapKind) -> Vec<(String, Value)> {
+    match kind {
+        MapKind::Linked => entries,
+        MapKind::Hash { req } => {
+            let keys: Vec<Value> = entries.iter().map(|(k, _)| Value::str(k.clone())).collect();
+            hash_order(&keys, req)
+                .into_iter()
+                .map(|i| entries[i].clone())
+                .collect()
+        }
+        MapKind::Tree => {
+            let mut out = entries;
+            out.sort_by(|a, b| natural_order(&Value::str(a.0.clone()), &Value::str(b.0.clone())));
+            out
+        }
+    }
+}
+
+/// The initial capacity `new HashMap(Map m)` asks for: the JDK's
+/// `putMapEntries` pre-size, `Math.ceil(size / 0.75)`.
+///
+/// This is **not** [`hash_req_for_collection`]: `HashSet(Collection)` floors its
+/// request at 16, `HashMap(Map)` does not, and the two really do iterate
+/// differently as a result. Five entries land in an 8-slot table here and a
+/// 16-slot one there.
+fn hash_req_for_map(n: usize) -> usize {
+    (n as f64 / 0.75).ceil() as usize
+}
+
+/// Build a `LinkedHashMap` handle — every map literal and every GDK method that
+/// rebuilds a map from scratch.
+fn gmap(entries: Vec<(String, Value)>) -> Value {
+    heap_push(HeapObj::OrderedMap {
+        entries,
+        kind: MapKind::Linked,
+    })
+}
+
+/// Build a map handle of a given implementation kind. `entries` is in insertion
+/// order; the kind decides presentation.
+fn gmap_kind(entries: Vec<(String, Value)>, kind: MapKind) -> Value {
+    heap_push(HeapObj::OrderedMap { entries, kind })
+}
+
+/// `java.util.NavigableMap`'s own methods — the ones a `TreeMap` answers and no
+/// other map does. Returns `None` for a method that is not one of them, so the
+/// caller falls through to the shared `Map` arms.
+///
+/// `entries` arrives sorted (a `Tree` map presents in key order), so a *range*
+/// method is a filter and a *neighbour* method is a scan. The whole family is
+/// keyed off [`utf16_cmp`] rather than `natural_order` for the same reason
+/// [`map_order`] is: a map key is stored as its rendered form, so `TreeMap`'s
+/// comparator here is `String.compareTo`, and the two must agree or a `headMap`
+/// would cut a sequence it was not sorted by.
+///
+/// `comparator()` answers `null` because a `TreeMap` built without one uses the
+/// keys' natural ordering, and no construction path here can supply one.
+fn dispatch_navigable_map(
+    vm: &mut VM,
+    entries: &[(String, Value)],
+    method: &str,
+    args: &[Value],
+) -> Option<Value> {
+    let key_arg = |i: usize| args.get(i).map(groovy_str).unwrap_or_default();
+    let entry_at = |i: Option<usize>| match i {
+        Some(i) => {
+            let (k, v) = &entries[i];
+            heap_push(HeapObj::Entry(k.clone(), v.clone()))
+        }
+        None => Value::Undef,
+    };
+    let key_at = |i: Option<usize>| match i {
+        Some(i) => Value::str(entries[i].0.clone()),
+        None => Value::Undef,
+    };
+    // The four neighbour searches, as indices into the sorted `entries`.
+    let strictly_below = |k: &str| {
+        (0..entries.len())
+            .rev()
+            .find(|&i| entries[i].0.as_str() < k)
+    };
+    let at_or_below = |k: &str| {
+        (0..entries.len())
+            .rev()
+            .find(|&i| entries[i].0.as_str() <= k)
+    };
+    let at_or_above = |k: &str| (0..entries.len()).find(|&i| entries[i].0.as_str() >= k);
+    let strictly_above = |k: &str| (0..entries.len()).find(|&i| entries[i].0.as_str() > k);
+    // A range view is materialised as a plain `TreeMap` of the selected entries.
+    // The views' own class names (`TreeMap$AscendingSubMap`, `$DescendingSubMap`)
+    // are not modeled — see the `TreeMap` entry in BUGS.md.
+    let range = |keep: &dyn Fn(&str) -> bool| {
+        gmap_kind(
+            entries
+                .iter()
+                .filter(|(k, _)| keep(k))
+                .cloned()
+                .collect::<Vec<_>>(),
+            MapKind::Tree,
+        )
+    };
+    // `inclusive` defaults differ per method: `headMap(k)` excludes `k`,
+    // `tailMap(k)` includes it.
+    let flag = |i: usize, dflt: bool| match args.get(i) {
+        Some(Value::Bool(b)) => *b,
+        _ => dflt,
+    };
+    Some(match method {
+        // `firstKey`/`lastKey` raise on an empty map where `firstEntry`/
+        // `lastEntry` answer null — a JDK asymmetry, not an oversight.
+        "firstKey" | "lastKey" => {
+            if entries.is_empty() {
+                raise(vm, "NoSuchElementException", "");
+                return Some(Value::Undef);
+            }
+            key_at(Some(if method == "firstKey" {
+                0
+            } else {
+                entries.len() - 1
+            }))
+        }
+        "lowerKey" => key_at(strictly_below(&key_arg(0))),
+        "floorKey" => key_at(at_or_below(&key_arg(0))),
+        "ceilingKey" => key_at(at_or_above(&key_arg(0))),
+        "higherKey" => key_at(strictly_above(&key_arg(0))),
+        "lowerEntry" => entry_at(strictly_below(&key_arg(0))),
+        "floorEntry" => entry_at(at_or_below(&key_arg(0))),
+        "ceilingEntry" => entry_at(at_or_above(&key_arg(0))),
+        "higherEntry" => entry_at(strictly_above(&key_arg(0))),
+        "headMap" => {
+            let (k, inc) = (key_arg(0), flag(1, false));
+            range(&|x: &str| if inc { x <= &k } else { x < &k })
+        }
+        "tailMap" => {
+            let (k, inc) = (key_arg(0), flag(1, true));
+            range(&|x: &str| if inc { x >= &k } else { x > &k })
+        }
+        // `subMap` is the one name that collides: on a `TreeMap` two or four
+        // arguments are the `NavigableMap` *range*, but the single-argument
+        // collection form is still the GDK's key selection, so it falls through.
+        "subMap" if args.len() == 2 && !is_list(&args[0]) => {
+            let (lo, hi) = (key_arg(0), key_arg(1));
+            range(&|x: &str| x >= &lo && x < &hi)
+        }
+        "subMap" if args.len() == 4 => {
+            let (lo, hi) = (key_arg(0), key_arg(2));
+            let (li, hi_inc) = (flag(1, true), flag(3, false));
+            range(&|x: &str| {
+                (if li { x >= &lo } else { x > &lo }) && (if hi_inc { x <= &hi } else { x < &hi })
+            })
+        }
+        "descendingMap" => {
+            let mut rev = entries.to_vec();
+            rev.reverse();
+            // A descending view is not a `TreeMap` — presenting it as one would
+            // re-sort it ascending — so it is handed back as the insertion-
+            // ordered map that holds the reversed sequence.
+            gmap(rev)
+        }
+        "descendingKeySet" => Value::array(
+            entries
+                .iter()
+                .rev()
+                .map(|(k, _)| Value::str(k.clone()))
+                .collect(),
+        ),
+        "navigableKeySet" => {
+            Value::array(entries.iter().map(|(k, _)| Value::str(k.clone())).collect())
+        }
+        "comparator" => Value::Undef,
+        _ => return None,
+    })
+}
+
+/// Groovy's `DefaultGroovyMethods.createSimilarMap`: the kind of the map a GDK
+/// method builds to hold a *subset* of a receiver's entries. It preserves only
+/// sortedness — a `SortedMap` gets another `TreeMap`, and every other receiver
+/// (including a `HashMap`) gets a `LinkedHashMap`, because the JDK offers no way
+/// to clone a hash table's capacity. `findAll` is the method this governs;
+/// `each` and `clone`, which answer the receiver itself or a true copy, keep the
+/// exact kind instead.
+fn similar_map_kind(kind: MapKind) -> MapKind {
+    match kind {
+        MapKind::Tree => MapKind::Tree,
+        _ => MapKind::Linked,
     }
 }
 
@@ -2192,10 +2436,10 @@ fn as_omap(v: &Value) -> Option<Vec<(String, Value)>> {
 fn omap_set(v: &Value, key: String, val: Value) -> bool {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
-            Some(HeapObj::OrderedMap(m)) => {
-                match m.iter_mut().find(|(k, _)| *k == key) {
+            Some(HeapObj::OrderedMap { entries, .. }) => {
+                match entries.iter_mut().find(|(k, _)| *k == key) {
                     Some(slot) => slot.1 = val,
-                    None => m.push((key, val)),
+                    None => entries.push((key, val)),
                 }
                 true
             }
@@ -2240,7 +2484,7 @@ fn b_make_map(vm: &mut VM, _argc: u8) -> Value {
         }
         i += 2;
     }
-    heap_push(HeapObj::OrderedMap(entries))
+    gmap(entries)
 }
 
 /// `GMAKE_CLOSURE`: pop the capture count, parameter count, and name index, then
@@ -2731,7 +2975,20 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
         }
         "HashMap" | "LinkedHashMap" | "TreeMap" => {
             let entries = args.first().and_then(as_omap).unwrap_or_default();
-            heap_push(HeapObj::OrderedMap(entries))
+            let kind = match simple_name_of(class).as_str() {
+                "TreeMap" => MapKind::Tree,
+                "LinkedHashMap" => MapKind::Linked,
+                // `new HashMap(Map)` pre-sizes its table from the argument;
+                // `new HashMap()` takes the JDK's default 16.
+                _ => MapKind::Hash {
+                    req: if args.is_empty() {
+                        DEFAULT_HASH_REQ
+                    } else {
+                        hash_req_for_map(entries.len())
+                    },
+                },
+            };
+            gmap_kind(entries, kind)
         }
         "Object" => heap_push(HeapObj::Instance(Instance {
             class: u32::MAX,
@@ -3719,6 +3976,25 @@ fn values_equal(a: &Value, b: &Value) -> bool {
             _ => false,
         };
     }
+    // `Map.equals` is by *entry set* — it ignores both order and implementation,
+    // so `[b: 2, a: 1] == [a: 1, b: 2]` and a `TreeMap` equals the
+    // `LinkedHashMap` of the same entries. Decided here because the fallback
+    // below compares rendered forms, which answers `false` for both: two maps
+    // holding the same entries in different orders print differently.
+    //
+    // Only ever true against another map, the way the set arm above is: a map
+    // and a list are never equal in Java whatever they contain.
+    let (ma, mb) = (as_omap(a), as_omap(b));
+    if ma.is_some() || mb.is_some() {
+        return match (ma, mb) {
+            (Some(x), Some(y)) => {
+                x.len() == y.len()
+                    && x.iter()
+                        .all(|(k, v)| y.iter().any(|(k2, v2)| k == k2 && values_equal(v, v2)))
+            }
+            _ => false,
+        };
+    }
     // A range compares as the list it enumerates, so `(1..3) == [1, 2, 3]` is
     // true in both directions the way Groovy's `AbstractList.equals` makes it.
     if as_range(a).is_some() || as_range(b).is_some() {
@@ -3927,9 +4203,22 @@ fn value_is_a(value: &Value, class: &str) -> bool {
                 || as_range(value).is_some()
         }
         "Range" | "IntRange" | "ObjectRange" | "NumberRange" => as_range(value).is_some(),
-        "Map" | "LinkedHashMap" | "HashMap" => {
-            matches!(value, Value::Hash(_)) || as_omap(value).is_some()
+        // Every map answers `Map`. The concrete names follow the JDK's hierarchy
+        // rather than aliasing each other: `LinkedHashMap extends HashMap`, so a
+        // `LinkedHashMap` is a `HashMap` but **not** the other way round, and
+        // `SortedMap`/`NavigableMap` are the `TreeMap`'s alone.
+        "Map" | "AbstractMap" => matches!(value, Value::Hash(_)) || as_omap(value).is_some(),
+        "LinkedHashMap" => {
+            matches!(value, Value::Hash(_)) || omap_kind(value) == Some(MapKind::Linked)
         }
+        "HashMap" => {
+            matches!(value, Value::Hash(_))
+                || matches!(
+                    omap_kind(value),
+                    Some(MapKind::Linked | MapKind::Hash { .. })
+                )
+        }
+        "TreeMap" | "SortedMap" | "NavigableMap" => omap_kind(value) == Some(MapKind::Tree),
         _ => false,
     }
 }
@@ -5047,7 +5336,8 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // The same operations over a map, which passes `(key, value)` (or one
     // `Map.Entry`) to the closure and rebuilds a map where Groovy does.
     if let Some(entries) = as_omap(&recv) {
-        if let Some(res) = dispatch_map_iteration(vm, &entries, method, &args) {
+        let kind = omap_kind(&recv).unwrap_or(MapKind::Linked);
+        if let Some(res) = dispatch_map_iteration(vm, &entries, kind, method, &args) {
             return match res {
                 Ok(v) => v,
                 Err(e) => {
@@ -5371,12 +5661,12 @@ fn dispatch_iteration(
                     None => groups.push((key, vec![it.clone()])),
                 }
             }
-            Some(Ok(heap_push(HeapObj::OrderedMap(
+            Some(Ok(gmap(
                 groups
                     .into_iter()
                     .map(|(k, v)| (k, Value::array(v)))
                     .collect(),
-            ))))
+            )))
         }
         // `list.countBy { … }` — a map from the closure's value to how many
         // elements produced it, keys in first-seen order.
@@ -5397,12 +5687,12 @@ fn dispatch_iteration(
                     None => counts.push((key, 1)),
                 }
             }
-            Some(Ok(heap_push(HeapObj::OrderedMap(
+            Some(Ok(gmap(
                 counts
                     .into_iter()
                     .map(|(k, n)| (k, Value::int(n)))
                     .collect(),
-            ))))
+            )))
         }
         // `list.findIndexValues { … }` — *every* accepted index, where
         // `findIndexOf` answers only the first.
@@ -5495,7 +5785,7 @@ fn dispatch_iteration(
                     }
                 }
             }
-            Some(Ok(heap_push(HeapObj::OrderedMap(out))))
+            Some(Ok(gmap(out)))
         }
         // `list.collectMany { … }` — collect, then concatenate the sublists.
         "collectMany" => {
@@ -5724,9 +6014,16 @@ fn entry_pairs(v: &Value) -> Vec<(String, Value)> {
 /// Groovy hands a map's closure either `(key, value)` (a two-parameter closure)
 /// or one `Map.Entry` (a one-parameter closure); [`entry_args`] picks between
 /// them from the closure's declared parameter count.
+/// `entries` arrives in the receiver's *presentation* order, so every closure
+/// here already runs in the order the map iterates. `kind` is the receiver's
+/// implementation, carried so the methods that answer a map **of the same
+/// class** — `each` (which returns the receiver), `findAll`, `sort` — rebuild
+/// one; the rest (`collectEntries`, `groupBy`, `countBy`) answer a
+/// `LinkedHashMap` whatever they were called on, as Groovy's do.
 fn dispatch_map_iteration(
     vm: &mut VM,
     entries: &[(String, Value)],
+    kind: MapKind,
     method: &str,
     args: &[Value],
 ) -> Option<Result<Value, String>> {
@@ -5734,9 +6031,15 @@ fn dispatch_map_iteration(
     // has a no-argument (sort-by-key) form.
     let clo = args.last().filter(|a| closure_meta(a).is_some());
     match method {
-        "each" | "eachWithIndex" => {
+        // `reverseEach` walks the map's own order backwards and, like `each`,
+        // answers the receiver.
+        "each" | "eachWithIndex" | "reverseEach" => {
             let clo = clo?;
-            for (i, (k, v)) in entries.iter().enumerate() {
+            let walked: Vec<&(String, Value)> = match method {
+                "reverseEach" => entries.iter().rev().collect(),
+                _ => entries.iter().collect(),
+            };
+            for (i, (k, v)) in walked.into_iter().enumerate() {
                 let mut call = entry_args(clo, k, v);
                 if method == "eachWithIndex" {
                     call.push(Value::int(i as i64));
@@ -5748,7 +6051,7 @@ fn dispatch_map_iteration(
                     return Some(Ok(Value::Undef));
                 }
             }
-            Some(Ok(heap_push(HeapObj::OrderedMap(entries.to_vec()))))
+            Some(Ok(gmap_kind(entries.to_vec(), kind)))
         }
         // `map.grep(filter)` has no `Map` overload, so Groovy reaches the
         // `Object` one: it iterates the map as its entry set and builds an
@@ -5806,7 +6109,11 @@ fn dispatch_map_iteration(
                     }
                 }
             }
-            Some(Ok(heap_push(HeapObj::OrderedMap(out))))
+            // `collectEntries` accumulates into `createSimilarMap`'s result, so
+            // `new TreeMap(…).collectEntries { … }` is a `TreeMap` and re-sorts
+            // whatever keys the closure produced, while a `HashMap` receiver
+            // answers a `LinkedHashMap`.
+            Some(Ok(gmap_kind(out, similar_map_kind(kind))))
         }
         // `map.collect { k, v -> … }` yields a *list* of the closure's results.
         "collect" => {
@@ -5848,7 +6155,7 @@ fn dispatch_map_iteration(
                 }
             }
             Some(Ok(match method {
-                "findAll" => heap_push(HeapObj::OrderedMap(kept)),
+                "findAll" => gmap_kind(kept, similar_map_kind(kind)),
                 "any" => Value::bool(false),
                 "every" => Value::bool(true),
                 _ => Value::Undef,
@@ -5872,12 +6179,9 @@ fn dispatch_map_iteration(
                     None => groups.push((key, vec![(k.clone(), v.clone())])),
                 }
             }
-            Some(Ok(heap_push(HeapObj::OrderedMap(
-                groups
-                    .into_iter()
-                    .map(|(k, v)| (k, heap_push(HeapObj::OrderedMap(v))))
-                    .collect(),
-            ))))
+            Some(Ok(gmap(
+                groups.into_iter().map(|(k, v)| (k, gmap(v))).collect(),
+            )))
         }
         // `map.inject(seed) { acc, entry -> … }` folds over the entries.
         "inject" => {
@@ -5914,13 +6218,16 @@ fn dispatch_map_iteration(
             if clo.is_none() {
                 let mut sorted = entries.to_vec();
                 sorted.sort_by(|a, b| a.0.cmp(&b.0));
-                return Some(Ok(heap_push(HeapObj::OrderedMap(sorted))));
+                // `sort(Map)` answers a `TreeMap` whatever it was called on —
+                // sorting by key *is* building one — while the closure form
+                // below answers a `LinkedHashMap` holding the closure's order,
+                // which a `TreeMap` could not represent.
+                return Some(Ok(gmap_kind(sorted, MapKind::Tree)));
             }
-            Some(sort_values(vm, &handles, &order).map(|sorted| {
-                heap_push(HeapObj::OrderedMap(
-                    sorted.iter().filter_map(as_entry).collect(),
-                ))
-            }))
+            Some(
+                sort_values(vm, &handles, &order)
+                    .map(|sorted| gmap(sorted.iter().filter_map(as_entry).collect())),
+            )
         }
         // `map.count { k, v -> … }` — how many entries the closure accepts.
         "count" => {
@@ -5956,19 +6263,19 @@ fn dispatch_map_iteration(
                     None => counts.push((key, 1)),
                 }
             }
-            Some(Ok(heap_push(HeapObj::OrderedMap(
+            Some(Ok(gmap(
                 counts
                     .into_iter()
                     .map(|(k, n)| (k, Value::int(n)))
                     .collect(),
-            ))))
+            )))
         }
         // `map.withDefault { key -> … }` — a copy whose missing-key reads run the
         // closure and *store* its result, the way `groovy.lang.MapWithDefault`
         // does. The closure is remembered in `MAP_DEFAULTS` against the copy.
         "withDefault" => {
             let clo = clo?;
-            let copy = heap_push(HeapObj::OrderedMap(entries.to_vec()));
+            let copy = gmap(entries.to_vec());
             if let Value::Obj(id) = copy {
                 MAP_DEFAULTS.with(|m| m.borrow_mut().insert(id, clo.clone()));
             }
@@ -6895,12 +7202,12 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // …while `indexed([offset])` answers a *map* from position to element.
         (Value::Array(a), "indexed") => {
             let base = args.first().and_then(as_i64).unwrap_or(0);
-            heap_push(HeapObj::OrderedMap(
+            gmap(
                 a.iter()
                     .enumerate()
                     .map(|(i, v)| ((base + i as i64).to_string(), v.clone()))
                     .collect(),
-            ))
+            )
         }
         // `list.iterator()` — a live cursor over the elements. Stateful, so it
         // rides a handle (see `HeapObj::Iter`).
@@ -7566,6 +7873,17 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // ── Ordered map (host heap) ──
         _ if as_omap(recv).is_some() => {
             let entries = as_omap(recv).unwrap();
+            let kind = omap_kind(recv).unwrap_or(MapKind::Linked);
+            // `java.util.NavigableMap` is the `TreeMap`'s interface alone: on any
+            // other map every one of these is a `MissingMethodException`, which
+            // is why they are gated on the kind rather than offered to all maps.
+            // `entries` is already in key order for a `Tree` map, so each of them
+            // is a scan of a sorted sequence.
+            if kind == MapKind::Tree {
+                if let Some(v) = dispatch_navigable_map(vm, &entries, method, args) {
+                    return v;
+                }
+            }
             match method {
                 "isEmpty" => Value::bool(entries.is_empty()),
                 "containsKey" => {
@@ -7590,9 +7908,60 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 "keySet" | "keys" => {
                     Value::array(entries.iter().map(|(k, _)| Value::str(k.clone())).collect())
                 }
+                // The entry-at-an-end four are the GDK's, defined on *every* map —
+                // unlike `firstKey`/`lastKey`, which are `NavigableMap`'s and
+                // reach a `TreeMap` alone. They answer null on an empty map where
+                // the key pair raises, and the two `poll` spellings also remove
+                // the entry they answer, mutating through the handle.
+                "firstEntry" | "lastEntry" | "pollFirstEntry" | "pollLastEntry" => {
+                    match entries.len() {
+                        0 => Value::Undef,
+                        n => {
+                            let i = match method {
+                                "firstEntry" | "pollFirstEntry" => 0,
+                                _ => n - 1,
+                            };
+                            let (k, v) = &entries[i];
+                            let taken = heap_push(HeapObj::Entry(k.clone(), v.clone()));
+                            if method.starts_with("poll") {
+                                let gone = k.clone();
+                                omap_retain(recv, |x| x != gone);
+                            }
+                            taken
+                        }
+                    }
+                }
+                // `map.take(n)` / `drop(n)` — the first (or all but the first)
+                // `n` entries in the map's own order, as a map of the same kind.
+                "take" | "drop" => {
+                    let n = args
+                        .first()
+                        .map(|v| v.to_int().max(0) as usize)
+                        .unwrap_or(0);
+                    let kept: Vec<(String, Value)> = match method {
+                        "take" => entries.into_iter().take(n).collect(),
+                        _ => entries.into_iter().skip(n).collect(),
+                    };
+                    gmap_kind(kept, similar_map_kind(kind))
+                }
+                // `map.toSorted()` orders by key like `sort()` but — unlike it —
+                // answers a `LinkedHashMap` *holding* that order rather than a
+                // `TreeMap`. The two spellings really do differ in class.
+                "toSorted" if args.is_empty() => {
+                    let mut sorted = entries;
+                    sorted.sort_by(|a, b| utf16_cmp(&a.0, &b.0));
+                    gmap(sorted)
+                }
                 // `map.subMap(keys)` — the entries for the listed keys, in the
-                // *receiver's* order; a key the map does not hold is dropped.
+                // ***argument's*** order; a key the map does not hold is dropped.
                 // Both the collection and the varargs spelling are accepted.
+                //
+                // The GDK walks the requested keys and puts each into a fresh
+                // `LinkedHashMap`, so the result follows them rather than the
+                // receiver: `[b: 2, a: 1].subMap('a', 'b')` is `[a:1, b:2]`.
+                // Filtering the receiver's entries instead reads identically
+                // whenever the two orders agree, which is why a sorted receiver
+                // hid it.
                 "subMap" => {
                     let wanted: Vec<String> = match args {
                         [one] if is_list(one) || as_range(one).is_some() => {
@@ -7600,47 +7969,58 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         }
                         rest => rest.iter().map(groovy_str).collect(),
                     };
-                    heap_push(HeapObj::OrderedMap(
-                        entries
+                    gmap(
+                        wanted
                             .into_iter()
-                            .filter(|(k, _)| wanted.iter().any(|w| w == k))
+                            .filter_map(|w| {
+                                entries
+                                    .iter()
+                                    .find(|(k, _)| *k == w)
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                            })
                             .collect(),
-                    ))
+                    )
                 }
-                // `map.spread()` is a shallow copy of the map.
-                "spread" | "clone" | "asImmutable" | "asSynchronized" => {
-                    heap_push(HeapObj::OrderedMap(entries))
-                }
+                // `map.spread()` is a shallow copy of the map. A copy is the same
+                // implementation as its source, so the kind rides along —
+                // `new TreeMap(…).clone()` is a `TreeMap` and still sorts.
+                "spread" | "clone" | "asImmutable" | "asSynchronized" => gmap_kind(entries, kind),
                 // `map - other` / `map.minus(other)` drops the entries the other
                 // map holds *identically* (same key and same value).
                 "minus" => {
                     let drop: Vec<(String, Value)> =
                         args.first().map(entry_pairs).unwrap_or_default();
-                    heap_push(HeapObj::OrderedMap(
+                    gmap_kind(
                         entries
                             .into_iter()
                             .filter(|(k, v)| {
                                 !drop.iter().any(|(dk, dv)| dk == k && values_equal(dv, v))
                             })
                             .collect(),
-                    ))
+                        similar_map_kind(kind),
+                    )
                 }
                 // …and `intersect` keeps exactly those.
                 "intersect" => {
                     let keep: Vec<(String, Value)> =
                         args.first().map(entry_pairs).unwrap_or_default();
-                    heap_push(HeapObj::OrderedMap(
+                    gmap_kind(
                         entries
                             .into_iter()
                             .filter(|(k, v)| {
                                 keep.iter().any(|(dk, dv)| dk == k && values_equal(dv, v))
                             })
                             .collect(),
-                    ))
+                        similar_map_kind(kind),
+                    )
                 }
                 // A map iterates over its entries.
                 "iterator" => heap_push(HeapObj::Iter {
-                    class: "java.util.LinkedHashMap$LinkedEntryIterator",
+                    class: match kind {
+                        MapKind::Linked => "java.util.LinkedHashMap$LinkedEntryIterator",
+                        MapKind::Hash { .. } => "java.util.HashMap$EntryIterator",
+                        MapKind::Tree => "java.util.TreeMap$EntryIterator",
+                    },
                     items: entries
                         .into_iter()
                         .map(|(k, v)| heap_push(HeapObj::Entry(k, v)))
@@ -8237,6 +8617,27 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
                 },
             )
         }
+        // `map as TreeMap` re-homes the same entries into another implementation,
+        // which changes the order they present in.
+        //
+        // `as HashMap` converts a `TreeMap` but leaves the other two **alone**,
+        // because `asType` hands back an operand that is already an instance of
+        // the target and `LinkedHashMap extends HashMap`: `[a: 1] as HashMap` is
+        // still a `LinkedHashMap`. Casting the kind unconditionally got that
+        // wrong in the direction that is hardest to notice — the entries are the
+        // same, only the print order moves.
+        "TreeMap" | "HashMap" | "LinkedHashMap" => match (as_omap(&v), omap_kind(&v)) {
+            (Some(entries), Some(from)) => match ty_simple.as_str() {
+                "TreeMap" => gmap_kind(entries, MapKind::Tree),
+                "LinkedHashMap" => gmap_kind(entries, MapKind::Linked),
+                _ if from == MapKind::Tree => {
+                    let req = hash_req_for_map(entries.len());
+                    gmap_kind(entries, MapKind::Hash { req })
+                }
+                _ => v,
+            },
+            _ => v,
+        },
         _ => v,
     }
 }
@@ -8622,7 +9023,7 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         // handle**, which is what makes `Collections.sort(l)` reorder the caller's
         // list, and answer `void` — `null` — rather than the list.
         ("Collections", "emptyList" | "emptySet") => Value::array(Vec::new()),
-        ("Collections", "emptyMap") => heap_push(HeapObj::OrderedMap(Vec::new())),
+        ("Collections", "emptyMap") => gmap(Vec::new()),
         ("Collections", "singletonList" | "singleton") => Value::array(vec![arg0]),
         ("Collections", "nCopies") => {
             let n = as_i64(&arg0)?.max(0) as usize;
@@ -9511,6 +9912,15 @@ fn first_arg(args: &[Value]) -> Value {
 }
 
 /// The qualified class name a set kind reports.
+/// The class a map handle of this kind names.
+fn map_class(kind: MapKind) -> &'static str {
+    match kind {
+        MapKind::Linked => "java.util.LinkedHashMap",
+        MapKind::Hash { .. } => "java.util.HashMap",
+        MapKind::Tree => "java.util.TreeMap",
+    }
+}
+
 fn set_class(kind: SetKind) -> &'static str {
     match kind {
         SetKind::Linked => "java.util.LinkedHashSet",
@@ -9872,7 +10282,7 @@ fn subsequences_of(items: &[Value]) -> Vec<Value> {
 fn omap_retain(v: &Value, keep: impl Fn(&str) -> bool) -> bool {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
-            Some(HeapObj::OrderedMap(m)) => {
+            Some(HeapObj::OrderedMap { entries: m, .. }) => {
                 m.retain(|(k, _)| keep(k));
                 true
             }
@@ -10944,7 +11354,10 @@ fn groovy_add(a: &Value, b: &Value) -> Value {
                 }
             }
         }
-        return heap_push(HeapObj::OrderedMap(entries));
+        // `Map.plus` clones the *left* operand and puts the right into it, so
+        // the result is the left's implementation: `new TreeMap(…) + [d: 4]`
+        // is a `TreeMap`, and `d` sorts into place rather than landing last.
+        return gmap_kind(entries, omap_kind(a).unwrap_or(MapKind::Linked));
     }
     // String concatenation renders each side the way `println` does, so a class
     // instance operand goes through its `toString()`. Both operands are cloned
@@ -11227,10 +11640,21 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
         // Groovy `+` dispatches on the left operand: list concatenation/append,
         // map merge, else string concatenation.
         NumOp::Add => Ok(groovy_add(a, b)),
-        // A set on either side compares as a set: order-insensitive, and never
-        // equal to a list. The rendered-form comparison below would get both
-        // halves backwards, so it has to be decided before it.
-        NumOp::Eq | NumOp::Ne if as_set(a).is_some() || as_set(b).is_some() => {
+        // A set or a map on either side compares by *contents*: order-insensitive,
+        // and never equal to a list. The rendered-form comparison below would get
+        // both halves backwards, so it has to be decided before it.
+        //
+        // The map half is why `[b: 2, a: 1] == [a: 1, b: 2]` is true. Rendering
+        // the two maps gives `[b:2, a:1]` and `[a:1, b:2]`, so the fallback
+        // answered `false` — a silent wrong answer on plain map literals, and a
+        // second one now that a `TreeMap` and a `LinkedHashMap` holding the same
+        // entries render in different orders by design.
+        NumOp::Eq | NumOp::Ne
+            if as_set(a).is_some()
+                || as_set(b).is_some()
+                || as_omap(a).is_some()
+                || as_omap(b).is_some() =>
+        {
             let eq = values_equal(a, b);
             Ok(Value::bool(if matches!(op, NumOp::Eq) { eq } else { !eq }))
         }

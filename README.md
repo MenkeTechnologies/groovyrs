@@ -154,6 +154,27 @@ Implemented and checked against Apache Groovy:
   (`list[0..1]`, `"abcdef"[1..3]`); subscript *assignment* `list[i] = v` (growing
   the list with nulls past the end) and `map[k] = v`. A multi-entry map keeps
   insertion order and `m.k = v` mutates it in place.
+- **A map carries its implementation**, so the class a script names decides the
+  order it presents entries in — through `toString`, iteration, `keySet`,
+  `values`, `entrySet` and every GDK read alike. `new TreeMap([b:2, a:1])` is
+  `[a:1, b:2]` and stays sorted as keys are added; `new HashMap(…)` iterates in
+  the JDK's bucket order, off a table pre-sized by `HashMap`'s own rule rather
+  than `HashSet`'s; a literal is a `LinkedHashMap`. `getClass()` and
+  `instanceof` follow the JDK hierarchy (`LinkedHashMap` *is* a `HashMap`;
+  `SortedMap`/`NavigableMap` are the `TreeMap`'s), and so does `as` — which
+  re-homes a map only when it is not already an instance of the target, leaving
+  `[a:1] as HashMap` a `LinkedHashMap`. A `TreeMap` answers the `NavigableMap`
+  methods (`firstKey`/`lastKey`, `lower`/`floor`/`ceiling`/`higherKey` and their
+  `Entry` twins, `headMap`/`tailMap`/`subMap` with the inclusivity flags,
+  `descendingMap`/`descendingKeySet`/`navigableKeySet`, `comparator`), which
+  raise `MissingMethodException` on any other map, as Groovy's do. Which class a
+  *derived* map takes is Groovy's own three rules: `each`/`clone`/`plus` keep
+  the receiver's exactly, `findAll`/`collectEntries`/`minus`/`take` go through
+  `createSimilarMap` (sortedness only), and `sort()` always builds a `TreeMap`
+  while `sort(closure)`/`toSorted()` never do.
+- **`Map.equals` is by entry set** — order- and implementation-insensitive, so
+  `[b:2, a:1] == [a:1, b:2]` and a `TreeMap` equals the `LinkedHashMap` holding
+  the same entries, while a map never equals a list or a set.
 - **Lists are references**, as Groovy's are: `def b = a` gives one `ArrayList`
   a second name, so `b.add(4)` is visible through `a`, and `a.is(b)` is `true`
   while a `collect` copy is `false`. The same holds for a list reached through a
@@ -230,10 +251,11 @@ Implemented and checked against Apache Groovy:
   a comparator, and `sort`/`unique` mutate a variable receiver the way Groovy's
   do; a multi-parameter closure receives a list element *spread* across its
   parameters (`[[1,2],[3,4]].collect { a, b -> a + b }` → `[3, 7]`). Over maps:
-  `each`, `collect`, `collectEntries`, `findAll`, `find`, `any`, `every`,
-  `groupBy`, `countBy`, `count`, `inject`, `sort`, `max`, `min`, `withDefault`,
-  `collectMany` — a two-parameter closure gets `(key, value)`, a one-parameter
-  closure a `Map.Entry`.
+  `each`, `reverseEach`, `collect`, `collectEntries`, `findAll`, `find`, `any`,
+  `every`, `groupBy`, `countBy`, `count`, `inject`, `sort`, `toSorted`, `max`,
+  `min`, `withDefault`, `collectMany`, `take`/`drop`, `subMap`, and
+  `firstEntry`/`lastEntry`/`pollFirstEntry`/`pollLastEntry` — a two-parameter
+  closure gets `(key, value)`, a one-parameter closure a `Map.Entry`.
 - **`grep` filters by the filter's `isCase`, not by `==`** — the same five rules
   a `switch` label follows, so the filter's *type* picks the test: a closure
   calls, a `Class` is `isInstance` (`[1, 'a'].grep(Integer)` → `[1, 2]`), a
@@ -492,13 +514,18 @@ Next waves, in priority order:
 5. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
    `"$s".getClass()` reports `java.lang.String` where Groovy reports
    `org.codehaus.groovy.runtime.GStringImpl`.
-6. **A `List`/`Map` implementation kind.** A set carries one, so a `TreeSet`
-   sorts; a list and a map do not, so `new LinkedList([1,2]).getClass()` reports
-   `java.util.ArrayList` and — the behaviour difference, not just a name —
-   `new TreeMap([b:2, a:1])` prints in insertion order rather than key order.
-   The same missing kind is why `asImmutable()` takes a write instead of raising
-   `UnsupportedOperationException`.
-7. **Command-argument chains beyond one argument** — `println a, b` and
+6. **A `List` implementation kind.** A set and a map each carry one, so a
+   `TreeSet` and a `TreeMap` sort; a list does not, so
+   `new LinkedList([1,2]).getClass()` reports `java.util.ArrayList`. The same
+   missing kind is why `asImmutable()` takes a write instead of raising
+   `UnsupportedOperationException` — a *wrapper* kind is unmodeled on every
+   collection, maps included.
+7. **Collection view types.** `keySet()`, `entrySet()` and `values()` answer a
+   plain `List` with the right contents in the right order, but they are copies
+   rather than live views, and `getClass()` names `java.util.ArrayList` where
+   Groovy names `java.util.TreeMap$KeySet`. A `Map.Entry` carries no class
+   either.
+8. **Command-argument chains beyond one argument** — `println a, b` and
    `foo bar baz` do not parse; the parenthesised call always does.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.

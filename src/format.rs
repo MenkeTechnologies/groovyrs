@@ -12,7 +12,7 @@
 //! This module is the pure half — parsing a format string into pieces and
 //! laying an unsigned `BigDecimal` out in the three float forms. The half that
 //! needs the VM (rendering `%s`, hashing `%h`, classifying an argument's Java
-//! type, raising) lives in [`crate::host::java_format`].
+//! type, raising) lives in `java_format`.
 //!
 //! Every rule and message below is byte-verified against Apache Groovy 5.1.0 /
 //! JVM 26; `tests/format.rs` carries the observed reference output.

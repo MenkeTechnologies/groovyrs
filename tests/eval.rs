@@ -4937,3 +4937,23 @@ def w = new StringWriter(); w << 'hi'; println(w.toString())"#);
          bcd\nbc\nabcd\naZbcd\nZbcd\ndcbZ\n1truenull\nhi\n"
     );
 }
+
+/// `set << x` is `Set.leftShift` — the `add`-that-answers-the-receiver the
+/// method spelling already had. Only the operator was missing it, so `s << 4`
+/// raised MissingMethodException where `s.add(4)` worked.
+#[test]
+fn set_left_shift_adds_and_answers_the_receiver() {
+    let (out, ok) = run(r#"def s = new LinkedHashSet([3, 1, 2])
+s << 4 << 4
+println(s); println(s.getClass().name); println(s.size())
+def t = new TreeSet([3, 1])
+t << 2
+println(t)
+def u = [] as Set
+println(u.isEmpty()); println((u << 'x').isEmpty())"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[3, 1, 2, 4]\njava.util.LinkedHashSet\n4\n[1, 2, 3]\ntrue\nfalse\n"
+    );
+}

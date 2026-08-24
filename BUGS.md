@@ -1062,6 +1062,21 @@ infinite loop on both sides.
   throws. Wrap the argument — `println(-42)` — for exact parity; the parenthesised
   form is unambiguous on both. (The differential fuzzer only ever emits the
   parenthesised form, so it never reports this.)
+- **A `Set`'s membership test is a scan, so filling one is quadratic.** A
+  `HeapObj::SetVal` stores its elements in a `Vec`, and `add`/`contains`
+  compare against each of them with `values_equal` — which is right (that is
+  what makes a user class's own `equals` decide membership, and what lets
+  `[1, 1.0] as Set` hold one element) and is `O(n)` per operation where
+  `java.util.HashSet` is `O(1)`. Measured on this machine in a debug build,
+  16 000 `s.add(i)` calls take ~13 s against Apache Groovy's ~1 s.
+
+  The `Map` side does not have this gap: a map key is *stored* as its rendered
+  text, so `HeapObj::OrderedMap` can index it in a `HashMap` and every keyed
+  operation is `O(1)`. Doing the same for a set would decide membership by
+  rendering rather than by `equals`, which is a different answer for a user
+  class — so the index a set needs is a hash of the *value*, and that is a
+  larger change than the map's. `size`/`isEmpty` and the `add` write no longer
+  copy the element vector; the scan itself is what remains.
 - **A `List` is always an `ArrayList`.** `HeapObj::ListVal` carries no
   implementation kind the way `HeapObj::SetVal` carries [`SetKind`] and
   `HeapObj::OrderedMap` carries [`MapKind`], so every list names one class

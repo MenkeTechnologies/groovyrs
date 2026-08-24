@@ -5351,6 +5351,17 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // A `Set` answers its own members (the operators, the mutators, `getClass`)
     // and hands everything else to the list it enumerates — which is faithful,
     // because those methods answer an `ArrayList` in Groovy too.
+    // A set's count needs no copy of its elements, and the copy below is a
+    // refcount bump per element.
+    if args.is_empty() && matches!(method, "size" | "getSize" | "isEmpty") {
+        if let Some(n) = set_len(&recv) {
+            return if method == "isEmpty" {
+                Value::bool(n == 0)
+            } else {
+                Value::int(n as i64)
+            };
+        }
+    }
     if let Some((items, kind)) = as_set(&recv) {
         if let Some(v) = dispatch_set_method(vm, &recv, &items, kind, method, &args) {
             return v;
@@ -8633,7 +8644,12 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
     // `map << other` is `Map.leftShift` — a `putAll` that answers the receiver,
     // so it chains. Same reason as the list above: one implementation, reached
     // through the ordinary dispatch.
-    if as_omap(&lhs).is_some() {
+    if is_omap(&lhs) {
+        return dispatch_call(vm, lhs, "leftShift", vec![rhs]);
+    }
+    // `set << x` is `Set.leftShift`, the same `add`-that-answers-the-receiver
+    // the method spelling already had. Only the operator was missing it.
+    if set_len(&lhs).is_some() {
         return dispatch_call(vm, lhs, "leftShift", vec![rhs]);
     }
     // `sb << "a"` is `StringBuilder.append`, which mutates through the handle
@@ -10572,6 +10588,28 @@ fn dedup_values(items: Vec<Value>) -> Vec<Value> {
 /// Replace a set handle's elements in place, keeping its kind. This is how a
 /// mutator (`add`, `remove`, `clear`) is visible to every holder of the handle,
 /// the way `java.util.Set`'s are.
+/// The element count of a set handle, without copying its elements.
+fn set_len(v: &Value) -> Option<usize> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::SetVal { items, .. }) => Some(items.len()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// Append one element to a set handle in place. The caller has already decided
+/// the element is absent — this does no membership test of its own.
+fn set_push(v: &Value, item: Value) {
+    let Value::Obj(id) = v else { return };
+    HEAP.with(|h| {
+        if let Some(HeapObj::SetVal { items, .. }) = h.borrow_mut().get_mut(*id as usize) {
+            items.push(item);
+        }
+    });
+}
+
 fn set_store(v: &Value, items: Vec<Value>) {
     let Value::Obj(id) = v else { return };
     HEAP.with(|h| {
@@ -10644,9 +10682,14 @@ fn dispatch_set_method(
             let v = first_arg(args);
             let present = items.iter().any(|k| values_equal(k, &v));
             if !present {
-                let mut next = items.to_vec();
-                next.push(v);
-                set_store(recv, next);
+                // Append through the handle rather than rebuilding the whole
+                // element vector and storing it back: `items` is already a copy
+                // of the set (the membership test needs one, because
+                // `values_equal` can re-enter the VM for a user `equals` and so
+                // cannot run under a heap borrow), and a second full copy per
+                // `add` is what made filling a set cost twice what the
+                // unavoidable scan does.
+                set_push(recv, v);
             }
             if method == "leftShift" {
                 recv.clone()

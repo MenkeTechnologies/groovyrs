@@ -377,7 +377,8 @@ Implemented and checked against Apache Groovy:
   `BigDecimal` with unbounded magnitude.
 - **Instantiable JDK classes** — `new StringBuilder()` / `StringBuffer` /
   `StringWriter` (mutating through a shared handle, so `sb.append("a").append(1)`
-  and `sb << "a" << 1` chain), the collection classes, the box types, and
+  and `sb << "a" << 1` chain, and an append grows the buffer rather than
+  rebuilding it), the collection classes, the box types, and
   `BigDecimal`/`BigInteger`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, the assigning
   `a ?= b`, and `a?.member` / `a?.method()`.

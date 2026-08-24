@@ -1708,6 +1708,66 @@ fn as_list_raw(v: &Value) -> Option<Vec<Value>> {
     })
 }
 
+/// Append to a **root** list handle in place, bumping its
+/// structural-modification counter the way [`list_store`] would. `false` for
+/// anything else, including a `SubList` window — inserting through one resizes
+/// every window it was taken through, which is bookkeeping the general path
+/// already carries.
+///
+/// The general path answers an append by cloning the whole element vector,
+/// running the call against the copy, and storing it back, so building a list
+/// one `<<` at a time was quadratic: 20 000 appends took 41 s against Apache
+/// Groovy's 1.1 s, and each doubling of the count quadrupled it.
+fn list_push_root(v: &Value, value: Value) -> bool {
+    let Value::Obj(id) = v else { return false };
+    HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
+        Some(HeapObj::ListVal { items, mod_count }) => {
+            items.push(value);
+            *mod_count += 1;
+            true
+        }
+        _ => false,
+    })
+}
+
+/// The element count of a **root** list handle, without copying it.
+fn list_len_root(v: &Value) -> Option<usize> {
+    let Value::Obj(id) = v else { return None };
+    HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::ListVal { items, .. }) => Some(items.len()),
+        _ => None,
+    })
+}
+
+/// One element of a **root** list handle by position, without copying the rest.
+/// `None` for a non-root handle *or* an out-of-range index, so the caller falls
+/// through to the general path and its diagnostics.
+fn list_get_root(v: &Value, i: usize) -> Option<Value> {
+    let Value::Obj(id) = v else { return None };
+    HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::ListVal { items, .. }) => items.get(i).cloned(),
+        _ => None,
+    })
+}
+
+/// Overwrite one element of a **root** list handle in place. Replacing an
+/// element is not a structural modification, so the modification counter does
+/// not move. `false` when the handle is not a root list or the index is past
+/// the end (where Groovy *grows* the list, which the general path handles).
+fn list_set_root(v: &Value, i: usize, value: Value) -> bool {
+    let Value::Obj(id) = v else { return false };
+    HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
+        Some(HeapObj::ListVal { items, .. }) => match items.get_mut(i) {
+            Some(slot) => {
+                *slot = value;
+                true
+            }
+            None => false,
+        },
+        _ => false,
+    })
+}
+
 /// The elements behind a `java.util.List` handle, if `v` is one.
 ///
 /// Reading a `SubList` whose backing list has been structurally modified through
@@ -1760,17 +1820,33 @@ fn check_comodification(v: &Value) -> bool {
 /// `Value::Array` form? The shape test every "did I get a list?" site uses, so
 /// none of them has to know which of the two representations it is holding.
 fn is_list(v: &Value) -> bool {
-    matches!(v, Value::Array(_)) || as_list_raw(v).is_some()
+    matches!(v, Value::Array(_)) || list_id(v).is_some()
 }
 
 /// The heap id of a list handle, if `v` is one — what an in-place mutator writes
 /// through and what `is()` compares. A window answers **its own** id, not its
 /// root's, so `a.is(a.subList(0, a.size()))` is false as Groovy's is.
+/// Asking this through `as_list_raw(v).is_some()` — which is how it read — put
+/// a **copy of every element** in front of every list method call and every
+/// shape test, so `l.size()` cost as much as the list was long and building one
+/// was quadratic. Nothing here reads an element.
 fn list_id(v: &Value) -> Option<u32> {
-    match v {
-        Value::Obj(id) if as_list_raw(v).is_some() => Some(*id),
-        _ => None,
-    }
+    let Value::Obj(id) = v else { return None };
+    HEAP.with(|h| {
+        let h = h.borrow();
+        match h.get(*id as usize)? {
+            HeapObj::ListVal { .. } => Some(*id),
+            // A window is a list while its backing storage still spans it —
+            // the same condition `as_list_raw` answers `None` for.
+            HeapObj::SubList {
+                root, offset, len, ..
+            } => match h.get(*root as usize) {
+                Some(HeapObj::ListVal { items, .. }) if offset + len <= items.len() => Some(*id),
+                _ => None,
+            },
+            _ => None,
+        }
+    })
 }
 
 /// Is this handle a live window rather than a whole list?
@@ -4467,6 +4543,19 @@ fn map_default(vm: &mut VM, map: &Value, key: &str) -> Value {
 /// `recv[index]`, shared by the `[…]` subscript builtin and by the `getAt(…)`
 /// method — Groovy defines the subscript *as* `getAt`, so both are one path.
 fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
+    // `list[i]` at a plain in-range position, straight off the heap. The
+    // conversion below detaches the whole list into a `Value::Array` first,
+    // which costs a copy of every element for a read of one — and `list[i]` is
+    // the hottest read a Groovy loop makes. A negative index, a range index and
+    // a window all fall through to it.
+    if let (Value::Obj(_), Some(i)) = (&recv, as_i64(&index).and_then(|i| usize::try_from(i).ok()))
+    {
+        if !is_sublist(&recv) {
+            if let Some(v) = list_get_root(&recv, i) {
+                return v;
+            }
+        }
+    }
     // A range subscripts as the list it enumerates, on either side: `(1..5)[0]`
     // is `1`, and `list[1..2]` is the sublist at those positions. A list handle
     // reads through the same transient array form the arms below match on.
@@ -4584,6 +4673,15 @@ fn b_setindex(vm: &mut VM, _argc: u8) -> Value {
     if is_omap(&recv) {
         omap_set(&recv, groovy_str(&index), value);
         return recv;
+    }
+    // `list[i] = v` over an existing element of a whole list: one slot, no copy.
+    // Growing the list, a negative index and a window all fall through to
+    // [`list_put`] below, which owns those rules.
+    if let (Value::Obj(_), Some(i)) = (&recv, as_i64(&index).and_then(|i| usize::try_from(i).ok()))
+    {
+        if !is_sublist(&recv) && list_set_root(&recv, i, value.clone()) {
+            return recv;
+        }
     }
     // A list rides a handle, so the write goes *through* it and every other name
     // for the list observes it. The element math is [`list_put`], shared with the
@@ -5107,6 +5205,44 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         // decided on the handle rather than on the detached elements.
         if method == "subList" && args.len() == 2 {
             return make_sublist(vm, &recv, &args);
+        }
+        // Append, count and positional read on a ROOT list, in place. Falling
+        // through to the general path below clones every element, runs the call
+        // against the copy and stores it back — three passes over the list for
+        // an operation that touches one slot, which is what made building a
+        // list with `<<` quadratic. A `SubList` window is excluded: its writes
+        // resize the windows it was taken through, and that bookkeeping lives
+        // in `list_store`.
+        if !is_sublist(&recv) {
+            if matches!(method, "add" | "leftShift")
+                && args.len() == 1
+                && list_push_root(&recv, args[0].clone())
+            {
+                set_mutated(recv.clone());
+                // `<<` answers the list so calls chain; `add` answers `true`.
+                return if method == "leftShift" {
+                    recv
+                } else {
+                    Value::bool(true)
+                };
+            }
+            if let Some(n) = list_len_root(&recv).filter(|_| args.is_empty()) {
+                match method {
+                    "size" => return Value::int(n as i64),
+                    "isEmpty" => return Value::bool(n == 0),
+                    _ => {}
+                }
+            }
+            if matches!(method, "get" | "getAt") && args.len() == 1 {
+                // Only the plain in-range index: a negative one counts from the
+                // end for `getAt` and raises for `get`, and both diagnostics
+                // stay in the general path rather than being restated here.
+                if let Some(i) = as_i64(&args[0]).and_then(|i| usize::try_from(i).ok()) {
+                    if let Some(v) = list_get_root(&recv, i) {
+                        return v;
+                    }
+                }
+            }
         }
         // `sort`/`unique` do not use the `MUTATED` slot — their *result* is the
         // new list (which is why the compiler writes the result back). Same rule

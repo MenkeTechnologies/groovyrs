@@ -4871,3 +4871,40 @@ println(m.get('a')); println(m.get('q')); println(m.get('q', 7)); println(m)"#);
         "1\nnull\n[a:9, b:2, z:9]\n9\nnull\n7\n[a:9, b:2, z:9, q:7]\n"
     );
 }
+
+/// A list handle answers append, count and positional access off the heap
+/// rather than by detaching a copy of every element. The copy is where all the
+/// window bookkeeping lives, so these pin what the shortcut must NOT change: a
+/// `SubList` still aliases its backing list, still fails fast after a
+/// structural change to it, and still resizes it when written through; a
+/// negative or out-of-range index still gets its own diagnostic; and `add`,
+/// `<<` and `push` still answer three different things.
+#[test]
+fn list_fast_paths_keep_window_and_index_semantics() {
+    let (out, ok) = run(r#"def l = [1, 2, 3, 4, 5]
+def s = l.subList(1, 4)
+s[0] = 9
+println(l); println(s)
+s.add(99)
+println(l); println(s.size())
+def m = [1, 2, 3]
+def w = m.subList(0, 2)
+m.add(4)
+try { println(w) } catch (e) { println(e.getClass().name) }
+println(m[0]); println(m[-1]); println(m[9])
+try { m.get(9) } catch (e) { println(e.message) }
+try { m.get(-1) } catch (e) { println(e.getClass().name) }
+println(m.getAt(-1))
+def n = [1, 2, 3]
+println(n.add(4)); println(n << 5); println(n)
+n.push(0); println(n); println(n.pop())"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[1, 9, 3, 4, 5]\n[9, 3, 4]\n[1, 9, 3, 4, 99, 5]\n4\n\
+         java.util.ConcurrentModificationException\n\
+         1\n4\nnull\nIndex 9 out of bounds for length 4\n\
+         java.lang.IndexOutOfBoundsException\n4\n\
+         true\n[1, 2, 3, 4, 5]\n[1, 2, 3, 4, 5]\n[0, 1, 2, 3, 4, 5]\n0\n"
+    );
+}

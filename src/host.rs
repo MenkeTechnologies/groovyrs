@@ -6209,7 +6209,15 @@ fn dispatch_map_iteration(
                 .iter()
                 .map(|(k, v)| heap_push(HeapObj::Entry(k.clone(), v.clone())))
                 .collect();
+            // A two-parameter closure sorts a *map* the way it sorts a list: as
+            // a comparator over the entries (`sort { a, b -> a.value <=> b.value }`),
+            // not as a `(key, value)` pair the way `each`/`collect` spread one.
+            // Treating it as a key extractor called the closure with one entry
+            // and a null second argument.
             let order = match clo {
+                Some(c) if closure_meta(c).map(|m| m.params).unwrap_or(1) >= 2 => {
+                    OrderBy::Comparator(c)
+                }
                 Some(c) => OrderBy::Key(c),
                 None => OrderBy::Natural,
             };
@@ -6482,6 +6490,16 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // Universal size query (String chars / list elements / map entries).
         (_, "size") => Value::int(value_size(recv)),
 
+        // `value.asType(Type)` is the method spelling of `value as Type`, so it
+        // runs the one coercion rather than a second, drifting copy of it. The
+        // argument is a `java.lang.Class`; `as` takes the name.
+        (_, "asType") if args.len() == 1 => {
+            let ty = as_class_ref(&args[0]).unwrap_or_else(|| groovy_str(&args[0]));
+            vm.stack.push(recv.clone());
+            vm.stack.push(Value::str(ty));
+            b_cast(vm, 0)
+        }
+
         // ── String ──
         (Value::Str(s), "length") => Value::int(utf16_len(s) as i64),
         (Value::Str(s), "toUpperCase") => Value::str(s.to_uppercase()),
@@ -6707,6 +6725,15 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // (`"abc".split("")` is `[a, b, c]`), and the default limit drops
         // *trailing* empties but keeps interior ones (`"a,b,,".split(",")` is
         // `[a, b]`). Both live in `crate::regex`.
+        // Groovy's no-argument `split()` is not `split("")`: it is
+        // `StringTokenizer`'s whitespace tokenizing, which drops every empty
+        // field including the leading and trailing ones, so `" a b ".split()`
+        // is `[a, b]` and `"".split()` is `[]`.
+        (Value::Str(s), "split") if args.is_empty() => Value::array(
+            s.split_whitespace()
+                .map(|w| Value::str(w.to_string()))
+                .collect(),
+        ),
         (Value::Str(s), "split") => {
             let pattern = args.first().map(pattern_source_of).unwrap_or_default();
             let limit = args.get(1).and_then(as_i64).unwrap_or(0);
@@ -6782,6 +6809,15 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (Value::Str(s), "toList" | "toCharArray" | "chars") => {
             Value::array(s.chars().map(|c| Value::str(c.to_string())).collect())
         }
+        // `s.bytes` / `s.getBytes()` — the UTF-8 encoding as *signed* bytes, so
+        // a non-ASCII character's units print negative the way a Java `byte[]`
+        // does. Modeled as a list, like every other array here.
+        (Value::Str(s), "getBytes") => Value::array(
+            s.as_bytes()
+                .iter()
+                .map(|b| Value::int(*b as i8 as i64))
+                .collect(),
+        ),
         // `s.tr(from, to)` — `tr(1)`-style character translation. Both sides
         // expand `a-c` ranges (reversed ones too); a `from` character past the
         // end of `to` maps to `to`'s last character, and an unlisted character
@@ -7464,6 +7500,22 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // ── Integer / Long ──
         // `intdiv` is Groovy's *integer* division (`/` yields a BigDecimal), and
         // it truncates toward zero like Java's `/`.
+        // `intdiv` is defined on the integral types only. A decimal on *either*
+        // side takes the whole call out of `NumberMath`'s integer path, and the
+        // message names the RECEIVER whichever side was the decimal:
+        // `7.intdiv(2.0)` reports `java.lang.Integer with value: 7`.
+        (_, "intdiv") if !args.is_empty() && (!is_integral(recv) || !is_integral(&args[0])) => {
+            raise(
+                vm,
+                "UnsupportedOperationException",
+                &format!(
+                    "Cannot use intdiv() on this number type: {} with value: {}",
+                    java_class_name(recv),
+                    groovy_str(recv)
+                ),
+            );
+            Value::Undef
+        }
         (Value::Int(n), "intdiv") => match args.first().and_then(as_i64) {
             Some(0) | None => {
                 // Three different wordings reach an `ArithmeticException` for a
@@ -7659,6 +7711,22 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 "negate" => dec_value(decimal::neg(&d)),
                 "toBigDecimal" => dec_value(d),
                 "toBigInteger" => bigint_value(d),
+                // A `BigDecimal` is an (unscaled value, scale) pair, and these
+                // three read it directly — `2.5.scale()` is `1`,
+                // `2.5.precision()` is `2`, `2.5.unscaledValue()` is `25`.
+                "scale" if args.is_empty() => Value::int(decimal::scale_of(&d)),
+                "precision" if args.is_empty() => Value::int(decimal::precision_of(&d)),
+                "unscaledValue" if args.is_empty() => bigint_value(decimal::unscaled_value(&d)),
+                // `setScale(n)` rounds with `RoundingMode.UNNECESSARY`, so it
+                // raises rather than dropping digits: `1.5.setScale(0)` is an
+                // `ArithmeticException`, while `1.5.setScale(3)` pads to `1.500`.
+                "setScale" if args.len() == 1 => match args[0].to_int() {
+                    n if decimal::fits_at_scale(&d, n) => dec_value(decimal::round_half_up(&d, n)),
+                    _ => {
+                        raise(vm, "ArithmeticException", "Rounding necessary");
+                        Value::Undef
+                    }
+                },
                 // `intdiv` is Groovy's integer division: exact, truncating, and
                 // (unlike `/`) not promoted to a `BigDecimal`.
                 "intdiv" => match args.first().and_then(as_exact_dec) {
@@ -8068,6 +8136,19 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                     }
                     Value::Undef
                 }
+                // `map << other` is `putAll` that answers the receiver, so it
+                // chains. Only a `Map` or a single `Map.Entry` is accepted —
+                // `[a:1] << ['b', 2]` is a `MissingMethodException` in Groovy,
+                // and admitting the pair here would silently accept it.
+                "leftShift"
+                    if args.len() == 1
+                        && (as_omap(&args[0]).is_some() || as_entry(&args[0]).is_some()) =>
+                {
+                    for (k, v) in entry_pairs(&args[0]) {
+                        omap_set(recv, k, v);
+                    }
+                    recv.clone()
+                }
                 "remove" => {
                     let k = args.first().map(groovy_str).unwrap_or_default();
                     let old = entries
@@ -8198,6 +8279,12 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
     // Route it through the ordinary method dispatch rather than repeating the
     // append here, so the handle write-through has exactly one implementation.
     if list_id(&lhs).is_some() {
+        return dispatch_call(vm, lhs, "leftShift", vec![rhs]);
+    }
+    // `map << other` is `Map.leftShift` — a `putAll` that answers the receiver,
+    // so it chains. Same reason as the list above: one implementation, reached
+    // through the ordinary dispatch.
+    if as_omap(&lhs).is_some() {
         return dispatch_call(vm, lhs, "leftShift", vec![rhs]);
     }
     // `sb << "a"` is `StringBuilder.append`, which mutates through the handle
@@ -8448,7 +8535,11 @@ fn b_in(vm: &mut VM, _argc: u8) -> Value {
     }
     Value::bool(match &coll {
         Value::Array(a) => a.iter().any(|v| values_equal(v, &needle)),
-        Value::Str(s) => s.contains(&groovy_str(&needle)),
+        // `x in str` is `str.isCase(x)`, and `String.isCase` is *equality*, not
+        // containment: `'a' in 'abc'` is `false` in Groovy. (`'a' in 'abc'`
+        // reading as a substring test is the natural guess, and the wrong one —
+        // `switch ('abc') { case 'a': }` does not match either.)
+        Value::Str(s) => **s == groovy_str(&needle),
         Value::Undef => false,
         other => values_equal(other, &needle),
     })
@@ -9139,6 +9230,30 @@ fn static_field(class: &str, name: &str) -> Option<Value> {
         ("Short", "MIN_VALUE") => Value::int(i16::MIN as i64),
         ("Byte", "MAX_VALUE") => Value::int(i8::MAX as i64),
         ("Byte", "MIN_VALUE") => Value::int(i8::MIN as i64),
+        // `Float`'s constants are stored as the `double` nearest the text a
+        // `Float` *prints*, not as `f32::MAX as f64`. groovyrs has no
+        // `java.lang.Float` (an `f`-suffixed literal is a `double`, as
+        // `1.0f / 3.0f` being `0.3333333333333333` on both sides shows), so a
+        // widened `f32::MAX` would render `3.4028234663852886E38` where Groovy
+        // renders `3.4028235E38`. The two agree to within `f32` precision —
+        // they round to the same `float` — and only the printed form differs,
+        // so the printed form is what is kept.
+        ("Float", "MAX_VALUE") => Value::float(3.4028235e38),
+        ("Float", "MIN_VALUE") => Value::float(1.4e-45),
+        ("Float", "MIN_NORMAL") => Value::float(1.1754944e-38),
+        ("Float", "POSITIVE_INFINITY") => Value::float(f64::INFINITY),
+        ("Float", "NEGATIVE_INFINITY") => Value::float(f64::NEG_INFINITY),
+        ("Float", "NaN") => Value::float(f64::NAN),
+        ("Float", "SIZE") => Value::int(32),
+        ("Float", "BYTES") => Value::int(4),
+        ("Float", "MAX_EXPONENT") => Value::int(127),
+        ("Float", "MIN_EXPONENT") => Value::int(-126),
+        // A `char` is a one-character `String` here (BUGS.md, *Java `char`*), so
+        // `Character`'s bounds are the code points `' '` and `'￿'`.
+        ("Character", "MIN_VALUE") => Value::str("\u{0}".to_string()),
+        ("Character", "MAX_VALUE") => Value::str("\u{ffff}".to_string()),
+        ("Character", "SIZE") => Value::int(16),
+        ("Character", "BYTES") => Value::int(2),
         ("Double", "MAX_VALUE") => Value::float(f64::MAX),
         // Java's `Double.MIN_VALUE` is the smallest *subnormal* (4.9E-324);
         // Rust's `f64::MIN_POSITIVE` is the smallest *normal*, which is Java's
@@ -10708,6 +10823,8 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
             );
             Value::Undef
         }
+        // Groovy's property-for-getter rule: `s.bytes` is `s.getBytes()`.
+        (Value::Str(_), "bytes") => dispatch_method(vm, recv, "getBytes", &[]),
         // `size`/`length` are *methods* on a String and a list, not properties:
         // Groovy raises `MissingPropertyException` for `[1, 2].size` and
         // `"abc".length` alike (a map's `m.size` is the key read handled above).

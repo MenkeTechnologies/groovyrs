@@ -436,6 +436,31 @@ pub fn round_half_up(d: &BigDecimal, scale: i64) -> BigDecimal {
     d.with_scale_round(scale, RoundingMode::HalfUp)
 }
 
+/// `BigDecimal.scale()`: the number of digits to the right of the point. A
+/// value written in `E+n` form has a *negative* scale (`2.5e7` is scale -6).
+pub fn scale_of(d: &BigDecimal) -> i64 {
+    d.as_bigint_and_exponent().1
+}
+
+/// `BigDecimal.precision()`: how many digits the unscaled value has. Zero has
+/// precision 1, matching Java.
+pub fn precision_of(d: &BigDecimal) -> i64 {
+    let digits = d.as_bigint_and_exponent().0.abs().to_str_radix(10);
+    digits.len() as i64
+}
+
+/// `BigDecimal.unscaledValue()`, as the `BigInteger` it is.
+pub fn unscaled_value(d: &BigDecimal) -> BigDecimal {
+    BigDecimal::from_bigint(d.as_bigint_and_exponent().0, 0)
+}
+
+/// Can `d` be written at `scale` fraction digits with no digit lost? This is
+/// what `BigDecimal.setScale(int)`'s implicit `RoundingMode.UNNECESSARY` asks
+/// before it raises `ArithmeticException("Rounding necessary")`.
+pub fn fits_at_scale(d: &BigDecimal, scale: i64) -> bool {
+    scale >= scale_of(d) || d.with_scale_round(scale, RoundingMode::Down) == *d
+}
+
 /// `d` cut to `scale` fraction digits, dropping the rest — Java's
 /// `RoundingMode.DOWN`, which is what Groovy's `BigDecimal.trunc` applies.
 pub fn truncate_to_scale(d: &BigDecimal, scale: i64) -> BigDecimal {

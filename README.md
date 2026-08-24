@@ -132,14 +132,15 @@ Implemented and checked against Apache Groovy:
   octal, with `_` group separators and the `L`/`G` suffixes) / decimal / string
   (single-, double- and triple-quoted) / boolean / `null` literals; `+ - * / % **`,
   `== != < > <= >=`, `&& ||` (short-circuiting), the bitwise `& | ^ ~` and the
-  shifts `<< >> >>>`, `x in coll`, the `value as Type` coercion, unary `-` and
+  shifts `<< >> >>>`, `x in coll` (which is `coll.isCase(x)`, so on a String it is equality, not
+  containment), the `value as Type` coercion, unary `-` and
   `!`, grouping. An unsuffixed decimal literal is a `BigDecimal` whose scale
   propagates (`1.10 + 2.20 == 3.30`), a `d`/`f` suffix makes an IEEE double;
   integer `/` promotes to a decimal (`7 / 2 == 3.5`); `**` follows the numeric
   tower (`2 ** 10` is an `Integer`, `2 ** -1` a `BigDecimal`); `+` concatenates
   when either side is a string, `-` and `*` also work on strings and lists
   (`"abc" * 3`, `[1, 2, 3] - [2]`), `<<` is `leftShift` (a bit shift, a list
-  append, or a string concatenation) and `>>` is `rightShift` (a bit shift on a
+  append, a map `putAll`, or a string concatenation) and `>>` is `rightShift` (a bit shift on a
   number, forward composition on a closure).
 - **32-bit `Integer` arithmetic.** Groovy's integer width is a property of the
   value, and groovyrs reproduces it: `Integer.MAX_VALUE + 1` is `-2147483648`,
@@ -287,7 +288,8 @@ Implemented and checked against Apache Groovy:
   `[1, 'a'].inspect()` is `[1, 'a']` where `toString()` is `[1, a]`) with
   `toListString`/`toMapString` as the plain-rendering aliases;
   strings answer `indexOf`/`lastIndexOf` (with the
-  `fromIndex` and code-point overloads), `replace`, `split`, `tokenize`,
+  `fromIndex` and code-point overloads), `replace`, `split` (including the
+  no-argument whitespace-tokenizing form), `getBytes`/`bytes`, `tokenize`,
   `charAt`, `substring`, `compareTo`, `padLeft`/`padRight`/`center`,
   `capitalize`, `take`/`drop`, `multiply`, `minus`, `startsWith`/`endsWith`,
   `tr`, `trim`, `strip`/`stripLeading`/`stripTrailing`/`isBlank`, `stripIndent`,
@@ -299,12 +301,16 @@ Implemented and checked against Apache Groovy:
   `<= U+0020` while `strip` strips `Character.isWhitespace`, which are different
   sets. Maps answer `put`, `remove`, `getOrDefault`, `entrySet`, `keySet`,
   `values`, `subMap`, `spread`, `minus`, `intersect`, `iterator`,
-  `containsValue`, `putAt`, `putAll`, `clear`. Numbers answer `power`, the scaled
-  `round(n)` and `trunc([n])`, `intdiv`, `abs`, the conversions, and the operator
+  `containsValue`, `putAt`, `putAll`, `clear`, and `leftShift` (`map << other`, a
+  `putAll` that answers the receiver so it chains). Numbers answer `power`, the scaled
+  `round(n)` and `trunc([n])`, `intdiv` (integral operands only — a decimal on
+  either side raises `UnsupportedOperationException`), `abs`, `asType`, the
+  conversions, and the operator
   method names — `and`/`or`/`xor`/`bitwiseNegate` and
   `leftShift`/`rightShift`/`rightShiftUnsigned`, which fill to the receiver's
   Java width. A `BigDecimal`/`BigInteger` additionally answers Java's own
-  `add`/`subtract`/`multiply`/`divide`/`remainder`/`mod`/`pow`, which are **not**
+  `add`/`subtract`/`multiply`/`divide`/`remainder`/`mod`/`pow`/`setScale`/`scale`/
+  `precision`/`unscaledValue`, which are **not**
   the Groovy operators: `7G.divide(3G)` truncates to `2` where `7G / 3G` is
   `2.3333333333`, and `1.0G.divide(3.0G)` raises `ArithmeticException` where the
   operator approximates.

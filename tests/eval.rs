@@ -4651,3 +4651,122 @@ println([b:2, a:1, c:3].subMap(['c', 'a']).getClass().getName())
          java.util.LinkedHashMap\n"
     );
 }
+
+/// `s.split()` with no argument is `StringTokenizer`, not `split("")` or
+/// `split(" ")`: runs of whitespace collapse and every empty field is dropped,
+/// leading and trailing ones included. Splitting on a whitespace *regex* keeps
+/// the leading empty, so the two must not share an implementation.
+#[test]
+fn no_argument_split_tokenizes_on_whitespace_runs() {
+    let (out, ok) = run(r#"println("a b  c".split().toList())
+println(" a b ".split().toList())
+println("a\tb\nc".split().toList())
+println("".split().toList())
+println(" a b ".split("\\s+").toList())"#);
+    assert!(ok);
+    assert_eq!(
+        out, "[a, b, c]\n[a, b]\n[a, b, c]\n[]\n[, a, b]\n",
+        "no-argument split is not whitespace tokenizing"
+    );
+}
+
+/// `x in str` is `str.isCase(x)`, which for a `String` is **equality**. Reading
+/// it as containment is the natural guess and the wrong one — the same rule
+/// decides whether `switch` takes a `case`.
+#[test]
+fn in_on_a_string_is_equality_not_containment() {
+    let (out, ok) = run(r#"println('a' in 'abc')
+println('abc' in 'abc')
+switch ('abc') { case 'a': println('sub'); break; case 'abc': println('eq'); break }"#);
+    assert!(ok);
+    assert_eq!(out, "false\ntrue\neq\n");
+}
+
+/// `intdiv` is defined on the integral types only; a decimal on either side
+/// raises, and the message names the RECEIVER whichever side it was.
+#[test]
+fn intdiv_refuses_a_decimal_on_either_side() {
+    let (out, ok) = run(
+        r#"try { 7.0.intdiv(2) } catch (e) { println(e.getClass().name + '|' + e.message) }
+try { 7.intdiv(2.0) } catch (e) { println(e.message) }
+println(7.intdiv(2))
+println(7G.intdiv(2))"#,
+    );
+    assert!(ok);
+    assert_eq!(
+        out,
+        "java.lang.UnsupportedOperationException|Cannot use intdiv() on this number type: \
+         java.math.BigDecimal with value: 7.0\n\
+         Cannot use intdiv() on this number type: java.lang.Integer with value: 7\n3\n3\n"
+    );
+}
+
+/// A two-parameter closure sorts a map as a *comparator over entries*, the way
+/// it sorts a list — not as the `(key, value)` pair that `each` and `collect`
+/// spread. Treating it as a key extractor called the closure with one entry and
+/// a null second argument, so every such sort raised.
+#[test]
+fn map_sort_with_two_parameters_is_an_entry_comparator() {
+    let (out, ok) = run(r#"println([a:1, b:2].sort { x, y -> y.value <=> x.value })
+println([b:2, a:1].sort { it.key })
+println([b:2, a:1].sort())"#);
+    assert!(ok);
+    assert_eq!(out, "[b:2, a:1]\n[a:1, b:2]\n[a:1, b:2]\n");
+}
+
+/// `map << map` is `putAll` answering the receiver, so it chains. A `[key,
+/// value]` list is NOT accepted — Groovy has only the `Map` and `Map.Entry`
+/// overloads — and admitting it would quietly accept a program Groovy rejects.
+#[test]
+fn map_left_shift_puts_all_and_chains() {
+    let (out, ok) = run(r#"def m = [a:1]
+m << [b:2] << [c:3]
+println(m)
+try { [a:1] << ['b', 2] } catch (e) { println(e.getClass().name) }"#);
+    assert!(ok);
+    assert_eq!(out, "[a:1, b:2, c:3]\ngroovy.lang.MissingMethodException\n");
+}
+
+/// `setScale(int)` rounds with `UNNECESSARY`: it pads freely and raises rather
+/// than dropping a digit. The two-argument form names the mode.
+#[test]
+fn set_scale_pads_but_refuses_to_lose_a_digit() {
+    let (out, ok) = run(r#"println(1.5.setScale(3))
+try { 1.5.setScale(0) } catch (e) { println(e.getClass().name + '|' + e.message) }
+println(1.500.setScale(1))
+println(2.5.scale())
+println(2.5.precision())
+println(2.5.unscaledValue())"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "1.500\njava.lang.ArithmeticException|Rounding necessary\n1.5\n1\n2\n25\n"
+    );
+}
+
+/// `asType(Type)` is the method spelling of `value as Type` and must run the
+/// same coercion, not a second one that has drifted.
+#[test]
+fn as_type_runs_the_same_coercion_as_the_as_operator() {
+    let (out, ok) = run(r#"println([1, 2].asType(Set).size())
+println("42".asType(Integer))
+println(5.asType(String))
+println("abc".asType(List))
+println(1.5.asType(Integer))"#);
+    assert!(ok);
+    assert_eq!(out, "2\n42\n5\n[a, b, c]\n1\n");
+}
+
+/// `Float`'s constants print the way a `Float` prints. groovyrs stores them as
+/// the `double` nearest that text rather than a widened `f32`, which would
+/// render `3.4028234663852886E38`.
+#[test]
+fn float_constants_print_as_floats() {
+    let (out, ok) = run(r#"println(Float.MAX_VALUE)
+println(Float.MIN_VALUE)
+println(Float.SIZE)
+println(Float.MAX_EXPONENT)
+println(Character.SIZE)"#);
+    assert!(ok);
+    assert_eq!(out, "3.4028235E38\n1.4E-45\n32\n127\n16\n");
+}

@@ -269,7 +269,9 @@ reported as parse or compile errors, never silently mis-run.
   its *last* character by one code point, so `'a'.next()` is `'b'` and
   `'z'.next()` is `'{'`.
 - **Ternary, Elvis, safe navigation.** `c ? t : e`, the Elvis `a ?: b`
-  (null/false-coalescing), and `a?.member` / `a?.method()` (yields `null` on a
+  (null/false-coalescing) and its assigning form `a ?= b` (which is `a = a ?: b`,
+  so a `0` or an empty list is overwritten too, and a property or a subscript is
+  a target as well), and `a?.member` / `a?.method()` (yields `null` on a
   `null` receiver rather than faulting). All branch on Groovy truthiness.
 - **`BigDecimal` decimals.** An unsuffixed decimal literal is a
   `java.math.BigDecimal` with the literal's exact scale, not an `f64`: it prints
@@ -546,7 +548,20 @@ infinite loop on both sides.
   statically (`Math`, `Integer`, `Long`, `Double`, `Float`, `Short`, `Byte`,
   `Boolean`, `Character`, `String`, `System`, `BigDecimal`, …) *do* resolve to a
   `java.lang.Class`, so `Math.max(1, 2)`, `Integer.parseInt("42")` and
-  `Integer.MAX_VALUE` work.
+  `Integer.MAX_VALUE` work. Each of them also resolves **package-qualified**
+  (`java.lang.Math.max(3, 4)`, `java.util.Arrays.asList(1, 2)`), and so does
+  `java.math.RoundingMode`, which Groovy does *not* default-import — a bare
+  `RoundingMode` raises `MissingPropertyException` on both sides. A binding of
+  the same name shadows the package: `def java = [math: 5]; java.math` is the
+  map read.
+
+  A `RoundingMode` constant is modeled as its own **name**, a `String`. That is
+  what an enum constant prints, what `setScale`/`divide` read back, and what
+  comparing two of them answers; only `getClass()` tells the difference (it
+  names `java.lang.String` where Groovy names `java.math.RoundingMode`, and a
+  `MissingMethodException` that lists one among its argument types says
+  `String`). Modeling the enum properly means a heap object with an identity,
+  which nothing else in the frontend needs yet.
 - **Java arrays.** `new int[3]` does not resolve: an array is a distinct type
   from a `List` (it has `.length` where a `List` has `.size()`, and its class
   name is `[I`), and groovyrs models only the `List`. Modeling it as a `List`

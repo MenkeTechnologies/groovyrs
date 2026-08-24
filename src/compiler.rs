@@ -1149,6 +1149,37 @@ impl Compiler {
             && !self.class_index.contains_key(name)
     }
 
+    /// The dotted package a receiver expression spells, if it is nothing but a
+    /// chain of lowercase-initial identifiers (`java`, `java.math`) rooted at a
+    /// name that is not bound to anything. That is what makes
+    /// `java.math.RoundingMode.HALF_UP` reachable: the parser sees an ordinary
+    /// property chain, and only the package shape tells it apart from a real
+    /// receiver. A binding of the same name wins, as it does in Groovy.
+    fn package_prefix(&self, e: &Expr) -> Option<String> {
+        match e {
+            Expr::Var(name) => {
+                let first = name.chars().next()?;
+                if !first.is_lowercase()
+                    || self.is_local(name)
+                    || self.is_field(name)
+                    || self.class_index.contains_key(name)
+                {
+                    return None;
+                }
+                Some(name.clone())
+            }
+            Expr::Property {
+                recv,
+                name,
+                safe: false,
+                ..
+            } if name.chars().next().is_some_and(char::is_lowercase) => {
+                Some(format!("{}.{name}", self.package_prefix(recv)?))
+            }
+            _ => None,
+        }
+    }
+
     /// True when `name` is bound to a slot in the current function/method scope
     /// (a parameter or local), so it must not be reinterpreted as a field/method.
     fn is_local(&self, name: &str) -> bool {
@@ -2437,6 +2468,17 @@ impl Compiler {
                 line,
                 safe,
             } => {
+                // A package-qualified class name (`java.math.RoundingMode`) is a
+                // property chain in the tree and a *class* in the language.
+                // Fold it here so the member read that follows dispatches on a
+                // `java.lang.Class` rather than faulting on an unbound `java`.
+                if let Some(pkg) = self.package_prefix(recv) {
+                    if let Some(qualified) = crate::host::jdk_qualified_class(&pkg, name) {
+                        let nidx = self.b.add_constant(Value::str(qualified));
+                        self.b.emit(Op::LoadConst(nidx), *line);
+                        return self.emit_call_builtin(crate::host::GCLASSREF, 0, *line);
+                    }
+                }
                 // `.class` on a statically-`Long` receiver, for the reason
                 // `getClass()` gives above.
                 if name == "class" && self.is_wide(recv) {

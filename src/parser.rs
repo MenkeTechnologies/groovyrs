@@ -399,6 +399,23 @@ impl Parser {
                 let value = self.expression()?;
                 return Ok(StmtKind::Assign { name, op, value });
             }
+            // `x ?= v` is `x = x ?: v`: the write happens only when `x` is
+            // falsy, so it is Groovy *truth* that decides, not just a null test
+            // (`def n = 0; n ?= 5` leaves `5`).
+            if matches!(next, Tok::ElvisAssign) {
+                self.advance(); // name
+                self.advance(); // ?=
+                self.skip_newlines();
+                let value = self.expression()?;
+                return Ok(StmtKind::Assign {
+                    name: name.clone(),
+                    op: AssignOp::Assign,
+                    value: Expr::Elvis {
+                        lhs: Box::new(Expr::Var(name)),
+                        rhs: Box::new(value),
+                    },
+                });
+            }
             if matches!(next, Tok::PlusPlus | Tok::MinusMinus) {
                 let inc = matches!(next, Tok::PlusPlus);
                 self.advance(); // name
@@ -410,6 +427,34 @@ impl Parser {
         // Fallback: an expression, which may be the left side of a property
         // assignment (`recv.name = value`, `this.v = x`).
         let lhs = self.expression()?;
+        // `recv.name ?= v` / `recv[i] ?= v` — the same desugar as the plain-name
+        // form above, with the target read once in the source text and twice in
+        // the tree (which is what Groovy's own `?=` does).
+        if self.is(&Tok::ElvisAssign) {
+            self.advance();
+            self.skip_newlines();
+            let value = self.expression()?;
+            let guarded = Expr::Elvis {
+                lhs: Box::new(lhs.clone()),
+                rhs: Box::new(value),
+            };
+            return match lhs {
+                Expr::Property { recv, name, .. } => Ok(StmtKind::SetProperty {
+                    recv: *recv,
+                    name,
+                    value: guarded,
+                }),
+                Expr::Index { recv, index, .. } => Ok(StmtKind::SetIndex {
+                    recv: *recv,
+                    index: *index,
+                    value: guarded,
+                }),
+                _ => Err(format!(
+                    "groovyrs: invalid assignment target on line {}",
+                    self.line()
+                )),
+            };
+        }
         if self.is(&Tok::Assign) {
             if let Expr::Property { recv, name, .. } = lhs {
                 self.advance();

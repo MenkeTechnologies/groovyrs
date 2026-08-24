@@ -7727,6 +7727,20 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         Value::Undef
                     }
                 },
+                // `setScale(n, RoundingMode.X)`. The mode arrives as its own
+                // name (see [`static_field`]); an unknown one is a dispatch miss
+                // rather than a silent HALF_UP.
+                "setScale" if args.len() == 2 => {
+                    let scale = args[0].to_int();
+                    match decimal::with_scale(&d, scale, &groovy_str(&args[1])) {
+                        Some(v) => dec_value(v),
+                        None if decimal::rounding_mode_exists(&groovy_str(&args[1])) => {
+                            raise(vm, "ArithmeticException", "Rounding necessary");
+                            Value::Undef
+                        }
+                        None => raise_missing_method(vm, recv, method, args),
+                    }
+                }
                 // `intdiv` is Groovy's integer division: exact, truncating, and
                 // (unlike `/`) not promoted to a `BigDecimal`.
                 "intdiv" => match args.first().and_then(as_exact_dec) {
@@ -7844,6 +7858,34 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 //   [`decimal::divide`] produces for the operator.
                 // - `mod` is `BigInteger`'s alone and is never negative:
                 //   `(-7G).mod(3G)` is `2` while `(-7G).remainder(3G)` is `-1`.
+                // `divide(divisor, scale, RoundingMode)` — the three-argument
+                // form that *always* terminates, unlike the one-argument one
+                // that raises on a non-terminating expansion.
+                "divide" if args.len() == 3 && as_bigint(recv).is_none() => {
+                    let Some(y) = args.first().and_then(as_exact_dec) else {
+                        return raise_missing_method(vm, recv, method, args);
+                    };
+                    if y.is_zero() {
+                        // The three-argument form's zero divisor reports the
+                        // JVM's bare `/ by zero`, not the one-argument form's
+                        // `BigDecimal divide by zero`. Verified on 5.1.0.
+                        raise(vm, "ArithmeticException", "/ by zero");
+                        return Value::Undef;
+                    }
+                    let scale = args[1].to_int();
+                    let mode = groovy_str(&args[2]);
+                    // Divide to a few digits past the target scale and round
+                    // there: the quotient itself may not terminate.
+                    let wide = decimal::divide_to_scale(&d, &y, scale + 4);
+                    match decimal::with_scale(&wide, scale, &mode) {
+                        Some(v) => dec_value(v),
+                        None if decimal::rounding_mode_exists(&mode) => {
+                            raise(vm, "ArithmeticException", "Rounding necessary");
+                            Value::Undef
+                        }
+                        None => raise_missing_method(vm, recv, method, args),
+                    }
+                }
                 "divide" | "remainder" | "mod" => {
                     let big = as_bigint(recv).is_some();
                     let Some(y) = args
@@ -8748,6 +8790,24 @@ pub fn jdk_class_package(name: &str) -> Option<&'static str> {
     })
 }
 
+/// The fully-qualified name for a class written out with its package
+/// (`java.math.RoundingMode`), or `None` when that package holds no such
+/// modeled class.
+///
+/// Two sets answer here. Everything [`jdk_class_package`] knows is reachable
+/// both bare and qualified, because Groovy default-imports those packages. The
+/// second set is reachable *only* qualified — Groovy 5 does not import
+/// `RoundingMode`, so a bare `RoundingMode.HALF_UP` raises
+/// `MissingPropertyException` there and must raise here too.
+pub fn jdk_qualified_class(package: &str, name: &str) -> Option<String> {
+    let known = jdk_class_package(name) == Some(package)
+        || matches!(
+            (package, name),
+            ("java.math", "RoundingMode") | ("java.math", "MathContext")
+        );
+    known.then(|| format!("{package}.{name}"))
+}
+
 /// `GCLASSREF`: build a `java.lang.Class` handle for a statically named class.
 fn b_classref(vm: &mut VM, _argc: u8) -> Value {
     let name = vm
@@ -9250,6 +9310,24 @@ fn static_field(class: &str, name: &str) -> Option<Value> {
         ("Float", "MIN_EXPONENT") => Value::int(-126),
         // A `char` is a one-character `String` here (BUGS.md, *Java `char`*), so
         // `Character`'s bounds are the code points `' '` and `'￿'`.
+        // `java.math.RoundingMode`'s constants. Each is its own name as a
+        // `String`: that is what an enum constant *prints*, what
+        // `BigDecimal.setScale` reads back here, and what comparing two of them
+        // answers. Only `getClass()` tells the difference (BUGS.md).
+        ("RoundingMode", _)
+            if matches!(
+                name,
+                "UP" | "DOWN"
+                    | "CEILING"
+                    | "FLOOR"
+                    | "HALF_UP"
+                    | "HALF_DOWN"
+                    | "HALF_EVEN"
+                    | "UNNECESSARY"
+            ) =>
+        {
+            Value::str(name.to_string())
+        }
         ("Character", "MIN_VALUE") => Value::str("\u{0}".to_string()),
         ("Character", "MAX_VALUE") => Value::str("\u{ffff}".to_string()),
         ("Character", "SIZE") => Value::int(16),

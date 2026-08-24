@@ -454,6 +454,49 @@ pub fn unscaled_value(d: &BigDecimal) -> BigDecimal {
     BigDecimal::from_bigint(d.as_bigint_and_exponent().0, 0)
 }
 
+/// `a / b` carried out to at least `scale` fraction digits, so a caller that
+/// wants a *fixed* scale (`BigDecimal.divide(y, scale, mode)`) has enough
+/// digits left to round at. `b` must be non-zero.
+pub fn divide_to_scale(a: &BigDecimal, b: &BigDecimal, scale: i64) -> BigDecimal {
+    if let Some(exact) = exact_divide(a, b) {
+        return exact;
+    }
+    let precision = (a.digits() + scale.max(0) as u64 + DIVISION_EXTRA_PRECISION).max(1);
+    divide_to_precision(a, b, precision)
+}
+
+/// Is `name` one of `java.math.RoundingMode`'s constants?
+pub fn rounding_mode_exists(name: &str) -> bool {
+    rounding_mode(name).is_some()
+}
+
+/// A `java.math.RoundingMode` constant by name. `UNNECESSARY` has no rounding
+/// rule of its own — it is the assertion that none is needed — so it maps to
+/// `None` and the caller checks [`fits_at_scale`] instead.
+fn rounding_mode(name: &str) -> Option<Option<RoundingMode>> {
+    Some(match name {
+        "UP" => Some(RoundingMode::Up),
+        "DOWN" => Some(RoundingMode::Down),
+        "CEILING" => Some(RoundingMode::Ceiling),
+        "FLOOR" => Some(RoundingMode::Floor),
+        "HALF_UP" => Some(RoundingMode::HalfUp),
+        "HALF_DOWN" => Some(RoundingMode::HalfDown),
+        "HALF_EVEN" => Some(RoundingMode::HalfEven),
+        "UNNECESSARY" => None,
+        _ => return None,
+    })
+}
+
+/// `BigDecimal.setScale(scale, mode)`. `None` for an unknown mode name, and for
+/// `UNNECESSARY` when a digit would be lost — the caller tells the two apart
+/// with [`rounding_mode_exists`].
+pub fn with_scale(d: &BigDecimal, scale: i64, mode: &str) -> Option<BigDecimal> {
+    match rounding_mode(mode)? {
+        Some(m) => Some(d.with_scale_round(scale, m)),
+        None => fits_at_scale(d, scale).then(|| d.with_scale_round(scale, RoundingMode::Down)),
+    }
+}
+
 /// Can `d` be written at `scale` fraction digits with no digit lost? This is
 /// what `BigDecimal.setScale(int)`'s implicit `RoundingMode.UNNECESSARY` asks
 /// before it raises `ArithmeticException("Rounding necessary")`.

@@ -102,6 +102,8 @@ pub enum Tok {
     QuestionDot, // `?.` safe navigation
     StarDot,     // `*.` spread — apply the member to every element
     Elvis,       // `?:` elvis / null-coalescing
+    /// `?=` elvis assignment: `a ?= b` writes `b` only when `a` is falsy.
+    ElvisAssign,
     /// A significant newline (statement terminator at bracket depth 0).
     Nl,
     // operators
@@ -580,6 +582,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             // leading-dot decimal literal for a `*` to multiply by.
             "*." => (Tok::StarDot, 2),
             "?:" => (Tok::Elvis, 2),
+            "?=" => (Tok::ElvisAssign, 2),
             "+=" => (Tok::PlusAssign, 2),
             "-=" => (Tok::MinusAssign, 2),
             "*=" => (Tok::StarAssign, 2),

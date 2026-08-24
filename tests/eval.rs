@@ -4770,3 +4770,62 @@ println(Character.SIZE)"#);
     assert!(ok);
     assert_eq!(out, "3.4028235E38\n1.4E-45\n32\n127\n16\n");
 }
+
+/// `a ?= b` is `a = a ?: b`, so it is Groovy *truth* that decides — a `0`, an
+/// empty string and an empty list all take the right-hand side, not just null.
+/// A property and a subscript are targets too.
+#[test]
+fn elvis_assignment_writes_only_over_a_falsy_target() {
+    let (out, ok) = run(r#"def q = null; q ?= 5; println(q)
+def r = 1; r ?= 5; println(r)
+def z = 0; z ?= 5; println(z)
+def s = ''; s ?= 'x'; println(s)
+def m = [:]; m.a ?= 7; println(m)
+def n = [a:1]; n.a ?= 7; println(n)
+def k = [:]; k['j'] ?= 3; println(k)
+def l = [null]; l[0] ?= 9; println(l)"#);
+    assert!(ok);
+    assert_eq!(out, "5\n1\n5\nx\n[a:7]\n[a:1]\n[j:3]\n[9]\n");
+}
+
+/// A package-qualified class name is an ordinary property chain in the parse
+/// tree; only its *shape* says it is a class. A binding of the same name still
+/// wins — `def java = [math: 5]` makes `java.math` the map read, as it does in
+/// Groovy — and a class Groovy does not default-import (`RoundingMode`) must
+/// stay unreachable bare.
+#[test]
+fn package_qualified_class_names_resolve() {
+    let (out, ok) = run(r#"println(java.lang.Integer.MAX_VALUE)
+println(java.lang.Math.max(3, 4))
+println(java.math.BigDecimal.ONE)
+println(java.util.Arrays.asList(1, 2))
+def java = [math: 5]
+println(java.math)"#);
+    assert!(ok);
+    assert_eq!(out, "2147483647\n4\n1\n[1, 2]\n5\n");
+
+    let (bare, _, bare_ok) = run_full("println(RoundingMode)");
+    assert!(!bare_ok, "Groovy does not default-import RoundingMode");
+    assert_eq!(bare, "");
+}
+
+/// `setScale(n, mode)` and the three-argument `divide(y, scale, mode)` — the
+/// two places a `RoundingMode` reaches the decimal model. `UNNECESSARY` is not
+/// a rounding rule but an assertion, so it raises rather than truncating.
+#[test]
+fn rounding_mode_drives_set_scale_and_divide() {
+    let (out, ok) = run(r#"println(1.5.setScale(0, java.math.RoundingMode.HALF_UP))
+println(1.5.setScale(0, java.math.RoundingMode.HALF_EVEN))
+println(2.5.setScale(0, java.math.RoundingMode.HALF_EVEN))
+println((-1.5).setScale(0, java.math.RoundingMode.CEILING))
+println(1.500.setScale(1, java.math.RoundingMode.UNNECESSARY))
+try { 1.55.setScale(1, java.math.RoundingMode.UNNECESSARY) } catch (e) { println(e.message) }
+println(1.0G.divide(3.0G, 5, java.math.RoundingMode.HALF_UP))
+println(2.0G.divide(3.0G, 2, java.math.RoundingMode.DOWN))
+try { 1.0G.divide(0G, 2, java.math.RoundingMode.HALF_UP) } catch (e) { println(e.message) }"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "2\n2\n2\n-1\n1.5\nRounding necessary\n0.33333\n0.66\n/ by zero\n"
+    );
+}

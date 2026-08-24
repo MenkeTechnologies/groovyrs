@@ -379,8 +379,8 @@ Implemented and checked against Apache Groovy:
   `StringWriter` (mutating through a shared handle, so `sb.append("a").append(1)`
   and `sb << "a" << 1` chain), the collection classes, the box types, and
   `BigDecimal`/`BigInteger`.
-- **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, and
-  `a?.member` / `a?.method()`.
+- **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, the assigning
+  `a ?= b`, and `a?.member` / `a?.method()`.
 - **Control flow** — `if` / `else if` / `else`, `while`, `do`/`while`, the
   C-style `for (init; cond; update)`, the `for (x in a..b)` / `for (x in a..<b)`
   range loop and the `for (x in <collection>)` loop (a list's elements, a map's

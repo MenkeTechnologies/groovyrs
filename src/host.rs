@@ -3202,6 +3202,48 @@ fn as_buffer(v: &Value) -> Option<(&'static str, String)> {
 /// Replace a character buffer's contents in place. Java's `StringBuilder`
 /// mutates through the reference, so every holder of the handle sees the change.
 /// Returns `false` if `v` is not a buffer.
+/// Is `v` a character-buffer handle? The shape question without the copy of
+/// its text that [`as_buffer`] makes.
+fn is_buffer(v: &Value) -> bool {
+    match v {
+        Value::Obj(id) => {
+            HEAP.with(|h| matches!(h.borrow().get(*id as usize), Some(HeapObj::Buffer { .. })))
+        }
+        _ => false,
+    }
+}
+
+/// Append to a character buffer in place. `false` when `v` is not one.
+///
+/// The general path reads the whole buffer out, formats a new `String` from it
+/// and writes that back, which makes building one append at a time quadratic —
+/// 400 000 `sb << "x"` took 5.1 s that way, and each doubling of the count
+/// roughly quadrupled it. `StringBuilder.append` is the one operation a buffer
+/// exists for, so it grows the stored `String` rather than replacing it.
+fn buffer_append(v: &Value, text: &str) -> bool {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
+            Some(HeapObj::Buffer { text: slot, .. }) => {
+                slot.push_str(text);
+                true
+            }
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// A character buffer's length in code points, without copying its text.
+fn buffer_char_len(v: &Value) -> Option<usize> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Buffer { text, .. }) => Some(text.chars().count()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 fn buffer_set(v: &Value, text: String) -> bool {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
@@ -3280,6 +3322,16 @@ fn dispatch_buffer_method(recv: &Value, text: &str, method: &str, args: &[Value]
             let head: String = chars[..start].iter().collect();
             let tail: String = chars[end.max(start)..].iter().collect();
             mutate(format!("{head}{tail}"))
+        }
+        // `substring(start[, end])` READS a span — unlike every mutator above,
+        // it leaves the buffer alone and answers a `String`.
+        "substring" => {
+            let start = idx(0).min(chars.len());
+            let end = match args.len() {
+                0 | 1 => chars.len(),
+                _ => idx(1).clamp(start, chars.len()),
+            };
+            Value::str(chars[start..end].iter().collect::<String>())
         }
         _ => return None,
     })
@@ -5318,9 +5370,26 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     }
     // A `StringBuilder`/`StringBuffer`/`StringWriter` mutates through its
     // handle, so its methods run before the value-shaped dispatch below.
-    if let Some((_, text)) = as_buffer(&recv) {
-        if let Some(v) = dispatch_buffer_method(&recv, &text, method, &args) {
-            return v;
+    if is_buffer(&recv) {
+        // Append and length in place: `as_buffer` below copies the whole text,
+        // which is the cost that made appending to a builder quadratic.
+        if matches!(method, "append" | "leftShift" | "write" | "print") && args.len() == 1 {
+            buffer_append(&recv, &groovy_str(&args[0]));
+            return recv;
+        }
+        if args.is_empty() {
+            if let Some(n) = buffer_char_len(&recv) {
+                match method {
+                    "length" | "size" => return Value::int(n as i64),
+                    "isEmpty" => return Value::bool(n == 0),
+                    _ => {}
+                }
+            }
+        }
+        if let Some((_, text)) = as_buffer(&recv) {
+            if let Some(v) = dispatch_buffer_method(&recv, &text, method, &args) {
+                return v;
+            }
         }
     }
     // A `Matcher` is mutable too — `find()` moves its cursor — so it is answered
@@ -8569,8 +8638,7 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
     }
     // `sb << "a"` is `StringBuilder.append`, which mutates through the handle
     // and answers the builder — so it chains, and needs no writeback.
-    if let Some((_, text)) = as_buffer(&lhs) {
-        buffer_set(&lhs, format!("{text}{}", groovy_str(&rhs)));
+    if buffer_append(&lhs, &groovy_str(&rhs)) {
         return lhs;
     }
     // `a << b` on two closures is `Closure.compose`: `b` runs first.

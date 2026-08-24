@@ -4908,3 +4908,32 @@ n.push(0); println(n); println(n.pop())"#);
          true\n[1, 2, 3, 4, 5]\n[1, 2, 3, 4, 5]\n[0, 1, 2, 3, 4, 5]\n0\n"
     );
 }
+
+/// A character buffer appends into its stored text rather than reading it out,
+/// rebuilding it and writing it back — the shape that made `sb << x` in a loop
+/// quadratic. The shortcut must keep the buffer a shared, mutable reference and
+/// must not change what each spelling answers, so this pins aliasing, chaining,
+/// the mutators that still rebuild (which read through the same handle), and
+/// `substring`, the one member that reads a span without mutating.
+#[test]
+fn string_builder_appends_in_place_and_stays_shared() {
+    let (out, ok) = run(r#"def s = new StringBuilder()
+def alias = s
+s << 'a' << 'b'
+alias.append('c')
+println(s); println(alias); println(s.is(alias))
+println(s.length()); println(s.size()); println(s.isEmpty()); println(new StringBuilder().isEmpty())
+def t = new StringBuilder('abcd')
+println(t.substring(1)); println(t.substring(1, 3)); println(t)
+t.insert(1, 'Z'); println(t)
+t.deleteCharAt(0); println(t)
+println(t.reverse())
+def u = new StringBuilder(); u << 1 << true << null; println(u)
+def w = new StringWriter(); w << 'hi'; println(w.toString())"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "abc\nabc\ntrue\n3\n3\nfalse\ntrue\n\
+         bcd\nbc\nabcd\naZbcd\nZbcd\ndcbZ\n1truenull\nhi\n"
+    );
+}

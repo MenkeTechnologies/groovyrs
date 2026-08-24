@@ -890,6 +890,18 @@ infinite loop on both sides.
   high surrogate `0xD83D`. `toCharArray()`/`chars()` answer a list of
   one-character strings rather than a `char[]` of code units, so their length is
   the code-point count.
+
+  The same missing type makes `%c` more permissive than the JDK's. Java's
+  `Formatter` takes a `Character` or an `int` code point and refuses a `String`
+  outright; groovyrs takes a *one-character* `String` (which is what `'a' as
+  char` evaluates to here) so that `sprintf("%c", 'a' as char)` still prints
+  `a`. A longer `String` raises `IllegalFormatConversionException` as Java
+  does, which is where the real mistake shows up.
+- **`%a` ignores a precision.** `sprintf("%a", 1.5d)` is `0x1.8p0`, matching
+  `Double.toHexString`, but `%.3a` prints the same rather than rounding the hex
+  mantissa to three digits. The rounding is defined on the *hex* significand, a
+  base the value model has no arithmetic for; every other float conversion
+  (`%f`, `%e`, `%g`) honours its precision exactly.
 - **A compound assignment to an unbound name raises the wrong throwable.**
   `counter += 1` with nothing bound reads `null` and then faults on the
   arithmetic, so it raises `NullPointerException` where Groovy raises

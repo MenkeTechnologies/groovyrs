@@ -1,0 +1,124 @@
+println(sprintf('%e', 1234.5))	1.234500e+03\n
+println(sprintf('%E', 1234.5))	1.234500E+03\n
+println(sprintf('%.2e', 1234.5))	1.23e+03\n
+println(sprintf('%e', 0.000012))	1.200000e-05\n
+println(sprintf('%e', 0))	EXC java.util.IllegalFormatConversionException: e != java.lang.Integer\n
+println(sprintf('%e', -1234.5))	-1.234500e+03\n
+println(sprintf('%15.3e|', 1234.5))	      1.235e+03|\n
+println(sprintf('%-15.3e|', 1234.5))	1.235e+03      |\n
+println(sprintf('%g', 1234.5))	1234.50\n
+println(sprintf('%g', 0.000012))	1.20000e-05\n
+println(sprintf('%g', 123456789.0))	1.23457e+08\n
+println(sprintf('%.3g', 1234.5))	1.23e+03\n
+println(sprintf('%+d', 5))	+5\n
+println(sprintf('%+d', -5))	-5\n
+println(sprintf('% d', 5))	 5\n
+println(sprintf('%+.2f', 5))	EXC java.util.IllegalFormatConversionException: f != java.lang.Integer\n
+println(sprintf('%05d', 42))	00042\n
+println(sprintf('%+05d', 42))	+0042\n
+println(sprintf('%05.1f', -4.25))	-04.3\n
+println(sprintf('%c', 65))	A\n
+println(sprintf('%c', 'a' as char))	a\n
+println(sprintf('%C', 97))	A\n
+println(sprintf('%2$s %1$s', 'a', 'b'))	b a\n
+println(sprintf('%1$s %1$s', 'a'))	a a\n
+println(sprintf('%(d', -5))	(5)\n
+println(sprintf('%,.2f', 1234567.891))	1,234,567.89\n
+println(sprintf('%#x', 255))	0xff\n
+println(sprintf('%#o', 8))	010\n
+println(sprintf('%x', -1))	ffffffff\n
+println(sprintf('%d', 3000000000L))	3000000000\n
+println(sprintf('%.0f', 2.5))	3\n
+println(sprintf('%.0f', 3.5))	4\n
+println(sprintf('%B', true))	TRUE\n
+println(sprintf('%10s|', 'ab'))	        ab|\n
+println(sprintf('%-10s|', 'ab'))	ab        |\n
+println(sprintf('%h', 'a'))	61\n
+println(String.format('%s %s', 'a', 'b'))	a b\n
+println(sprintf('%d', 1.5))	EXC java.util.IllegalFormatConversionException: d != java.math.BigDecimal\n
+println(sprintf('%d', 1.5G))	EXC java.util.IllegalFormatConversionException: d != java.math.BigDecimal\n
+println(sprintf('%d', 3000000000L))	3000000000\n
+println(sprintf('%d', 2G**80))	1208925819614629174706176\n
+println(sprintf('%f', 1))	EXC java.util.IllegalFormatConversionException: f != java.lang.Integer\n
+println(sprintf('%f', 1.5G))	1.500000\n
+println(sprintf('%f', 1.5d))	1.500000\n
+println(sprintf('%e', 1.5G))	1.500000e+00\n
+println(sprintf('%g', 1.5G))	1.50000\n
+println(sprintf('%x', 255L))	ff\n
+println(sprintf('%x', 2G**80))	100000000000000000000\n
+println(sprintf('%x', 1.5))	EXC java.util.IllegalFormatConversionException: x != java.math.BigDecimal\n
+println(sprintf('%o', -1))	37777777777\n
+println(sprintf('%c', 'ab'))	EXC java.util.IllegalFormatConversionException: c != java.lang.String\n
+println(sprintf('%c', 1.5))	EXC java.util.IllegalFormatConversionException: c != java.math.BigDecimal\n
+println(sprintf('%s', 1.5G))	1.5\n
+println(sprintf('%h', 'ab'))	c21\n
+println(sprintf('%h', 5))	5\n
+println(sprintf('%g', 0.0001))	0.000100000\n
+println(sprintf('%g', 0.00001))	1.00000e-05\n
+println(sprintf('%g', 1e10))	1.00000e+10\n
+println(sprintf('%g', 999999.0))	999999\n
+println(sprintf('%g', 1000000.0))	1.00000e+06\n
+println(sprintf('%.1g', 0.0))	0e-01\n
+println(sprintf('%g', 0.0))	0.00000e-01\n
+println(sprintf('%e', 9.9999999))	1.000000e+01\n
+println(sprintf('%.2e', 9.999))	1.00e+01\n
+println(sprintf('%e', 1e300))	1.000000e+300\n
+println(sprintf('%e', 1e-300))	1.000000e-300\n
+println(sprintf('%.0e', 1234.5))	1e+03\n
+println(sprintf('%(f', -1.5))	(1.500000)\n
+println(sprintf('%(,d', -1234567))	(1,234,567)\n
+println(sprintf('%,d', -1234567))	-1,234,567\n
+println(sprintf('% .2f', 1.5))	 1.50\n
+println(sprintf('%08.2f', -1.5))	-0001.50\n
+println(sprintf('%+x', 255))	EXC java.util.FormatFlagsConversionMismatchException: Conversion = x, Flags = +\n
+println(sprintf('%3$s%1$s%2$s', 'a','b','c'))	cab\n
+println(sprintf('%1$05d', 42))	00042\n
+println(sprintf('%s %s', 'a'))	EXC java.util.MissingFormatArgumentException: Format specifier '%s'\n
+println(sprintf('%e', Double.NaN))	NaN\n
+println(sprintf('%f', Double.POSITIVE_INFINITY))	Infinity\n
+println(sprintf('%.3f', 1.0005))	1.001\n
+println(sprintf('%.3f', 1.0005d))	1.001\n
+println(sprintf('%b', 0))	true\n
+println(sprintf('%b', ''))	true\n
+println(sprintf('%b', [1]))	true\n
+try { sprintf('%q', 1) } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.UnknownFormatConversionException|Conversion = 'q'\n
+try { sprintf('%.2d', 1) } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.IllegalFormatPrecisionException|2\n
+try { sprintf('%s') } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.MissingFormatArgumentException|Format specifier '%s'\n
+try { sprintf('%--s','a') } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.DuplicateFormatFlagsException|Flags = '-'\n
+try { sprintf('%-s','a') } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.MissingFormatWidthException|%-s\n
+try { sprintf('%0s','a') } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.FormatFlagsConversionMismatchException|Conversion = s, Flags = 0\n
+try { sprintf('%(s','a') } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.FormatFlagsConversionMismatchException|Conversion = s, Flags = (\n
+try { sprintf('%,s','a') } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.FormatFlagsConversionMismatchException|Conversion = s, Flags = ,\n
+try { sprintf('%#s','a') } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.FormatFlagsConversionMismatchException|Conversion = s, Flags = #\n
+try { sprintf('%#d',1) } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.FormatFlagsConversionMismatchException|Conversion = d, Flags = #\n
+try { sprintf('%,x',255) } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.FormatFlagsConversionMismatchException|Conversion = x, Flags = ,\n
+try { sprintf('%(x',255) } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.FormatFlagsConversionMismatchException|Conversion = x, Flags = (\n
+try { sprintf('% x',255) } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.FormatFlagsConversionMismatchException|Conversion = x, Flags =  \n
+try { sprintf('%0d',1) } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.MissingFormatWidthException|%0d\n
+try { sprintf('%.2c',65) } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.IllegalFormatPrecisionException|2\n
+try { sprintf('%.2b',true) } catch(e) { println(e.getClass().name+'|'+e.message) }	
+println(sprintf('%.2s','abcd'))	ab\n
+println(sprintf('%.1b',true))	t\n
+try { sprintf('%+s','a') } catch(e) { println(e.getClass().name+'|'+e.message) }	java.util.FormatFlagsConversionMismatchException|Conversion = s, Flags = +\n
+println(sprintf('%,f',1234.5))	1,234.500000\n
+println(sprintf('%s %s','a',null))	a null\n
+println(sprintf('%h',[1,2]))	1\n
+println(sprintf('%h',1.5))	1d2\n
+println(sprintf('%g',-0.00001))	-1.00000e-05\n
+println(sprintf('%g',-1234.5))	-1234.50\n
+println(sprintf('%g',1e-5d))	1.00000e-05\n
+println(sprintf('%g',0.0d))	0.00000\n
+println(sprintf('%g',999999.0d))	999999\n
+println(sprintf('%g',1000000.0d))	1.00000e+06\n
+println(sprintf('%e',0.0G))	0.000000e-01\n
+println(sprintf('%e',0.0d))	0.000000e+00\n
+println(sprintf('%.10e',1.0G/3G))	3.3333333330e-01\n
+println(sprintf('%f',1.0G/3G))	0.333333\n
+println(sprintf('%.20f',0.1d))	0.10000000000000000000\n
+println(sprintf('%.20f',0.1G))	0.10000000000000000000\n
+println(sprintf('%e',12345678901234567890G))	EXC java.util.IllegalFormatConversionException: e != java.math.BigInteger\n
+println(sprintf('%a',1.5d))	0x1.8p0\n
+println(sprintf('%s-%s',['a','b']))	a-b\n
+println(sprintf('%s-%s','a','b'))	a-b\n
+println(sprintf('%s',[1,2,3]))	1\n
+def l=[1,2]; printf('%s|%s%n',l)	1|2\n

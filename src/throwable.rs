@@ -24,6 +24,55 @@ const THROWABLES: &[(&str, &str, &str)] = &[
         "java.lang",
     ),
     ("IllegalStateException", "RuntimeException", "java.lang"),
+    // `java.util.Formatter`'s failure surface. Every one of these is an
+    // `IllegalFormatException`, so a script's `catch (IllegalArgumentException
+    // e)` around a `printf` catches all of them — verified on Apache Groovy
+    // 5.1.0 by walking `getSuperclass()` from each.
+    (
+        "IllegalFormatException",
+        "IllegalArgumentException",
+        "java.util",
+    ),
+    (
+        "IllegalFormatConversionException",
+        "IllegalFormatException",
+        "java.util",
+    ),
+    (
+        "IllegalFormatCodePointException",
+        "IllegalFormatException",
+        "java.util",
+    ),
+    (
+        "IllegalFormatPrecisionException",
+        "IllegalFormatException",
+        "java.util",
+    ),
+    (
+        "MissingFormatArgumentException",
+        "IllegalFormatException",
+        "java.util",
+    ),
+    (
+        "MissingFormatWidthException",
+        "IllegalFormatException",
+        "java.util",
+    ),
+    (
+        "DuplicateFormatFlagsException",
+        "IllegalFormatException",
+        "java.util",
+    ),
+    (
+        "UnknownFormatConversionException",
+        "IllegalFormatException",
+        "java.util",
+    ),
+    (
+        "FormatFlagsConversionMismatchException",
+        "IllegalFormatException",
+        "java.util",
+    ),
     // What a malformed (or unsupported) `~/…/` / `=~` pattern raises.
     (
         "PatternSyntaxException",

@@ -22,7 +22,7 @@
 //!    where `+` routes through `groovy_add`.
 
 use crate::decimal;
-use bigdecimal::{BigDecimal, Zero};
+use bigdecimal::{BigDecimal, Signed, Zero};
 use fusevm::{Frame, NumOp, VMResult, Value, VM};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -9182,103 +9182,402 @@ fn static_field(class: &str, name: &str) -> Option<Value> {
     })
 }
 
-/// A faithful-enough `java.util.Formatter`: the conversions a Groovy script
-/// writes (`%s`, `%d`, `%f`/`%.Nf`, `%x`, `%o`, `%b`, `%%`, `%n`), with width
-/// and left-justification. An unmodeled conversion is copied through verbatim
-/// rather than guessed at.
+/// `java.util.Formatter`, driven by [`crate::format`]'s specifier parser.
+///
+/// The JDK's `Formatter` is strict in three ways a naive printf is not, and a
+/// Groovy script sees all three: a conversion accepts a fixed flag set and
+/// throws on anything else, an integral conversion refuses a `BigDecimal`
+/// argument (`"%d"` of the literal `1.5` is an `IllegalFormatConversionException`,
+/// not `1.5`), and a `double` is laid out from its shortest round-trip
+/// representation rather than its exact binary value.
+///
+/// The one deliberate departure is `%c`: groovyrs has no `java.lang.Character`
+/// (BUGS.md, *Java `char`*), modeling a `char` as a one-character `String`, so
+/// `%c` accepts a one-character `String` where the JDK would refuse a `String`
+/// outright. A longer `String` still raises, which is what catches the real
+/// mistake.
 fn java_format(vm: &mut VM, spec: &str, args: &[Value]) -> String {
+    let pieces = match crate::format::parse(spec) {
+        Ok(p) => p,
+        Err(e) => {
+            raise(vm, e.class(), &e.message());
+            return String::new();
+        }
+    };
     let mut out = String::new();
+    // Ordinary conversions walk the argument list; an explicit `%3$s` index
+    // reads without advancing that cursor, and `%<s` re-reads the last one.
     let mut next = 0usize;
-    let mut it = spec.chars().peekable();
-    while let Some(c) = it.next() {
-        if c != '%' {
-            out.push(c);
-            continue;
-        }
-        // Collect flags, width and precision up to the conversion character.
-        let mut flags = String::new();
-        while matches!(it.peek(), Some('-' | '+' | '0' | ' ' | ',' | '#')) {
-            flags.push(it.next().unwrap());
-        }
-        let mut width = String::new();
-        while matches!(it.peek(), Some(d) if d.is_ascii_digit()) {
-            width.push(it.next().unwrap());
-        }
-        let mut precision = String::new();
-        if matches!(it.peek(), Some('.')) {
-            it.next();
-            while matches!(it.peek(), Some(d) if d.is_ascii_digit()) {
-                precision.push(it.next().unwrap());
+    let mut last = 0usize;
+    for piece in pieces {
+        let spec = match piece {
+            crate::format::Piece::Literal(text) => {
+                out.push_str(&text);
+                continue;
             }
-        }
-        let Some(conv) = it.next() else { break };
-        if conv == '%' {
-            out.push('%');
-            continue;
-        }
-        if conv == 'n' {
-            out.push('\n');
-            continue;
-        }
-        let arg = args.get(next).cloned().unwrap_or(Value::Undef);
-        next += 1;
-        let body = match conv {
-            'd' => as_i64(&arg)
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| groovy_str(&arg)),
-            'f' | 'e' | 'g' => {
-                let digits: usize = precision.parse().unwrap_or(6);
-                // Java rounds HALF_UP on the argument's *exact* value, so a
-                // `BigDecimal` argument (every unsuffixed Groovy literal) rounds
-                // off the decimal — `"%.2f"` of `1.005` is `1.01`, not the
-                // `1.00` the nearest double would give.
-                match as_dec(&arg) {
-                    Some(d) => {
-                        decimal::to_groovy_string(&decimal::round_half_up(&d, digits as i64))
-                    }
-                    None => format!("{:.*}", digits, as_f64(&arg)),
-                }
-            }
-            'x' => format!("{:x}", as_i64(&arg).unwrap_or(0)),
-            'X' => format!("{:X}", as_i64(&arg).unwrap_or(0)),
-            'o' => format!("{:o}", as_i64(&arg).unwrap_or(0)),
-            'b' => groovy_truthy(vm, &arg).to_string(),
-            's' | 'S' => {
-                let s = render_value(vm, &arg);
-                if conv == 'S' {
-                    s.to_uppercase()
-                } else {
-                    s
-                }
-            }
-            _ => groovy_str(&arg),
+            crate::format::Piece::Conv(s) => s,
         };
-        // The `,` flag is Java's locale grouping separator, which under en-US
-        // (the only locale groovyrs models — see `parity-scripts/oracle-jvm.sh`)
-        // is a comma every three digits of the integer part. It applies to the
-        // integral and the floating conversions, and to nothing else.
-        let body = if flags.contains(',') && matches!(conv, 'd' | 'f' | 'e' | 'g') {
-            group_integer_digits(&body)
+        match spec.conv {
+            '%' => {
+                out.push_str(&pad_conversion(&spec, "%", ""));
+                continue;
+            }
+            'n' => {
+                out.push('\n');
+                continue;
+            }
+            _ => {}
+        }
+        let idx = if spec.prev {
+            last
+        } else if let Some(i) = spec.index {
+            i.saturating_sub(1)
         } else {
-            body
+            next += 1;
+            next - 1
         };
-        let w: usize = width.parse().unwrap_or(0);
-        if body.chars().count() >= w {
-            out.push_str(&body);
-        } else if flags.contains('-') {
-            out.push_str(&body);
-            out.push_str(&" ".repeat(w - body.chars().count()));
-        } else {
-            let fill = if flags.contains('0') && conv != 's' {
-                "0"
-            } else {
-                " "
-            };
-            out.push_str(&fill.repeat(w - body.chars().count()));
-            out.push_str(&body);
+        last = idx;
+        let Some(arg) = args.get(idx).cloned() else {
+            raise(
+                vm,
+                "MissingFormatArgumentException",
+                &format!("Format specifier '{}'", spec.text),
+            );
+            return String::new();
+        };
+        match format_one(vm, &spec, &arg) {
+            Some(body) => out.push_str(&body),
+            // `format_one` has already parked the throwable.
+            None => return String::new(),
         }
     }
     out
+}
+
+/// Render one conversion, padded. `None` means a throwable was raised.
+fn format_one(vm: &mut VM, spec: &crate::format::Spec, arg: &Value) -> Option<String> {
+    let null = matches!(arg, Value::Undef);
+    let refuse = |vm: &mut VM| -> Option<String> {
+        raise(
+            vm,
+            "IllegalFormatConversionException",
+            &format!("{} != {}", spec.conv, java_class_name(arg)),
+        );
+        None
+    };
+    // A null argument prints `null` under every conversion but `%b`, which is
+    // the one conversion defined on the *absence* of a value.
+    if null && !matches!(spec.conv, 'b' | 'B') {
+        return Some(pad_conversion(spec, &truncated("null", spec.precision), ""));
+    }
+    match spec.conv {
+        'b' | 'B' => {
+            let text = match arg {
+                Value::Undef => "false".to_string(),
+                Value::Bool(b) => b.to_string(),
+                _ => "true".to_string(),
+            };
+            Some(pad_conversion(
+                spec,
+                &cased(&text, spec.conv, spec.precision),
+                "",
+            ))
+        }
+        'h' | 'H' => {
+            let text = format!("{:x}", object_hash_code(arg) as u32);
+            Some(pad_conversion(
+                spec,
+                &cased(&text, spec.conv, spec.precision),
+                "",
+            ))
+        }
+        's' | 'S' => {
+            let text = render_value(vm, arg);
+            Some(pad_conversion(
+                spec,
+                &cased(&text, spec.conv, spec.precision),
+                "",
+            ))
+        }
+        'c' | 'C' => {
+            let text = match arg {
+                // A code point, the way the JDK's `%c` takes an `int`.
+                Value::Int(n) => match u32::try_from(*n).ok().and_then(char::from_u32) {
+                    Some(c) => c.to_string(),
+                    None => {
+                        raise(vm, "IllegalFormatCodePointException", &format!("{n:#x}"));
+                        return None;
+                    }
+                },
+                // groovyrs's stand-in for `java.lang.Character`.
+                Value::Str(s) if s.chars().count() == 1 => s.to_string(),
+                _ => return refuse(vm),
+            };
+            Some(pad_conversion(spec, &cased(&text, spec.conv, None), ""))
+        }
+        'd' => {
+            let digits = if let Some(b) = as_bigint(arg) {
+                decimal::to_groovy_string(&decimal::abs(&b))
+            } else if let Value::Int(n) = arg {
+                n.unsigned_abs().to_string()
+            } else {
+                return refuse(vm);
+            };
+            let negative = as_bigint(arg)
+                .map(|b| b.is_negative())
+                .unwrap_or(matches!(arg, Value::Int(n) if *n < 0));
+            let digits = if spec.has(',') {
+                group_integer_digits(&digits)
+            } else {
+                digits
+            };
+            Some(signed_number(spec, &digits, negative, ""))
+        }
+        'o' | 'x' | 'X' => {
+            let radix: u32 = if spec.conv == 'o' { 8 } else { 16 };
+            let prefix = match (spec.has('#'), spec.conv) {
+                (true, 'o') => "0",
+                (true, 'x') => "0x",
+                (true, 'X') => "0X",
+                _ => "",
+            };
+            if let Some(b) = as_bigint(arg) {
+                // A `BigInteger` is not a two's-complement word, so the JDK
+                // signs it — and only then are `+`, ` ` and `(` legal.
+                let digits = decimal::to_radix_string(&decimal::abs(&b), radix as i64);
+                let digits = cased(&digits, spec.conv, None);
+                return Some(signed_number(spec, &digits, b.is_negative(), prefix));
+            }
+            let Value::Int(n) = arg else {
+                return refuse(vm);
+            };
+            for f in "+ (".chars() {
+                if spec.has(f) {
+                    let e = crate::format::Error::FlagMismatch(spec.conv, f);
+                    raise(vm, e.class(), &e.message());
+                    return None;
+                }
+            }
+            // Two's complement at the argument's own width: an `Integer` wraps
+            // at 32 bits (`%x` of `-1` is `ffffffff`), a `Long` at 64.
+            let text = match i32::try_from(*n) {
+                Ok(small) => radix_text(small as u32 as u64, radix),
+                Err(_) => radix_text(*n as u64, radix),
+            };
+            let text = cased(&text, spec.conv, None);
+            Some(pad_conversion(spec, &text, prefix))
+        }
+        'e' | 'E' | 'f' | 'g' | 'G' | 'a' | 'A' => {
+            let prec = spec.precision.unwrap_or(6);
+            // A `double` keeps the IEEE path; every other Groovy decimal is an
+            // exact `BigDecimal`. An integral type is refused outright.
+            let (value, is_double) = match arg {
+                Value::Float(f) => {
+                    if f.is_nan() || f.is_infinite() {
+                        let body = if f.is_nan() { "NaN" } else { "Infinity" };
+                        return Some(signed_word(spec, body, f.is_sign_negative() && !f.is_nan()));
+                    }
+                    match decimal::parse(&decimal::format_double(*f)) {
+                        Some(d) => (d, true),
+                        None => return refuse(vm),
+                    }
+                }
+                _ if as_bigint(arg).is_some() => return refuse(vm),
+                _ => match as_dec(arg) {
+                    Some(d) => (d, false),
+                    None => return refuse(vm),
+                },
+            };
+            let negative = value.is_negative();
+            let magnitude = decimal::abs(&value);
+            // A zero `double` has no scale to take an exponent from, so `%e` of
+            // `0.0d` is `e+00` where the `BigDecimal` `0.0` is `e-01`.
+            let zero_exp = (is_double && magnitude.is_zero()).then_some(0);
+            let digits = match spec.conv {
+                'f' => {
+                    let body = crate::format::fixed(&magnitude, prec);
+                    if spec.has(',') {
+                        group_integer_digits(&body)
+                    } else {
+                        body
+                    }
+                }
+                'e' | 'E' => cased(
+                    &crate::format::scientific(&magnitude, prec, zero_exp),
+                    spec.conv,
+                    None,
+                ),
+                'g' | 'G' => {
+                    let prec = if spec.precision == Some(0) { 1 } else { prec };
+                    let decimals = if is_double {
+                        general_double_digits(&magnitude, prec)
+                    } else {
+                        crate::format::general_decimal_digits(&magnitude, prec)
+                    };
+                    let body = match decimals {
+                        Some(d) => {
+                            let body = crate::format::fixed(&magnitude, d);
+                            if spec.has(',') {
+                                group_integer_digits(&body)
+                            } else {
+                                body
+                            }
+                        }
+                        None => crate::format::scientific(&magnitude, prec - 1, zero_exp),
+                    };
+                    cased(&body, spec.conv, None)
+                }
+                _ => {
+                    if !is_double {
+                        return refuse(vm);
+                    }
+                    cased(&hex_double(as_f64(arg).abs()), spec.conv, None)
+                }
+            };
+            Some(signed_number(spec, &digits, negative, ""))
+        }
+        _ => Some(String::new()),
+    }
+}
+
+/// `Integer.toHexString`/`toOctalString` of an already-widened word.
+fn radix_text(bits: u64, radix: u32) -> String {
+    if radix == 8 {
+        format!("{bits:o}")
+    } else {
+        format!("{bits:x}")
+    }
+}
+
+/// Apply `%S`/`%B`/`%X`-style upper-casing and a `%s`-style precision cut.
+fn cased(text: &str, conv: char, precision: Option<usize>) -> String {
+    let text = truncated(text, precision);
+    if conv.is_uppercase() {
+        text.to_uppercase()
+    } else {
+        text
+    }
+}
+
+/// A precision on `%s`/`%b`/`%h` cuts the rendering to that many characters.
+fn truncated(text: &str, precision: Option<usize>) -> String {
+    match precision {
+        Some(p) if text.chars().count() > p => text.chars().take(p).collect(),
+        _ => text.to_string(),
+    }
+}
+
+/// A non-numeric float body (`NaN`, `Infinity`): the sign flags apply, the
+/// zero-fill does not — the JDK pads these with spaces whatever `0` says.
+fn signed_word(spec: &crate::format::Spec, body: &str, negative: bool) -> String {
+    let sign = if negative {
+        "-"
+    } else if spec.has('+') {
+        "+"
+    } else if spec.has(' ') {
+        " "
+    } else {
+        ""
+    };
+    pad_text_body(spec, &format!("{sign}{body}"), false)
+}
+
+/// Attach the sign (or the `(` flag's parentheses) to an unsigned numeric body
+/// and pad it. Zero-fill goes *between* the sign and the digits, which is why
+/// this cannot go through the plain text padder.
+fn signed_number(
+    spec: &crate::format::Spec,
+    digits: &str,
+    negative: bool,
+    radix_prefix: &str,
+) -> String {
+    let (open, close) = if negative && spec.has('(') {
+        ("(", ")")
+    } else if negative {
+        ("-", "")
+    } else if spec.has('+') {
+        ("+", "")
+    } else if spec.has(' ') {
+        (" ", "")
+    } else {
+        ("", "")
+    };
+    let width = spec.width.unwrap_or(0);
+    let fixed = open.chars().count()
+        + close.chars().count()
+        + radix_prefix.chars().count()
+        + digits.chars().count();
+    if spec.has('0') && width > fixed && !spec.has('-') {
+        return format!(
+            "{open}{radix_prefix}{}{digits}{close}",
+            "0".repeat(width - fixed)
+        );
+    }
+    pad_text_body(spec, &format!("{open}{radix_prefix}{digits}{close}"), false)
+}
+
+/// Width padding for a conversion whose body carries no sign.
+fn pad_conversion(spec: &crate::format::Spec, body: &str, radix_prefix: &str) -> String {
+    pad_text_body(spec, &format!("{radix_prefix}{body}"), spec.has('0'))
+}
+
+/// Pad `body` to the specifier's width, left- or right-justified.
+fn pad_text_body(spec: &crate::format::Spec, body: &str, zero_fill: bool) -> String {
+    let width = spec.width.unwrap_or(0);
+    let len = body.chars().count();
+    if len >= width {
+        return body.to_string();
+    }
+    let fill = if zero_fill { "0" } else { " " };
+    if spec.has('-') {
+        format!("{body}{}", " ".repeat(width - len))
+    } else {
+        format!("{}{body}", fill.repeat(width - len))
+    }
+}
+
+/// `%g`'s branch for a `double` argument. Unlike the `BigDecimal` rule (which
+/// compares the value itself — see [`crate::format::general_decimal_digits`]),
+/// the JDK decides a `double` on the exponent the value has *after* rounding to
+/// `prec` significant digits, so a zero takes the decimal branch.
+fn general_double_digits(magnitude: &BigDecimal, prec: usize) -> Option<usize> {
+    if magnitude.is_zero() {
+        return Some(prec - 1);
+    }
+    // The rounded scientific rendering carries the exponent the branch needs.
+    let sci = crate::format::scientific(magnitude, prec.saturating_sub(1), None);
+    let exp: i64 = sci
+        .rsplit('e')
+        .next()
+        .and_then(|e| e.parse().ok())
+        .unwrap_or(0);
+    if (-4..prec as i64).contains(&exp) {
+        Some((prec as i64 - exp - 1).max(0) as usize)
+    } else {
+        None
+    }
+}
+
+/// `Double.toHexString`, which is what `%a` prints: a normalized value as
+/// `0x1.<hex mantissa>p<exponent>`, a subnormal as `0x0.…p-1022`, and a zero as
+/// `0x0.0p0`. The value is non-negative; the caller attaches the sign.
+fn hex_double(f: f64) -> String {
+    if f == 0.0 {
+        return "0x0.0p0".to_string();
+    }
+    let bits = f.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i64;
+    let mantissa = bits & 0x000f_ffff_ffff_ffff;
+    let (lead, unbiased) = if exponent == 0 {
+        ("0x0.", -1022)
+    } else {
+        ("0x1.", exponent - 1023)
+    };
+    let mut hex = format!("{mantissa:013x}");
+    while hex.len() > 1 && hex.ends_with('0') {
+        hex.pop();
+    }
+    format!("{lead}{hex}p{unbiased}")
 }
 
 /// Insert `,` every three digits of `text`'s integer part, leaving a sign, a
@@ -10015,9 +10314,14 @@ fn formatted(vm: &mut VM, argc: u8) -> String {
     let Some((spec, rest)) = args.split_first() else {
         return String::new();
     };
-    // A lone list argument is the argument *vector*, not one `%s` operand.
+    // A lone list argument is the argument *vector*, not one `%s` operand —
+    // Groovy's `sprintf(String, Object)` spreads an array or a `List`. A list
+    // literal is a heap handle rather than a `Value::Array`, so both shapes have
+    // to unwrap or `sprintf("%h", [1, 2])` hashes the *list* where Groovy
+    // hashes its first element.
     let rest: Vec<Value> = match rest {
         [Value::Array(a)] => a.to_vec(),
+        [only] => as_list(only).unwrap_or_else(|| vec![only.clone()]),
         other => other.to_vec(),
     };
     java_format(vm, &groovy_str(spec), &rest)

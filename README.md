@@ -334,9 +334,15 @@ Implemented and checked against Apache Groovy:
   `max` / `min`, `frequency`, `disjoint`), `Arrays.asList`, `System`
   (`lineSeparator`, `getProperty` with and without a default, `getenv`), and
   `String.format` / `String.valueOf`, plus the script-scope `printf` / `sprintf`
-  over a `java.util.Formatter` subset (`%s %d %f %x %o %b %n %%`, width,
-  precision, left-justification and the `,` grouping flag, so `%,d` of `1234567`
-  is `1,234,567`). `Math.round`, `Math.signum`, `Math.max` / `Math.min` and
+  over `java.util.Formatter` (`%s %S %b %B %h %H %c %C %d %o %x %X %e %E %f %g
+  %G %a %A %n %%`, the `-` `#` `+` `,` `(` `0` and space flags, width,
+  precision, and `%3$s` / `%<s` argument indexing). It is strict the way the JDK
+  is — a conversion accepts a fixed flag set and raises
+  `FormatFlagsConversionMismatchException` on anything else, an integral
+  conversion refuses a `BigDecimal` argument, and a `double` lays out from its
+  shortest round-trip form: `%,d` of `1234567` is `1,234,567`, `%e` of `1234.5`
+  is `1.234500e+03`, `%x` of `-1` is `ffffffff`, and `%.20f` of `0.1d` is
+  `0.10000000000000000000`. `Math.round`, `Math.signum`, `Math.max` / `Math.min` and
   `Double.compare` follow Java's rules rather than the same-named Rust ones,
   which differ on ties, signed zeros and NaN.
 - **Spread `*.`** — `list*.member` / `list*.method(args)` applies the member to

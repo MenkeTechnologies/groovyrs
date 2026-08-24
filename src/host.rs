@@ -1355,6 +1355,16 @@ enum HeapObj {
     /// re-sorting on every write would make `m.c = 3` O(n log n).
     OrderedMap {
         entries: Vec<(String, Value)>,
+        /// Key → its position in `entries`. A Groovy map is a `HashMap` under
+        /// every implementation name, so a lookup and an overwrite must not
+        /// scan: with `entries` alone, filling one took time quadratic in its
+        /// size (16 000 `m["k$i"] = i` writes took 9 s against Apache Groovy's
+        /// 1.1 s, and doubling the count quadrupled it).
+        ///
+        /// Rebuilt wholesale by [`omap_retain`], which is the only mutator that
+        /// moves an entry; every other write appends or overwrites in place, so
+        /// a position, once handed out, stays valid.
+        index: HashMap<String, usize>,
         kind: MapKind,
     },
     /// A `java.math.BigDecimal` — every unsuffixed Groovy decimal. fusevm's
@@ -2224,7 +2234,7 @@ fn as_omap(v: &Value) -> Option<Vec<(String, Value)>> {
 fn as_omap_kind(v: &Value) -> Option<(Vec<(String, Value)>, MapKind)> {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
-            Some(HeapObj::OrderedMap { entries, kind }) => Some((entries.clone(), *kind)),
+            Some(HeapObj::OrderedMap { entries, kind, .. }) => Some((entries.clone(), *kind)),
             _ => None,
         }),
         _ => None,
@@ -2274,16 +2284,72 @@ fn hash_req_for_map(n: usize) -> usize {
 /// Build a `LinkedHashMap` handle — every map literal and every GDK method that
 /// rebuilds a map from scratch.
 fn gmap(entries: Vec<(String, Value)>) -> Value {
-    heap_push(HeapObj::OrderedMap {
-        entries,
-        kind: MapKind::Linked,
-    })
+    gmap_kind(entries, MapKind::Linked)
+}
+
+/// The key → position index for a freshly built entry vector.
+fn omap_index(entries: &[(String, Value)]) -> HashMap<String, usize> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, (k, _))| (k.clone(), i))
+        .collect()
 }
 
 /// Build a map handle of a given implementation kind. `entries` is in insertion
 /// order; the kind decides presentation.
 fn gmap_kind(entries: Vec<(String, Value)>, kind: MapKind) -> Value {
-    heap_push(HeapObj::OrderedMap { entries, kind })
+    let index = omap_index(&entries);
+    heap_push(HeapObj::OrderedMap {
+        entries,
+        index,
+        kind,
+    })
+}
+
+/// One entry of an ordered-map handle, without copying the rest of it.
+///
+/// The outer `None` means `v` is not a map; the inner one means the key is
+/// absent. [`as_omap`] answers the same question by cloning every entry (and
+/// re-ordering them, for a `HashMap`/`TreeMap`), which turns a single key read
+/// into work proportional to the whole map — 100 000 reads of a 3 000-entry map
+/// took 17.6 s that way against Apache Groovy's 1.4 s. Presentation order does
+/// not matter to a keyed read, so this skips it entirely.
+fn omap_get(v: &Value, key: &str) -> Option<Option<Value>> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::OrderedMap { entries, index, .. }) => {
+                Some(index.get(key).map(|i| entries[*i].1.clone()))
+            }
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// Is `v` an ordered-map handle? The cheap question — [`as_omap`] answers it
+/// too, but only by building the copy the caller may not want.
+fn is_omap(v: &Value) -> bool {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| {
+            matches!(
+                h.borrow().get(*id as usize),
+                Some(HeapObj::OrderedMap { .. })
+            )
+        }),
+        _ => false,
+    }
+}
+
+/// The entry count of an ordered-map handle, without copying it.
+fn omap_len(v: &Value) -> Option<usize> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::OrderedMap { entries, .. }) => Some(entries.len()),
+            _ => None,
+        }),
+        _ => None,
+    }
 }
 
 /// `java.util.NavigableMap`'s own methods — the ones a `TreeMap` answers and no
@@ -2436,10 +2502,13 @@ fn similar_map_kind(kind: MapKind) -> MapKind {
 fn omap_set(v: &Value, key: String, val: Value) -> bool {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
-            Some(HeapObj::OrderedMap { entries, .. }) => {
-                match entries.iter_mut().find(|(k, _)| *k == key) {
-                    Some(slot) => slot.1 = val,
-                    None => entries.push((key, val)),
+            Some(HeapObj::OrderedMap { entries, index, .. }) => {
+                match index.get(&key) {
+                    Some(i) => entries[*i].1 = val,
+                    None => {
+                        index.insert(key.clone(), entries.len());
+                        entries.push((key, val));
+                    }
                 }
                 true
             }
@@ -4418,10 +4487,10 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
             None => Value::Undef,
         };
     }
-    if let Some(entries) = as_omap(&recv) {
+    if is_omap(&recv) {
         let k = index.as_str_cow().into_owned();
-        return match entries.iter().find(|(ek, _)| *ek == k) {
-            Some((_, v)) => v.clone(),
+        return match omap_get(&recv, &k).flatten() {
+            Some(v) => v,
             None => map_default(vm, &recv, &k),
         };
     }
@@ -4512,7 +4581,7 @@ fn b_setindex(vm: &mut VM, _argc: u8) -> Value {
         }
         return recv;
     }
-    if as_omap(&recv).is_some() {
+    if is_omap(&recv) {
         omap_set(&recv, groovy_str(&index), value);
         return recv;
     }
@@ -5215,7 +5284,7 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     if method == "grep"
         && args.len() <= 1
         && !matches!(recv, Value::Array(_) | Value::Str(_))
-        && as_omap(&recv).is_none()
+        && !is_omap(&recv)
         && as_set(&recv).is_none()
         && as_range(&recv).is_none()
     {
@@ -5335,8 +5404,18 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     }
     // The same operations over a map, which passes `(key, value)` (or one
     // `Map.Entry`) to the closure and rebuilds a map where Groovy does.
-    if let Some(entries) = as_omap(&recv) {
-        let kind = omap_kind(&recv).unwrap_or(MapKind::Linked);
+    //
+    // Every arm of `dispatch_map_iteration` but `sort` and `grep` starts by
+    // demanding a closure argument, so asking for one first decides nothing on
+    // its own — but it decides it *without copying the map*, and reaching this
+    // point with a copy in hand is what made every ordinary `m.put(k, v)` cost
+    // a clone (twice: `as_omap` and `omap_kind` each built one) plus, for a
+    // `HashMap`/`TreeMap`, a re-ordering of every entry.
+    let map_iteration =
+        matches!(method, "sort" | "grep") || args.iter().any(|a| closure_meta(a).is_some());
+    if map_iteration && is_omap(&recv) {
+        let (entries, kind) = as_omap_kind(&recv).unwrap_or_else(|| (Vec::new(), MapKind::Linked));
+        let entries = map_order(entries, kind);
         if let Some(res) = dispatch_map_iteration(vm, &entries, kind, method, &args) {
             return match res {
                 Ok(v) => v,
@@ -5349,10 +5428,7 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     }
     // `x.getAt(i)` is the `x[i]` subscript spelled out — same operation, same
     // range/list/negative-index rules, same out-of-bounds diagnostics.
-    if method == "getAt"
-        && args.len() == 1
-        && (!matches!(recv, Value::Obj(_)) || as_omap(&recv).is_some())
-    {
+    if method == "getAt" && args.len() == 1 && (!matches!(recv, Value::Obj(_)) || is_omap(&recv)) {
         return index_read(vm, recv, args[0].clone());
     }
     // Pure GDK dispatch — no closure, no VM re-entrancy.
@@ -6430,7 +6506,7 @@ fn value_size(v: &Value) -> i64 {
         Value::Str(s) => utf16_len(s) as i64,
         Value::Array(a) => a.len() as i64,
         Value::Hash(h) => h.len() as i64,
-        _ => as_omap(v).map(|m| m.len() as i64).unwrap_or(0),
+        _ => omap_len(v).map(|n| n as i64).unwrap_or(0),
     }
 }
 
@@ -7981,7 +8057,33 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         }
 
         // ── Ordered map (host heap) ──
-        _ if as_omap(recv).is_some() => {
+        // The keyed operations first, because they need no copy of the map.
+        // Falling through to the general arm below makes a single `put` or
+        // `get` cost a clone (and, for a `HashMap`/`TreeMap`, a re-order) of
+        // every entry — filling a map with 16 000 `put`s took 42 s that way.
+        (_, "put" | "putAt") if args.len() == 2 && is_omap(recv) => {
+            let key = groovy_str(&args[0]);
+            let previous = omap_get(recv, &key).flatten();
+            omap_set(recv, key, args[1].clone());
+            // `put` answers the value it displaced; `putAt` (the `m[k] = v`
+            // spelling) answers nothing.
+            match method {
+                "put" => previous.unwrap_or(Value::Undef),
+                _ => Value::Undef,
+            }
+        }
+        (_, "get" | "getAt") if args.len() == 1 && is_omap(recv) => {
+            omap_get(recv, &groovy_str(&args[0]))
+                .flatten()
+                .unwrap_or(Value::Undef)
+        }
+        (_, "containsKey") if args.len() == 1 && is_omap(recv) => {
+            Value::bool(omap_get(recv, &groovy_str(&args[0])).flatten().is_some())
+        }
+        (_, "isEmpty") if args.is_empty() && is_omap(recv) => {
+            Value::bool(omap_len(recv) == Some(0))
+        }
+        _ if is_omap(recv) => {
             let entries = as_omap(recv).unwrap();
             let kind = omap_kind(recv).unwrap_or(MapKind::Linked);
             // `java.util.NavigableMap` is the `TreeMap`'s interface alone: on any
@@ -8571,9 +8673,8 @@ fn b_in(vm: &mut VM, _argc: u8) -> Value {
     let coll = deref_list(&range_as_list(&vm.stack.pop().unwrap_or(Value::Undef)));
     let needle = vm.stack.pop().unwrap_or(Value::Undef);
     let _ = vm;
-    if let Some(entries) = as_omap(&coll) {
-        let k = groovy_str(&needle);
-        return Value::bool(entries.iter().any(|(ek, _)| *ek == k));
+    if let Some(found) = omap_get(&coll, &groovy_str(&needle)) {
+        return Value::bool(found.is_some());
     }
     Value::bool(match &coll {
         Value::Array(a) => a.iter().any(|v| values_equal(v, &needle)),
@@ -10779,8 +10880,18 @@ fn subsequences_of(items: &[Value]) -> Vec<Value> {
 fn omap_retain(v: &Value, keep: impl Fn(&str) -> bool) -> bool {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
-            Some(HeapObj::OrderedMap { entries: m, .. }) => {
+            Some(HeapObj::OrderedMap {
+                entries: m, index, ..
+            }) => {
                 m.retain(|(k, _)| keep(k));
+                // Removing an entry shifts every later position, so the index
+                // is rebuilt rather than patched. This is the one mutator that
+                // has to, and it was already linear in the map's size.
+                *index = m
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (k, _))| (k.clone(), i))
+                    .collect();
                 true
             }
             _ => false,
@@ -10831,12 +10942,8 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     // other value: `[a:1].size`, `[a:1].class`, and `[a:1].length` are all
     // `null` in Groovy, while `[size: 9].size` is `9`. Checked first for that
     // reason.
-    if let Some(entries) = as_omap(recv) {
-        return entries
-            .iter()
-            .find(|(ek, _)| ek == name)
-            .map(|(_, v)| v.clone())
-            .unwrap_or(Value::Undef);
+    if let Some(found) = omap_get(recv, name) {
+        return found.unwrap_or(Value::Undef);
     }
     if let Value::Hash(h) = recv {
         return h.get(name).cloned().unwrap_or(Value::Undef);

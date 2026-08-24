@@ -4829,3 +4829,45 @@ try { 1.0G.divide(0G, 2, java.math.RoundingMode.HALF_UP) } catch (e) { println(e
         "2\n2\n2\n-1\n1.5\nRounding necessary\n0.33333\n0.66\n/ by zero\n"
     );
 }
+
+/// A map carries a key → position index alongside its entry vector so a lookup
+/// and an overwrite do not scan. The index is what could silently corrupt
+/// insertion order, so this pins the sequences that move an entry: a removal
+/// (which shifts every later position), a re-insert of a removed key, an
+/// overwrite that must NOT move the key, and a clear.
+#[test]
+fn map_keeps_insertion_order_across_removal_and_reinsert() {
+    let (out, ok) = run(
+        r#"def a = [a:1, b:2, c:3]; a.remove('b'); a.d = 4; a.a = 9; println(a)
+def b = [a:1, b:2, c:3]; b.remove('a'); b.a = 5; println(b)
+def c = [:]; c.a = 1; c.b = 2; c.a = 3; println(c)
+def d = [a:1]; d.clear(); d.z = 1; println(d)
+def e = [a:1, b:2]; e.remove('a'); e.remove('b'); e.x = 1; e.y = 2; println(e)
+def f = [:]; for (i in 1..5) { f["k$i"] = i }; f.remove('k3'); f['k6'] = 6
+println(f); println(f.k6); println(f.size())
+def g = new TreeMap([c:3, a:1, b:2]); g.d = 4; println(g); println(g.a)"#,
+    );
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[a:9, c:3, d:4]\n[b:2, c:3, a:5]\n[a:3, b:2]\n[z:1]\n[x:1, y:2]\n\
+         [k1:1, k2:2, k4:4, k5:5, k6:6]\n6\n5\n[a:1, b:2, c:3, d:4]\n1\n"
+    );
+}
+
+/// `put` answers the value it displaced (and `null` for a new key) where the
+/// `m[k] = v` spelling answers nothing. The two share one write path, so the
+/// return value is the only thing that distinguishes them.
+#[test]
+fn map_put_answers_the_displaced_value() {
+    let (out, ok) = run(r#"def m = [a:1, b:2]
+println(m.put('a', 9))
+println(m.put('z', 9))
+println(m)
+println(m.get('a')); println(m.get('q')); println(m.get('q', 7)); println(m)"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "1\nnull\n[a:9, b:2, z:9]\n9\nnull\n7\n[a:9, b:2, z:9, q:7]\n"
+    );
+}

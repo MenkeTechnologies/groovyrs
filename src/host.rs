@@ -366,6 +366,27 @@ pub const GCELL_GET: u16 = 769;
 /// through [`GCELL_GET`].
 pub const GCELL_SET: u16 = 770;
 
+/// Builtin id for a **declaration's** cell: the cell a `def` inside a loop body
+/// makes each time it runs. Stack: the initial value, then the handle the
+/// target currently holds (the handle on top). Answers a cell holding the value.
+///
+/// Reuses that handle in place when it names a cell no closure has captured,
+/// and allocates otherwise. The reuse is unobservable, and the argument is
+/// local: an unescaped cell's handle exists nowhere but the slot it came from —
+/// every read of a boxed name goes through [`GCELL_GET`], which answers the
+/// *value*, so only [`b_make_closure`] can copy a handle, and it marks what it
+/// copies. Overwriting a cell nothing else can name cannot change what any
+/// closure sees.
+///
+/// Taking the old handle from the target's own slot is also what makes this
+/// safe under recursion: a second call's slot holds that call's own cell, never
+/// the caller's, so a nested frame can never reuse a live outer one.
+///
+/// Without it, a loop whose body declares a captured local allocated one cell
+/// per iteration for the whole run — 400 000 iterations that create a single
+/// escaping closure cost 400 000 cells and 46 MB, on a heap with no collector.
+pub const GCELL_RENEW: u16 = 771;
+
 /// The call depth at which groovyrs raises `java.lang.StackOverflowError`.
 ///
 /// Groovy's depth is the JVM's: whatever fits in the thread's `-Xss`. Measured
@@ -453,6 +474,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GCELL_NEW, b_cell_new);
     vm.register_builtin(GCELL_GET, b_cell_get);
     vm.register_builtin(GCELL_SET, b_cell_set);
+    vm.register_builtin(GCELL_RENEW, b_cell_renew);
     vm.register_builtin(GIN, b_in);
     vm.register_builtin(GCAST, b_cast);
     vm.register_builtin(GCLASSREF, b_classref);
@@ -1464,7 +1486,18 @@ enum HeapObj {
     /// compiler emits the [`GCELL_GET`] read and the [`GCELL_SET`] write around
     /// every access to a boxed name, so nothing but a capture ever holds the
     /// handle.
-    Cell(Value),
+    Cell {
+        value: Value,
+        /// Set once some closure has captured this cell's *handle*. Until then
+        /// the slot that names it is the only reference, which is what
+        /// [`GCELL_RENEW`] relies on to overwrite it in place instead of
+        /// allocating a new one per loop iteration.
+        ///
+        /// Only [`b_make_closure`] can copy a handle anywhere, because the
+        /// compiler emits a [`GCELL_GET`] around every other read — so marking
+        /// it there is complete.
+        escaped: bool,
+    },
     /// A `groovy.lang.MapWithDefault` — a live **view** onto the map whose heap
     /// id this holds, with its own default closure in [`MAP_DEFAULTS`].
     ///
@@ -2830,7 +2863,42 @@ fn b_make_list(vm: &mut VM, _argc: u8) -> Value {
 /// hold two different cells.
 fn b_cell_new(vm: &mut VM, _argc: u8) -> Value {
     let init = vm.stack.pop().unwrap_or(Value::Undef);
-    heap_push(HeapObj::Cell(init))
+    heap_push(HeapObj::Cell {
+        value: init,
+        escaped: false,
+    })
+}
+
+/// `GCELL_RENEW`: the cell for a declaration — reusing the target's current one
+/// when nothing has captured it.
+///
+/// Stack is the initial value then the old handle, so the handle is on top: the
+/// compiler lowers the initializer first (it may read the name being declared)
+/// and pushes the slot's current contents after it.
+fn b_cell_renew(vm: &mut VM, _argc: u8) -> Value {
+    let old = vm.stack.pop().unwrap_or(Value::Undef);
+    let init = vm.stack.pop().unwrap_or(Value::Undef);
+    if let Value::Obj(id) = old {
+        let reused = HEAP.with(|h| match h.borrow_mut().get_mut(id as usize) {
+            // Unescaped: this handle is the slot's alone, so writing through it
+            // is exactly a fresh binding as far as anything can observe.
+            Some(HeapObj::Cell {
+                value,
+                escaped: false,
+            }) => {
+                *value = init.clone();
+                true
+            }
+            _ => false,
+        });
+        if reused {
+            return old;
+        }
+    }
+    heap_push(HeapObj::Cell {
+        value: init,
+        escaped: false,
+    })
 }
 
 /// `GCELL_GET`: read a boxed binding.
@@ -2843,7 +2911,7 @@ fn b_cell_get(vm: &mut VM, _argc: u8) -> Value {
     let cell = vm.stack.pop().unwrap_or(Value::Undef);
     match cell {
         Value::Obj(id) => HEAP.with(|h| match h.borrow().get(id as usize) {
-            Some(HeapObj::Cell(v)) => v.clone(),
+            Some(HeapObj::Cell { value, .. }) => value.clone(),
             _ => Value::Obj(id),
         }),
         other => other,
@@ -2860,7 +2928,7 @@ fn b_cell_set(vm: &mut VM, _argc: u8) -> Value {
     let val = vm.stack.pop().unwrap_or(Value::Undef);
     if let Value::Obj(id) = cell {
         let wrote = HEAP.with(|h| match h.borrow_mut().get_mut(id as usize) {
-            Some(HeapObj::Cell(slot)) => {
+            Some(HeapObj::Cell { value: slot, .. }) => {
                 *slot = val.clone();
                 true
             }
@@ -2909,6 +2977,12 @@ fn b_make_closure(vm: &mut VM, _argc: u8) -> Value {
         captures.push(vm.stack.pop().unwrap_or(Value::Undef));
     }
     captures.reverse();
+    // A captured cell's handle now lives somewhere other than the slot it came
+    // from, so it can no longer be reused in place. This is the only path that
+    // copies a handle anywhere — every other read of a boxed name goes through
+    // `GCELL_GET`, which answers the value — so marking here is what makes
+    // `GCELL_RENEW`'s reuse sound.
+    mark_captured_cells(&captures);
     heap_push(HeapObj::Closure(ClosureMeta {
         name_idx,
         params,
@@ -2916,6 +2990,20 @@ fn b_make_closure(vm: &mut VM, _argc: u8) -> Value {
         captures,
         derived: None,
     }))
+}
+
+/// Mark every cell handle among `captures` as escaped. See [`GCELL_RENEW`].
+fn mark_captured_cells(captures: &[Value]) {
+    HEAP.with(|h| {
+        let mut heap = h.borrow_mut();
+        for c in captures {
+            if let Value::Obj(id) = c {
+                if let Some(HeapObj::Cell { escaped, .. }) = heap.get_mut(*id as usize) {
+                    *escaped = true;
+                }
+            }
+        }
+    });
 }
 
 /// Build a derived-closure handle (see [`Derived`]) reporting `params` arity.

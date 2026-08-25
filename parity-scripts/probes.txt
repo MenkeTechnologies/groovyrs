@@ -2564,3 +2564,18 @@ try { new int[-1] } catch (e) { println e.getClass().getName(); println e.getMes
 println (new int[0]); println (new int[0]).length
 %%
 def a = "a,b,c".split(","); a[1] = 'Z'; println a; println a.length; println a.join('-')
+%%
+# a boxed binding's cell is reused when nothing captured it — invisibly
+def out = []; def rec; rec = { n -> def y = n; if (n > 0) rec(n-1); out << { y }; return }; rec(3); println out.collect{it()}
+%%
+def mk = { n -> def z = n * 10; return { z } }; println([mk(1)(), mk(2)(), mk(3)()])
+%%
+def f = { def acc = []; for (i in 0..2) { def v = i; acc << { v } }; acc }; println f().collect{it()}; println f().collect{it()}
+%%
+def k = []; for (i in 0..3) { def m = i; if (i % 2 == 0) k << { m } }; println k.collect{it()}
+%%
+def noesc = 0; for (i in 0..2) { def w = i; def cl = { w }; noesc += cl() }; println noesc
+%%
+def h = []; for (i in 0..2) { def a = i; def b = a * 2; if (i == 1) h << { "$a/$b" } }; println h.collect{it()}
+%%
+def g = { n -> def t = n; def c = { t }; t = t + 100; c() }; println([g(1), g(2)])

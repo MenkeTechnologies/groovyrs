@@ -5309,3 +5309,39 @@ fn a_negative_array_size_raises() {
     assert!(ok);
     assert_eq!(out, "java.lang.NegativeArraySizeException\n-1\n");
 }
+
+/// A boxed binding's cell is reused when no closure captured it, and that reuse
+/// must be invisible. These are the shapes where it could show: a recursive call
+/// re-entering the declaration while the caller's cell is still live, one
+/// function called twice, a closure built on only some iterations, and a closure
+/// that never outlives its iteration.
+///
+/// Every expectation is Apache Groovy 5.1.0's own output.
+#[test]
+fn reusing_an_uncaptured_cell_is_invisible() {
+    let (out, ok) = run(r#"def out = []
+def rec
+rec = { n -> def y = n; if (n > 0) rec(n-1); out << { y }; return }
+rec(3)
+println(out.collect{it()})
+def mk = { n -> def z = n * 10; return { z } }
+println([mk(1)(), mk(2)(), mk(3)()])
+def f = { def acc = []; for (i in 0..2) { def v = i; acc << { v } }; acc }
+println(f().collect{it()})
+println(f().collect{it()})
+def k = []
+for (i in 0..3) { def m = i; if (i % 2 == 0) k << { m } }
+println(k.collect{it()})
+def noesc = 0
+for (i in 0..2) { def w = i; def cl = { w }; noesc += cl() }
+println(noesc)
+def deep = []
+for (i in 0..1) { def p = i; for (j in 0..1) { def q = j; deep << { "$p$q" } } }
+println(deep.collect{it()})"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[0, 1, 2, 3]\n[10, 20, 30]\n[0, 1, 2]\n[0, 1, 2]\n[0, 2]\n3\n\
+         [00, 01, 10, 11]\n"
+    );
+}

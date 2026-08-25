@@ -725,10 +725,20 @@ impl Compiler {
     /// stack. A boxed name gets a **fresh** cell here — that is what makes a
     /// `def` inside a loop body a new variable on every iteration, so the
     /// closures built in two iterations do not share one binding.
+    ///
+    /// "Fresh" is about identity, not about allocation: the cell the target
+    /// already holds is reused when no closure captured it, which is the common
+    /// case for a loop that builds a closure only sometimes (or never calls one
+    /// that outlives the iteration). Pushing the target's current handle after
+    /// the initializer is what lets [`crate::host::GCELL_RENEW`] decide — and
+    /// taking it from the target itself is what keeps a recursive call from
+    /// reusing its caller's cell.
     fn emit_decl_store(&mut self, name: &str, line: u32) {
         if self.cells.contains(name) {
+            let get = self.load_op_for(name);
+            self.b.emit(get, line);
             self.b
-                .emit(Op::CallBuiltin(crate::host::GCELL_NEW, 0), line);
+                .emit(Op::CallBuiltin(crate::host::GCELL_RENEW, 0), line);
         }
         let store = self.store_op_for_decl(name);
         self.b.emit(store, line);

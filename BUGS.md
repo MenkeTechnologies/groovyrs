@@ -835,6 +835,15 @@ infinite loop on both sides.
 - **Implicit return does not reach through a trailing loop or assignment.** It
   reaches through a trailing expression, `if`, and `try`; a body ending in a
   `for`/`while` or a bare assignment still returns `null`.
+- **A captured local's cell is reclaimed only when nothing captured it.** A
+  boxed binding's cell is reused in place when the target's current one has not
+  been captured, so a loop that builds a closure only sometimes costs one cell
+  rather than one per iteration (400 000 iterations that create a single
+  escaping closure: 59 MB before, 11 MB after). A loop where every iteration's
+  closure *does* escape needs every cell and keeps them all, because the host
+  heap has no collector — 400 000 escaping closures hold 176 MB for the length
+  of the run. That is the same absence as the entry below, not a cell-specific
+  one.
 - **Every decimal operation allocates a heap slot that is never reclaimed.**
   Decimal literals are interned (a literal inside a loop allocates once), but each
   arithmetic *result* takes a new slot in the host heap, which has no collector.

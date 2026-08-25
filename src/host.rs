@@ -2950,7 +2950,11 @@ fn invoke_closure(vm: &mut VM, clo: &Value, args: &[Value]) -> Result<Value, Str
     // A varargs closure binds its last parameter to a list of every argument
     // from that position on — empty when the call stops short of it, which is
     // why `{ Object... xs -> }` called with nothing still sees a list.
-    let last = if meta.varargs { want.saturating_sub(1) } else { want };
+    let last = if meta.varargs {
+        want.saturating_sub(1)
+    } else {
+        want
+    };
     for i in 0..last {
         vm.stack.push(args.get(i).cloned().unwrap_or(Value::Undef));
     }

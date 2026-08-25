@@ -4967,12 +4967,14 @@ println(u.isEmpty()); println((u << 'x').isEmpty())"#);
 /// a cell. Every expectation below is Apache Groovy 5.1.0's own output.
 #[test]
 fn a_declaration_inside_a_loop_body_is_a_fresh_binding_per_iteration() {
-    let (out, ok) = run(r#"def e=[]; int k=0; while (k<3) { def m=k; e << { m }; k++ }
+    let (out, ok) = run(
+        r#"def e=[]; int k=0; while (k<3) { def m=k; e << { m }; k++ }
 println(e.collect{it()})
 def q=[]; for (x in 0..2) { def y = x*2; q << { y } }
 println(q.collect{y -> y()})
 def n=[]; for (a in 0..1) { for (b in 0..1) { def p = "$a$b"; n << { p } } }
-println(n.collect{it()})"#);
+println(n.collect{it()})"#,
+    );
     assert!(ok);
     assert_eq!(out, "[0, 1, 2]\n[0, 2, 4]\n[00, 01, 10, 11]\n");
 }
@@ -5021,10 +5023,7 @@ println(g.collect{it()})
 def h=[]; 3.times { t -> h << { t } }
 println(h.collect{it()})"#);
     assert!(ok);
-    assert_eq!(
-        out,
-        "2\n6\n[102, 102, 102]\n[1, 2]\n[0, 1, 2]\n[0, 1, 2]\n"
-    );
+    assert_eq!(out, "2\n6\n[102, 102, 102]\n[1, 2]\n[0, 1, 2]\n[0, 1, 2]\n");
 }
 
 /// The membership index is an accelerator, never the answer: it must not change

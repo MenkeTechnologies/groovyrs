@@ -1004,8 +1004,7 @@ impl Compiler {
             self.b.emit(Op::SetSlot(i as u16), pc.line);
         }
 
-        let prev_cells =
-            self.enter_cell_scope(&pc.params, &pc.body, &pc.cell_captures, pc.line);
+        let prev_cells = self.enter_cell_scope(&pc.params, &pc.body, &pc.cell_captures, pc.line);
         self.fn_body(&pc.body)?;
         self.exit_cell_scope(prev_cells);
         self.closure_depth -= 1;
@@ -2894,8 +2893,7 @@ impl Compiler {
         // Whether the last parameter collects the call's remaining arguments.
         // The body's prologue is the same either way — one slot per parameter —
         // so this only reaches `invoke_closure`, which decides what to bind.
-        self.b
-            .emit(Op::LoadInt(i64::from(varargs)), self.cur_line);
+        self.b.emit(Op::LoadInt(i64::from(varargs)), self.cur_line);
         self.b.emit(
             Op::CallBuiltin(crate::host::GMAKE_CLOSURE, 0),
             self.cur_line,
@@ -3703,7 +3701,10 @@ fn boxed_names(params: &[String], body: &[Stmt]) -> HashSet<String> {
     collect_bound_stmts(body, &mut own);
     // `this` is the receiver in slot 0, never a variable a cell could hold.
     own.remove("this");
-    cx.captured.into_iter().filter(|n| own.contains(n)).collect()
+    cx.captured
+        .into_iter()
+        .filter(|n| own.contains(n))
+        .collect()
 }
 
 /// Add every name declared as a local at this closure level (including inside
@@ -3838,10 +3839,7 @@ fn free_in_stmt(s: &Stmt, bound: &HashSet<String>, cx: &mut FreeCtx) {
             free_in_expr(value, bound, cx);
         }
         StmtKind::SetIndex {
-            recv,
-            index,
-            value,
-            ..
+            recv, index, value, ..
         } => {
             free_in_expr(recv, bound, cx);
             free_in_expr(index, bound, cx);
@@ -3886,9 +3884,7 @@ fn free_in_expr(e: &Expr, bound: &HashSet<String>, cx: &mut FreeCtx) {
         Expr::Recorded { inner, .. } => free_in_expr(inner, bound, cx),
         Expr::Var(n) => note_free(n, bound, cx),
         Expr::Cast { value, .. } => free_in_expr(value, bound, cx),
-        Expr::PostIncDec { name, .. } | Expr::PreIncDec { name, .. } => {
-            note_free(name, bound, cx)
-        }
+        Expr::PostIncDec { name, .. } | Expr::PreIncDec { name, .. } => note_free(name, bound, cx),
         Expr::Unary { rhs, .. } => free_in_expr(rhs, bound, cx),
         Expr::Binary { lhs, rhs, .. } => {
             free_in_expr(lhs, bound, cx);
@@ -4094,10 +4090,7 @@ fn body_uses_exceptions(body: &[Stmt]) -> bool {
             expr_uses_exceptions(recv) || expr_uses_exceptions(value)
         }
         StmtKind::SetIndex {
-            recv,
-            index,
-            value,
-            ..
+            recv, index, value, ..
         } => {
             expr_uses_exceptions(recv) || expr_uses_exceptions(index) || expr_uses_exceptions(value)
         }
@@ -4208,13 +4201,8 @@ fn body_any(body: &[Stmt], f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         StmtKind::Function { body, .. } => body_any(body, f),
         StmtKind::SetProperty { recv, value, .. } => expr_any(recv, f) || expr_any(value, f),
         StmtKind::SetIndex {
-            recv,
-            index,
-            value,
-            ..
-        } => {
-            expr_any(recv, f) || expr_any(index, f) || expr_any(value, f)
-        }
+            recv, index, value, ..
+        } => expr_any(recv, f) || expr_any(index, f) || expr_any(value, f),
         StmtKind::Class {
             fields,
             ctors,

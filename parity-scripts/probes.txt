@@ -2613,3 +2613,18 @@ def cl = { a, b -> a * b }; println cl.call(*[3,4])
 def outer = { x -> { y -> "$x$y" } }; println outer(*[1])(*[2])
 %%
 def sb = new StringBuilder(*['seed']); println sb
+%%
+# String.leftShift answers a StringBuffer, and a buffer compares only to a buffer
+def a = 'ab' << 'cd'; println a; println a.getClass().getName(); println a.reverse(); println a
+%%
+def b = 'x'; b <<= 'y'; println b; println b.getClass().getName()
+%%
+def c = 'p' << 'q'; c.append('r'); println c; println (c instanceof StringBuffer); println (c instanceof CharSequence)
+%%
+println(('ab' << 'cd') + 'z'); println "${'a' << 'b'}"
+%%
+def d = 'm' << 'n'; def e = d; e.append('o'); println d
+%%
+def x = 'a' << 'b'; def y = 'a' << 'b'; println(x == x); println(x == y); println(x.equals(x)); println(x.equals(y)); println('ab' == x); println(x.toString() == 'ab')
+%%
+def sb = new StringBuilder('ab'); println(sb == sb); println(sb == new StringBuilder('ab')); println(sb.equals(sb))

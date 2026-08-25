@@ -3729,6 +3729,14 @@ fn dispatch_buffer_method(recv: &Value, text: &str, method: &str, args: &[Value]
     };
     Some(match method {
         "append" | "leftShift" | "write" | "print" => mutate(format!("{text}{}", arg_str(0))),
+        // `StringBuffer` does not override `equals`, so it is `Object`'s —
+        // reference identity. Two buffers holding the same characters are not
+        // `equals`, even though `==` (which is `compareTo` on a `Comparable`)
+        // answers true for them.
+        "equals" => Value::bool(match (recv, args.first()) {
+            (Value::Obj(a), Some(Value::Obj(b))) => a == b,
+            _ => false,
+        }),
         "toString" | "getText" => Value::str(text.to_string()),
         "length" | "size" => Value::int(chars.len() as i64),
         "isEmpty" => Value::bool(chars.is_empty()),
@@ -4644,6 +4652,19 @@ fn values_equal(a: &Value, b: &Value) -> bool {
                     && x.iter()
                         .all(|(k, v)| y.iter().any(|(k2, v2)| k == k2 && values_equal(v, v2)))
             }
+            _ => false,
+        };
+    }
+    // A character buffer is `Comparable`, so Groovy's `==` compares its
+    // *contents* against another buffer — but only against another buffer.
+    // `('a' << 'b') == ('a' << 'b')` is true while `'ab' == ('a' << 'b')` is
+    // false, because a `StringBuffer` and a `String` are not comparable to each
+    // other. Decided here because the rendered-form fallback below answers true
+    // for both. (`.equals` is a different question — see `buffer_member`.)
+    let (ba, bb) = (as_buffer(a), as_buffer(b));
+    if ba.is_some() || bb.is_some() {
+        return match (ba, bb) {
+            (Some((_, x)), Some((_, y))) => x == y,
             _ => false,
         };
     }
@@ -9315,7 +9336,15 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
             set_mutated(out.clone());
             out
         }
-        Value::Str(s) => Value::str(format!("{s}{}", groovy_str(&rhs))),
+        // `String.leftShift` answers a `java.lang.StringBuffer`, not a `String`:
+        // it is the GDK's builder-append, so the result is mutable, is a
+        // reference, and is never `equals` to a `String` of the same characters
+        // (`('m' << 'n') == 'mn'` is false). Answering a `String` got the
+        // characters right and every one of those wrong.
+        Value::Str(s) => heap_push(HeapObj::Buffer {
+            class: "java.lang.StringBuffer",
+            text: format!("{s}{}", groovy_str(&rhs)),
+        }),
         _ => match bigint_shift(true, &lhs, &rhs) {
             Some(v) => v,
             None => match (as_i64(&lhs), as_i64(&rhs)) {
@@ -13389,11 +13418,16 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
         // answered `false` — a silent wrong answer on plain map literals, and a
         // second one now that a `TreeMap` and a `LinkedHashMap` holding the same
         // entries render in different orders by design.
+        // A character buffer joins them for the same reason: the rendered-form
+        // fallback below makes `'ab' == ('a' << 'b')` true, and a `StringBuffer`
+        // is not comparable to a `String`.
         NumOp::Eq | NumOp::Ne
             if as_set(a).is_some()
                 || as_set(b).is_some()
                 || as_omap(a).is_some()
-                || as_omap(b).is_some() =>
+                || as_omap(b).is_some()
+                || as_buffer(a).is_some()
+                || as_buffer(b).is_some() =>
         {
             let eq = values_equal(a, b);
             Ok(Value::bool(if matches!(op, NumOp::Eq) { eq } else { !eq }))

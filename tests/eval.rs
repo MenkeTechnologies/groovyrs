@@ -5543,3 +5543,59 @@ fn a_spread_outside_a_call_or_literal_is_a_compile_error() {
     assert!(!ok, "expected a compile error, got: {out}");
     assert!(err.contains("groovyrs:"), "stderr was: {err}");
 }
+
+/// `String.leftShift` answers a `java.lang.StringBuffer`, not a `String`. It is
+/// the GDK's builder-append, so the result is mutable, is a reference, and is
+/// never `equals` to a `String` of the same characters. groovyrs answered a
+/// `String`, which got the characters right and all three of those wrong.
+///
+/// `==` and `.equals` differ on a buffer and both are pinned: `==` is
+/// `compareTo` (a `StringBuffer` is `Comparable`), so two buffers holding the
+/// same characters are `==` — but a buffer and a `String` are not comparable to
+/// each other, so that is false. `.equals` is `Object`'s, so it is identity.
+/// Every expectation is Apache Groovy 5.1.0's own output.
+#[test]
+fn string_left_shift_answers_a_string_buffer() {
+    let (out, ok) = run(r#"def a = 'ab' << 'cd'
+println(a)
+println(a.getClass().getName())
+println(a.reverse())
+println(a)
+def b = 'x'; b <<= 'y'; println(b); println(b.getClass().getName())
+def c = 'p' << 'q'
+c.append('r'); println(c)
+println(c instanceof StringBuffer)
+println(c instanceof CharSequence)
+println(('ab' << 'cd') + 'z')
+println("${'a' << 'b'}")
+def d = 'm' << 'n'
+def e = d
+e.append('o')
+println(d)"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "abcd\njava.lang.StringBuffer\ndcba\ndcba\nxy\njava.lang.StringBuffer\n\
+         pqr\ntrue\ntrue\nabcdz\nab\nmno\n"
+    );
+}
+
+/// A buffer's `==` compares contents against another buffer and nothing else;
+/// its `.equals` is identity.
+#[test]
+fn a_character_buffer_compares_only_against_another_buffer() {
+    let (out, ok) = run(r#"def x = 'a' << 'b'
+def y = 'a' << 'b'
+def z = x
+println(x == x); println(x == y); println(x == z)
+println(x.equals(x)); println(x.equals(y))
+println('ab' == x)
+println(x.toString() == 'ab')
+def sb = new StringBuilder('ab')
+println(sb == sb); println(sb == new StringBuilder('ab')); println(sb.equals(sb))"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "true\ntrue\ntrue\ntrue\nfalse\nfalse\ntrue\ntrue\ntrue\ntrue\n"
+    );
+}

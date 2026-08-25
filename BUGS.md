@@ -929,12 +929,6 @@ infinite loop on both sides.
   mantissa to three digits. The rounding is defined on the *hex* significand, a
   base the value model has no arithmetic for; every other float conversion
   (`%f`, `%e`, `%g`) honours its precision exactly.
-- **`str << str` answers a `String`.** Groovy's `String.leftShift` answers a
-  `java.lang.StringBuffer`, so `('ab' << 'cd').getClass()` reports
-  `java.lang.StringBuffer` where groovyrs reports `java.lang.String`. The
-  *contents* agree; only the class does not, and `<<=` inherits it. Same root as
-  the *A `GString` is a `String`* entry: a value whose class is not the one its
-  representation implies needs a wrapper the string model does not carry.
 - **A compound assignment to an unbound name raises the wrong throwable.**
   `counter += 1` with nothing bound reads `null` and then faults on the
   arithmetic, so it raises `NullPointerException` where Groovy raises

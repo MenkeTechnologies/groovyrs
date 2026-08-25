@@ -5135,3 +5135,31 @@ int q=0; for (; q<2; q++) println("e $q")"#);
          c 0 0 9\nc 1 2 8\nd i=0 j=6\nd i=2 j=4\ne 0\ne 1\n"
     );
 }
+
+/// A varargs closure parameter (`{ Object... xs -> }`) collects every argument
+/// from its position onward, and a call that stops short of it still binds it —
+/// to an empty list. groovyrs did not parse the `...` at all.
+///
+/// The collected value is a `List`, where Groovy hands over an `Object[]`; see
+/// BUGS.md's *Java arrays* entry for what that costs (`xs.length`,
+/// `xs.getClass()`). Everything asserted below agrees with Apache Groovy 5.1.0.
+#[test]
+fn a_closure_parameter_can_be_varargs() {
+    let (out, ok) = run(r#"def v = { Object... xs -> xs.size() + ':' + xs.toList() }
+println(v()); println(v(1,2,3))
+def v2 = { String pre, Object... xs -> pre + xs.toList() }
+println(v2('a', 1, 2)); println(v2('b'))
+def f = { int... n -> n.sum() }
+println(f(1,2,3))
+def g = { a, Object... rest -> "$a|$rest" }
+println(g(1)); println(g(1,2,3))
+def h = { Object... xs -> xs.collect{ it * 2 } }
+println(h(1,2))
+def plain = { a, b -> a + b }
+println(plain(1,2))"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "0:[]\n3:[1, 2, 3]\na[1, 2]\nb[]\n6\n1|[]\n1|[2, 3]\n[2, 4]\n3\n"
+    );
+}

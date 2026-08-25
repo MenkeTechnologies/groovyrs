@@ -1618,6 +1618,10 @@ pub struct RangeVal {
 struct ClosureMeta {
     name_idx: u16,
     params: u8,
+    /// The last parameter was written `Type... name`: it takes a list of every
+    /// argument from its position onward, and a call that stops short of it
+    /// still binds it — to an empty list. See [`invoke_closure`].
+    varargs: bool,
     captures: Vec<Value>,
     /// Set when this closure has no body region of its own but wraps another
     /// callable — what `curry`, `>>`/`<<`, and `memoize` return. `name_idx` and
@@ -2776,6 +2780,7 @@ fn b_make_map(vm: &mut VM, _argc: u8) -> Value {
 /// the captured upvalue values (deepest-first), register the closure, and return
 /// its `Value::Obj` handle.
 fn b_make_closure(vm: &mut VM, _argc: u8) -> Value {
+    let varargs = vm.stack.pop().unwrap_or(Value::Undef).to_int() != 0;
     let ncap = vm.stack.pop().unwrap_or(Value::Undef).to_int() as usize;
     let params = vm.stack.pop().unwrap_or(Value::Undef).to_int() as u8;
     let name_idx = vm.stack.pop().unwrap_or(Value::Undef).to_int() as u16;
@@ -2787,6 +2792,7 @@ fn b_make_closure(vm: &mut VM, _argc: u8) -> Value {
     heap_push(HeapObj::Closure(ClosureMeta {
         name_idx,
         params,
+        varargs,
         captures,
         derived: None,
     }))
@@ -2797,6 +2803,7 @@ fn derived_closure(params: u8, d: Derived) -> Value {
     heap_push(HeapObj::Closure(ClosureMeta {
         name_idx: u16::MAX,
         params,
+        varargs: false,
         captures: Vec::new(),
         derived: Some(Box::new(d)),
     }))
@@ -2940,8 +2947,16 @@ fn invoke_closure(vm: &mut VM, clo: &Value, args: &[Value]) -> Result<Value, Str
     // after the parameters (see `compiler::emit_closure`).
     let want = meta.params as usize;
     let stack_base = vm.stack.len();
-    for i in 0..want {
+    // A varargs closure binds its last parameter to a list of every argument
+    // from that position on — empty when the call stops short of it, which is
+    // why `{ Object... xs -> }` called with nothing still sees a list.
+    let last = if meta.varargs { want.saturating_sub(1) } else { want };
+    for i in 0..last {
         vm.stack.push(args.get(i).cloned().unwrap_or(Value::Undef));
+    }
+    if meta.varargs && want > 0 {
+        vm.stack
+            .push(glist(args.iter().skip(last).cloned().collect()));
     }
     for cap in &meta.captures {
         vm.stack.push(cap.clone());

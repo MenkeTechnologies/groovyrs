@@ -2483,3 +2483,14 @@ for (int i=0, j=3; i<j; i++, j--) println "i=$i j=$j"
 for (int i=0, j=0, k=9; i<2; i++, j+=2, k--) println "$i $j $k"
 %%
 for (int i=0, j=6; i<j; i++, j--) { if (i==1) continue; println "i=$i j=$j" }
+%%
+# varargs closure parameters
+def v = { Object... xs -> xs.size() + ':' + xs.toList() }; println v(); println v(1,2,3)
+%%
+def v2 = { String pre, Object... xs -> pre + xs.toList() }; println v2('a', 1, 2); println v2('b')
+%%
+def f = { int... n -> n.sum() }; println f(1,2,3)
+%%
+def g = { a, Object... rest -> "$a|$rest" }; println g(1); println g(1,2,3)
+%%
+def h = { Object... xs -> xs.collect{ it * 2 } }; println h(1,2)

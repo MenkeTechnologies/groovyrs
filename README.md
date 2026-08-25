@@ -124,8 +124,12 @@ Implemented and checked against Apache Groovy:
   leading `#!` shebang and `package`/`import` lines are tolerated.
 - **Variables** — `def x = …`, typed `int` / `double` / `String` / `boolean`
   declarations, and bare `x = …` script bindings; plain and compound assignment
-  (`=`, `+=`, `-=`, `*=`, `/=`, `%=`); increment / decrement in both statement
-  and expression position, postfix (`i++`) and prefix (`++i`).
+  (`=`, `+=`, `-=`, `*=`, `/=`, `%=`) on a name, a field, a subscript
+  (`m['a'] += 1`) or a property (`p.x += 1`); increment / decrement in both
+  statement and expression position, postfix (`i++`) and prefix (`++i`), and on
+  a subscript or property target in statement position (`l[0]++`, `p.x--`). A
+  compound assignment to a subscript evaluates its receiver and index once, so
+  `m[key()] += 5` calls `key` a single time.
 - **Functions** — `def f(a, b) { … }` (and typed `Type f(…) { … }`) compiled to
   fusevm subroutine regions over the native `Op::Call` frame ABI. Parameters and
   locals are frame slots, so recursion and mutual recursion are sound; `return
@@ -240,8 +244,12 @@ Implemented and checked against Apache Groovy:
 - **Closures** — `{ a, b -> … }`, defaulted parameters (`{ a, b = 5 -> … }`),
    the explicit zero-parameter `{ -> … }`, and the implicit `{ it }` form as first-class
   callable values, invoked with `.call(args)` or directly (`def f = { it * 2 };
-  f(21)`). A closure captures its enclosing script scope, and a closure nested in
-  a function/closure captures that frame's locals as upvalues, so a curried
+  f(21)`). Varargs parameters (`{ Object... xs -> }`) collect the call's
+  remaining arguments. A closure captures the enclosing *variable*, not a copy of
+  its value: a boxed cell holds every local some closure in that scope captures,
+  so a mutation made after the closure was created is visible to a later call of
+  it, and a declaration inside a loop body is a fresh variable per iteration
+  (`for (x in 0..2) { def y = x*2; q << { y } }` collects 0, 2, 4). A curried
   `{ x -> { y -> x + y } }` and a chained call `f(a)(b)` work.
 - **Closure-driven GDK** — over lists, ranges and a `String`'s characters:
   `each`, `eachWithIndex`, `reverseEach`, `collect`, `collectMany`,
@@ -386,7 +394,9 @@ Implemented and checked against Apache Groovy:
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, the assigning
   `a ?= b`, and `a?.member` / `a?.method()`.
 - **Control flow** — `if` / `else if` / `else`, `while`, `do`/`while`, the
-  C-style `for (init; cond; update)`, the `for (x in a..b)` / `for (x in a..<b)`
+  C-style `for (init; cond; update)` — whose `init` and `update` may each be a
+  comma-separated list, `for (int i = 0, j = n; i < j; i++, j--)` — the
+  `for (x in a..b)` / `for (x in a..<b)`
   range loop and the `for (x in <collection>)` loop (a list's elements, a map's
   entries, a `String`'s characters), `break`, `continue`, labeled
   `break`/`continue`, `return`.
@@ -421,7 +431,7 @@ Implemented and checked against Apache Groovy:
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
 overloading by parameter type, script-declared class names as values, Java
 arrays, `GString` as a type, `++`/`--` not calling `next`/`previous`,
-by-reference upvalue capture).
+the bitwise compound assignments).
 
 ---
 
@@ -516,32 +526,30 @@ Debug Adapter (`--dap`).
 
 Next waves, in priority order:
 
-1. **By-reference upvalue capture** — boxed cells so a closure sees a mutation of
-   an outer frame local made after capture (capture is by value today).
-2. **Method overloading, by arity as well as by parameter type** — today methods
+1. **Method overloading, by arity as well as by parameter type** — today methods
    and operator methods are keyed by name only, so same-named declarations
    collapse onto the first, which then answers calls of every arity.
    Constructors already key by arity and are the shape to follow.
-3. **`trait`s** — `interface` and `implements` are modeled (including `default`
+2. **`trait`s** — `interface` and `implements` are modeled (including `default`
    methods); `trait` is not.
-4. **Java arrays.** `new int[3]` does not resolve — an array is a distinct type
+3. **Java arrays.** `new int[3]` does not resolve — an array is a distinct type
    from a `List` (`.length` versus `.size()`, class name `[I`), and modeling it
    as a `List` would make `[1, 2, 3].length` answer where Groovy raises.
-5. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
+4. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
    `"$s".getClass()` reports `java.lang.String` where Groovy reports
    `org.codehaus.groovy.runtime.GStringImpl`.
-6. **A `List` implementation kind.** A set and a map each carry one, so a
+5. **A `List` implementation kind.** A set and a map each carry one, so a
    `TreeSet` and a `TreeMap` sort; a list does not, so
    `new LinkedList([1,2]).getClass()` reports `java.util.ArrayList`. The same
    missing kind is why `asImmutable()` takes a write instead of raising
    `UnsupportedOperationException` — a *wrapper* kind is unmodeled on every
    collection, maps included.
-7. **Collection view types.** `keySet()`, `entrySet()` and `values()` answer a
+6. **Collection view types.** `keySet()`, `entrySet()` and `values()` answer a
    plain `List` with the right contents in the right order, but they are copies
    rather than live views, and `getClass()` names `java.util.ArrayList` where
    Groovy names `java.util.TreeMap$KeySet`. A `Map.Entry` carries no class
    either.
-8. **Command-argument chains beyond one argument** — `println a, b` and
+7. **Command-argument chains beyond one argument** — `println a, b` and
    `foo bar baz` do not parse; the parenthesised call always does.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.

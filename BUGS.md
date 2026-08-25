@@ -567,6 +567,14 @@ infinite loop on both sides.
   name is `[I`), and groovyrs models only the `List`. Modeling it as a `List`
   would make `[1, 2, 3].length` answer where Groovy raises, so the construct
   faults instead.
+
+  This is also what a **varargs closure parameter** binds. `{ Object... xs -> }`
+  collects the call's remaining arguments, which Groovy hands over as an
+  `Object[]`; groovyrs hands over a `List`. Everything the corpus does with one
+  agrees (`size()`, `toList()`, `sum()`, `collect`, `each`, and the `"$xs"`
+  rendering), but `xs.length` raises `MissingPropertyException` where Groovy
+  answers, and `xs.getClass().getName()` is `java.util.ArrayList` rather than
+  `[Ljava.lang.Object;`.
 - **`new Random(…)` / `new Date(…)` and the other stateful JDK classes.**
   Reproducing them means reproducing Java's exact LCG and clock, so they fault
   rather than answering a plausible-looking different number. The instantiable
@@ -917,6 +925,11 @@ infinite loop on both sides.
   mantissa to three digits. The rounding is defined on the *hex* significand, a
   base the value model has no arithmetic for; every other float conversion
   (`%f`, `%e`, `%g`) honours its precision exactly.
+- **The bitwise compound assignments do not parse.** `x <<= 2`, `>>=`, `>>>=`,
+  `&=`, `|=`, `^=` and `**=` are all syntax errors, on every target — `AssignOp`
+  carries only `=`, `+=`, `-=`, `*=`, `/=` and `%=`, and the lexer has no token
+  for the rest. The non-compound operators themselves (`<<`, `&`, `**`, …) are
+  modeled, so `x = x << 2` works.
 - **A compound assignment to an unbound name raises the wrong throwable.**
   `counter += 1` with nothing bound reads `null` and then faults on the
   arithmetic, so it raises `NullPointerException` where Groovy raises
@@ -981,16 +994,12 @@ infinite loop on both sides.
   reference identity) for the string/number/boolean operands modeled here.
   Cross-type comparisons that Groovy would coerce (`"5" == 5 → false`) are not
   yet distinguished — both sides compare by their printed form.
-- **Upvalue capture of a frame local is by value, not by reference.** A closure
-  nested in a function/closure captures the enclosing frame's locals at
-  closure-creation time (the value is copied into the closure handle). Groovy
-  captures the *variable*, so a mutation of the outer local made *after* the
-  closure is created is visible to a later call; groovyrs's copy is not. The
-  common curry / factory shapes (`{ x -> { y -> x + y } }`, `def make(n) {
-  return { it + n } }`) are unaffected because the outer local is not mutated
-  after capture. Capture of a **script** binding (a top-level global) stays
-  by-reference, matching Groovy. Boxed-cell by-reference capture across live
-  frames is a later wave.
+- **A `GString` whose expression is a closure is not deferred.** `"${-> x}"` is
+  a *lazy* `GString` in Groovy: the closure is called at render time, so
+  `def x = 1; def s = "${-> x}"; x = 2; s.toString()` is `2`. groovyrs renders
+  every interpolation where the literal is written, so it has nothing to defer
+  to — the same root as the *A `GString` is a `String`* entry above. The literal
+  is currently a parse error rather than a wrong answer.
 - **A `List` has no `.length`.** `"a/b".split(/\//)` answers a `List` where
   Groovy answers a `String[]` array, so `.length` on the result raises
   `MissingPropertyException` — `.size()` is the spelling that works. Adding
@@ -1062,21 +1071,15 @@ infinite loop on both sides.
   throws. Wrap the argument — `println(-42)` — for exact parity; the parenthesised
   form is unambiguous on both. (The differential fuzzer only ever emits the
   parenthesised form, so it never reports this.)
-- **A `Set`'s membership test is a scan, so filling one is quadratic.** A
-  `HeapObj::SetVal` stores its elements in a `Vec`, and `add`/`contains`
-  compare against each of them with `values_equal` — which is right (that is
-  what makes a user class's own `equals` decide membership, and what lets
-  `[1, 1.0] as Set` hold one element) and is `O(n)` per operation where
-  `java.util.HashSet` is `O(1)`. Measured on this machine in a debug build,
-  16 000 `s.add(i)` calls take ~13 s against Apache Groovy's ~1 s.
-
-  The `Map` side does not have this gap: a map key is *stored* as its rendered
-  text, so `HeapObj::OrderedMap` can index it in a `HashMap` and every keyed
-  operation is `O(1)`. Doing the same for a set would decide membership by
-  rendering rather than by `equals`, which is a different answer for a user
-  class — so the index a set needs is a hash of the *value*, and that is a
-  larger change than the map's. `size`/`isEmpty` and the `add` write no longer
-  copy the element vector; the scan itself is what remains.
+- **A `Set` whose elements are not all plain `Integer`s or all plain `String`s
+  still scans.** Membership is decided by `values_equal`, which can re-enter the
+  VM for a user class's own `equals` and equates values across types, so no hash
+  of a value is consistent with it. `SetIndex` is therefore an accelerator, not
+  the answer: it exists only while every element fits one of those two key
+  kinds — where `values_equal` *is* key equality — a hit is a candidate the real
+  `equals` still confirms, and anything else falls back to the `O(n)` scan.
+  Mixing a kind in turns the index off for that set's lifetime. `add`/`contains`
+  on an indexed set are `O(1)`; on any other they are what they always were.
 - **A `List` is always an `ArrayList`.** `HeapObj::ListVal` carries no
   implementation kind the way `HeapObj::SetVal` carries [`SetKind`] and
   `HeapObj::OrderedMap` carries [`MapKind`], so every list names one class
@@ -1121,9 +1124,9 @@ infinite loop on both sides.
   kind to carry the immutability in. Maps now have a kind but still no
   *wrapper* kind, so the same holds there — `asImmutable()` on a `TreeMap`
   answers a mutable `java.util.TreeMap` rather than
-  `Collections$UnmodifiableNavigableMap`, and `withDefault { … }` answers a
-  plain `LinkedHashMap` rather than `groovy.lang.MapWithDefault` (its
-  *behaviour* is modeled — see `MAP_DEFAULTS` — only its class is not).
+  `Collections$UnmodifiableNavigableMap`. (`withDefault { … }` is no longer one
+  of these: it answers a `HeapObj::MapWithDefault` view naming
+  `groovy.lang.MapWithDefault`, and writes through to the map it wraps.)
   `Collections.emptyList`, `singletonList`
   and `nCopies` have the same name divergence (`Collections$EmptyList`,
   `$SingletonList`, `$CopiesList`) but no behaviour one, since nothing in the

@@ -2746,7 +2746,8 @@ impl Compiler {
                 params,
                 body,
                 explicit_params,
-            } => self.closure(params, body, *explicit_params)?,
+                varargs,
+            } => self.closure(params, body, *explicit_params, *varargs)?,
             Expr::Range {
                 start,
                 end,
@@ -2817,6 +2818,7 @@ impl Compiler {
         params: &[String],
         body: &[Stmt],
         explicit_params: bool,
+        varargs: bool,
     ) -> Result<(), String> {
         // No parameter list at all means Groovy's single implicit `it`; an
         // explicit list — even the empty `{ -> … }` — is taken as written.
@@ -2889,6 +2891,11 @@ impl Compiler {
             .emit(Op::LoadInt(effective.len() as i64), self.cur_line);
         self.b
             .emit(Op::LoadInt(captures.len() as i64), self.cur_line);
+        // Whether the last parameter collects the call's remaining arguments.
+        // The body's prologue is the same either way — one slot per parameter —
+        // so this only reaches `invoke_closure`, which decides what to bind.
+        self.b
+            .emit(Op::LoadInt(i64::from(varargs)), self.cur_line);
         self.b.emit(
             Op::CallBuiltin(crate::host::GMAKE_CLOSURE, 0),
             self.cur_line,
@@ -3938,6 +3945,7 @@ fn free_in_expr(e: &Expr, bound: &HashSet<String>, cx: &mut FreeCtx) {
             params,
             body,
             explicit_params,
+            ..
         } => {
             // Descend with the nested closure's own bindings added, so a name
             // free in the inner closure but not bound here still surfaces.

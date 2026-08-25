@@ -97,6 +97,7 @@ pub enum Tok {
     Dot,
     DotDot,      // `..` inclusive range
     DotDotLt,    // `..<` half-open range
+    Ellipsis,    // `...` varargs parameter
     Arrow,       // `->` closure parameter separator
     Question,    // `?` ternary
     QuestionDot, // `?.` safe navigation
@@ -540,6 +541,17 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         if three == "==~" {
             out.push(Token {
                 kind: Tok::MatchFull,
+                line,
+                offset: tok_start,
+            });
+            i += 3;
+            continue;
+        }
+        // `...` — a varargs parameter. Checked ahead of `..` so the range
+        // operator does not claim the first two dots and leave a stray `.`.
+        if three == "..." {
+            out.push(Token {
+                kind: Tok::Ellipsis,
                 line,
                 offset: tok_start,
             });

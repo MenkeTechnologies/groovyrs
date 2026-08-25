@@ -401,6 +401,11 @@ pub enum Expr {
         /// list (`{ it * 2 }`) Groovy supplies the single implicit parameter
         /// `it`, which is what `false` selects.
         explicit_params: bool,
+        /// True when the last parameter was written `Type... name` — it collects
+        /// every argument from its position onward into one list, and a call
+        /// that stops short of it still binds it (to an empty one). Without it a
+        /// call's extra arguments are dropped.
+        varargs: bool,
     },
     /// The sequence a `for (x in <expr>)` walks — the parser wraps the loop's
     /// subject in this, and it lowers to the host's iteration builtin

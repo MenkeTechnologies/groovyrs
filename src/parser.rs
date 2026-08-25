@@ -1820,6 +1820,7 @@ impl Parser {
                         params: vec!["it".to_string()],
                         body: vec![Stmt::new(line, StmtKind::Expr(inner))],
                         explicit_params: false,
+                        varargs: false,
                     }],
                     line,
                     safe: false,
@@ -2089,6 +2090,7 @@ impl Parser {
         self.skip_newlines();
         let explicit_params = self.has_closure_arrow();
         let mut defaults: Vec<(String, Expr)> = Vec::new();
+        let mut varargs = false;
         let params = if explicit_params {
             let mut params = Vec::new();
             // `{ -> … }` declares an empty parameter list: no `it` is supplied.
@@ -2100,14 +2102,22 @@ impl Parser {
                     params,
                     body,
                     explicit_params,
+                    varargs,
                 });
             }
             loop {
                 // An optional type in front of the parameter (`int a`) — a
-                // second identifier follows, so skip the type name.
-                if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Ident(_))
+                // second identifier follows, so skip the type name. A varargs
+                // parameter puts `...` between the two (`Object... xs`), and the
+                // type is always written, so the `...` is looked for there.
+                if matches!(self.peek(), Tok::Ident(_))
+                    && matches!(self.peek_at(1), Tok::Ident(_) | Tok::Ellipsis)
                 {
                     self.advance();
+                }
+                if self.is(&Tok::Ellipsis) {
+                    self.advance();
+                    varargs = true;
                 }
                 let name = self.ident()?;
                 // `{ a, b = 5 -> … }` — a default value for a trailing
@@ -2165,6 +2175,7 @@ impl Parser {
             params,
             body,
             explicit_params,
+            varargs,
         })
     }
 
@@ -2198,7 +2209,9 @@ impl Parser {
         let mut j = from;
         loop {
             match self.toks.get(j).map(|t| &t.kind) {
-                Some(Tok::Ident(_)) | Some(Tok::Comma) => j += 1,
+                // `Ellipsis` is the `...` of a varargs parameter, which sits
+                // between the type and the name (`Object... xs`).
+                Some(Tok::Ident(_)) | Some(Tok::Comma) | Some(Tok::Ellipsis) => j += 1,
                 // A default value runs to the next top-level `,` or `->`.
                 Some(Tok::Assign) => {
                     j += 1;

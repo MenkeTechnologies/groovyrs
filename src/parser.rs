@@ -1273,7 +1273,20 @@ impl Parser {
             step(v(&hi), false)
         };
 
-        body.insert(0, local(&var, v(&cur)));
+        // The loop variable is declared **once**, outside the loop, and assigned
+        // per iteration. Groovy's `for (x in …)` binds one variable for the whole
+        // loop, so every closure built in the body shares it and they all read
+        // the final value — declaring it inside the body would give each
+        // iteration its own binding (see `host::GCELL_NEW`).
+        let assign_var = Stmt::new(
+            line,
+            StmtKind::Assign {
+                name: var.clone(),
+                op: AssignOp::Assign,
+                value: v(&cur),
+            },
+        );
+        body.insert(0, assign_var);
         let at_or_before = bin(BinOp::Le, v(&cur), v(&last));
         let at_or_after = bin(BinOp::Ge, v(&cur), v(&last));
         let loop_for = StmtKind::For {
@@ -1325,6 +1338,7 @@ impl Parser {
                     ),
                 ),
                 local(&last, last_init),
+                local(&var, Expr::Null),
                 Stmt::new(line, loop_for),
             ],
             els: vec![],
@@ -1365,14 +1379,20 @@ impl Parser {
                 },
             )
         };
+        // One binding for the whole loop, assigned per iteration — see the range
+        // form's note.
         body.insert(
             0,
-            local(
-                &var,
-                Expr::Index {
-                    recv: Box::new(Expr::Var(seq.clone())),
-                    index: Box::new(Expr::Var(idx.clone())),
-                    line,
+            Stmt::new(
+                line,
+                StmtKind::Assign {
+                    name: var.clone(),
+                    op: AssignOp::Assign,
+                    value: Expr::Index {
+                        recv: Box::new(Expr::Var(seq.clone())),
+                        index: Box::new(Expr::Var(idx.clone())),
+                        line,
+                    },
                 },
             ),
         );
@@ -1408,6 +1428,7 @@ impl Parser {
                         safe: false,
                     },
                 ),
+                local(&var, Expr::Null),
                 Stmt::new(line, loop_for),
             ],
             els: vec![],

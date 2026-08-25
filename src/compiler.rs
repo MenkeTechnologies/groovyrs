@@ -214,6 +214,19 @@ struct Compiler {
     /// to the host as [`crate::host::set_wide_sites`]. See
     /// [`Compiler::is_wide`].
     wide_sites: HashSet<usize>,
+    /// The names in the *current* scope that live in a boxed binding — a
+    /// [`crate::host::GCELL_NEW`] cell — because some closure written in that
+    /// scope captures them. Every read of one goes through
+    /// [`crate::host::GCELL_GET`] and every write through
+    /// [`crate::host::GCELL_SET`], so the closure and the enclosing code share
+    /// the variable rather than a snapshot of its value, and a declaration
+    /// inside a loop body makes a new variable per iteration.
+    ///
+    /// Scoped like [`Compiler::wide_vars`]: [`Compiler::function`] and
+    /// [`Compiler::emit_closure`] save and restore it around a body. Computed by
+    /// [`boxed_names`], so a scope with no closure in it boxes nothing and its
+    /// loops keep their plain slot reads.
+    cells: HashSet<String>,
 }
 
 /// The Groovy/Java type names a `case <Name>:` label can check against without
@@ -282,6 +295,11 @@ struct PendingClosure {
     name_idx: u16,
     params: Vec<String>,
     captures: Vec<String>,
+    /// The subset of `captures` that arrive as boxed bindings (cells). The body
+    /// must read and write those through [`crate::host::GCELL_GET`] /
+    /// [`crate::host::GCELL_SET`] — copying the *handle* into a slot is exactly
+    /// what makes the closure share the enclosing variable.
+    cell_captures: HashSet<String>,
     body: Vec<Stmt>,
     line: u32,
     class_fields: Option<HashSet<String>>,
@@ -433,6 +451,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         pinned_wide: HashSet::new(),
         obj_vars: HashSet::new(),
         wide_sites: HashSet::new(),
+        cells: boxed_names(&[], &prog.body),
     };
     // Arm the host's exception machinery for this run. Emitted only by a program
     // that uses `try`/`throw`, and it is what lets a runtime `Throwable` (a zero
@@ -474,6 +493,15 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
                 c.wide_returns.insert(name.clone());
             }
         }
+    }
+    // Install a `null` cell for every boxed script binding before the body runs,
+    // so a read that reaches one before its declaration finds a cell rather than
+    // an unset global. A declaration then replaces it with a fresh cell, which is
+    // what makes a top-level `def` inside a loop a new variable per iteration.
+    let mut script_cells: Vec<String> = c.cells.iter().cloned().collect();
+    script_cells.sort();
+    for n in &script_cells {
+        c.emit_cell_init(n, 0);
     }
     // Emit the script body (function and class definitions are hoisted out and
     // emitted as subroutine regions below).
@@ -599,8 +627,7 @@ impl Compiler {
     /// nothing and a hot loop keeps its JIT trace eligibility.
     fn emit_name_load(&mut self, name: &str, line: u32) -> Result<(), String> {
         if !self.nothing_binds(name) {
-            let get = self.load_op_for(name);
-            self.b.emit(get, line);
+            self.emit_var_read(name, line);
             return Ok(());
         }
         self.emit_name_site(name, line);
@@ -609,6 +636,16 @@ impl Compiler {
 
     /// Emit the write of a bare `name`, its value already on the stack.
     fn emit_name_store(&mut self, name: &str, line: u32) -> Result<(), String> {
+        if self.cells.contains(name) {
+            // The value is already on the stack; push the cell over it and write
+            // through the handle, so the closures holding it see the new value.
+            let get = self.load_op_for(name);
+            self.b.emit(get, line);
+            self.b
+                .emit(Op::CallBuiltin(crate::host::GCELL_SET, 0), line);
+            self.b.emit(Op::Pop, line);
+            return Ok(());
+        }
         if !self.needs_delegate(name) {
             let store = self.store_op_for(name);
             self.b.emit(store, line);
@@ -663,6 +700,45 @@ impl Compiler {
         }
     }
 
+    /// Emit a read of `name` the compiler can bind: the slot/global load, plus
+    /// the cell deref when the name is boxed.
+    fn emit_var_read(&mut self, name: &str, line: u32) {
+        let get = self.load_op_for(name);
+        self.b.emit(get, line);
+        if self.cells.contains(name) {
+            self.b
+                .emit(Op::CallBuiltin(crate::host::GCELL_GET, 0), line);
+        }
+    }
+
+    /// Emit the store for a *declaration* of `name`, its value already on the
+    /// stack. A boxed name gets a **fresh** cell here — that is what makes a
+    /// `def` inside a loop body a new variable on every iteration, so the
+    /// closures built in two iterations do not share one binding.
+    fn emit_decl_store(&mut self, name: &str, line: u32) {
+        if self.cells.contains(name) {
+            self.b
+                .emit(Op::CallBuiltin(crate::host::GCELL_NEW, 0), line);
+        }
+        let store = self.store_op_for_decl(name);
+        self.b.emit(store, line);
+    }
+
+    /// Install a fresh `null` cell for a boxed `name` in the current scope.
+    /// Emitted for an uninitialized declaration (`def v` with no initializer),
+    /// and once per scope entry so that a read reaching the name before its
+    /// declaration runs finds a cell rather than an unset slot.
+    fn emit_cell_init(&mut self, name: &str, line: u32) {
+        if !self.cells.contains(name) {
+            return;
+        }
+        self.b.emit(Op::LoadUndef, line);
+        self.b
+            .emit(Op::CallBuiltin(crate::host::GCELL_NEW, 0), line);
+        let store = self.store_op_for_decl(name);
+        self.b.emit(store, line);
+    }
+
     /// Lower a user function into a subroutine region: register its entry, bind
     /// its parameters from the value stack into frame slots, lower the body with
     /// an implicit last-expression return, and end with a `null` fall-through
@@ -714,7 +790,9 @@ impl Compiler {
             self.emit_exc_check(line)?;
         }
 
+        let prev_cells = self.enter_cell_scope(params, body, &HashSet::new(), line);
         self.fn_body(body)?;
+        self.exit_cell_scope(prev_cells);
 
         // Fall-through: a function that does not hit an explicit `return` (or
         // whose last statement is not a value expression) returns `null`.
@@ -726,6 +804,71 @@ impl Compiler {
         self.finallys = prev_finallys;
         self.exit_width_scope(prev_widths);
         Ok(())
+    }
+
+    /// Enter a body's boxed-binding scope: compute which of its own names some
+    /// closure inside it captures, install their cells, and hand back the
+    /// previous set for [`Compiler::exit_cell_scope`].
+    ///
+    /// `pre_boxed` are names that arrive **already** boxed — a closure's cell
+    /// captures, whose slots hold the enclosing scope's handles and must not be
+    /// re-boxed. Parameters that are boxed here are re-wrapped from their slot,
+    /// so each call gets its own cell; every other boxed local starts as a `null`
+    /// cell so a read that runs before the declaration finds one.
+    fn enter_cell_scope(
+        &mut self,
+        params: &[String],
+        body: &[Stmt],
+        pre_boxed: &HashSet<String>,
+        line: u32,
+    ) -> HashSet<String> {
+        let saved = std::mem::take(&mut self.cells);
+        let mut own = boxed_names(params, body);
+        // A capture already lives in a cell; boxing it again would give the
+        // closure a private copy, which is the bug this whole mechanism fixes.
+        for n in pre_boxed {
+            own.remove(n);
+        }
+        self.cells = own;
+        self.cells.extend(pre_boxed.iter().cloned());
+        // A boxed parameter is re-wrapped from its slot, so each call of the body
+        // gets its own cell: a closure built on the second call cannot see the
+        // first call's argument.
+        for p in params {
+            if !self.cells.contains(p) || pre_boxed.contains(p) {
+                continue;
+            }
+            self.emit_var_read_raw(p, line);
+            self.b
+                .emit(Op::CallBuiltin(crate::host::GCELL_NEW, 0), line);
+            let store = self.store_op_for_decl(p);
+            self.b.emit(store, line);
+        }
+        // Sorted: this walk allocates the frame slots, and a `HashSet`'s order
+        // would make the same source compile to different slot numbers run to
+        // run.
+        let mut locals: Vec<String> = self
+            .cells
+            .iter()
+            .filter(|n| !params.contains(n) && !pre_boxed.contains(*n))
+            .cloned()
+            .collect();
+        locals.sort();
+        for n in locals {
+            self.emit_cell_init(&n, line);
+        }
+        saved
+    }
+
+    /// Restore the boxed-binding set a body was entered from.
+    fn exit_cell_scope(&mut self, saved: HashSet<String>) {
+        self.cells = saved;
+    }
+
+    /// Push `name`'s slot/global value without the cell deref — the raw handle.
+    fn emit_var_read_raw(&mut self, name: &str, line: u32) {
+        let get = self.load_op_for(name);
+        self.b.emit(get, line);
     }
 
     /// Save the width state around a function/closure body and start the body
@@ -861,7 +1004,10 @@ impl Compiler {
             self.b.emit(Op::SetSlot(i as u16), pc.line);
         }
 
+        let prev_cells =
+            self.enter_cell_scope(&pc.params, &pc.body, &pc.cell_captures, pc.line);
         self.fn_body(&pc.body)?;
+        self.exit_cell_scope(prev_cells);
         self.closure_depth -= 1;
 
         // Fall-through: a closure with no trailing value expression returns null.
@@ -1083,7 +1229,9 @@ impl Compiler {
         for i in (0..params.len() + 1).rev() {
             self.b.emit(Op::SetSlot(i as u16), line);
         }
+        let prev_cells = self.enter_cell_scope(params, body, &HashSet::new(), line);
         self.fn_body(body)?;
+        self.exit_cell_scope(prev_cells);
         self.b.emit(Op::LoadUndef, self.cur_line);
         self.b.emit(Op::ReturnValue, self.cur_line);
 
@@ -1117,10 +1265,12 @@ impl Compiler {
         let prev_methods = self.cur_class_methods.take();
         let prev_tries = std::mem::take(&mut self.tries);
         let prev_finallys = std::mem::take(&mut self.finallys);
+        let prev_cells = std::mem::take(&mut self.cells);
         let saved_line = self.cur_line;
         self.cur_line = line;
         self.expr(init)?;
         self.b.emit(Op::ReturnValue, self.cur_line);
+        self.cells = prev_cells;
         self.scope = prev;
         self.cur_class_fields = prev_fields;
         self.cur_class_methods = prev_methods;
@@ -1326,8 +1476,7 @@ impl Compiler {
                 if let Some(e) = init {
                     self.expr(e)?;
                     self.note_var_width(ty, name, init.as_ref());
-                    let store = self.store_op_for_decl(name);
-                    self.b.emit(store, self.cur_line);
+                    self.emit_decl_store(name, self.cur_line);
                     // `def y = null - 1` raises from the numeric hook, which has
                     // no check of its own. See the expression-statement arm.
                     self.emit_exc_check(self.cur_line)?;
@@ -1336,8 +1485,12 @@ impl Compiler {
                     // An uninitialized local stays unbound (Groovy defaults it to
                     // `null`; a read before assignment yields `null`). Inside a
                     // function still register the slot so later reads/writes of the
-                    // name resolve to the local, not a same-named global.
+                    // name resolve to the local, not a same-named global. A boxed
+                    // one still needs its own cell here: the declaration is what
+                    // makes the variable, so a `def v` inside a loop body is a
+                    // fresh binding each iteration whether or not it is initialized.
                     self.declare_slot(name);
+                    self.emit_cell_init(name, self.cur_line);
                 }
                 Ok(())
             }
@@ -1745,8 +1898,7 @@ impl Compiler {
         let n = self.b.add_constant(Value::str(joined));
         self.b.emit(Op::LoadConst(n), line);
         for (name, _) in value_names {
-            let get = self.load_op_for(name);
-            self.b.emit(get, line);
+            self.emit_var_read(name, line);
         }
         self.b.emit(Op::MakeArray(value_names.len() as u16), line);
         self.b
@@ -2622,12 +2774,21 @@ impl Compiler {
         // enclosing function/closure frame. At script top level there is no such
         // frame (`scope` is `None`), so a closure captures nothing and its free
         // names stay script-binding globals, exactly as before.
+        //
+        // At script top level there is no frame, but a **boxed** script binding
+        // is still captured: the closure has to hold the cell that existed when
+        // it was created, not whatever cell the name points at later. Without
+        // that, a `def` inside a top-level loop would hand every closure the last
+        // iteration's binding.
         let mut captures: Vec<String> = match self.scope.as_ref() {
             Some(scope) => free_vars(&effective, body)
                 .into_iter()
-                .filter(|n| scope.vars.contains_key(n))
+                .filter(|n| scope.vars.contains_key(n) || self.cells.contains(n))
                 .collect(),
-            None => Vec::new(),
+            None => free_vars(&effective, body)
+                .into_iter()
+                .filter(|n| self.cells.contains(n))
+                .collect(),
         };
         // A closure that reads a field or calls a sibling method needs the
         // enclosing `this` even though the bare name is the field/method, not
@@ -2650,10 +2811,16 @@ impl Compiler {
         let id = self.closures_seen;
         self.closures_seen += 1;
         let name_idx = self.b.add_name(&format!("$closure_{id}"));
+        let cell_captures: HashSet<String> = captures
+            .iter()
+            .filter(|n| self.cells.contains(*n))
+            .cloned()
+            .collect();
         self.pending_closures.push_back(PendingClosure {
             name_idx,
             params: effective.clone(),
             captures: captures.clone(),
+            cell_captures,
             body: body.to_vec(),
             line: self.cur_line,
             class_fields: self.cur_class_fields.clone(),
@@ -2755,8 +2922,7 @@ impl Compiler {
         // directly, `def f = { it * 2 }; f(21)`. Load the value, push the args,
         // and dispatch through the closure-call builtin, which faults with
         // `unresolved reference: name` if the value is not a closure.
-        let get = self.load_op_for(name);
-        self.b.emit(get, line);
+        self.emit_var_read(name, line);
         for a in args {
             self.expr(a)?;
         }
@@ -3431,14 +3597,51 @@ fn is_static_bool(e: &Expr) -> bool {
 /// parameters/locals) so an inner closure's free name propagates outward and is
 /// captured at each intervening level. First-seen order, deduplicated.
 fn free_vars(params: &[String], body: &[Stmt]) -> Vec<String> {
+    walk_free(params, body).out
+}
+
+/// The walk's accumulators. `out`/`seen` build the free-variable list;
+/// `depth`/`closure_bound`/`captured` answer the *other* question the same walk
+/// can settle — which of this scope's own names a nested closure captures, which
+/// is the set that has to be boxed (see [`crate::host::GCELL_NEW`]).
+#[derive(Default)]
+struct FreeCtx {
+    out: Vec<String>,
+    seen: HashSet<String>,
+    /// Closure-literal nesting depth at the current reference.
+    depth: usize,
+    /// One entry per enclosing closure literal: the names it binds itself.
+    closure_bound: Vec<HashSet<String>>,
+    /// Every name referenced inside some closure that the closure does not bind.
+    captured: HashSet<String>,
+}
+
+/// Run the free-variable walk over a scope's body and hand back both answers.
+fn walk_free(params: &[String], body: &[Stmt]) -> FreeCtx {
     let mut bound: HashSet<String> = params.iter().cloned().collect();
     collect_bound_stmts(body, &mut bound);
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
+    let mut cx = FreeCtx::default();
     for s in body {
-        free_in_stmt(s, &bound, &mut out, &mut seen);
+        free_in_stmt(s, &bound, &mut cx);
     }
-    out
+    cx
+}
+
+/// The names a scope *owns* — its parameters and the locals its body declares —
+/// that some closure written inside it captures.
+///
+/// These are the ones the compiler boxes. Groovy compiles exactly this set into
+/// `groovy.lang.Reference` cells, and that is what gives a closure the variable
+/// rather than a copy of its value, and what makes a declaration inside a loop
+/// body a fresh variable per iteration. Boxing is confined to this set so a loop
+/// with no closure in it keeps its plain slot reads and its JIT trace.
+fn boxed_names(params: &[String], body: &[Stmt]) -> HashSet<String> {
+    let cx = walk_free(params, body);
+    let mut own: HashSet<String> = params.iter().cloned().collect();
+    collect_bound_stmts(body, &mut own);
+    // `this` is the receiver in slot 0, never a variable a cell could hold.
+    own.remove("this");
+    cx.captured.into_iter().filter(|n| own.contains(n)).collect()
 }
 
 /// Add every name declared as a local at this closure level (including inside
@@ -3493,61 +3696,57 @@ fn collect_bound_stmts(body: &[Stmt], bound: &mut HashSet<String>) {
 }
 
 /// Record `name` as free if it is not bound in the current scope (deduped).
-fn note_free(
-    name: &str,
-    bound: &HashSet<String>,
-    out: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
-    if !bound.contains(name) && seen.insert(name.to_string()) {
-        out.push(name.to_string());
+fn note_free(name: &str, bound: &HashSet<String>, cx: &mut FreeCtx) {
+    // A reference made *inside* a closure to a name that closure does not bind
+    // itself is a capture: the enclosing scope owns the variable and the closure
+    // reads it through the handle. That is the set the compiler has to box.
+    if cx.depth > 0 && !cx.closure_bound.iter().any(|b| b.contains(name)) {
+        cx.captured.insert(name.to_string());
+    }
+    if !bound.contains(name) && cx.seen.insert(name.to_string()) {
+        cx.out.push(name.to_string());
     }
 }
 
-fn free_in_stmt(
-    s: &Stmt,
-    bound: &HashSet<String>,
-    out: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
+fn free_in_stmt(s: &Stmt, bound: &HashSet<String>, cx: &mut FreeCtx) {
     match &s.kind {
         StmtKind::Local { init, .. } => {
             if let Some(e) = init {
-                free_in_expr(e, bound, out, seen);
+                free_in_expr(e, bound, cx);
             }
         }
         StmtKind::Assign { name, value, .. } => {
-            note_free(name, bound, out, seen);
-            free_in_expr(value, bound, out, seen);
+            note_free(name, bound, cx);
+            free_in_expr(value, bound, cx);
         }
-        StmtKind::Expr(e) => free_in_expr(e, bound, out, seen),
+        StmtKind::Expr(e) => free_in_expr(e, bound, cx),
         StmtKind::If { cond, then, els } => {
-            free_in_expr(cond, bound, out, seen);
+            free_in_expr(cond, bound, cx);
             for s in then {
-                free_in_stmt(s, bound, out, seen);
+                free_in_stmt(s, bound, cx);
             }
             for s in els {
-                free_in_stmt(s, bound, out, seen);
+                free_in_stmt(s, bound, cx);
             }
         }
         StmtKind::While { cond, body } | StmtKind::DoWhile { body, cond } => {
-            free_in_expr(cond, bound, out, seen);
+            free_in_expr(cond, bound, cx);
             for s in body {
-                free_in_stmt(s, bound, out, seen);
+                free_in_stmt(s, bound, cx);
             }
         }
         StmtKind::Switch { subject, cases } => {
-            free_in_expr(subject, bound, out, seen);
+            free_in_expr(subject, bound, cx);
             for c in cases {
                 if let Some(l) = &c.label {
-                    free_in_expr(l, bound, out, seen);
+                    free_in_expr(l, bound, cx);
                 }
                 for s in &c.body {
-                    free_in_stmt(s, bound, out, seen);
+                    free_in_stmt(s, bound, cx);
                 }
             }
         }
-        StmtKind::Labeled { stmt, .. } => free_in_stmt(stmt, bound, out, seen),
+        StmtKind::Labeled { stmt, .. } => free_in_stmt(stmt, bound, cx),
         StmtKind::For {
             init,
             cond,
@@ -3555,31 +3754,31 @@ fn free_in_stmt(
             body,
         } => {
             if let Some(i) = init {
-                free_in_stmt(i, bound, out, seen);
+                free_in_stmt(i, bound, cx);
             }
             if let Some(c) = cond {
-                free_in_expr(c, bound, out, seen);
+                free_in_expr(c, bound, cx);
             }
             if let Some(u) = update {
-                free_in_stmt(u, bound, out, seen);
+                free_in_stmt(u, bound, cx);
             }
             for s in body {
-                free_in_stmt(s, bound, out, seen);
+                free_in_stmt(s, bound, cx);
             }
         }
         StmtKind::Return { value } => {
             if let Some(e) = value {
-                free_in_expr(e, bound, out, seen);
+                free_in_expr(e, bound, cx);
             }
         }
         StmtKind::SetProperty { recv, value, .. } => {
-            free_in_expr(recv, bound, out, seen);
-            free_in_expr(value, bound, out, seen);
+            free_in_expr(recv, bound, cx);
+            free_in_expr(value, bound, cx);
         }
         StmtKind::SetIndex { recv, index, value } => {
-            free_in_expr(recv, bound, out, seen);
-            free_in_expr(index, bound, out, seen);
-            free_in_expr(value, bound, out, seen);
+            free_in_expr(recv, bound, cx);
+            free_in_expr(index, bound, cx);
+            free_in_expr(value, bound, cx);
         }
         StmtKind::Try {
             body,
@@ -3587,7 +3786,7 @@ fn free_in_stmt(
             finally_body,
         } => {
             for s in body.iter().chain(finally_body) {
-                free_in_stmt(s, bound, out, seen);
+                free_in_stmt(s, bound, cx);
             }
             for arm in catches {
                 // The caught binding is local to its arm.
@@ -3595,15 +3794,15 @@ fn free_in_stmt(
                 inner.insert(arm.name.clone());
                 collect_bound_stmts(&arm.body, &mut inner);
                 for s in &arm.body {
-                    free_in_stmt(s, &inner, out, seen);
+                    free_in_stmt(s, &inner, cx);
                 }
             }
         }
-        StmtKind::Throw(e) => free_in_expr(e, bound, out, seen),
+        StmtKind::Throw(e) => free_in_expr(e, bound, cx),
         StmtKind::Assert { cond, message, .. } => {
-            free_in_expr(cond, bound, out, seen);
+            free_in_expr(cond, bound, cx);
             if let Some(m) = message {
-                free_in_expr(m, bound, out, seen);
+                free_in_expr(m, bound, cx);
             }
         }
         StmtKind::Break(_)
@@ -3613,71 +3812,66 @@ fn free_in_stmt(
     }
 }
 
-fn free_in_expr(
-    e: &Expr,
-    bound: &HashSet<String>,
-    out: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
+fn free_in_expr(e: &Expr, bound: &HashSet<String>, cx: &mut FreeCtx) {
     match e {
         Expr::Regex(_) => {}
-        Expr::Iterable(inner) => free_in_expr(inner, bound, out, seen),
-        Expr::Recorded { inner, .. } => free_in_expr(inner, bound, out, seen),
-        Expr::Var(n) => note_free(n, bound, out, seen),
-        Expr::Cast { value, .. } => free_in_expr(value, bound, out, seen),
+        Expr::Iterable(inner) => free_in_expr(inner, bound, cx),
+        Expr::Recorded { inner, .. } => free_in_expr(inner, bound, cx),
+        Expr::Var(n) => note_free(n, bound, cx),
+        Expr::Cast { value, .. } => free_in_expr(value, bound, cx),
         Expr::PostIncDec { name, .. } | Expr::PreIncDec { name, .. } => {
-            note_free(name, bound, out, seen)
+            note_free(name, bound, cx)
         }
-        Expr::Unary { rhs, .. } => free_in_expr(rhs, bound, out, seen),
+        Expr::Unary { rhs, .. } => free_in_expr(rhs, bound, cx),
         Expr::Binary { lhs, rhs, .. } => {
-            free_in_expr(lhs, bound, out, seen);
-            free_in_expr(rhs, bound, out, seen);
+            free_in_expr(lhs, bound, cx);
+            free_in_expr(rhs, bound, cx);
         }
         Expr::Println { arg, .. } => {
             if let Some(a) = arg {
-                free_in_expr(a, bound, out, seen);
+                free_in_expr(a, bound, cx);
             }
         }
         Expr::Call { name, args, .. } => {
             // The callee may be an enclosing-scope closure variable, so it is a
             // free reference too (a global function name simply won't intersect
             // the enclosing frame's slots and so is never captured).
-            note_free(name, bound, out, seen);
+            note_free(name, bound, cx);
             for a in args {
-                free_in_expr(a, bound, out, seen);
+                free_in_expr(a, bound, cx);
             }
         }
         Expr::CallValue { callee, args, .. } => {
-            free_in_expr(callee, bound, out, seen);
+            free_in_expr(callee, bound, cx);
             for a in args {
-                free_in_expr(a, bound, out, seen);
+                free_in_expr(a, bound, cx);
             }
         }
         Expr::List(elems) => {
             for e in elems {
-                free_in_expr(e, bound, out, seen);
+                free_in_expr(e, bound, cx);
             }
         }
         Expr::Map(entries) => {
             for (k, v) in entries {
-                free_in_expr(k, bound, out, seen);
-                free_in_expr(v, bound, out, seen);
+                free_in_expr(k, bound, cx);
+                free_in_expr(v, bound, cx);
             }
         }
         Expr::MethodCall { recv, args, .. } => {
-            free_in_expr(recv, bound, out, seen);
+            free_in_expr(recv, bound, cx);
             for a in args {
-                free_in_expr(a, bound, out, seen);
+                free_in_expr(a, bound, cx);
             }
         }
-        Expr::Property { recv, .. } => free_in_expr(recv, bound, out, seen),
+        Expr::Property { recv, .. } => free_in_expr(recv, bound, cx),
         Expr::Index { recv, index, .. } => {
-            free_in_expr(recv, bound, out, seen);
-            free_in_expr(index, bound, out, seen);
+            free_in_expr(recv, bound, cx);
+            free_in_expr(index, bound, cx);
         }
         Expr::New { args, .. } => {
             for a in args {
-                free_in_expr(a, bound, out, seen);
+                free_in_expr(a, bound, cx);
             }
         }
         Expr::Closure {
@@ -3688,47 +3882,53 @@ fn free_in_expr(
             // Descend with the nested closure's own bindings added, so a name
             // free in the inner closure but not bound here still surfaces.
             let mut inner = bound.clone();
+            let mut own: HashSet<String> = HashSet::new();
             if params.is_empty() && !*explicit_params {
-                inner.insert("it".to_string());
+                own.insert("it".to_string());
             }
             for p in params {
-                inner.insert(p.clone());
+                own.insert(p.clone());
             }
-            collect_bound_stmts(body, &mut inner);
+            collect_bound_stmts(body, &mut own);
+            inner.extend(own.iter().cloned());
+            cx.closure_bound.push(own);
+            cx.depth += 1;
             for s in body {
-                free_in_stmt(s, &inner, out, seen);
+                free_in_stmt(s, &inner, cx);
             }
+            cx.depth -= 1;
+            cx.closure_bound.pop();
         }
         Expr::Range { start, end, .. } => {
-            free_in_expr(start, bound, out, seen);
-            free_in_expr(end, bound, out, seen);
+            free_in_expr(start, bound, cx);
+            free_in_expr(end, bound, cx);
         }
         Expr::GString(parts) => {
             for p in parts {
                 if let GStringPart::Expr(e) = p {
-                    free_in_expr(e, bound, out, seen);
+                    free_in_expr(e, bound, cx);
                 }
             }
         }
         Expr::Ternary { cond, then, els } => {
-            free_in_expr(cond, bound, out, seen);
-            free_in_expr(then, bound, out, seen);
-            free_in_expr(els, bound, out, seen);
+            free_in_expr(cond, bound, cx);
+            free_in_expr(then, bound, cx);
+            free_in_expr(els, bound, cx);
         }
         Expr::Elvis { lhs, rhs } => {
-            free_in_expr(lhs, bound, out, seen);
-            free_in_expr(rhs, bound, out, seen);
+            free_in_expr(lhs, bound, cx);
+            free_in_expr(rhs, bound, cx);
         }
         // `this`/`super` are captured upvalues when a closure inside a method
         // uses them (both resolve to the receiver instance in slot 0).
-        Expr::This | Expr::Super => note_free("this", bound, out, seen),
+        Expr::This | Expr::Super => note_free("this", bound, cx),
         Expr::SuperCtor { args, .. } => {
-            note_free("this", bound, out, seen);
+            note_free("this", bound, cx);
             for a in args {
-                free_in_expr(a, bound, out, seen);
+                free_in_expr(a, bound, cx);
             }
         }
-        Expr::InstanceOf { value, .. } => free_in_expr(value, bound, out, seen),
+        Expr::InstanceOf { value, .. } => free_in_expr(value, bound, cx),
         Expr::Int(..)
         | Expr::Float(_)
         | Expr::Dec(_)

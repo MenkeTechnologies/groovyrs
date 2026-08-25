@@ -342,6 +342,30 @@ pub const GBITOP: u16 = 766;
 /// Stack: the operand.
 pub const GBITNOT: u16 = 767;
 
+/// Builtin id for allocating a **boxed binding** — the cell a captured local
+/// lives in. Stack: the initial value. Answers the cell's `Value::Obj` handle.
+///
+/// Groovy compiles a local that some closure captures into a
+/// `groovy.lang.Reference`, and the reference is created where the *declaration*
+/// runs. Two observable rules follow, and neither is reachable without a cell:
+/// a mutation made after a closure is created is visible to a later call of it
+/// (the closure holds the variable, not a copy), and a declaration inside a loop
+/// body makes a **new** variable on every iteration, so each closure built there
+/// keeps that iteration's value. See [`GCELL_GET`] / [`GCELL_SET`].
+pub const GCELL_NEW: u16 = 768;
+
+/// Builtin id for reading a boxed binding. Stack: the cell handle. Answers its
+/// contents — or, when the operand is not a cell, the operand itself, so a read
+/// that reaches a slot before its cell was installed degrades to the plain value
+/// rather than faulting.
+pub const GCELL_GET: u16 = 769;
+
+/// Builtin id for writing a boxed binding. Stack: the new value, then the cell
+/// handle (the handle on top). Answers the value written, which the compiler
+/// pops — an assignment is a statement here, and the expression forms re-read
+/// through [`GCELL_GET`].
+pub const GCELL_SET: u16 = 770;
+
 /// The call depth at which groovyrs raises `java.lang.StackOverflowError`.
 ///
 /// Groovy's depth is the JVM's: whatever fits in the thread's `-Xss`. Measured
@@ -426,6 +450,9 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GUSHR, b_ushr);
     vm.register_builtin(GBITOP, b_bitop);
     vm.register_builtin(GBITNOT, b_bitnot);
+    vm.register_builtin(GCELL_NEW, b_cell_new);
+    vm.register_builtin(GCELL_GET, b_cell_get);
+    vm.register_builtin(GCELL_SET, b_cell_set);
     vm.register_builtin(GIN, b_in);
     vm.register_builtin(GCAST, b_cast);
     vm.register_builtin(GCLASSREF, b_classref);
@@ -1339,6 +1366,17 @@ fn with_vm<R>(f: impl FnOnce(&mut VM) -> R) -> Option<R> {
 /// an insertion-ordered map.
 enum HeapObj {
     Closure(ClosureMeta),
+    /// A **boxed binding** — `groovy.lang.Reference`. Holds one local variable's
+    /// current value for a local some closure captures.
+    ///
+    /// A closure captures the cell's *handle*, so it reads and writes the same
+    /// variable the enclosing code does; a declaration allocates a fresh cell, so
+    /// a `def` inside a loop body is a new variable per iteration and each
+    /// closure built there keeps that iteration's value. Never user-visible: the
+    /// compiler emits the [`GCELL_GET`] read and the [`GCELL_SET`] write around
+    /// every access to a boxed name, so nothing but a capture ever holds the
+    /// handle.
+    Cell(Value),
     Instance(Instance),
     /// A Groovy map. Entries are *stored* in insertion order whatever the
     /// implementation; [`MapKind`] decides the order they are iterated and
@@ -1440,6 +1478,9 @@ enum HeapObj {
     SetVal {
         items: Vec<Value>,
         kind: SetKind,
+        /// The membership accelerator. Membership is decided by `equals`, so this
+        /// only ever *narrows* the search — see [`SetIndex`].
+        index: SetIndex,
     },
     /// A `java.util.ArrayList` — every Groovy `List` a script can name.
     ///
@@ -2607,6 +2648,56 @@ fn b_make_list(vm: &mut VM, _argc: u8) -> Value {
         // array, so this is only reachable if the emitter changes).
         other => other,
     }
+}
+
+/// `GCELL_NEW`: allocate a boxed binding around the value on the stack.
+///
+/// Called where a declaration runs, which is what makes a `def` inside a loop
+/// body a fresh variable each iteration — the closures built in two iterations
+/// hold two different cells.
+fn b_cell_new(vm: &mut VM, _argc: u8) -> Value {
+    let init = vm.stack.pop().unwrap_or(Value::Undef);
+    heap_push(HeapObj::Cell(init))
+}
+
+/// `GCELL_GET`: read a boxed binding.
+///
+/// A non-cell operand answers itself. That is not a silent fallback for a wrong
+/// handle — it is what makes a read of a boxed name that runs *before* its cell
+/// is installed (a forward reference to a script binding) yield the plain value
+/// instead of faulting.
+fn b_cell_get(vm: &mut VM, _argc: u8) -> Value {
+    let cell = vm.stack.pop().unwrap_or(Value::Undef);
+    match cell {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(id as usize) {
+            Some(HeapObj::Cell(v)) => v.clone(),
+            _ => Value::Obj(id),
+        }),
+        other => other,
+    }
+}
+
+/// `GCELL_SET`: write a boxed binding, answering the value written.
+///
+/// Stack is the value then the handle, so the handle is on top: the compiler
+/// lowers the right-hand side first (it may read the variable being written,
+/// `x = x + 1`) and pushes the cell after it.
+fn b_cell_set(vm: &mut VM, _argc: u8) -> Value {
+    let cell = vm.stack.pop().unwrap_or(Value::Undef);
+    let val = vm.stack.pop().unwrap_or(Value::Undef);
+    if let Value::Obj(id) = cell {
+        let wrote = HEAP.with(|h| match h.borrow_mut().get_mut(id as usize) {
+            Some(HeapObj::Cell(slot)) => {
+                *slot = val.clone();
+                true
+            }
+            _ => false,
+        });
+        if wrote {
+            return val;
+        }
+    }
+    val
 }
 
 fn b_make_map(vm: &mut VM, _argc: u8) -> Value {
@@ -10461,7 +10552,7 @@ fn range_step(r: &RangeVal, step: i64) -> Vec<Value> {
 fn as_set(v: &Value) -> Option<(Vec<Value>, SetKind)> {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
-            Some(HeapObj::SetVal { items, kind }) => Some((items.clone(), *kind)),
+            Some(HeapObj::SetVal { items, kind, .. }) => Some((items.clone(), *kind)),
             _ => None,
         }),
         _ => None,
@@ -10563,31 +10654,192 @@ fn set_elements(items: &[Value], kind: SetKind) -> Vec<Value> {
     }
 }
 
+/// The key a [`SetIndex`] hashes an element under. Deliberately narrow: only the
+/// two shapes whose `equals` relation is exactly key equality.
+#[derive(PartialEq, Eq, Hash, Clone)]
+enum SetKey {
+    Int(i64),
+    Str(Box<str>),
+}
+
+/// Which shape a set's index is keyed on. A set that mixes them (or holds
+/// anything else) has no index at all — see [`SetIndex`].
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum SetKeyKind {
+    Int,
+    Str,
+}
+
+/// A `Set`'s membership accelerator: element key → its position in `items`.
+///
+/// Membership in a `java.util.Set` is decided by `equals`, and groovyrs's
+/// [`values_equal`] can re-enter the VM for a user class's own `equals` and
+/// equates values across types (`1` and `1.0`, `1` and `true`, `1` and `"1"`).
+/// No hash of a value can be consistent with all of that, so this is an
+/// accelerator and never the answer:
+///
+/// * It exists only while every element is a plain `Value::Int` **or** every
+///   element is a plain `Value::Str`. Those are the two shapes where two
+///   elements are `values_equal` exactly when their keys are equal — no
+///   cross-type coercion can reach either from inside its own kind. The first
+///   element decides the kind; anything that does not fit turns the index off
+///   for the life of that set, and it falls back to the scan it always did.
+/// * A probe whose key kind differs from the set's is scanned, not looked up —
+///   that is what keeps `s.contains("1")` finding the `Integer` `1`.
+/// * A hit is a **candidate**: the caller confirms it with [`values_equal`]
+///   against the element itself. Only a miss is decisive, and it is decisive
+///   only because of the two rules above.
+///
+/// Without it, filling a set was quadratic: 16 000 `s.add(i)` calls took ~13 s
+/// against Apache Groovy's ~1 s, and doubling the count quadrupled it.
+#[derive(Default, Clone)]
+struct SetIndex {
+    kind: Option<SetKeyKind>,
+    /// `None` once the set holds something no key can represent, or two kinds at
+    /// once. Never rebuilt after that: an element already scanned past has to
+    /// keep being scanned past.
+    map: Option<HashMap<SetKey, usize>>,
+}
+
+/// The index key for `v`, or `None` when no key can represent it.
+fn set_key(v: &Value) -> Option<SetKey> {
+    match v {
+        Value::Int(n) => Some(SetKey::Int(*n)),
+        Value::Str(s) => Some(SetKey::Str(s.as_str().into())),
+        _ => None,
+    }
+}
+
+fn set_key_kind(k: &SetKey) -> SetKeyKind {
+    match k {
+        SetKey::Int(_) => SetKeyKind::Int,
+        SetKey::Str(_) => SetKeyKind::Str,
+    }
+}
+
+impl SetIndex {
+    /// Build an index over `items`, or an off one when they do not all fit a
+    /// single key kind.
+    fn build(items: &[Value]) -> Self {
+        let mut idx = SetIndex {
+            kind: None,
+            map: Some(HashMap::with_capacity(items.len())),
+        };
+        for (i, v) in items.iter().enumerate() {
+            idx.record(v, i);
+        }
+        idx
+    }
+
+    /// Note that `items[pos]` is `v`. Turns the index off when `v` has no key or
+    /// does not match the kind the set already settled on.
+    fn record(&mut self, v: &Value, pos: usize) {
+        let Some(map) = self.map.as_mut() else { return };
+        let Some(key) = set_key(v) else {
+            self.map = None;
+            return;
+        };
+        let kk = set_key_kind(&key);
+        match self.kind {
+            None => self.kind = Some(kk),
+            Some(existing) if existing == kk => {}
+            Some(_) => {
+                self.map = None;
+                return;
+            }
+        }
+        map.insert(key, pos);
+    }
+
+    /// Where `probe` might be, when the index can answer at all.
+    ///
+    /// `None` means "no answer — scan". `Some(None)` means the element is
+    /// definitively absent. `Some(Some(pos))` is a candidate the caller must
+    /// still confirm with [`values_equal`].
+    fn find(&self, probe: &Value) -> Option<Option<usize>> {
+        let map = self.map.as_ref()?;
+        let key = set_key(probe)?;
+        // A probe of the other kind can still be `equals` to an element of this
+        // one (`"1"` and `1` compare by their printed form), so it is scanned.
+        if self.kind != Some(set_key_kind(&key)) {
+            return None;
+        }
+        Some(map.get(&key).copied())
+    }
+}
+
 /// Build a set handle from `items`, dropping later duplicates — which is what
 /// makes `[1, 2, 2, 3] as Set` three elements and, applied to every operator
 /// result, what makes the set operators re-de-duplicate.
 fn make_set(items: Vec<Value>, kind: SetKind) -> Value {
-    heap_push(HeapObj::SetVal {
-        items: dedup_values(items),
-        kind,
-    })
+    let items = dedup_values(items);
+    let index = SetIndex::build(&items);
+    heap_push(HeapObj::SetVal { items, kind, index })
 }
 
 /// `items` with every later duplicate dropped — `Set.add`'s answer for an
 /// element already present is `false`, and it leaves the first one in place.
+///
+/// Indexed the same way membership is, and for the same reason: without it,
+/// building a set from `n` elements is `n²/2` `values_equal` calls, so
+/// `(1..n).toSet()` and every set operator that re-de-duplicates its result got
+/// four times slower for twice the input.
 fn dedup_values(items: Vec<Value>) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
+    let mut index = SetIndex::default();
     for v in items {
-        if !out.iter().any(|k| values_equal(k, &v)) {
+        if !index_member(&index, &out, &v) {
+            index.record(&v, out.len());
             out.push(v);
         }
     }
     out
 }
 
-/// Replace a set handle's elements in place, keeping its kind. This is how a
-/// mutator (`add`, `remove`, `clear`) is visible to every holder of the handle,
-/// the way `java.util.Set`'s are.
+/// Whether `probe` is already in `items`, using `index` to narrow the search.
+///
+/// The index only ever *narrows*: a hit is a candidate that [`values_equal`]
+/// still has to confirm, and an index that cannot answer (`None`) falls back to
+/// the full scan. Only a miss inside an index that can answer is decisive — see
+/// [`SetIndex`] for why that is sound.
+fn index_member(index: &SetIndex, items: &[Value], probe: &Value) -> bool {
+    match index.find(probe) {
+        // Definitively absent: the index covers every element and holds no key
+        // equal to this one.
+        Some(None) => false,
+        // A candidate. `values_equal` decides, exactly as the scan would.
+        Some(Some(pos)) => items
+            .get(pos)
+            .map(|v| values_equal(v, probe))
+            .unwrap_or(false),
+        // No answer — the index is off, or the probe is of the other key kind.
+        None => items.iter().any(|v| values_equal(v, probe)),
+    }
+}
+
+/// Whether `probe` is in the set behind `recv`, consulting that set's index.
+///
+/// `items` is the caller's snapshot of the same elements. The heap borrow is
+/// held only for the hash lookup and released before [`values_equal`] runs — it
+/// can re-enter the VM for a user class's `equals`, which would re-borrow.
+fn set_member(recv: &Value, items: &[Value], probe: &Value) -> bool {
+    let hit = match recv {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::SetVal { index, .. }) => index.find(probe),
+            _ => None,
+        }),
+        _ => None,
+    };
+    match hit {
+        Some(None) => false,
+        Some(Some(pos)) => items
+            .get(pos)
+            .map(|v| values_equal(v, probe))
+            .unwrap_or(false),
+        None => items.iter().any(|v| values_equal(v, probe)),
+    }
+}
+
 /// The element count of a set handle, without copying its elements.
 fn set_len(v: &Value) -> Option<usize> {
     match v {
@@ -10604,16 +10856,27 @@ fn set_len(v: &Value) -> Option<usize> {
 fn set_push(v: &Value, item: Value) {
     let Value::Obj(id) = v else { return };
     HEAP.with(|h| {
-        if let Some(HeapObj::SetVal { items, .. }) = h.borrow_mut().get_mut(*id as usize) {
+        if let Some(HeapObj::SetVal { items, index, .. }) = h.borrow_mut().get_mut(*id as usize) {
+            index.record(&item, items.len());
             items.push(item);
         }
     });
 }
 
+/// Replace a set handle's elements in place, keeping its kind. This is how a
+/// mutator (`remove`, `retainAll`, `clear`) is visible to every holder of the
+/// handle, the way `java.util.Set`'s are.
+///
+/// The index is rebuilt rather than patched: every one of these rewrites the
+/// element vector, so every position an index entry names could have moved.
 fn set_store(v: &Value, items: Vec<Value>) {
     let Value::Obj(id) = v else { return };
     HEAP.with(|h| {
-        if let Some(HeapObj::SetVal { items: dst, .. }) = h.borrow_mut().get_mut(*id as usize) {
+        if let Some(HeapObj::SetVal {
+            items: dst, index, ..
+        }) = h.borrow_mut().get_mut(*id as usize)
+        {
+            *index = SetIndex::build(&items);
             *dst = items;
         }
     });
@@ -10646,23 +10909,24 @@ fn dispatch_set_method(
         "toString" => Value::str(groovy_str(recv)),
         "size" | "getSize" => Value::int(items.len() as i64),
         "isEmpty" => Value::bool(items.is_empty()),
-        "contains" => Value::bool(items.iter().any(|v| values_equal(v, &first_arg(args)))),
+        "contains" => Value::bool(set_member(recv, items, &first_arg(args))),
         // The set operators. Each answers a set of the receiver's kind with the
         // duplicates dropped, which is the whole point of the type: a list's
         // `+` concatenates, a set's unions.
         "plus" | "minus" | "intersect" | "unique" | "toSet" | "asImmutable" | "asSynchronized"
         | "clone" => {
             let o = other();
+            let o_index = SetIndex::build(&o);
             make_set(
                 match method {
                     "plus" => ordered().into_iter().chain(o).collect(),
                     "minus" => ordered()
                         .into_iter()
-                        .filter(|v| !o.iter().any(|w| values_equal(v, w)))
+                        .filter(|v| !index_member(&o_index, &o, v))
                         .collect(),
                     "intersect" => ordered()
                         .into_iter()
-                        .filter(|v| o.iter().any(|w| values_equal(v, w)))
+                        .filter(|v| index_member(&o_index, &o, v))
                         .collect(),
                     _ => ordered(),
                 },
@@ -10680,7 +10944,7 @@ fn dispatch_set_method(
         // `add` answers whether the set changed, and mutates through the handle.
         "add" | "leftShift" => {
             let v = first_arg(args);
-            let present = items.iter().any(|k| values_equal(k, &v));
+            let present = set_member(recv, items, &v);
             if !present {
                 // Append through the handle rather than rebuilding the whole
                 // element vector and storing it back: `items` is already a copy
@@ -10710,25 +10974,24 @@ fn dispatch_set_method(
         }
         "addAll" | "removeAll" | "retainAll" => {
             let o = other();
+            // The two filtering forms test every element against the whole
+            // argument, so the argument gets an index of its own — otherwise
+            // `a.removeAll(b)` is `|a| × |b|` `values_equal` calls.
+            let o_index = SetIndex::build(&o);
             let next: Vec<Value> = match method {
                 "addAll" => items.iter().cloned().chain(o).collect(),
                 "removeAll" => items
                     .iter()
-                    .filter(|k| !o.iter().any(|w| values_equal(k, w)))
+                    .filter(|k| !index_member(&o_index, &o, k))
                     .cloned()
                     .collect(),
                 _ => items
                     .iter()
-                    .filter(|k| o.iter().any(|w| values_equal(k, w)))
+                    .filter(|k| index_member(&o_index, &o, k))
                     .cloned()
                     .collect(),
             };
-            let mut deduped: Vec<Value> = Vec::new();
-            for v in next {
-                if !deduped.iter().any(|k| values_equal(k, &v)) {
-                    deduped.push(v);
-                }
-            }
+            let deduped = dedup_values(next);
             let changed = deduped.len() != items.len();
             set_store(recv, deduped);
             Value::bool(changed)

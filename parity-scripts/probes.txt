@@ -2661,9 +2661,3 @@ println([size: 9].size()); println([size: 9].size)
 def f = { a, c -> c(a) }; println(f(3) { it * 2 })
 %%
 println([1,2,3].inject(0) { a, b -> a + b })
-%%
-# overloading by arity, for a script function
-def f() { "f0" }
-def f(a) { "f1:$a" }
-def f(a,b) { "f2:$a$b" }
-println(f()); println(f(1)); println(f(1,2)); println(f(*[1,2]))

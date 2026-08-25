@@ -5345,3 +5345,69 @@ println(deep.collect{it()})"#);
          [00, 01, 10, 11]\n"
     );
 }
+
+/// `methodMissing` and `propertyMissing` — Groovy's last-resort dispatch hooks,
+/// which groovyrs did not have: an unresolved call or read raised straight away.
+///
+/// The hook runs only once every real resolution has failed, the GDK included:
+/// `obj.with { … }` is a GDK method on any object, and a hook that shadowed it
+/// would turn a working construct into a silently wrong one. Every expectation
+/// is Apache Groovy 5.1.0's own output.
+#[test]
+fn method_missing_is_the_last_resort_not_the_first() {
+    let (out, ok) = run(r#"class D {
+  def real() { 'real' }
+  int n = 5
+  def methodMissing(String name, args) { "mm:$name:${args.size()}" }
+}
+def d = new D()
+println(d.real())
+println(d.whatever())
+println(d.whatever(1,2,3))
+println(d.getN())
+class E extends D { }
+println(new E().inherited(7))
+class W { def v = 3; def methodMissing(String n, args) { "mm:$n" } }
+def w = new W()
+println(w.with { v })
+println(w.is(w))
+println(w.anything())"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "real\nmm:whatever:0\nmm:whatever:3\n5\nmm:inherited:1\n3\ntrue\nmm:anything\n"
+    );
+}
+
+/// A hook that throws propagates its own throwable, and a real failure inside a
+/// method the class *does* have is never rerouted into the hook — only a
+/// `MissingMethodException` for the call itself hands over.
+#[test]
+fn a_failure_inside_a_real_method_does_not_reach_method_missing() {
+    let (out, ok) = run(r#"class X { def v = 1; def methodMissing(String n, args) { throw new IllegalStateException("boom:$n") } }
+try { new X().nope() } catch (e) { println(e.getClass().getName() + ':' + e.getMessage()) }
+class Y { def go() { throw new IllegalArgumentException('inner') }; def methodMissing(String n, args) { 'mm' } }
+try { new Y().go() } catch (e) { println(e.getClass().getSimpleName() + ':' + e.getMessage()) }
+class Z2 { def v = 1 }
+try { new Z2().nope() } catch (e) { println(e.getClass().getSimpleName()) }"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "java.lang.IllegalStateException:boom:nope\n\
+         IllegalArgumentException:inner\nMissingMethodException\n"
+    );
+}
+
+/// `propertyMissing(String name)` reads and `propertyMissing(String name, value)`
+/// writes, after the getter/setter and the declared fields — Groovy's own order.
+#[test]
+fn property_missing_answers_an_unknown_read_and_write() {
+    let (out, ok) = run(r#"class P { def propertyMissing(String n) { "pm:$n" }; def known = 'k' }
+def p = new P()
+println(p.known)
+println(p.unknown)
+class Q { def propertyMissing(String n, v) { println("set $n=$v") } }
+def q = new Q(); q.zzz = 3"#);
+    assert!(ok);
+    assert_eq!(out, "k\npm:unknown\nset zzz=3\n");
+}

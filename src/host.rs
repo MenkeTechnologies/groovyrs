@@ -528,6 +528,18 @@ thread_local! {
     /// value stack because it has to survive the returns that unwind every frame
     /// between the `throw` and its handler.
     static PENDING: RefCell<Option<Value>> = const { RefCell::new(None) };
+    /// While `Some(name)`, a `MissingMethodException` for exactly that method
+    /// records itself in [`MISS_PROBED`] instead of being raised.
+    ///
+    /// This is how a `methodMissing` hook is offered a call only after the GDK
+    /// has refused it. The GDK reports a refusal by raising, and a raise is not
+    /// something the caller can take back: `raise_with` either parks a pending
+    /// throwable — and only when the program armed exceptions with a `try` — or
+    /// hard-faults and halts the VM. Neither is recoverable after the fact, so
+    /// the miss has to be intercepted where it happens rather than undone.
+    static MISS_PROBE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Set when the method [`MISS_PROBE`] names has missed.
+    static MISS_PROBED: Cell<bool> = const { Cell::new(false) };
     /// True once [`GEXC_ARM`] has run — i.e. the program uses `try`/`throw`, so
     /// the compiler emitted the pending-exception checks that make a parked
     /// exception observable. A runtime error Groovy models as a `Throwable`
@@ -850,6 +862,14 @@ fn raise_missing_method_wide(
         Value::Int(_) if wide_at(0) => "java.lang.Long".to_string(),
         _ => java_class_name(recv),
     };
+    // A probe for exactly this method: report the miss to the prober rather than
+    // raising, so it can offer the call to `methodMissing` instead. Matched on
+    // the method name, so a *nested* miss inside a GDK method that did exist is
+    // still a real one.
+    if MISS_PROBE.with(|p| p.borrow().as_deref() == Some(method)) {
+        MISS_PROBED.with(|m| m.set(true));
+        return Value::Undef;
+    }
     let payload_class = class.clone();
     let payload_args = args.to_vec();
     raise_with(
@@ -1244,6 +1264,7 @@ fn register_throwables() {
                 },
                 field_inits: Vec::new(),
                 methods: std::collections::HashMap::new(),
+                method_arity: std::collections::HashMap::new(),
                 ctors: std::collections::HashMap::new(),
             });
         }
@@ -1811,6 +1832,12 @@ struct ClassMeta {
     field_inits: Vec<(String, u16)>,
     /// method name → subroutine name-pool index.
     methods: std::collections::HashMap<String, u16>,
+    /// method name → its declared parameter count. Read only where the *shape*
+    /// of a call has to match the declaration rather than just its name:
+    /// `propertyMissing` is one method name with a one-argument reader and a
+    /// two-argument writer, and dispatching the wrong one would push the wrong
+    /// number of values into the body's prologue.
+    method_arity: std::collections::HashMap<String, u8>,
     /// constructor subroutine name-pool indices keyed by arity.
     ctors: std::collections::HashMap<u8, u16>,
 }
@@ -3250,6 +3277,26 @@ fn class_meta(id: u32) -> Option<ClassMeta> {
 /// Resolve a method name to its subroutine index, walking the superclass chain
 /// so an inherited (or overriding) method is found. A subclass entry shadows its
 /// super's, giving virtual dispatch (the most-derived definition wins).
+/// The declared parameter count of the `method` that `lookup_method` would find
+/// on `class` — searched the same way, so the answer describes the same
+/// declaration.
+fn method_arity(class: u32, method: &str) -> Option<u8> {
+    let mut cur = Some(class);
+    while let Some(id) = cur {
+        let meta = class_meta(id)?;
+        if let Some(n) = meta.method_arity.get(method) {
+            return Some(*n);
+        }
+        cur = meta.superclass.as_deref().and_then(find_class);
+    }
+    for id in interface_closure(class) {
+        if let Some(n) = class_meta(id).and_then(|m| m.method_arity.get(method).copied()) {
+            return Some(n);
+        }
+    }
+    None
+}
+
 fn lookup_method(class: u32, method: &str) -> Option<u16> {
     let mut cur = Some(class);
     while let Some(id) = cur {
@@ -3372,6 +3419,8 @@ fn capitalize(s: &str) -> String {
 /// field-name array, the method table, the field-initializer table, and the
 /// constructor table on top.
 fn b_class(vm: &mut VM, _argc: u8) -> Value {
+    // Pushed last by `register_class`, so it pops first.
+    let arities_h = vm.stack.pop().unwrap_or(Value::Undef);
     let ctors_h = vm.stack.pop().unwrap_or(Value::Undef);
     let inits_h = vm.stack.pop().unwrap_or(Value::Undef);
     let methods_h = vm.stack.pop().unwrap_or(Value::Undef);
@@ -3423,9 +3472,14 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
             .collect(),
         _ => std::collections::HashMap::new(),
     };
+    let method_arity: std::collections::HashMap<String, u8> = match arities_h {
+        Value::Hash(h) => h.into_iter().map(|(k, v)| (k, v.to_int() as u8)).collect(),
+        _ => std::collections::HashMap::new(),
+    };
     CLASSES.with(|c| {
         c.borrow_mut().push(ClassMeta {
             name,
+            method_arity,
             superclass,
             interfaces,
             is_interface,
@@ -4854,7 +4908,54 @@ fn dispatch_instance_method(
             return Some(Ok(v));
         }
     }
+    // Nothing on the class answered. The caller decides what happens next: from
+    // `dispatch_call` the GDK still gets its turn (`obj.with { … }` is a GDK
+    // method on any object, not something the class declares), and only when
+    // that has failed too is `methodMissing` tried — which is Groovy's order.
+    None
+}
+
+/// The end of the line for a call on a class instance: Groovy's `methodMissing`
+/// hook, else `MissingMethodException`.
+///
+/// Split from [`dispatch_instance_method`] so it runs *after* the GDK, not
+/// before it. Running it earlier would let a `methodMissing` shadow every GDK
+/// method on the object — `obj.with { … }` would answer `"with"` instead of
+/// running the closure, turning a working construct into a silently wrong one.
+fn instance_method_miss(
+    vm: &mut VM,
+    recv: &Value,
+    method: &str,
+    args: &[Value],
+) -> Option<Result<Value, String>> {
+    let inst = as_instance(recv)?;
+    class_meta(inst.class)?;
+    // The arguments arrive as one list, so a hook can forward them
+    // (`args as List`, `args[0]`).
+    if let Some(idx) = lookup_method(inst.class, "methodMissing") {
+        return Some(invoke_sub(
+            vm,
+            idx,
+            &[
+                recv.clone(),
+                Value::str(method.to_string()),
+                glist(args.to_vec()),
+            ],
+        ));
+    }
     Some(Ok(raise_missing_method(vm, recv, method, args)))
+}
+
+/// [`dispatch_instance_method`] plus the miss handling — for the callers that
+/// have no further chain to fall through to (`getAt`/`putAt`).
+fn dispatch_instance_method_or_miss(
+    vm: &mut VM,
+    recv: &Value,
+    method: &str,
+    args: &[Value],
+) -> Option<Result<Value, String>> {
+    dispatch_instance_method(vm, recv, method, args)
+        .or_else(|| instance_method_miss(vm, recv, method, args))
 }
 
 /// Lowercase the first character (`X` → `x`) — the inverse of [`capitalize`],
@@ -4898,6 +4999,20 @@ fn dispatch_instance_prop_get(
             return Some(Ok(v));
         }
     }
+    // `propertyMissing(String name)` — the read half of Groovy's hook, tried
+    // after the getter, the field and the built-in members, which is Groovy's
+    // own order. The one-argument form is the reader; the two-argument form is
+    // the writer, and `lookup_method` keys by name alone, so the arity has to be
+    // checked before dispatching (see `method_param_count`).
+    if let Some(idx) = lookup_method(inst.class, "propertyMissing") {
+        if method_arity(inst.class, "propertyMissing") == Some(1) {
+            return Some(invoke_sub(
+                vm,
+                idx,
+                &[recv.clone(), Value::str(name.to_string())],
+            ));
+        }
+    }
     Some(Ok(raise_missing_property(vm, recv, name)))
 }
 
@@ -4923,6 +5038,28 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
                         Value::Undef
                     }
                 };
+            }
+        }
+        // `propertyMissing(String name, value)` — the write half of Groovy's
+        // hook, tried after the setter and before the field check below, which
+        // is Groovy's own order. The two-argument form is the writer; the
+        // one-argument form is the reader, and both register under one name (see
+        // `ClassMeta::method_arity`).
+        if !inst.fields.contains_key(&name) {
+            if let Some(idx) = lookup_method(inst.class, "propertyMissing") {
+                if method_arity(inst.class, "propertyMissing") == Some(2) {
+                    return match invoke_sub(
+                        vm,
+                        idx,
+                        &[recv.clone(), Value::str(name.clone()), value],
+                    ) {
+                        Ok(_) => Value::Undef,
+                        Err(e) => {
+                            fault(vm, e);
+                            Value::Undef
+                        }
+                    };
+                }
             }
         }
         // A field the class chain never declared: Groovy raises rather than
@@ -5007,7 +5144,7 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
         return dispatch_call(vm, recv, "getAt", vec![index]);
     }
     if as_instance(&recv).is_some() {
-        return match dispatch_instance_method(vm, &recv, "getAt", &[index]) {
+        return match dispatch_instance_method_or_miss(vm, &recv, "getAt", &[index]) {
             Some(Ok(v)) => v,
             Some(Err(e)) => {
                 fault(vm, e);
@@ -5105,7 +5242,9 @@ fn b_setindex(vm: &mut VM, _argc: u8) -> Value {
     let index = vm.stack.pop().unwrap_or(Value::Undef);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
     if as_instance(&recv).is_some() {
-        if let Some(Err(e)) = dispatch_instance_method(vm, &recv, "putAt", &[index, value]) {
+        if let Some(Err(e)) =
+            dispatch_instance_method_or_miss(vm, &recv, "putAt", &[index, value])
+        {
             fault(vm, e);
         }
         return recv;
@@ -6041,9 +6180,42 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     if method == "getAt" && args.len() == 1 && (!matches!(recv, Value::Obj(_)) || is_omap(&recv)) {
         return index_read(vm, recv, args[0].clone());
     }
+    // A call on a class instance whose class declares `methodMissing`, and which
+    // nothing above answered. The GDK still gets its turn first — `obj.with { … }`
+    // is a GDK method on any object, and letting the hook shadow it would turn a
+    // working construct into a silently wrong one — so the hook runs only once
+    // the GDK has failed, which is where Groovy runs it.
+    //
+    // "Failed" is read off the pending exception the miss raises, rather than
+    // predicted from a list of method names that would go stale as the GDK
+    // grows. A class that declares no hook never enters this branch at all, so
+    // nothing about the existing dispatch changes for one.
+    if as_instance(&recv).is_some_and(|i| lookup_method(i.class, "methodMissing").is_some()) {
+        let prev = MISS_PROBE.with(|p| p.borrow_mut().replace(method.to_string()));
+        let prev_probed = MISS_PROBED.with(|m| m.replace(false));
+        let answered = dispatch_method(vm, &recv, method, &args);
+        let missed = MISS_PROBED.with(|m| m.replace(prev_probed));
+        MISS_PROBE.with(|p| *p.borrow_mut() = prev);
+        // The GDK had the method — or failed inside one it had, which is a real
+        // failure and stays in flight.
+        if !missed {
+            return answered;
+        }
+        if let Some(res) = instance_method_miss(vm, &recv, method, &args) {
+            return match res {
+                Ok(v) => v,
+                Err(e) => {
+                    fault(vm, e);
+                    Value::Undef
+                }
+            };
+        }
+    }
     // Pure GDK dispatch — no closure, no VM re-entrancy.
     dispatch_method(vm, &recv, method, &args)
 }
+
+
 
 /// The closure-driven GDK collection methods over a list (or the elements a
 /// range enumerates): `each`, `collect`, `findAll`, `find`, `inject`, `sum`. Returns `None`

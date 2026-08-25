@@ -395,6 +395,11 @@ Implemented and checked against Apache Groovy:
   `BigDecimal`/`BigInteger`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, the assigning
   `a ?= b`, and `a?.member` / `a?.method()`.
+- **`methodMissing` / `propertyMissing`** — Groovy's last-resort dispatch hooks,
+  tried only once every real resolution has failed, the GDK included: a class
+  that defines `methodMissing` still gets `obj.with { … }` from the GDK, and the
+  hook sees only what nothing else answered. `propertyMissing(String)` reads and
+  `propertyMissing(String, value)` writes.
 - **Java arrays** — `new int[3]`, `[1,2,3] as int[]`, `.length`, and the JVM
   class descriptors (`[I`, `[J`, `[D`, `[Z`, `[B`, `[C`, `[Ljava.lang.String;`).
   Modeled as a list *kind*, the way a `TreeMap` is a map kind, so an array

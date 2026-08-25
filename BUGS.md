@@ -1134,6 +1134,16 @@ infinite loop on both sides.
 - **`"abc".chars()` is not modeled.** It answers an `IntStream`, which groovyrs
   has no value for. (`toArray()`, `toCharArray()` and `String.bytes` no longer
   share this gap — they answer real `Object[]` / `char[]` / `byte[]` arrays.)
+- **A class defining both `propertyMissing` forms gets only one.** The reader
+  (`propertyMissing(String)`) and the writer (`propertyMissing(String, value)`)
+  share a name, and methods are keyed by name alone (see the overloading entry
+  above), so the second declaration replaces the first and only its half of the
+  hook fires. Either form alone works. Same root as the overloading gap, not a
+  hook-specific one.
+- **A user instance renders as its class name, not `Class@hash`.** `new W()`
+  prints `W` where Groovy prints `W@60fa3495`, and `toString()` agrees with it.
+  The suffix is the JVM identity hash, which is not reproducible here — the same
+  absence as the `HashSet` ordering note above.
 - **A closure is called with the arguments it is given, padded with nulls.**
   Groovy resolves a closure call against the declared parameter count and raises
   `MissingMethodException` when nothing matches, so

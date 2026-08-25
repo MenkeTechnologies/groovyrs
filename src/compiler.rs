@@ -1129,6 +1129,17 @@ impl Compiler {
             self.b.emit(Op::LoadInt(sub as i64), line);
         }
         self.b.emit(Op::MakeHash((ctors.len() * 2) as u16), line);
+        // method-arity table: name -> declared parameter count. Methods are keyed
+        // by name alone (see the overloading entry in BUGS.md), so this does not
+        // separate overloads — what it answers is how many parameters the method
+        // that *did* register under a name takes, which is what
+        // `propertyMissing` needs to tell its reader form from its writer form.
+        for m in methods {
+            let k = self.b.add_constant(Value::str(m.name.clone()));
+            self.b.emit(Op::LoadConst(k), line);
+            self.b.emit(Op::LoadInt(m.params.len() as i64), line);
+        }
+        self.b.emit(Op::MakeHash((methods.len() * 2) as u16), line);
         self.b.emit(Op::CallBuiltin(crate::host::GCLASS, 0), line);
         self.b.emit(Op::Pop, line);
     }

@@ -1128,6 +1128,21 @@ infinite loop on both sides.
 - **`"abc".chars()` is not modeled.** It answers an `IntStream`, which groovyrs
   has no value for. (`toArray()`, `toCharArray()` and `String.bytes` no longer
   share this gap — they answer real `Object[]` / `char[]` / `byte[]` arrays.)
+- **A closure's `resolveStrategy` is stored, not obeyed, and `owner` is
+  absent.** `clo.delegate` and `clo.resolveStrategy` read and write, and a
+  user-set delegate joins the resolution chain — a name the owner cannot resolve
+  reaches it, which is Groovy's `OWNER_FIRST` and the shape a builder uses. What
+  the strategy would change beyond that is not modeled: `DELEGATE_FIRST` does not
+  make a delegate shadow a name the owner *can* resolve. Note that in Groovy it
+  does not shadow a captured **local** either — a closure over `def x = 5` reads
+  `5` under `DELEGATE_FIRST` — so the difference is narrower than it sounds.
+
+  Two consequences of groovyrs treating a script-level `def` as a binding for the
+  whole program (rather than from its declaration onward): a delegate cannot
+  supply a name the script declares *anywhere*, and an unassigned `clo.delegate`
+  reads as `null` where Groovy answers the owner — the same absence as the
+  script-`this` entry above. `clo.owner` raises rather than answering a value
+  groovyrs does not have.
 - **Only part of each AST-transform annotation's attribute set is read.**
   `@ToString`'s `includeNames` is honoured; its `excludes`, `includes`,
   `includeSuper`, `ignoreNulls` and the rest are accepted and ignored, as are

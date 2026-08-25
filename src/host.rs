@@ -1800,6 +1800,13 @@ pub struct RangeVal {
 struct ClosureMeta {
     name_idx: u16,
     params: u8,
+    /// `clo.delegate` — the object a name the owner cannot resolve is tried
+    /// against while the closure runs. `None` until a script assigns one.
+    delegate: Option<Value>,
+    /// `clo.resolveStrategy` — Groovy's `OWNER_FIRST` (0), `DELEGATE_FIRST` (1),
+    /// `OWNER_ONLY` (2), `DELEGATE_ONLY` (3). Stored and reported; see BUGS.md
+    /// for what it does and does not decide here.
+    resolve_strategy: i64,
     /// The last parameter was written `Type... name`: it takes a list of every
     /// argument from its position onward, and a call that stops short of it
     /// still binds it — to an empty list. See [`invoke_closure`].
@@ -3062,6 +3069,8 @@ fn b_make_closure(vm: &mut VM, _argc: u8) -> Value {
         name_idx,
         params,
         varargs,
+        delegate: None,
+        resolve_strategy: 0,
         captures,
         derived: None,
     }))
@@ -3087,6 +3096,8 @@ fn derived_closure(params: u8, d: Derived) -> Value {
         name_idx: u16::MAX,
         params,
         varargs: false,
+        delegate: None,
+        resolve_strategy: 0,
         captures: Vec::new(),
         derived: Some(Box::new(d)),
     }))
@@ -3228,6 +3239,14 @@ fn invoke_closure(vm: &mut VM, clo: &Value, args: &[Value]) -> Result<Value, Str
     // arguments with `null`, drop extras. Then push the captured upvalues, in
     // declaration order, so the prologue pops them into the slots immediately
     // after the parameters (see `compiler::emit_closure`).
+    // A user-set `delegate` is on the resolution chain while the body runs, the
+    // same chain `with`/`tap` install their receiver on: a name the owner cannot
+    // resolve is tried against it. Pushed here and popped below, so a nested
+    // call sees its own delegate first.
+    let delegated = meta.delegate.clone();
+    if let Some(d) = &delegated {
+        DELEGATES.with(|s| s.borrow_mut().push(d.clone()));
+    }
     let want = meta.params as usize;
     let stack_base = vm.stack.len();
     // A varargs closure binds its last parameter to a list of every argument
@@ -3252,7 +3271,13 @@ fn invoke_closure(vm: &mut VM, clo: &Value, args: &[Value]) -> Result<Value, Str
     for cap in &meta.captures {
         vm.stack.push(cap.clone());
     }
-    run_sub(vm, entry, stack_base)
+    let out = run_sub(vm, entry, stack_base);
+    if delegated.is_some() {
+        DELEGATES.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+    out
 }
 
 /// Run a subroutine body already positioned on the value stack (its prologue
@@ -5316,6 +5341,23 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
         .into_owned();
     let value = vm.stack.pop().unwrap_or(Value::Undef);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    // `clo.delegate = x` / `clo.resolveStrategy = n` — the two settable
+    // properties of a `groovy.lang.Closure`, written through the handle so every
+    // holder of the closure sees them.
+    if matches!(name.as_str(), "delegate" | "resolveStrategy") && closure_meta(&recv).is_some() {
+        if let Value::Obj(id) = recv {
+            HEAP.with(|h| {
+                if let Some(HeapObj::Closure(meta)) = h.borrow_mut().get_mut(id as usize) {
+                    if name == "delegate" {
+                        meta.delegate = Some(value.clone());
+                    } else {
+                        meta.resolve_strategy = value.to_int();
+                    }
+                }
+            });
+        }
+        return Value::Undef;
+    }
     if let Some(inst) = as_instance(&recv) {
         {
             let setter = format!("set{}", capitalize(&name));
@@ -5655,6 +5697,24 @@ fn dispatch_on_delegate(vm: &mut VM, name: &str, args: &[Value]) -> Option<Value
         });
     }
     Some(out)
+}
+
+/// Is `method` one a `Map` itself answers? A map entry holding a closure is
+/// callable as a method (`[foo: { … }].foo()`), and that must not shadow the
+/// map's own interface — `[size: 9].size()` is `1`, the map's size, while
+/// `[size: 9].size` is `9`, the key.
+fn dispatch_map_method_exists(method: &str) -> bool {
+    matches!(
+        method,
+        "size" | "getSize" | "isEmpty" | "containsKey" | "containsValue" | "get" | "getAt"
+            | "put" | "putAt" | "putAll" | "remove" | "clear" | "keySet" | "values" | "entrySet"
+            | "each" | "eachWithIndex" | "collect" | "collectEntries" | "find" | "findAll"
+            | "findResult" | "any" | "every" | "count" | "countBy" | "groupBy" | "inject"
+            | "sort" | "toSorted" | "max" | "min" | "sum" | "withDefault" | "subMap" | "plus"
+            | "minus" | "leftShift" | "asImmutable" | "toString" | "toMapString" | "inspect"
+            | "getClass" | "equals" | "hashCode" | "is" | "with" | "tap" | "asBoolean"
+            | "iterator" | "spread" | "dump" | "grep" | "reverseEach" | "take" | "drop"
+    )
 }
 
 /// Pop the `(global-index, name)` pair both bare-name builtins are handed.
@@ -6258,6 +6318,22 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         }
         let hits: Vec<Value> = matcher_all(&m).iter().map(match_value).collect();
         return dispatch_call(vm, Value::array(hits), method, args);
+    }
+    // `m.foo()` where the map holds a closure under `foo` — Groovy's
+    // map-as-object idiom, and what makes a map usable as a closure's
+    // `delegate`. Below the map's own methods, so `m.size()` is still the map's.
+    if as_omap(&recv).is_some() && dispatch_map_method_exists(method) {
+        // A real `Map` method — fall through to it.
+    } else if let Some(Some(entry)) = omap_get(&recv, method) {
+        if closure_meta(&entry).is_some() {
+            return match invoke_closure(vm, &entry, &args) {
+                Ok(v) => v,
+                Err(e) => {
+                    fault(vm, e);
+                    Value::Undef
+                }
+            };
+        }
     }
     // A method on a class instance: a user method (implicit `this`) or Groovy's
     // auto getter/setter over a field. Checked first — an instance handle is a
@@ -10031,6 +10107,8 @@ pub fn jdk_class_package(name: &str) -> Option<&'static str> {
         | "Runtime" => "java.lang",
         "BigDecimal" | "BigInteger" => "java.math",
         "Collections" | "Arrays" | "List" | "Map" | "Set" | "Random" | "UUID" => "java.util",
+        // Named for its resolve-strategy constants (`Closure.DELEGATE_FIRST`).
+        "Closure" => "groovy.lang",
         _ => return None,
     })
 }
@@ -10527,6 +10605,12 @@ fn java_system_property(name: &str) -> Option<&'static str> {
 /// The static fields a script reads off a JDK class (`Integer.MAX_VALUE`).
 fn static_field(class: &str, name: &str) -> Option<Value> {
     Some(match (class, name) {
+        // `groovy.lang.Closure`'s resolve-strategy constants, which a script
+        // names when it sets `clo.resolveStrategy`.
+        ("Closure", "OWNER_FIRST") => Value::int(0),
+        ("Closure", "DELEGATE_FIRST") => Value::int(1),
+        ("Closure", "OWNER_ONLY") => Value::int(2),
+        ("Closure", "DELEGATE_ONLY") => Value::int(3),
         ("Integer", "MAX_VALUE") => Value::int(i32::MAX as i64),
         ("Integer", "MIN_VALUE") => Value::int(i32::MIN as i64),
         ("Long", "MAX_VALUE") => Value::int(i64::MAX),
@@ -12399,6 +12483,12 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     if let Some(meta) = closure_meta(recv) {
         return match name {
             "maximumNumberOfParameters" => Value::int(meta.params as i64),
+            // An unassigned `delegate` is Groovy's *owner* — the script object —
+            // which groovyrs has no value for (see the script-`this` entry in
+            // BUGS.md), so it reads as `null` here.
+            "delegate" => meta.delegate.clone().unwrap_or(Value::Undef),
+            "resolveStrategy" => Value::int(meta.resolve_strategy),
+            "parameterTypes" => glist(Vec::new()),
             _ => raise_missing_property(vm, recv, name),
         };
     }

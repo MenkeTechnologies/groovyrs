@@ -5775,3 +5775,58 @@ println([1,2].class.name)"#);
          java.util.ArrayList\n"
     );
 }
+
+/// A closure's `delegate` and `resolveStrategy`, and the `Closure` constants a
+/// script names when setting one. A user-set delegate joins the same resolution
+/// chain `with`/`tap` install their receiver on, so a name the owner cannot
+/// resolve reaches it.
+///
+/// Every expectation is Apache Groovy 5.1.0's own output.
+#[test]
+fn a_closure_carries_a_delegate_and_a_resolve_strategy() {
+    let (out, ok) = run(r#"println(Closure.OWNER_FIRST)
+println(Closure.DELEGATE_FIRST)
+println(Closure.OWNER_ONLY)
+println(Closure.DELEGATE_ONLY)
+def e = { -> 1 }
+println(e.resolveStrategy)
+e.resolveStrategy = Closure.DELEGATE_FIRST
+println(e.resolveStrategy)
+e.delegate = [a:1]
+println(e.delegate)
+def d = { -> foo() }
+d.delegate = [foo: { "dele" }]
+println(d())
+def g = { -> bar }
+g.delegate = [bar: 42]
+println(g())
+def two = { -> tag() }
+two.delegate = [tag: { 'first' }]
+println(two())
+two.delegate = [tag: { 'second' }]
+println(two())"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "0\n1\n2\n3\n0\n1\n[a:1]\ndele\n42\nfirst\nsecond\n"
+    );
+}
+
+/// Groovy's map-as-object idiom: a map entry holding a closure is callable as a
+/// method, which is what makes a plain map usable as a closure's `delegate`. It
+/// must not shadow the map's own interface — `[size: 9].size()` is the map's
+/// size while `[size: 9].size` is the key.
+#[test]
+fn a_map_entry_holding_a_closure_is_callable_as_a_method() {
+    let (out, ok) = run(r#"def m = [foo:{'x'}, bar:{a -> a*2}]
+println(m.foo())
+println(m.bar(3))
+println(m.size())
+println([size: 9].size())
+println([size: 9].size)
+def g = [greet: { n -> "hi $n" }, count: 0]
+println(g.greet('bo'))
+println(g.count)"#);
+    assert!(ok);
+    assert_eq!(out, "x\n6\n2\n1\n9\nhi bo\n0\n");
+}

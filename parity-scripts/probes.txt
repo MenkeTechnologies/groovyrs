@@ -2642,3 +2642,17 @@ println([[a:1],[b:2]].a); println([].nope); println(([[a:1],[a:2]] as Set).a)
 println([[a:1],[a:2]].a.getClass().getName()); println([1,2].empty); println([].empty)
 %%
 println(([1] as Set).empty); println([a:1].empty); println("".empty); println([1,2].class.name)
+%%
+# a closure's delegate / resolveStrategy, and the Closure constants
+println(Closure.OWNER_FIRST); println(Closure.DELEGATE_FIRST); println(Closure.OWNER_ONLY); println(Closure.DELEGATE_ONLY)
+%%
+def e = { -> 1 }; println(e.resolveStrategy); e.resolveStrategy = Closure.DELEGATE_FIRST; println(e.resolveStrategy); e.delegate = [a:1]; println(e.delegate)
+%%
+def d = { -> foo() }; d.delegate = [foo: { "dele" }]; println(d())
+%%
+def g = { -> bar }; g.delegate = [bar: 42]; println(g())
+%%
+# a map entry holding a closure is callable as a method
+def m = [foo:{'x'}, bar:{a -> a*2}]; println(m.foo()); println(m.bar(3)); println(m.size())
+%%
+println([size: 9].size()); println([size: 9].size)

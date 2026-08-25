@@ -395,6 +395,14 @@ Implemented and checked against Apache Groovy:
   `BigDecimal`/`BigInteger`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, the assigning
   `a ?= b`, and `a?.member` / `a?.method()`.
+- **Closure `delegate` / `resolveStrategy`** — both read and write, with the
+  `Closure.OWNER_FIRST` / `DELEGATE_FIRST` / `OWNER_ONLY` / `DELEGATE_ONLY`
+  constants. A user-set delegate joins the resolution chain `with`/`tap` use, so
+  a name the owner cannot resolve reaches it. See BUGS.md for what the strategy
+  does not decide.
+- **Map-as-object dispatch** — a map entry holding a closure is callable as a
+  method (`[foo: { … }].foo()`), which is what makes a plain map usable as a
+  delegate. The map's own interface still wins: `[size: 9].size()` is `1`.
 - **GPath** — a property a collection does not itself have is collected from its
   elements, so `people.name` is every `name` and `orders.items.price` reaches two
   levels down. A `null` element is skipped; a missing map key still contributes

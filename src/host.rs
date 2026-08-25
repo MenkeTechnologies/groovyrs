@@ -387,6 +387,21 @@ pub const GCELL_SET: u16 = 770;
 /// escaping closure cost 400 000 cells and 46 MB, on a heap with no collector.
 pub const GCELL_RENEW: u16 = 771;
 
+/// Builtin id for parking a spread call's argument list. Stack: the list.
+/// Answers `null`, which the compiler discards — the list is consumed by the
+/// call opcode that follows, not by the expression stack.
+///
+/// See `SPREAD_ARGS` for why a spread call cannot simply push its arguments.
+pub const GSPREAD_ARGS: u16 = 772;
+
+/// Builtin id for calling a **user function** with parked spread arguments.
+/// Stack: the function's name-pool index. Answers the call's result.
+///
+/// `Op::Call` binds a fixed number of stack values into the callee's frame, so
+/// it cannot express a call whose argument count is a run-time value. This
+/// enters the same subroutine through [`invoke_sub`], which pushes a vector.
+pub const GCALL_SPREAD: u16 = 773;
+
 /// The call depth at which groovyrs raises `java.lang.StackOverflowError`.
 ///
 /// Groovy's depth is the JVM's: whatever fits in the thread's `-Xss`. Measured
@@ -475,6 +490,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GCELL_GET, b_cell_get);
     vm.register_builtin(GCELL_SET, b_cell_set);
     vm.register_builtin(GCELL_RENEW, b_cell_renew);
+    vm.register_builtin(GSPREAD_ARGS, b_spread_args);
+    vm.register_builtin(GCALL_SPREAD, b_call_spread);
     vm.register_builtin(GIN, b_in);
     vm.register_builtin(GCAST, b_cast);
     vm.register_builtin(GCLASSREF, b_classref);
@@ -537,6 +554,16 @@ thread_local! {
     /// throwable — and only when the program armed exceptions with a `try` — or
     /// hard-faults and halts the VM. Neither is recoverable after the fact, so
     /// the miss has to be intercepted where it happens rather than undone.
+    /// The argument list a spread call built, parked between the
+    /// [`GSPREAD_ARGS`] that built it and the call opcode that consumes it.
+    ///
+    /// A call opcode carries its argument count in the instruction, and a spread
+    /// does not know that count until its operand is evaluated — `f(*xs)` passes
+    /// as many arguments as `xs` has elements. So the compiler builds the whole
+    /// list, parks it here, and emits the ordinary call with a count of zero;
+    /// every call builtin takes its arguments from the park when one is waiting.
+    /// Taken on read, so a call that ignores it cannot leak into the next one.
+    static SPREAD_ARGS: RefCell<Option<Vec<Value>>> = const { RefCell::new(None) };
     static MISS_PROBE: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Set when the method [`MISS_PROBE`] names has missed.
     static MISS_PROBED: Cell<bool> = const { Cell::new(false) };
@@ -3771,12 +3798,11 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    let n = argc as usize;
-    let mut args = Vec::with_capacity(n);
-    for _ in 0..n {
-        args.push(vm.stack.pop().unwrap_or(Value::Undef));
-    }
-    args.reverse();
+    let args = pop_call_args(vm, argc);
+    // The *actual* arity, which is what picks the constructor. It is `argc` for
+    // an ordinary call and the parked list's length for a spread one, where the
+    // opcode carries a count of zero because the real one is a run-time value.
+    let argc = args.len() as u8;
     // `new T[n]` — an array of `n` slots, each holding Java's default for the
     // element type (`0`, `0.0`, `false`, `null`). The parser routes it here as a
     // `new` of the array type with the length as its only argument.
@@ -3854,7 +3880,7 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
         return handle;
     }
     if let Some(ctor_idx) = meta.ctors.get(&argc) {
-        let mut pushes = Vec::with_capacity(n + 1);
+        let mut pushes = Vec::with_capacity(args.len() + 1);
         pushes.push(handle.clone());
         pushes.extend(args);
         if let Err(e) = invoke_sub(vm, *ctor_idx, &pushes) {
@@ -3924,12 +3950,7 @@ fn b_super_method(vm: &mut VM, argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    let n = argc as usize;
-    let mut args = Vec::with_capacity(n);
-    for _ in 0..n {
-        args.push(vm.stack.pop().unwrap_or(Value::Undef));
-    }
-    args.reverse();
+    let args = pop_call_args(vm, argc);
     let this = vm.stack.pop().unwrap_or(Value::Undef);
     let Some(super_id) = find_class(&super_name) else {
         fault(
@@ -3945,7 +3966,7 @@ fn b_super_method(vm: &mut VM, argc: u8) -> Value {
         );
         return Value::Undef;
     };
-    let mut pushes = Vec::with_capacity(n + 1);
+    let mut pushes = Vec::with_capacity(args.len() + 1);
     pushes.push(this);
     pushes.extend(args);
     match invoke_sub(vm, idx, &pushes) {
@@ -3967,12 +3988,7 @@ fn b_super_ctor(vm: &mut VM, argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    let n = argc as usize;
-    let mut args = Vec::with_capacity(n);
-    for _ in 0..n {
-        args.push(vm.stack.pop().unwrap_or(Value::Undef));
-    }
-    args.reverse();
+    let args = pop_call_args(vm, argc);
     let this = vm.stack.pop().unwrap_or(Value::Undef);
     let Some(super_id) = find_class(&super_name) else {
         fault(
@@ -3981,6 +3997,9 @@ fn b_super_ctor(vm: &mut VM, argc: u8) -> Value {
         );
         return Value::Undef;
     };
+    // As in `b_new`: a spread's arity is the parked list's length, because the
+    // opcode carries a count of zero when the real one is a run-time value.
+    let argc = args.len() as u8;
     let Some(idx) = class_meta(super_id).and_then(|m| m.ctors.get(&argc).copied()) else {
         // `super(message)` / `super(message, cause)` into the built-in throwable
         // chain — the modeled JDK constructors, which a user exception class
@@ -3994,7 +4013,7 @@ fn b_super_ctor(vm: &mut VM, argc: u8) -> Value {
         );
         return Value::Undef;
     };
-    let mut pushes = Vec::with_capacity(n + 1);
+    let mut pushes = Vec::with_capacity(args.len() + 1);
     pushes.push(this);
     pushes.extend(args);
     match invoke_sub(vm, idx, &pushes) {
@@ -5330,12 +5349,7 @@ fn b_closure_call(vm: &mut VM, argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    let n = argc as usize;
-    let mut args = Vec::with_capacity(n);
-    for _ in 0..n {
-        args.push(vm.stack.pop().unwrap_or(Value::Undef));
-    }
-    args.reverse();
+    let args = pop_call_args(vm, argc);
     let clo = vm.stack.pop().unwrap_or(Value::Undef);
     if closure_meta(&clo).is_none() {
         // The owner (the script) has no such closure, so a `with`/`tap` delegate
@@ -5483,12 +5497,7 @@ fn b_method_safe(vm: &mut VM, argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    let n = argc as usize;
-    let mut args = Vec::with_capacity(n);
-    for _ in 0..n {
-        args.push(vm.stack.pop().unwrap_or(Value::Undef));
-    }
-    args.reverse();
+    let args = pop_call_args(vm, argc);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
     if matches!(recv, Value::Undef) {
         return Value::Undef;
@@ -5611,12 +5620,7 @@ fn b_ffi_call(vm: &mut VM, argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    let n = argc as usize;
-    let mut args = Vec::with_capacity(n);
-    for _ in 0..n {
-        args.push(vm.stack.pop().unwrap_or(Value::Undef));
-    }
-    args.reverse();
+    let args = pop_call_args(vm, argc);
     match fusevm::ffi::try_call(&name, &args) {
         Some(Ok(v)) => v,
         Some(Err(e)) => {
@@ -5647,6 +5651,50 @@ fn call_widths() -> u8 {
 
 /// Pop the plain [`GMETHOD`] stack shape: the method name, `argc` arguments, and
 /// the receiver beneath them.
+/// `GSPREAD_ARGS`: park the argument list a spread call built.
+fn b_spread_args(vm: &mut VM, _argc: u8) -> Value {
+    let list = vm.stack.pop().unwrap_or(Value::Undef);
+    SPREAD_ARGS.with(|a| *a.borrow_mut() = Some(iteration_elements(&list)));
+    Value::Undef
+}
+
+/// `GCALL_SPREAD`: call a user function with the parked arguments.
+fn b_call_spread(vm: &mut VM, _argc: u8) -> Value {
+    let idx = vm.stack.pop().unwrap_or(Value::Undef).to_int() as u16;
+    let args = take_spread_args().unwrap_or_default();
+    match invoke_sub(vm, idx, &args) {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    }
+}
+
+/// The parked spread arguments, if a [`GSPREAD_ARGS`] ran for this call.
+fn take_spread_args() -> Option<Vec<Value>> {
+    SPREAD_ARGS.with(|a| a.borrow_mut().take())
+}
+
+/// The arguments of a call: the parked spread list when there is one, else the
+/// `argc` values the opcode pushed.
+///
+/// Every call builtin collects its arguments through here, so a spread reaches
+/// all of them — a method, a constructor, a closure, an FFI export and a `super`
+/// call alike — without any of them knowing about spreads.
+fn pop_call_args(vm: &mut VM, argc: u8) -> Vec<Value> {
+    if let Some(spread) = take_spread_args() {
+        return spread;
+    }
+    let n = argc as usize;
+    let mut args = Vec::with_capacity(n);
+    for _ in 0..n {
+        args.push(vm.stack.pop().unwrap_or(Value::Undef));
+    }
+    args.reverse();
+    args
+}
+
 fn pop_call(vm: &mut VM, argc: u8) -> (String, Vec<Value>, Value) {
     let name = vm
         .stack
@@ -5654,12 +5702,7 @@ fn pop_call(vm: &mut VM, argc: u8) -> (String, Vec<Value>, Value) {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    let n = argc as usize;
-    let mut args = Vec::with_capacity(n);
-    for _ in 0..n {
-        args.push(vm.stack.pop().unwrap_or(Value::Undef));
-    }
-    args.reverse();
+    let args = pop_call_args(vm, argc);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
     (name, args, recv)
 }

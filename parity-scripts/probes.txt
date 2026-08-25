@@ -2590,3 +2590,26 @@ def m = [a:1]; println([b:2, *:m]); println([*:m, a:9]); println([*:m]); println
 println([*:[:], z:1]); def m = [a:1]; println([*m.keySet()])
 %%
 def r = [1,2,3]; println([*r[0..1]]); println([[1,2], *[[3]]])
+%%
+# the spread operator in an argument position
+def f = { a, b -> "$a|$b" }; println f(*[1,2]); println f(1, *[2]); println f(*[1], 2)
+%%
+def v = { Object... xs -> "v:${xs.length}:${xs.toList()}" }; println v(*[1,2,3]); println v(*[]); println v(1, *[2,3])
+%%
+def d = { a, b = 9 -> "$a/$b" }; println d(*[1]); println d(*[1,2])
+%%
+def e = { -> 'noargs' }; println e(*[])
+%%
+def f = { a, b -> "$a|$b" }; println f(*(1..2)); println f(*([7,8] as Set)); println f(*([3,4] as int[]))
+%%
+def g = { a, b, c, d2 -> "$a$b$c$d2" }; println g(*[1,2], *[3,4]); println g(1, *[2,3], 4)
+%%
+def n = 0; def side = { n++; [1,2] }; def f = { a, b -> "$a|$b" }; println f(*side()); println "side=$n"
+%%
+println 'abc'.substring(*[1,2]); println Math.max(*[3,9]); def m = [:]; m.put(*['k', 1]); println m
+%%
+def cl = { a, b -> a * b }; println cl.call(*[3,4])
+%%
+def outer = { x -> { y -> "$x$y" } }; println outer(*[1])(*[2])
+%%
+def sb = new StringBuilder(*['seed']); println sb

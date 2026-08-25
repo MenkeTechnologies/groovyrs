@@ -2393,7 +2393,16 @@ impl Parser {
         let mut args = Vec::new();
         if !self.is(&Tok::RParen) {
             loop {
-                args.push(self.expression()?);
+                // `f(*xs)` — a spread argument. Kept as a marker rather than
+                // desugared here: the call has to build its argument list at run
+                // time, which is a lowering decision, not a parse one.
+                if self.is(&Tok::Star) {
+                    self.advance();
+                    self.skip_newlines();
+                    args.push(Expr::SpreadArg(Box::new(self.expression()?)));
+                } else {
+                    args.push(self.expression()?);
+                }
                 self.skip_newlines();
                 if self.is(&Tok::Comma) {
                     self.advance();

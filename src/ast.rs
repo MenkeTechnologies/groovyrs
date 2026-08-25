@@ -400,6 +400,16 @@ pub enum Expr {
     /// existing `Op::Call` frame ABI via the host closure dispatch. Non-parameter
     /// names resolve to the enclosing script bindings (globals), so a closure
     /// captures the script scope it was defined in.
+    /// `*expr` in an **argument** position: everything `expr` enumerates becomes
+    /// separate arguments of the call.
+    ///
+    /// Only ever an argument. A spread in a list or map *literal* is desugared
+    /// away by the parser into `+`, because there it means concatenation; in a
+    /// call it cannot be, since the number of arguments is not known until the
+    /// operand is evaluated. The compiler answers that by building the whole
+    /// argument list at run time and handing it to the call through
+    /// [`crate::host::GSPREAD_ARGS`].
+    SpreadArg(Box<Expr>),
     Closure {
         params: Vec<String>,
         body: Vec<Stmt>,

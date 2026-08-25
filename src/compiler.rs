@@ -2536,6 +2536,15 @@ impl Compiler {
                 self.expr(inner)?;
                 self.emit_call_builtin(crate::host::GITER, 1, self.cur_line)?;
             }
+            // A spread is only meaningful in an argument list, and every call
+            // shape takes its arguments apart before lowering them — so reaching
+            // here means one was written somewhere a call cannot expand it.
+            Expr::SpreadArg(_) => {
+                return Err(format!(
+                    "groovyrs: `*` spread is only valid in an argument list on line {}",
+                    self.cur_line
+                ))
+            }
             // A `~/…/` literal compiles at run time, through the host, because a
             // compiled pattern is a heap object with no fusevm representation.
             // An `assert` sub-expression whose value the power-assert renderer
@@ -2624,13 +2633,11 @@ impl Compiler {
                 // `super(args)`: run the superclass's arity-matched constructor on
                 // the current instance (stack: [this, args, superclassname]).
                 self.emit_this();
-                for a in args {
-                    self.expr(a)?;
-                }
+                let argc = self.emit_args(args, *line)?;
                 let sname = self.cur_class_super.clone().unwrap_or_default();
                 let sidx = self.b.add_constant(Value::str(sname));
                 self.b.emit(Op::LoadConst(sidx), *line);
-                self.emit_call_builtin(crate::host::GSUPER_CTOR, args.len() as u8, *line)?;
+                self.emit_call_builtin(crate::host::GSUPER_CTOR, argc, *line)?;
             }
             Expr::InstanceOf { value, class } => {
                 // `value instanceof Class` — stack: [value, classname].
@@ -2642,12 +2649,10 @@ impl Compiler {
             }
             Expr::New { class, args, line } => {
                 // Push the constructor args, then the class name on top.
-                for a in args {
-                    self.expr(a)?;
-                }
+                let argc = self.emit_args(args, *line)?;
                 let c = self.b.add_constant(Value::str(class.clone()));
                 self.b.emit(Op::LoadConst(c), *line);
-                self.emit_call_builtin(crate::host::GNEW, args.len() as u8, *line)?;
+                self.emit_call_builtin(crate::host::GNEW, argc, *line)?;
             }
             Expr::Index { recv, index, line } => {
                 // `recv[index]` — stack: recv (deepest), index.
@@ -2660,12 +2665,10 @@ impl Compiler {
                 // call-application that makes `f(a)(b)` work. Reuses the
                 // closure-call builtin with a synthetic name for diagnostics.
                 self.expr(callee)?;
-                for a in args {
-                    self.expr(a)?;
-                }
+                let argc = self.emit_args(args, *line)?;
                 let nidx = self.b.add_constant(Value::str("<closure>".to_string()));
                 self.b.emit(Op::LoadConst(nidx), *line);
-                self.emit_call_builtin(crate::host::GCLOSURE_CALL, args.len() as u8, *line)?;
+                self.emit_call_builtin(crate::host::GCLOSURE_CALL, argc, *line)?;
             }
             Expr::Unary { op, rhs } => match op {
                 UnOp::Neg => {
@@ -2766,15 +2769,13 @@ impl Compiler {
                 }
                 if matches!(**recv, Expr::Super) {
                     self.emit_this();
-                    for a in args {
-                        self.expr(a)?;
-                    }
+                    let argc = self.emit_args(args, *line)?;
                     let midx = self.b.add_constant(Value::str(method.clone()));
                     self.b.emit(Op::LoadConst(midx), *line);
                     let sname = self.cur_class_super.clone().unwrap_or_default();
                     let sidx = self.b.add_constant(Value::str(sname));
                     self.b.emit(Op::LoadConst(sidx), *line);
-                    self.emit_call_builtin(crate::host::GSUPER_METHOD, args.len() as u8, *line)?;
+                    self.emit_call_builtin(crate::host::GSUPER_METHOD, argc, *line)?;
                 } else {
                     // Stack: [recv, arg0..argN-1, methodname]; the GDK dispatch
                     // builtin pops the name, the N args, then the receiver. The
@@ -2795,9 +2796,7 @@ impl Compiler {
                         self.b.emit(Op::LoadInt(i64::from(widths)), *line);
                     }
                     self.expr(recv)?;
-                    for a in args {
-                        self.expr(a)?;
-                    }
+                    let argc = self.emit_args(args, *line)?;
                     let midx = self.b.add_constant(Value::str(method.clone()));
                     self.b.emit(Op::LoadConst(midx), *line);
                     let id = match (*safe, widths) {
@@ -2805,7 +2804,7 @@ impl Compiler {
                         (false, 0) => crate::host::GMETHOD,
                         (false, _) => crate::host::GMETHOD_WIDE,
                     };
-                    self.emit_call_builtin(id, args.len() as u8, *line)?;
+                    self.emit_call_builtin(id, argc, *line)?;
                     self.emit_receiver_writeback(recv, method, args)?;
                 }
             }
@@ -3045,10 +3044,20 @@ impl Compiler {
         // A user-defined function: push the args (left-to-right) and call through
         // the fusevm frame ABI; `Op::Call` leaves the return value on the stack.
         if self.fn_names.contains(name) {
+            let nidx = self.b.add_name(name);
+            // `Op::Call` binds a fixed number of stack values into the callee's
+            // frame, so a spread — whose count is a run-time value — enters the
+            // same subroutine through the host instead.
+            if Self::has_spread(args) {
+                self.emit_spread_args(args, line)?;
+                self.b.emit(Op::LoadInt(nidx as i64), line);
+                self.emit_call_builtin(crate::host::GCALL_SPREAD, 0, line)?;
+                self.emit_exc_check(line)?;
+                return Ok(());
+            }
             for a in args {
                 self.expr(a)?;
             }
-            let nidx = self.b.add_name(name);
             self.b.emit(Op::Call(nidx, args.len() as u8), line);
             self.emit_exc_check(line)?;
             return Ok(());
@@ -3057,27 +3066,21 @@ impl Compiler {
         // export registered at runtime, so lower to a by-name FFI dispatch: push
         // the args (deepest first), then the name, then call.
         if self.has_ffi {
-            for a in args {
-                self.expr(a)?;
-            }
+            let argc = self.emit_args(args, line)?;
             let nidx = self.b.add_constant(Value::str(name.to_string()));
             self.b.emit(Op::LoadConst(nidx), line);
-            self.b.emit(
-                Op::CallBuiltin(crate::host::GFFI_CALL, args.len() as u8),
-                line,
-            );
+            self.b
+                .emit(Op::CallBuiltin(crate::host::GFFI_CALL, argc), line);
             return Ok(());
         }
         // A bare call to a sibling method inside a class body is an implicit
         // `this.method(args)` (a local variable of the same name would shadow it).
         if self.is_method(name) && !self.is_local(name) {
             self.emit_this(); // this (receiver)
-            for a in args {
-                self.expr(a)?;
-            }
+            let argc = self.emit_args(args, line)?;
             let midx = self.b.add_constant(Value::str(name.to_string()));
             self.b.emit(Op::LoadConst(midx), line);
-            self.emit_call_builtin(crate::host::GMETHOD, args.len() as u8, line)?;
+            self.emit_call_builtin(crate::host::GMETHOD, argc, line)?;
             return Ok(());
         }
         // Otherwise `name(args)` is a call through a variable — a closure invoked
@@ -3085,12 +3088,77 @@ impl Compiler {
         // and dispatch through the closure-call builtin, which faults with
         // `unresolved reference: name` if the value is not a closure.
         self.emit_var_read(name, line);
+        let argc = self.emit_args(args, line)?;
+        let nidx = self.b.add_constant(Value::str(name.to_string()));
+        self.b.emit(Op::LoadConst(nidx), line);
+        self.emit_call_builtin(crate::host::GCLOSURE_CALL, argc, line)?;
+        Ok(())
+    }
+
+    /// Lower a call's arguments and answer the argument count the call opcode
+    /// should carry.
+    ///
+    /// Without a spread that is the arguments pushed and their count. With one,
+    /// the whole list is built and parked instead and the count is zero — the
+    /// builtin takes the parked list. Every call shape goes through here, so a
+    /// spread reaches all of them.
+    fn emit_args(&mut self, args: &[Expr], line: u32) -> Result<u8, String> {
+        if Self::has_spread(args) {
+            self.emit_spread_args(args, line)?;
+            return Ok(0);
+        }
         for a in args {
             self.expr(a)?;
         }
-        let nidx = self.b.add_constant(Value::str(name.to_string()));
-        self.b.emit(Op::LoadConst(nidx), line);
-        self.emit_call_builtin(crate::host::GCLOSURE_CALL, args.len() as u8, line)?;
+        Ok(args.len() as u8)
+    }
+
+    /// Does this argument list contain a `*` spread? A call that does cannot use
+    /// a fixed-argument-count opcode — see [`Compiler::emit_spread_args`].
+    fn has_spread(args: &[Expr]) -> bool {
+        args.iter().any(|a| matches!(a, Expr::SpreadArg(_)))
+    }
+
+    /// Build a spread call's whole argument list on the stack and park it for
+    /// the call opcode that follows.
+    ///
+    /// The list is assembled the same way a list literal with a spread is —
+    /// concatenation, with `Expr::Iterable` turning each spread operand into its
+    /// elements — so a range, a set and an array spread as readily as a list.
+    /// The call is then emitted with an argument count of zero, and the builtin
+    /// takes the parked list instead of popping the stack.
+    fn emit_spread_args(&mut self, args: &[Expr], line: u32) -> Result<(), String> {
+        let mut acc: Option<Expr> = None;
+        let mut plain: Vec<Expr> = Vec::new();
+        let flush = |acc: &mut Option<Expr>, plain: &mut Vec<Expr>| {
+            if plain.is_empty() {
+                return;
+            }
+            let chunk = Expr::List(std::mem::take(plain));
+            *acc = Some(match acc.take() {
+                None => chunk,
+                Some(a) => concat_expr(a, chunk),
+            });
+        };
+        for a in args {
+            match a {
+                Expr::SpreadArg(inner) => {
+                    flush(&mut acc, &mut plain);
+                    let spread = Expr::Iterable(inner.clone());
+                    acc = Some(match acc.take() {
+                        None => concat_expr(Expr::List(Vec::new()), spread),
+                        Some(prev) => concat_expr(prev, spread),
+                    });
+                }
+                other => plain.push(other.clone()),
+            }
+        }
+        flush(&mut acc, &mut plain);
+        let list = acc.unwrap_or_else(|| Expr::List(Vec::new()));
+        self.expr(&list)?;
+        self.b
+            .emit(Op::CallBuiltin(crate::host::GSPREAD_ARGS, 0), line);
+        self.b.emit(Op::Pop, line);
         Ok(())
     }
 
@@ -3985,10 +4053,20 @@ fn free_in_stmt(s: &Stmt, bound: &HashSet<String>, cx: &mut FreeCtx) {
     }
 }
 
+/// `lhs + rhs` — list concatenation, used to assemble a spread call's argument
+/// list. The same operator the parser desugars a literal's spread to.
+fn concat_expr(lhs: Expr, rhs: Expr) -> Expr {
+    Expr::Binary {
+        op: BinOp::Add,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }
+}
+
 fn free_in_expr(e: &Expr, bound: &HashSet<String>, cx: &mut FreeCtx) {
     match e {
         Expr::Regex(_) => {}
-        Expr::Iterable(inner) => free_in_expr(inner, bound, cx),
+        Expr::Iterable(inner) | Expr::SpreadArg(inner) => free_in_expr(inner, bound, cx),
         Expr::Recorded { inner, .. } => free_in_expr(inner, bound, cx),
         Expr::Var(n) => note_free(n, bound, cx),
         Expr::Cast { value, .. } => free_in_expr(value, bound, cx),
@@ -4355,7 +4433,7 @@ fn expr_any(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         return true;
     }
     match e {
-        Expr::Iterable(inner) => expr_any(inner, f),
+        Expr::Iterable(inner) | Expr::SpreadArg(inner) => expr_any(inner, f),
         Expr::Recorded { inner, .. } => expr_any(inner, f),
         Expr::Call { args, .. } => args.iter().any(|a| expr_any(a, f)),
         Expr::Unary { rhs, .. } => expr_any(rhs, f),

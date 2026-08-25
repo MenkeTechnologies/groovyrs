@@ -5447,3 +5447,99 @@ println([[1,2], *[[3]]])"#);
          [b:2, a:1]\n[a:9]\n[a:1]\n[a:1, c:3]\n[z:1]\n[a]\n[1, 2]\n[[1, 2], [3]]\n"
     );
 }
+
+/// The spread operator in an **argument** position — `f(*args)` — across every
+/// call shape: a closure variable, a user function, a method, a constructor,
+/// `super(...)`, and a postfix call application.
+///
+/// A spread cannot be desugared the way a literal's is, because the number of
+/// arguments is not known until the operand is evaluated and a call opcode
+/// carries its count in the instruction. The whole argument list is built at run
+/// time and parked; the call is emitted with a count of zero and takes the
+/// parked list. Every expectation is Apache Groovy 5.1.0's own output.
+#[test]
+fn the_spread_operator_expands_a_calls_arguments() {
+    let (out, ok) = run(r#"def f = { a, b -> "$a|$b" }
+println(f(*[1,2]))
+println(f(1, *[2]))
+println(f(*[1], 2))
+def add(a, b) { a + b }
+println(add(*[1,2]))
+def three(a, b, c) { "$a$b$c" }
+println(three(*[1,2], 3))
+println('abc'.substring(*[1,2]))
+println(Math.max(*[3,9]))
+def m = [:]; m.put(*['k', 1]); println(m)
+def cl = { a, b -> a * b }
+println(cl.call(*[3,4]))
+def outer = { x -> { y -> "$x$y" } }
+println(outer(*[1])(*[2]))"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "1|2\n1|2\n1|2\n3\n123\nb\n9\n[k:1]\n12\n12\n"
+    );
+}
+
+/// A spread's interaction with the parameter shapes it has to agree with:
+/// varargs (which collects what the spread supplies), a defaulted parameter
+/// (which a short spread leaves at its default), a zero-parameter closure, and
+/// an empty spread — plus multiple spreads in one call and a spread of a range,
+/// a set and an array.
+#[test]
+fn a_spread_argument_agrees_with_varargs_defaults_and_emptiness() {
+    let (out, ok) = run(r#"def v = { Object... xs -> "v:${xs.length}:${xs.toList()}" }
+println(v(*[1,2,3]))
+println(v(*[]))
+println(v(1, *[2,3]))
+def d = { a, b = 9 -> "$a/$b" }
+println(d(*[1]))
+println(d(*[1,2]))
+def e = { -> 'noargs' }
+println(e(*[]))
+def f = { a, b -> "$a|$b" }
+println(f(*(1..2)))
+println(f(*([7,8] as Set)))
+println(f(*([3,4] as int[])))
+def g = { a, b, c, d2 -> "$a$b$c$d2" }
+println(g(*[1,2], *[3,4]))
+println(g(1, *[2,3], 4))
+def n = 0
+def side = { n++; [1,2] }
+println(f(*side()))
+println("side=$n")"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "v:3:[1, 2, 3]\nv:0:[]\nv:3:[1, 2, 3]\n1/9\n1/2\nnoargs\n\
+         1|2\n7|8\n3|4\n1234\n1234\n1|2\nside=1\n"
+    );
+}
+
+/// A spread reaches a constructor and a `super(...)` call, where the argument
+/// count picks the constructor — so the arity has to come from the spread list
+/// rather than from the opcode, which carries zero.
+#[test]
+fn a_spread_argument_picks_a_constructor_by_its_runtime_arity() {
+    let (out, ok) = run(r#"class P { int a; int b; P(int a, int b) { this.a=a; this.b=b }; String toString() { "P($a,$b)" } }
+println(new P(*[1,2]))
+class Q extends P { Q(xs) { super(*xs) }; String toString(){ "Q(${a},${b})" } }
+println(new Q([3,4]))
+class C { def sum(a, b) { a + b }; def go(xs) { sum(*xs) } }
+println(new C().go([4,5]))
+println(new C().sum(*[6,7]))
+def sb = new StringBuilder(*['seed'])
+println(sb)"#);
+    assert!(ok);
+    assert_eq!(out, "P(1,2)\nQ(3,4)\n9\n13\nseed\n");
+}
+
+/// A `*` outside an argument list is refused rather than silently mis-run — the
+/// literal forms are desugared by the parser, so anywhere else there is nothing
+/// to expand it into.
+#[test]
+fn a_spread_outside_a_call_or_literal_is_a_compile_error() {
+    let (out, err, ok) = run_full("def xs = [1,2]\ndef y = *xs\nprintln(y)");
+    assert!(!ok, "expected a compile error, got: {out}");
+    assert!(err.contains("groovyrs:"), "stderr was: {err}");
+}

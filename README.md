@@ -395,9 +395,12 @@ Implemented and checked against Apache Groovy:
   `BigDecimal`/`BigInteger`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, the assigning
   `a ?= b`, and `a?.member` / `a?.method()`.
-- **The spread operator in a literal** — `[a, *b, c]` and `[k: v, *:m]`. A list
-  spread takes everything the operand enumerates (a list, a range, a set); a map
-  spread merges, with a later key winning.
+- **The spread operator** — in a literal (`[a, *b, c]`, `[k: v, *:m]`) and in an
+  argument position (`f(*args)`, `obj.m(*args)`, `new T(*args)`, `super(*args)`).
+  A list spread takes everything the operand enumerates (a list, a range, a set,
+  an array); a map spread merges, with a later key winning. A spread argument
+  agrees with varargs, defaulted parameters and an empty operand, and the
+  constructor it picks is chosen by the count the spread actually supplies.
 - **`methodMissing` / `propertyMissing`** — Groovy's last-resort dispatch hooks,
   tried only once every real resolution has failed, the GDK included: a class
   that defines `methodMissing` still gets `obj.with { … }` from the GDK, and the

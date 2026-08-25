@@ -2047,6 +2047,17 @@ impl Parser {
             self.eat(&Tok::RBracket)?;
             return Ok(Expr::Map(Vec::new()));
         }
+        // `[*:m, …]` — a spread *map* entry, which can open the literal and so
+        // has to be decided before the list-vs-map test below.
+        if self.is(&Tok::Star) && matches!(self.peek_at(1), Tok::Colon) {
+            return self.map_literal_from_spread();
+        }
+        // `[*xs, …]` — a spread in the *first* element position. A literal that
+        // opens with one is a list, so it never reaches the list-vs-map test.
+        if self.is(&Tok::Star) {
+            let first = self.list_part()?;
+            return self.list_rest(vec![first]);
+        }
         // Decide list vs map on the first entry: a `key:` prefix means a map.
         let first_key = self.map_key()?;
         if self.is(&Tok::Colon) {
@@ -2061,6 +2072,11 @@ impl Parser {
                 if self.is(&Tok::RBracket) {
                     break;
                 }
+                // `[b: 2, *:m]` — a spread entry after the first. The entries up
+                // to here are already a map literal, so the rest merges onto it.
+                if self.is(&Tok::Star) && matches!(self.peek_at(1), Tok::Colon) {
+                    return self.map_merge_rest(Expr::Map(entries));
+                }
                 let k = self.map_key()?;
                 self.eat(&Tok::Colon)?;
                 self.skip_newlines();
@@ -2072,7 +2088,12 @@ impl Parser {
             return Ok(Expr::Map(entries));
         }
         // A list: the first key was actually the first element expression.
-        let mut elems = vec![first_key];
+        self.list_rest(vec![ListPart::One(first_key)])
+    }
+
+    /// Parse the remaining elements of a list literal onto `parts`, through the
+    /// closing bracket.
+    fn list_rest(&mut self, mut parts: Vec<ListPart>) -> Result<Expr, String> {
         self.skip_newlines();
         while self.is(&Tok::Comma) {
             self.advance();
@@ -2080,11 +2101,116 @@ impl Parser {
             if self.is(&Tok::RBracket) {
                 break;
             }
-            elems.push(self.expression()?);
+            parts.push(self.list_part()?);
             self.skip_newlines();
         }
         self.eat(&Tok::RBracket)?;
-        Ok(Expr::List(elems))
+        Ok(Self::list_from_parts(parts))
+    }
+
+    /// One element position of a list literal: a plain element, or a `*expr`
+    /// spread of everything `expr` enumerates.
+    fn list_part(&mut self) -> Result<ListPart, String> {
+        if self.is(&Tok::Star) {
+            self.advance();
+            self.skip_newlines();
+            return Ok(ListPart::Spread(self.expression()?));
+        }
+        Ok(ListPart::One(self.expression()?))
+    }
+
+    /// Assemble a list literal from its element positions.
+    ///
+    /// With no spread this is the plain `Expr::List` it always was. A spread
+    /// becomes list concatenation — `[a, *b, c]` is `[a] + b + [c]` — because
+    /// that is what the spread means and `plus` on a list already concatenates.
+    /// `Expr::Iterable` is what turns `b` into its elements, the same conversion
+    /// `for (x in b)` uses, so a range or a set spreads too.
+    fn list_from_parts(parts: Vec<ListPart>) -> Expr {
+        if !parts.iter().any(|p| matches!(p, ListPart::Spread(_))) {
+            return Expr::List(parts.into_iter().map(ListPart::into_expr).collect());
+        }
+        let mut out: Option<Expr> = None;
+        let mut pending: Vec<Expr> = Vec::new();
+        for p in parts {
+            match p {
+                ListPart::One(e) => pending.push(e),
+                ListPart::Spread(e) => {
+                    Self::flush_list_chunk(&mut out, &mut pending);
+                    let spread = Expr::Iterable(Box::new(e));
+                    out = Some(match out.take() {
+                        None => Self::concat(Expr::List(Vec::new()), spread),
+                        Some(acc) => Self::concat(acc, spread),
+                    });
+                }
+            }
+        }
+        Self::flush_list_chunk(&mut out, &mut pending);
+        out.unwrap_or_else(|| Expr::List(Vec::new()))
+    }
+
+    /// Fold the plain elements collected so far into the concatenation.
+    fn flush_list_chunk(out: &mut Option<Expr>, pending: &mut Vec<Expr>) {
+        if pending.is_empty() {
+            return;
+        }
+        let chunk = Expr::List(std::mem::take(pending));
+        *out = Some(match out.take() {
+            None => chunk,
+            Some(acc) => Self::concat(acc, chunk),
+        });
+    }
+
+    /// `lhs + rhs` — list concatenation, or map merge with the right winning.
+    /// The operator rather than a `plus` method call: `+` is what carries those
+    /// two meanings, and it is the operator the spread is defined in terms of.
+    fn concat(lhs: Expr, rhs: Expr) -> Expr {
+        Expr::Binary {
+            op: BinOp::Add,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
+    }
+
+    /// A map literal that opens with a `*:m` spread. Every entry — spread or
+    /// `k: v` — merges left to right through map `plus`, so a later key wins,
+    /// which is what Groovy's spread does.
+    fn map_literal_from_spread(&mut self) -> Result<Expr, String> {
+        self.map_merge_rest(Expr::Map(Vec::new()))
+    }
+
+    /// Merge the remaining entries of a map literal onto `acc`, starting at a
+    /// `*:m` spread. Shared by the literal that opens with one and the literal
+    /// that reaches one part-way through.
+    fn map_merge_rest(&mut self, acc: Expr) -> Result<Expr, String> {
+        let mut acc = acc;
+        loop {
+            let part = if self.is(&Tok::Star) && matches!(self.peek_at(1), Tok::Colon) {
+                self.advance();
+                self.advance();
+                self.skip_newlines();
+                self.expression()?
+            } else {
+                let k = self.map_key()?;
+                self.eat(&Tok::Colon)?;
+                self.skip_newlines();
+                let v = self.expression()?;
+                Expr::Map(vec![(k, v)])
+            };
+            acc = Self::concat(acc, part);
+            self.skip_newlines();
+            if self.is(&Tok::Comma) {
+                self.advance();
+                self.skip_newlines();
+                if self.is(&Tok::RBracket) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        self.eat(&Tok::RBracket)?;
+        Ok(acc)
     }
 
     /// Parse a map-literal key. A bare identifier is a string constant (Groovy
@@ -2314,6 +2440,21 @@ impl Parser {
 }
 
 /// Map a token to a compound-assignment operator, if it is one.
+/// One element position of a list literal — see [`Parser::list_from_parts`].
+enum ListPart {
+    One(Expr),
+    Spread(Expr),
+}
+
+impl ListPart {
+    /// The expression written at this position, spread marker discarded.
+    fn into_expr(self) -> Expr {
+        match self {
+            ListPart::One(e) | ListPart::Spread(e) => e,
+        }
+    }
+}
+
 fn assign_op(t: &Tok) -> Option<AssignOp> {
     Some(match t {
         Tok::Assign => AssignOp::Assign,

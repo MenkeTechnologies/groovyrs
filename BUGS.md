@@ -1134,6 +1134,11 @@ infinite loop on both sides.
 - **`"abc".chars()` is not modeled.** It answers an `IntStream`, which groovyrs
   has no value for. (`toArray()`, `toCharArray()` and `String.bytes` no longer
   share this gap — they answer real `Object[]` / `char[]` / `byte[]` arrays.)
+- **The spread operator does not reach a call's arguments.** `[a, *b]` and
+  `[k: v, *:m]` work — those lower to `+`, which already means concatenation and
+  merge — but `f(*args)` and `obj.m(*args)` do not parse. Spreading into a call
+  is not an expression rewrite: the arguments have to be built at run time and
+  the call made with that list, which the call opcodes have no shape for.
 - **A class defining both `propertyMissing` forms gets only one.** The reader
   (`propertyMissing(String)`) and the writer (`propertyMissing(String, value)`)
   share a name, and methods are keyed by name alone (see the overloading entry

@@ -2579,3 +2579,14 @@ def noesc = 0; for (i in 0..2) { def w = i; def cl = { w }; noesc += cl() }; pri
 def h = []; for (i in 0..2) { def a = i; def b = a * 2; if (i == 1) h << { "$a/$b" } }; println h.collect{it()}
 %%
 def g = { n -> def t = n; def c = { t }; t = t + 100; c() }; println([g(1), g(2)])
+%%
+# the spread operator in list and map literals
+def l = [1,2]; println([0, *l, 3]); println([*l]); println([*l, *l])
+%%
+println([*(1..3)]); println([*([9,8] as Set)]); println([*[]]); println([1, *[], 2])
+%%
+def m = [a:1]; println([b:2, *:m]); println([*:m, a:9]); println([*:m]); println([*:m, *:[c:3]])
+%%
+println([*:[:], z:1]); def m = [a:1]; println([*m.keySet()])
+%%
+def r = [1,2,3]; println([*r[0..1]]); println([[1,2], *[[3]]])

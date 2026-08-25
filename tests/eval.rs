@@ -5411,3 +5411,39 @@ def q = new Q(); q.zzz = 3"#);
     assert!(ok);
     assert_eq!(out, "k\npm:unknown\nset zzz=3\n");
 }
+
+/// The spread operator in a list literal (`[a, *b, c]`) and a map literal
+/// (`[k: v, *:m]`), neither of which groovyrs parsed.
+///
+/// Both lower to the `+` operator, because that is what the spread means: `+`
+/// on a list concatenates and on a map merges with the right key winning, which
+/// is exactly the spread's semantics. `Expr::Iterable` turns the spread operand
+/// into its elements — the same conversion `for (x in b)` uses — so a range and
+/// a set spread too. Every expectation is Apache Groovy 5.1.0's own output.
+#[test]
+fn the_spread_operator_works_in_list_and_map_literals() {
+    let (out, ok) = run(r#"def l = [1,2]
+println([0, *l, 3])
+println([*l])
+println([*l, *l])
+println([*(1..3)])
+println([*([9,8] as Set)])
+println([*[]])
+println([1, *[], 2])
+def m = [a:1]
+println([b:2, *:m])
+println([*:m, a:9])
+println([*:m])
+println([*:m, *:[c:3]])
+println([*:[:], z:1])
+println([*m.keySet()])
+def r = [1,2,3]
+println([*r[0..1]])
+println([[1,2], *[[3]]])"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[0, 1, 2, 3]\n[1, 2]\n[1, 2, 1, 2]\n[1, 2, 3]\n[9, 8]\n[]\n[1, 2]\n\
+         [b:2, a:1]\n[a:9]\n[a:1]\n[a:1, c:3]\n[z:1]\n[a]\n[1, 2]\n[[1, 2], [3]]\n"
+    );
+}

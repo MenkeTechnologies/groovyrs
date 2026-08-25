@@ -2121,7 +2121,13 @@ impl Parser {
                 // A call expression `name(args...)`: a user-defined function or an
                 // inline-Rust FFI export (the compiler resolves which).
                 if self.is(&Tok::LParen) {
-                    let args = self.call_args()?;
+                    let mut args = self.call_args()?;
+                    // A trailing closure after the parenthesised args, the same
+                    // way a method call takes one: `f(3) { it * 2 }`, and the
+                    // `use (Cat) { … }` category block, which is this shape.
+                    if self.is(&Tok::LBrace) {
+                        args.push(self.closure_literal()?);
+                    }
                     return Ok(self.record(col, Expr::Call { name, args, line }));
                 }
                 // Postfix `i++` / `i--` in expression position: yields the value

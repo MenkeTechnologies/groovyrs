@@ -2656,3 +2656,8 @@ def g = { -> bar }; g.delegate = [bar: 42]; println(g())
 def m = [foo:{'x'}, bar:{a -> a*2}]; println(m.foo()); println(m.bar(3)); println(m.size())
 %%
 println([size: 9].size()); println([size: 9].size)
+%%
+# a trailing closure after a function call's parenthesised arguments
+def f = { a, c -> c(a) }; println(f(3) { it * 2 })
+%%
+println([1,2,3].inject(0) { a, b -> a + b })

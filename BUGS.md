@@ -1128,6 +1128,13 @@ infinite loop on both sides.
 - **`"abc".chars()` is not modeled.** It answers an `IntStream`, which groovyrs
   has no value for. (`toArray()`, `toCharArray()` and `String.bytes` no longer
   share this gap — they answer real `Object[]` / `char[]` / `byte[]` arrays.)
+- **A category is selected by arity, not by its first parameter's type.** Groovy
+  applies `static int twice(Integer i)` only to an `Integer` receiver; groovyrs
+  applies any method of an active category whose declared parameter count matches
+  the call plus one, whatever the receiver is. Two categories declaring the same
+  method name for different receiver types would therefore resolve to the
+  innermost rather than to the matching one. The runtime is dynamically typed —
+  declared parameter types are diagnostic everywhere else too.
 - **A closure's `resolveStrategy` is stored, not obeyed, and `owner` is
   absent.** `clo.delegate` and `clo.resolveStrategy` read and write, and a
   user-set delegate joins the resolution chain — a name the owner cannot resolve

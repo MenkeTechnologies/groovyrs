@@ -402,6 +402,16 @@ pub const GSPREAD_ARGS: u16 = 772;
 /// enters the same subroutine through [`invoke_sub`], which pushes a vector.
 pub const GCALL_SPREAD: u16 = 773;
 
+/// Builtin id for `use (Cat, …) { … }` — Groovy's category block. Stack: the
+/// category class references, then the closure to run under them. Answers the
+/// closure's result.
+///
+/// A category makes a class's methods available on the *type of their first
+/// parameter*: `static int twice(Integer i)` becomes `3.twice()`. They apply
+/// only while the block runs, and only where the receiver has no such method of
+/// its own.
+pub const GUSE: u16 = 774;
+
 /// The call depth at which groovyrs raises `java.lang.StackOverflowError`.
 ///
 /// Groovy's depth is the JVM's: whatever fits in the thread's `-Xss`. Measured
@@ -492,6 +502,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GCELL_RENEW, b_cell_renew);
     vm.register_builtin(GSPREAD_ARGS, b_spread_args);
     vm.register_builtin(GCALL_SPREAD, b_call_spread);
+    vm.register_builtin(GUSE, b_use);
     vm.register_builtin(GIN, b_in);
     vm.register_builtin(GCAST, b_cast);
     vm.register_builtin(GCLASSREF, b_classref);
@@ -563,6 +574,11 @@ thread_local! {
     /// list, parks it here, and emits the ordinary call with a count of zero;
     /// every call builtin takes its arguments from the park when one is waiting.
     /// Taken on read, so a call that ignores it cannot leak into the next one.
+    /// The classes an enclosing `use (Cat) { … }` block made active, innermost
+    /// last. A method the receiver does not answer is tried against each, most
+    /// recent first, with the receiver passed as the category method's first
+    /// argument — which is what a Groovy category is.
+    static CATEGORIES: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     static SPREAD_ARGS: RefCell<Option<Vec<Value>>> = const { RefCell::new(None) };
     static MISS_PROBE: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Set when the method [`MISS_PROBE`] names has missed.
@@ -5699,6 +5715,70 @@ fn dispatch_on_delegate(vm: &mut VM, name: &str, args: &[Value]) -> Option<Value
     Some(out)
 }
 
+/// `GUSE`: run a closure with categories active.
+fn b_use(vm: &mut VM, argc: u8) -> Value {
+    let mut args = pop_call_args(vm, argc);
+    let Some(body) = args.pop() else {
+        fault(vm, "groovyrs: use requires a closure".to_string());
+        return Value::Undef;
+    };
+    let ids: Vec<u32> = args
+        .iter()
+        .filter_map(as_class_ref)
+        .filter_map(|n| find_class(&n))
+        .collect();
+    let pushed = ids.len();
+    CATEGORIES.with(|c| c.borrow_mut().extend(ids));
+    let out = invoke_closure(vm, &body, &[]);
+    CATEGORIES.with(|c| {
+        let mut c = c.borrow_mut();
+        let keep = c.len().saturating_sub(pushed);
+        c.truncate(keep);
+    });
+    match out {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    }
+}
+
+/// A method an active category supplies for `recv`, if any.
+///
+/// Tried innermost-first, and only after the receiver's own dispatch has failed
+/// — a category never shadows a method the receiver already has. The receiver
+/// becomes the category method's first argument, which is what makes
+/// `static int twice(Integer i)` answer `3.twice()`.
+fn dispatch_category(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
+    let ids: Vec<u32> = CATEGORIES.with(|c| c.borrow().iter().rev().copied().collect());
+    for id in ids {
+        // A category that does not supply this method is simply skipped — the
+        // next one still gets its turn.
+        let Some(idx) = lookup_method(id, method) else {
+            continue;
+        };
+        // The declared parameter count includes the receiver, which arrives as
+        // the first argument.
+        if method_arity(id, method) != Some(args.len() as u8 + 1) {
+            continue;
+        }
+        // Slot 0 of a method body is `this`, which a category method never uses.
+        let mut pushes = Vec::with_capacity(args.len() + 2);
+        pushes.push(Value::Undef);
+        pushes.push(recv.clone());
+        pushes.extend_from_slice(args);
+        return Some(match invoke_sub(vm, idx, &pushes) {
+            Ok(v) => v,
+            Err(e) => {
+                fault(vm, e);
+                Value::Undef
+            }
+        });
+    }
+    None
+}
+
 /// Is `method` one a `Map` itself answers? A map entry holding a closure is
 /// callable as a method (`[foo: { … }].foo()`), and that must not shadow the
 /// map's own interface — `[size: 9].size()` is `1`, the map's size, while
@@ -6598,6 +6678,22 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
                     Value::Undef
                 }
             };
+        }
+    }
+    // A method an enclosing `use (Cat) { … }` supplies. Last, so a category
+    // never shadows a method the receiver already answers — which is Groovy's
+    // rule and the reason it is safe to make one active for a whole block.
+    if !CATEGORIES.with(|c| c.borrow().is_empty()) {
+        let probe = MISS_PROBE.with(|p| p.borrow_mut().replace(method.to_string()));
+        let probed = MISS_PROBED.with(|m| m.replace(false));
+        let answered = dispatch_method(vm, &recv, method, &args);
+        let missed = MISS_PROBED.with(|m| m.replace(probed));
+        MISS_PROBE.with(|p| *p.borrow_mut() = probe);
+        if !missed {
+            return answered;
+        }
+        if let Some(v) = dispatch_category(vm, &recv, method, &args) {
+            return v;
         }
     }
     // Pure GDK dispatch — no closure, no VM re-entrancy.

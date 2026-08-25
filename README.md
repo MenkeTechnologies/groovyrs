@@ -395,6 +395,12 @@ Implemented and checked against Apache Groovy:
   `BigDecimal`/`BigInteger`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, the assigning
   `a ?= b`, and `a?.member` / `a?.method()`.
+- **Category `use` blocks** — `use (NumCat) { 3.twice() }`. A category makes a
+  class's methods available on the type of their first parameter, for the
+  duration of the block, and only where the receiver has no such method of its
+  own. Several may be active at once, innermost first. A trailing closure after a
+  *function* call's parenthesised arguments (`f(3) { it * 2 }`) parses too, which
+  is the shape `use` is written in.
 - **Closure `delegate` / `resolveStrategy`** — both read and write, with the
   `Closure.OWNER_FIRST` / `DELEGATE_FIRST` / `OWNER_ONLY` / `DELEGATE_ONLY`
   constants. A user-set delegate joins the resolution chain `with`/`tap` use, so

@@ -5830,3 +5830,38 @@ println(g.count)"#);
     assert!(ok);
     assert_eq!(out, "x\n6\n2\n1\n9\nhi bo\n0\n");
 }
+
+/// Category `use (Cat) { … }` blocks. A category makes a class's methods
+/// available on the type of their first parameter — `static int twice(Integer i)`
+/// becomes `3.twice()` — for the duration of the block, and only where the
+/// receiver has no such method of its own.
+///
+/// Every expectation is Apache Groovy 5.1.0's own output.
+#[test]
+fn a_use_block_makes_a_categorys_methods_available() {
+    let (out, ok) = run(r#"class NumCat { static int twice(Integer i) { i * 2 } }
+class StrCat { static String shout(String s) { s.toUpperCase() + '!' } }
+use (NumCat) { println 3.twice() }
+use (NumCat, StrCat) { println 4.twice(); println 'hi'.shout() }
+use (NumCat) { println([1,2].collect { it.twice() }) }
+try { 3.twice() } catch (e) { println e.getClass().getSimpleName() }
+class ArgCat { static int plus2(Integer i, int n) { i + n } }
+use (ArgCat) { println 5.plus2(3) }
+println(use (NumCat) { 6.twice() })"#);
+    assert!(ok);
+    assert_eq!(out, "6\n8\nHI!\n[2, 4]\nMissingMethodException\n8\n12\n");
+}
+
+/// A trailing closure after a *function* call's parenthesised arguments —
+/// `f(3) { it * 2 }`. A method call already took one; a function call did not,
+/// which is also the shape `use (Cat) { … }` is written in.
+#[test]
+fn a_function_call_takes_a_trailing_closure() {
+    let (out, ok) = run(r#"def f(a, Closure c) { c(a) }
+println(f(3) { it * 2 })
+def g(Closure c) { c() }
+println(g() { 7 })
+println([1,2,3].inject(0) { a, b -> a + b })"#);
+    assert!(ok);
+    assert_eq!(out, "6\n7\n6\n");
+}

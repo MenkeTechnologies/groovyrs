@@ -3065,6 +3065,28 @@ impl Compiler {
             self.emit_call_builtin(id, args.len() as u8, line)?;
             return Ok(());
         }
+        // `use (Cat, …) { … }` — Groovy's category block. Lowered here rather
+        // than as an ordinary call because its arguments are *class names*, and
+        // a bare capitalised name is only a class reference in this position.
+        if name == "use" && args.len() >= 2 && !self.fn_names.contains(name) {
+            let (cats, body) = args.split_at(args.len() - 1);
+            for a in cats {
+                // A bare name here is the *class*, not a variable — a category
+                // is named, never held. Lowering it as a variable read would
+                // find an unbound global.
+                match a {
+                    Expr::Var(n) => {
+                        let c = self.b.add_constant(Value::str(n.clone()));
+                        self.b.emit(Op::LoadConst(c), line);
+                        self.emit_call_builtin(crate::host::GCLASSREF, 0, line)?;
+                    }
+                    other => self.expr(other)?,
+                }
+            }
+            self.expr(&body[0])?;
+            self.emit_call_builtin(crate::host::GUSE, args.len() as u8, line)?;
+            return Ok(());
+        }
         // A user-defined function: push the args (left-to-right) and call through
         // the fusevm frame ABI; `Op::Call` leaves the return value on the stack.
         if self.fn_names.contains(name) {

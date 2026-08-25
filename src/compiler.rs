@@ -479,6 +479,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             interfaces,
             is_interface,
             is_trait,
+            generated,
             fields,
             ctors,
             methods,
@@ -491,6 +492,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
                 interfaces,
                 *is_interface,
                 *is_trait,
+                *generated,
                 fields,
                 ctors,
                 methods,
@@ -1074,6 +1076,7 @@ impl Compiler {
         interfaces: &[String],
         is_interface: bool,
         is_trait: bool,
+        generated: Generated,
         fields: &[Field],
         ctors: &[Ctor],
         methods: &[Method],
@@ -1092,6 +1095,13 @@ impl Compiler {
         self.b.emit(Op::LoadConst(iidx), line);
         let tidx = self.b.add_constant(Value::bool(is_trait));
         self.b.emit(Op::LoadConst(tidx), line);
+        // What the class's annotations asked to be generated, as one bit set —
+        // the register builtin pops it next.
+        let gbits = (generated.to_string as i64)
+            | ((generated.include_names as i64) << 1)
+            | ((generated.equals_hash as i64) << 2)
+            | ((generated.tuple_ctor as i64) << 3);
+        self.b.emit(Op::LoadInt(gbits), line);
         for i in interfaces {
             let c = self.b.add_constant(Value::str(i.clone()));
             self.b.emit(Op::LoadConst(c), line);
@@ -1100,9 +1110,14 @@ impl Compiler {
         // class name
         let nidx = self.b.add_constant(Value::str(name.to_string()));
         self.b.emit(Op::LoadConst(nidx), line);
-        // field-name array (declaration order)
+        // field-name array (declaration order). Each name carries its declared
+        // type after a `:` — the one thing the type decides at run time is an
+        // uninitialised *primitive* field's zero, and packing it here avoids a
+        // second parallel array through the register builtin.
         for f in fields {
-            let c = self.b.add_constant(Value::str(f.name.clone()));
+            let c = self
+                .b
+                .add_constant(Value::str(format!("{}:{}", f.name, f.ty)));
             self.b.emit(Op::LoadConst(c), line);
         }
         self.b.emit(Op::MakeArray(fields.len() as u16), line);

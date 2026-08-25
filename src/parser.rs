@@ -247,6 +247,19 @@ impl Parser {
     fn statement(&mut self) -> Result<Stmt, String> {
         let line = self.line();
         let kind = match self.peek() {
+            // `@ToString class C { … }` — the annotation family in front of a
+            // type declaration. Anything else annotated is skipped, as a member
+            // annotation is.
+            Tok::At if self.annotated_type_decl_ahead() => {
+                let generated = self.class_annotations()?;
+                let is_interface = self.type_decl_ahead() == Some(true);
+                while !matches!(self.peek(), Tok::Ident(w) if w == "class" || w == "interface" || w == "trait")
+                {
+                    self.advance();
+                }
+                let is_trait = matches!(self.peek(), Tok::Ident(w) if w == "trait");
+                self.class_decl_with(is_interface, is_trait, generated)?
+            }
             // `class`/`interface`, optionally behind modifiers
             // (`abstract class C`, `public final class C`).
             Tok::Ident(_) if self.type_decl_ahead().is_some() => {
@@ -610,6 +623,108 @@ impl Parser {
         }
     }
 
+    /// Lookahead: does a run of `@Annotation`s lead to a type declaration?
+    fn annotated_type_decl_ahead(&self) -> bool {
+        let mut i = 0;
+        while matches!(self.peek_at(i), Tok::At) {
+            i += 1;
+            if !matches!(self.peek_at(i), Tok::Ident(_)) {
+                return false;
+            }
+            // The annotation name, which may be package-qualified.
+            i += 1;
+            while matches!(self.peek_at(i), Tok::Dot) && matches!(self.peek_at(i + 1), Tok::Ident(_))
+            {
+                i += 2;
+            }
+            // Its parenthesised arguments, balanced.
+            if matches!(self.peek_at(i), Tok::LParen) {
+                let mut depth = 0;
+                loop {
+                    match self.peek_at(i) {
+                        Tok::LParen => depth += 1,
+                        Tok::RParen => {
+                            depth -= 1;
+                            i += 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            continue;
+                        }
+                        Tok::Eof => return false,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            while matches!(self.peek_at(i), Tok::Nl) {
+                i += 1;
+            }
+        }
+        // Past the annotations, the same test a bare declaration takes.
+        matches!(self.peek_at(i), Tok::Ident(w) if w == "class" || w == "interface" || w == "trait")
+            || matches!(self.peek_at(i), Tok::Ident(w) if matches!(w.as_str(), "public" | "private" | "protected" | "static" | "final" | "abstract"))
+    }
+
+    /// Consume the `@Annotation`s in front of a type declaration and answer what
+    /// they ask the compiler to generate.
+    ///
+    /// An annotation outside the generating family is consumed and ignored,
+    /// which is what the member-level annotation skip already does — they have
+    /// no runtime effect here.
+    fn class_annotations(&mut self) -> Result<Generated, String> {
+        let mut gen = Generated::default();
+        while self.is(&Tok::At) {
+            self.advance();
+            let mut name = self.ident()?;
+            while self.is(&Tok::Dot) {
+                self.advance();
+                name = self.ident()?;
+            }
+            let mut args = String::new();
+            if self.is(&Tok::LParen) {
+                let mut depth = 0;
+                loop {
+                    match self.peek() {
+                        Tok::LParen => depth += 1,
+                        Tok::RParen => {
+                            depth -= 1;
+                            self.advance();
+                            if depth == 0 {
+                                break;
+                            }
+                            continue;
+                        }
+                        Tok::Eof => break,
+                        Tok::Ident(w) => args.push_str(w),
+                        Tok::True => args.push_str("true"),
+                        _ => {}
+                    }
+                    self.advance();
+                }
+            }
+            match name.as_str() {
+                "ToString" => {
+                    gen.to_string = true;
+                    // Only `includeNames` changes the rendering; the rest of the
+                    // attribute set is accepted and ignored (see BUGS.md).
+                    gen.include_names |= args.contains("includeNames") && args.contains("true");
+                }
+                "EqualsAndHashCode" => gen.equals_hash = true,
+                "TupleConstructor" => gen.tuple_ctor = true,
+                // `@Canonical` is exactly the three together.
+                "Canonical" => {
+                    gen.to_string = true;
+                    gen.equals_hash = true;
+                    gen.tuple_ctor = true;
+                }
+                _ => {}
+            }
+            self.skip_newlines();
+        }
+        Ok(gen)
+    }
+
     /// Parse a class or interface declaration
     /// `class Name [extends S] [implements A, B] { members }` /
     /// `interface Name [extends A, B] { members }`. The `class`/`interface`
@@ -623,6 +738,17 @@ impl Parser {
     /// with no body is an abstract declaration and contributes nothing; one with
     /// a body is a `default` method every implementor inherits.
     fn class_decl(&mut self, is_interface: bool, is_trait: bool) -> Result<StmtKind, String> {
+        self.class_decl_with(is_interface, is_trait, Generated::default())
+    }
+
+    /// [`Parser::class_decl`] with the annotations in front of the declaration
+    /// already resolved to what they generate.
+    fn class_decl_with(
+        &mut self,
+        is_interface: bool,
+        is_trait: bool,
+        generated: Generated,
+    ) -> Result<StmtKind, String> {
         self.advance(); // `class` / `interface` / `trait`
         let name = self.ident()?;
         self.skip_newlines();
@@ -687,6 +813,7 @@ impl Parser {
             name,
             superclass,
             interfaces,
+            generated,
             is_interface,
             is_trait,
             fields,
@@ -754,6 +881,7 @@ impl Parser {
         // `def name` — a field or method.
         if self.is(&Tok::Def) {
             self.advance();
+            let ty = "def".to_string();
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
                 let params = self.param_list()?;
@@ -764,7 +892,7 @@ impl Parser {
                 methods.push(Method { name, params, body });
             } else {
                 let init = self.opt_initializer()?;
-                fields.push(Field { name, init });
+                fields.push(Field { name, ty, init });
             }
             return Ok(());
         }
@@ -781,7 +909,8 @@ impl Parser {
         }
         // A typed member `Type name ...` — a field or method.
         if self.looks_like_decl() {
-            self.ident()?; // return / field type (ignored)
+            // The declared type: a *primitive* field's zero depends on it.
+            let ty = self.ident()?;
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
                 let params = self.param_list()?;
@@ -792,7 +921,7 @@ impl Parser {
                 methods.push(Method { name, params, body });
             } else {
                 let init = self.opt_initializer()?;
-                fields.push(Field { name, init });
+                fields.push(Field { name, ty, init });
             }
             return Ok(());
         }
@@ -2398,8 +2527,25 @@ impl Parser {
         self.eat(&Tok::LParen)?;
         self.skip_newlines();
         let mut args = Vec::new();
+        // `f(a: 1, b: 2)` — named arguments, which Groovy gathers into one map
+        // passed as the call's *first* argument. Collected across the whole list
+        // so `f(a: 1, 9)` is `f([a: 1], 9)`, which is the order Groovy uses.
+        let mut named: Vec<(Expr, Expr)> = Vec::new();
         if !self.is(&Tok::RParen) {
             loop {
+                if self.named_arg_ahead() {
+                    let k = self.map_key()?;
+                    self.eat(&Tok::Colon)?;
+                    self.skip_newlines();
+                    named.push((k, self.expression()?));
+                    self.skip_newlines();
+                    if self.is(&Tok::Comma) {
+                        self.advance();
+                        self.skip_newlines();
+                        continue;
+                    }
+                    break;
+                }
                 // `f(*xs)` — a spread argument. Kept as a marker rather than
                 // desugared here: the call has to build its argument list at run
                 // time, which is a lowering decision, not a parse one.
@@ -2420,7 +2566,19 @@ impl Parser {
             }
         }
         self.eat(&Tok::RParen)?;
+        if !named.is_empty() {
+            args.insert(0, Expr::Map(named));
+        }
         Ok(args)
+    }
+
+    /// Is the next argument a `name: value` pair rather than a plain expression?
+    ///
+    /// Only the spellings a map key takes — a bare identifier or a string
+    /// literal followed by `:` — so a ternary's `?:` and a nested map literal
+    /// are not mistaken for one.
+    fn named_arg_ahead(&self) -> bool {
+        matches!(self.peek(), Tok::Ident(_) | Tok::Str(_)) && matches!(self.peek_at(1), Tok::Colon)
     }
 
     /// Take one level of the [`MAX_NESTING`] budget, or refuse the program.

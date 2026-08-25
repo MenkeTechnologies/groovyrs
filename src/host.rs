@@ -1285,6 +1285,8 @@ fn register_throwables() {
                 interfaces: Vec::new(),
                 is_interface: false,
                 is_trait: false,
+                generated: 0,
+                field_types: std::collections::HashMap::new(),
                 field_names: if superclass.is_none() {
                     vec!["message".to_string()]
                 } else {
@@ -1854,6 +1856,18 @@ struct ClassMeta {
     interfaces: Vec<String>,
     /// True for an `interface` declaration — it cannot be instantiated.
     is_interface: bool,
+    /// What the class's annotations asked the compiler to generate — the bit
+    /// set `Compiler::register_class` builds from `ast::Generated`: bit 0
+    /// `toString`, bit 1 its `includeNames` form, bit 2 `equals`/`hashCode`,
+    /// bit 3 a positional constructor.
+    ///
+    /// The *declaration* is a compile-time decision, so it arrives as a flag;
+    /// the *behaviour* lives here, because that is where an instance's fields,
+    /// its rendering and its equality already live.
+    generated: u8,
+    /// Declared field type by name — read only to decide an uninitialised
+    /// *primitive* field's starting value (`int a` is `0`, not `null`).
+    field_types: std::collections::HashMap<String, String>,
     /// True for a `trait`. A trait registers as an interface (non-instantiable,
     /// and `instanceof` answers for it) but differs in two ways an interface
     /// does not: it carries **state**, so every implementing class materialises
@@ -3356,6 +3370,110 @@ fn lookup_method(class: u32, method: &str) -> Option<u16> {
 /// from the most-derived class, so a nearer `default` method shadows a farther
 /// one. Cycles (`interface A extends B`, `B extends A`) terminate on the seen
 /// set.
+/// What an uninitialised field of declared type `ty` starts at.
+///
+/// `None` for every reference type, which starts at `null`. Only the eight Java
+/// primitives have a non-null default, and it is the one Java gives them.
+fn primitive_zero(ty: &str) -> Option<Value> {
+    Some(match ty {
+        "int" | "long" | "short" | "byte" | "char" => Value::int(0),
+        "float" | "double" => Value::Float(0.0),
+        "boolean" => Value::Bool(false),
+        _ => return None,
+    })
+}
+
+/// Bit 0 of [`ClassMeta::generated`] — a generated `toString`.
+const GEN_TO_STRING: u8 = 1;
+/// Bit 1 — that `toString` renders `name:value` pairs.
+const GEN_INCLUDE_NAMES: u8 = 2;
+/// Bit 2 — generated `equals`/`hashCode`.
+const GEN_EQUALS_HASH: u8 = 4;
+/// Bit 3 — a generated positional constructor.
+const GEN_TUPLE_CTOR: u8 = 8;
+
+/// Does `class` — or any class it descends from — carry the generated `what`?
+fn class_generates(class: u32, what: u8) -> bool {
+    class_chain(class)
+        .iter()
+        .any(|id| class_meta(*id).is_some_and(|m| m.generated & what != 0))
+}
+
+/// Every field of an instance's class, in declaration order across the chain
+/// (root first) and the traits it implements — the order every generated member
+/// walks, because `@ToString`'s rendering and `@TupleConstructor`'s parameter
+/// order are both that order.
+fn generated_field_order(class: u32) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in trait_closure(class).iter().chain(class_chain(class).iter()) {
+        if let Some(m) = class_meta(*id) {
+            for f in &m.field_names {
+                if !out.contains(f) {
+                    out.push(f.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The `toString` `@ToString` generates: `ClassName(v1, v2)`, or
+/// `ClassName(a:1, b:x)` under `includeNames`.
+fn generated_to_string(inst: &Instance) -> String {
+    let names = class_generates(inst.class, GEN_INCLUDE_NAMES);
+    let shown: Vec<String> = generated_field_order(inst.class)
+        .into_iter()
+        .map(|f| {
+            let v = inst.fields.get(&f).cloned().unwrap_or(Value::Undef);
+            if names {
+                format!("{f}:{}", groovy_str(&v))
+            } else {
+                groovy_str(&v)
+            }
+        })
+        .collect();
+    let cls = class_meta(inst.class)
+        .map(|m| m.name.clone())
+        .unwrap_or_default();
+    format!("{cls}({})", shown.join(", "))
+}
+
+/// The `hashCode` `@EqualsAndHashCode` generates.
+///
+/// Groovy's is `org.codehaus.groovy.util.HashCodeHelper`: `initHash()` is 127
+/// and each field folds in as `59 * current + hashCode(field)`, with a null
+/// field contributing `0`. Measured against the helper itself rather than taken
+/// from the docs, so the *number* matches, not merely its consistency.
+fn generated_hash_code(inst: &Instance) -> i32 {
+    let mut h: i32 = 127;
+    for f in generated_field_order(inst.class) {
+        let v = inst.fields.get(&f).cloned().unwrap_or(Value::Undef);
+        let fh = if matches!(v, Value::Undef) {
+            0
+        } else {
+            object_hash_code(&v)
+        };
+        h = h.wrapping_mul(59).wrapping_add(fh);
+    }
+    h
+}
+
+/// The `equals` `@EqualsAndHashCode` generates: the same class, and every field
+/// equal.
+fn generated_equals(a: &Instance, b: &Value) -> bool {
+    let Some(other) = as_instance(b) else {
+        return false;
+    };
+    if other.class != a.class {
+        return false;
+    }
+    generated_field_order(a.class).into_iter().all(|f| {
+        let x = a.fields.get(&f).cloned().unwrap_or(Value::Undef);
+        let y = other.fields.get(&f).cloned().unwrap_or(Value::Undef);
+        values_equal(&x, &y)
+    })
+}
+
 /// The traits `class` implements, transitively — the subset of its interface
 /// closure that is declared `trait`.
 ///
@@ -3491,6 +3609,7 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
     // (empty string ⇒ root class) are pushed first by `register_class`, so they
     // pop last and in that order.
     let interfaces_a = vm.stack.pop().unwrap_or(Value::Undef);
+    let generated = vm.stack.pop().unwrap_or(Value::Undef).to_int() as u8;
     let is_trait = matches!(vm.stack.pop(), Some(Value::Bool(true)));
     let is_interface = matches!(vm.stack.pop(), Some(Value::Bool(true)));
     let super_name = vm
@@ -3505,10 +3624,22 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
         _ => Vec::new(),
     };
 
-    let field_names: Vec<String> = match fields_a {
-        Value::Array(a) => a.iter().map(|v| v.as_str_cow().into_owned()).collect(),
+    // Each entry arrives as `name:type` (see `Compiler::register_class`).
+    let declared: Vec<(String, String)> = match fields_a {
+        Value::Array(a) => a
+            .iter()
+            .map(|v| {
+                let text = v.as_str_cow().into_owned();
+                match text.split_once(':') {
+                    Some((n, t)) => (n.to_string(), t.to_string()),
+                    None => (text, "def".to_string()),
+                }
+            })
+            .collect(),
         _ => Vec::new(),
     };
+    let field_names: Vec<String> = declared.iter().map(|(n, _)| n.clone()).collect();
+    let field_types: std::collections::HashMap<String, String> = declared.into_iter().collect();
     let methods: std::collections::HashMap<String, u16> = match methods_h {
         Value::Hash(h) => h.into_iter().map(|(k, v)| (k, v.to_int() as u16)).collect(),
         _ => std::collections::HashMap::new(),
@@ -3541,7 +3672,9 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
             interfaces,
             is_interface,
             is_trait,
+            generated,
             field_names,
+            field_types,
             field_inits,
             methods,
             ctors,
@@ -3881,7 +4014,14 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
     for id in traits.iter().chain(chain.iter()) {
         if let Some(m) = class_meta(*id) {
             for f in &m.field_names {
-                fields.insert(f.clone(), Value::Undef);
+                // A primitive field starts at its type's zero, a reference one
+                // at `null` — Java's rule, which Groovy keeps.
+                let zero = m
+                    .field_types
+                    .get(f)
+                    .and_then(|t| primitive_zero(t))
+                    .unwrap_or(Value::Undef);
+                fields.insert(f.clone(), zero);
             }
         }
     }
@@ -3929,6 +4069,45 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
         if let Err(e) = invoke_sub(vm, *ctor_idx, &pushes) {
             fault(vm, e);
             return Value::Undef;
+        }
+    } else if class_generates(cid, GEN_TUPLE_CTOR)
+        && !meta.ctors.contains_key(&argc)
+        && argc as usize <= generated_field_order(cid).len()
+        && !(argc == 1 && as_omap(&args[0]).is_some())
+    {
+        // The constructor `@TupleConstructor` generates: the fields taken
+        // positionally, in declaration order, with any the call stops short of
+        // left at their default. A single map argument is excluded so the map
+        // constructor below still wins for `new C(a: 1)`, which is what Groovy
+        // does when both are available.
+        if let Err(e) = run_implicit_super_ctor(vm, &handle, cid) {
+            fault(vm, e);
+            return Value::Undef;
+        }
+        for (f, v) in generated_field_order(cid).into_iter().zip(args) {
+            set_instance_field(&handle, &f, v);
+        }
+    } else if argc == 1 && as_omap(&args[0]).is_some() && !meta.ctors.contains_key(&1) {
+        // Groovy's **map constructor**: `new P(a: 1, b: 2)` with no matching
+        // declared constructor sets the named properties on a default-built
+        // instance. Reached whether or not the class declares other
+        // constructors, because Groovy adds this one alongside them — but not
+        // when a one-argument constructor exists, which would be the real
+        // overload and wins.
+        if let Err(e) = run_implicit_super_ctor(vm, &handle, cid) {
+            fault(vm, e);
+            return Value::Undef;
+        }
+        for (k, v) in as_omap(&args[0]).unwrap_or_default() {
+            let setter = format!("set{}", capitalize(&k));
+            if let Some(idx) = lookup_method(cid, &setter) {
+                if let Err(e) = invoke_sub(vm, idx, &[handle.clone(), v]) {
+                    fault(vm, e);
+                    return Value::Undef;
+                }
+                continue;
+            }
+            set_instance_field(&handle, &k, v);
         }
     } else if !meta.ctors.is_empty() {
         fault(
@@ -4690,6 +4869,20 @@ fn values_equal(a: &Value, b: &Value) -> bool {
             _ => false,
         };
     }
+    // An instance of a class with a generated `equals` compares by its fields.
+    // Decided here because the rendered-form fallback below would compare two
+    // `toString`s — which happens to agree for `@Canonical` and disagrees for
+    // `@EqualsAndHashCode` alone, where there is no generated rendering.
+    if let Some(x) = as_instance(a) {
+        if class_generates(x.class, GEN_EQUALS_HASH) {
+            return generated_equals(&x, b);
+        }
+    }
+    if let Some(y) = as_instance(b) {
+        if class_generates(y.class, GEN_EQUALS_HASH) {
+            return generated_equals(&y, a);
+        }
+    }
     // A character buffer is `Comparable`, so Groovy's `==` compares its
     // *contents* against another buffer — but only against another buffer.
     // `('a' << 'b') == ('a' << 'b')` is true while `'ab' == ('a' << 'b')` is
@@ -4851,7 +5044,13 @@ fn object_hash_code(v: &Value) -> i32 {
 /// built-in one — the guard that keeps the universal hook from shadowing a user
 /// method, the way `getClass` is guarded inside `dispatch_instance_method`.
 fn has_user_hash_code(recv: &Value) -> bool {
-    as_instance(recv).is_some_and(|inst| lookup_method(inst.class, "hashCode").is_some())
+    as_instance(recv).is_some_and(|inst| {
+        // A *generated* `hashCode` counts as the class's own: it is not a
+        // declared method, so `lookup_method` cannot see it, but it is what the
+        // instance must hash by.
+        lookup_method(inst.class, "hashCode").is_some()
+            || class_generates(inst.class, GEN_EQUALS_HASH)
+    })
 }
 
 /// Whether `value` is an instance of the (user or built-in) type `class`.
@@ -4969,6 +5168,21 @@ fn dispatch_instance_method(
             let v = args.first().cloned().unwrap_or(Value::Undef);
             set_instance_field(recv, &key, v);
             return Some(Ok(Value::Undef));
+        }
+    }
+    // The members `@ToString` / `@EqualsAndHashCode` generate. Below
+    // `lookup_method`, so a class that declares its own `toString` keeps it —
+    // which is what Groovy's transform does too: it generates a member, it does
+    // not replace a declared one.
+    if args.is_empty() && method == "toString" && class_generates(inst.class, GEN_TO_STRING) {
+        return Some(Ok(Value::str(generated_to_string(&inst))));
+    }
+    if class_generates(inst.class, GEN_EQUALS_HASH) {
+        if method == "hashCode" && args.is_empty() {
+            return Some(Ok(Value::int(i64::from(generated_hash_code(&inst)))));
+        }
+        if method == "equals" && args.len() == 1 {
+            return Some(Ok(Value::bool(generated_equals(&inst, &args[0]))));
         }
     }
     // `getClass()` answers on every object (a user override was already found
@@ -12775,6 +12989,14 @@ fn render_value(vm: &mut VM, v: &Value) -> String {
 /// class defines one.
 fn instance_to_string(vm: &mut VM, recv: &Value) -> Option<String> {
     let inst = as_instance(recv)?;
+    // A generated `toString` is not a declared method, so `lookup_method` will
+    // not find it — but it is still what the object renders as. Below the
+    // lookup would be wrong: a class that declares its own `toString` keeps it,
+    // which is why this asks for the declared one first.
+    if lookup_method(inst.class, "toString").is_none() && class_generates(inst.class, GEN_TO_STRING)
+    {
+        return Some(generated_to_string(&inst));
+    }
     let idx = lookup_method(inst.class, "toString")?;
     match invoke_sub(vm, idx, std::slice::from_ref(recv)) {
         Ok(v) => Some(groovy_str(&v)),
@@ -12833,6 +13055,13 @@ pub fn groovy_str(v: &Value) -> String {
     // `java.lang.Class.toString` prefixes the qualified name with `class `.
     if let Some(name) = as_class_ref(v) {
         return format!("class {name}");
+    }
+    // An instance of a class with a generated `toString` renders through it, so
+    // `println p` and `"$p"` agree with `p.toString()`.
+    if let Some(inst) = as_instance(v) {
+        if class_generates(inst.class, GEN_TO_STRING) {
+            return generated_to_string(&inst);
+        }
     }
     // `Map.Entry.toString` is `key=value`.
     if let Some((k, val)) = as_entry(v) {
@@ -13307,6 +13536,11 @@ fn instance_equals(a: &Value, b: &Value) -> Result<bool, String> {
     {
         return res.map(|v| v.is_truthy());
     }
+    // A generated `equals` decides next — after a declared one, which Groovy's
+    // transform also defers to, and before the identity default below.
+    if class_generates(inst.class, GEN_EQUALS_HASH) {
+        return Ok(generated_equals(&inst, b));
+    }
     // No `compareTo`/`equals`: default `Object` identity — the same heap handle.
     Ok(matches!((a, b), (Value::Obj(x), Value::Obj(y)) if x == y))
 }
@@ -13455,14 +13689,17 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
         // entries render in different orders by design.
         // A character buffer joins them for the same reason: the rendered-form
         // fallback below makes `'ab' == ('a' << 'b')` true, and a `StringBuffer`
-        // is not comparable to a `String`.
+        // is not comparable to a `String`. So does an instance whose class has a
+        // generated `equals`, which compares by field and not by rendering.
         NumOp::Eq | NumOp::Ne
             if as_set(a).is_some()
                 || as_set(b).is_some()
                 || as_omap(a).is_some()
                 || as_omap(b).is_some()
                 || as_buffer(a).is_some()
-                || as_buffer(b).is_some() =>
+                || as_buffer(b).is_some()
+                || as_instance(a).is_some_and(|i| class_generates(i.class, GEN_EQUALS_HASH))
+                || as_instance(b).is_some_and(|i| class_generates(i.class, GEN_EQUALS_HASH)) =>
         {
             let eq = values_equal(a, b);
             Ok(Value::bool(if matches!(op, NumOp::Eq) { eq } else { !eq }))

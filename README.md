@@ -395,6 +395,14 @@ Implemented and checked against Apache Groovy:
   `BigDecimal`/`BigInteger`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, the assigning
   `a ?= b`, and `a?.member` / `a?.method()`.
+- **The AST-transform annotations** — `@ToString` (with `includeNames`),
+  `@EqualsAndHashCode`, `@TupleConstructor`, and `@Canonical` (the three
+  together). A declared member always wins over the generated one. The generated
+  `hashCode` is Groovy's own number, not merely a self-consistent one.
+- **Named arguments and the map constructor** — `f(a: 1, 9)` gathers the named
+  arguments into one map passed first, and `new P(a: 1, b: 2)` sets those
+  properties on a default-built instance. An uninitialised field of a primitive
+  type starts at that type's zero (`int a` is `0`), not at `null`.
 - **`trait`s** — stateful interfaces with method bodies: a trait declares fields
   that every implementing class materialises, its methods need no `default`
   keyword, `instanceof` answers for it, and it may `extends` another trait and

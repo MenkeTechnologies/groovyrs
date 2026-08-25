@@ -144,6 +144,15 @@ pub enum StmtKind {
         /// An interface cannot be instantiated; its method declarations with a
         /// body are Java 8 `default` methods, inherited by every implementor.
         is_interface: bool,
+        /// The `@ToString` / `@EqualsAndHashCode` / `@TupleConstructor` /
+        /// `@Canonical` family written in front of the declaration, already
+        /// resolved to what each one *generates* — see [`Generated`].
+        ///
+        /// The annotations are a compile-time declaration, so they are settled
+        /// here rather than kept as syntax: nothing downstream needs to know
+        /// which annotation asked for a generated `toString`, only that one was
+        /// asked for.
+        generated: Generated,
         /// A `trait` rather than a `class` or an `interface`.
         ///
         /// A trait is an interface that also carries **state**: it may declare
@@ -233,6 +242,13 @@ pub struct CatchArm {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: String,
+    /// The declared type, as written (`def` when untyped).
+    ///
+    /// Kept only for the one thing it decides at run time: an uninitialised
+    /// field of a *primitive* type starts at that type's zero, not at `null`, so
+    /// `class P { int a }` gives `new P().a == 0`. Every other use of a declared
+    /// type is diagnostic — the runtime is dynamically typed.
+    pub ty: String,
     pub init: Option<Expr>,
 }
 
@@ -270,6 +286,30 @@ pub enum AssignOp {
     /// `BigInteger` operand routing and the `Integer`-vs-`Long` shift masking
     /// are all one implementation.
     Bin(BinOp),
+}
+
+/// What a class's annotations asked the compiler to generate for it.
+///
+/// `@Canonical` is exactly the three together, which is why this is a set of
+/// what to generate rather than a list of annotation names.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Generated {
+    /// `@ToString` — a `toString()` of the field values in declaration order,
+    /// `ClassName(v1, v2)`.
+    pub to_string: bool,
+    /// `@ToString(includeNames = true)` — `ClassName(a:1, b:x)` instead.
+    pub include_names: bool,
+    /// `@EqualsAndHashCode` — `equals`/`hashCode` over the field values.
+    pub equals_hash: bool,
+    /// `@TupleConstructor` — a constructor taking the fields positionally.
+    pub tuple_ctor: bool,
+}
+
+impl Generated {
+    /// Nothing generated — the ordinary case.
+    pub fn is_empty(self) -> bool {
+        !self.to_string && !self.equals_hash && !self.tuple_ctor
+    }
 }
 
 /// Which Java integer type an integer literal has.

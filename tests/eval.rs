@@ -5654,3 +5654,85 @@ def k = new K(); k.inc().inc(); println(k.n)"#);
     assert!(ok);
     assert_eq!(out, "B\nE\ntop>mid>base\nvia impl\n2\n");
 }
+
+/// The AST-transform annotation family — `@ToString`, `@EqualsAndHashCode`,
+/// `@TupleConstructor` and `@Canonical` (which is the three together). groovyrs
+/// did not parse a class-level annotation at all.
+///
+/// The *declaration* is a compile-time decision, so it travels as a flag on the
+/// class; the generated members live in the host, where an instance's fields,
+/// its rendering and its equality already do. A declared member always wins over
+/// the generated one, which is what Groovy's transforms do. Every expectation is
+/// Apache Groovy 5.1.0's own output.
+#[test]
+fn the_ast_transform_annotations_generate_their_members() {
+    let (out, ok) = run(r#"import groovy.transform.*
+@Canonical class C { int a; String b }
+def c1 = new C(1,'z'); def c2 = new C(1,'z')
+println(c1)
+println(c1 == c2)
+println(c1.hashCode() == c2.hashCode())
+println(c1 == new C(2,'z'))
+println(new C(a:5, b:'q'))
+println(new C(7))
+@ToString class D { int a; String b; String c }
+println(new D(a:1, b:'x'))
+@ToString(includeNames=true) class E { int a; String b }
+println(new E(a:1, b:'y'))
+@EqualsAndHashCode class F { int a; String toString() { 'mine' } }
+println(new F(a:1))
+@ToString class G2 { int a; String toString() { 'declared' } }
+println(new G2(a:1))
+@Canonical class H2 { int a }
+def l = [new H2(1), new H2(2)]
+println(l)
+println(l.contains(new H2(2)))"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "C(1, z)\ntrue\ntrue\nfalse\nC(5, q)\nC(7, null)\nD(1, x, null)\n\
+         E(a:1, b:y)\nmine\ndeclared\n[H2(1), H2(2)]\ntrue\n"
+    );
+}
+
+/// Groovy's generated `hashCode` is `org.codehaus.groovy.util.HashCodeHelper`:
+/// `initHash()` is 127 and each field folds in as `59 * current + hashCode(field)`.
+/// Measured against the helper itself, so the *number* matches rather than
+/// merely being self-consistent.
+#[test]
+fn a_generated_hash_code_matches_groovys_own_number() {
+    let (out, ok) = run(r#"import groovy.transform.EqualsAndHashCode
+@EqualsAndHashCode class P { int a; String b }
+println(new P(a:1,b:'x').hashCode())
+@EqualsAndHashCode class Q { int a }
+println(new Q(a:0).hashCode())
+println(new Q(a:1).hashCode())"#);
+    assert!(ok);
+    assert_eq!(out, "442266\n7493\n7494\n");
+}
+
+/// Groovy's **map constructor** — `new P(a: 1, b: 2)` — and the primitive field
+/// defaults it exposes. Named arguments gather into one map passed as the call's
+/// first argument, and a class with no matching declared constructor sets the
+/// named properties on a default-built instance. An uninitialised field of a
+/// primitive type starts at that type's zero, not at `null`.
+#[test]
+fn named_arguments_build_a_map_and_drive_the_map_constructor() {
+    let (out, ok) = run(r#"class P { int a; int b; String toString(){ "P($a,$b)" } }
+println(new P(a:1, b:2))
+println(new P(b:5))
+println(new P())
+def f = { Map m, x -> "$m|$x" }
+println(f(a:1, 9))
+def g(Map m) { m }
+println(g(k:1, j:2))
+class Q { int a; Q(int a){ this.a = a }; String toString(){"Q($a)"} }
+println(new Q(3))
+class R { int i; long l; double d; boolean z; String s; String toString(){ "$i/$l/$d/$z/$s" } }
+println(new R())"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "P(1,2)\nP(0,5)\nP(0,0)\n[a:1]|9\n[k:1, j:2]\nQ(3)\n0/0/0.0/false/null\n"
+    );
+}

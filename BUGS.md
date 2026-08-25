@@ -1128,6 +1128,12 @@ infinite loop on both sides.
 - **`"abc".chars()` is not modeled.** It answers an `IntStream`, which groovyrs
   has no value for. (`toArray()`, `toCharArray()` and `String.bytes` no longer
   share this gap — they answer real `Object[]` / `char[]` / `byte[]` arrays.)
+- **Only part of each AST-transform annotation's attribute set is read.**
+  `@ToString`'s `includeNames` is honoured; its `excludes`, `includes`,
+  `includeSuper`, `ignoreNulls` and the rest are accepted and ignored, as are
+  `@EqualsAndHashCode`'s and `@TupleConstructor`'s. An annotation outside the
+  family (`@Immutable`, `@Sortable`, `@CompileStatic`, …) is consumed and has no
+  effect, which is what the member-level annotation skip already did.
 - **A `static` method is not callable on the class.** `class Z { static String s() { 'x' } }; Z.s()`
   raises: a class name in expression position is a `java.lang.Class` and the
   static half of a class's method table is not modeled, so nothing answers.

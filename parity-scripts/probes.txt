@@ -2628,3 +2628,8 @@ def d = 'm' << 'n'; def e = d; e.append('o'); println d
 def x = 'a' << 'b'; def y = 'a' << 'b'; println(x == x); println(x == y); println(x.equals(x)); println(x.equals(y)); println('ab' == x); println(x.toString() == 'ab')
 %%
 def sb = new StringBuilder('ab'); println(sb == sb); println(sb == new StringBuilder('ab')); println(sb.equals(sb))
+%%
+# named arguments gather into a leading map
+def f = { Map m, x -> "$m|$x" }; println f(a:1, 9)
+%%
+def m = [a:1]; println m.subMap(['a'])

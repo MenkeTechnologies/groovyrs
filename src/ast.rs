@@ -255,6 +255,13 @@ pub enum AssignOp {
     Mul,
     Div,
     Mod,
+    /// The bitwise and exponent compound assignments — `<<=`, `>>=`, `>>>=`,
+    /// `&=`, `|=`, `^=`, `**=`. Each carries the [`BinOp`] it applies, and the
+    /// compiler lowers it through exactly the binary-operator path that `BinOp`
+    /// takes, so `x <<= n` cannot drift from `x = x << n`: the width rules, the
+    /// `BigInteger` operand routing and the `Integer`-vs-`Long` shift masking
+    /// are all one implementation.
+    Bin(BinOp),
 }
 
 /// Which Java integer type an integer literal has.

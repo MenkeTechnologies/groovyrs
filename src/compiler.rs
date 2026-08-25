@@ -227,6 +227,15 @@ struct Compiler {
     /// [`boxed_names`], so a scope with no closure in it boxes nothing and its
     /// loops keep their plain slot reads.
     cells: HashSet<String>,
+    /// Set by [`Compiler::emit_compound_value`] just before it calls
+    /// [`Compiler::binary`]: the left operand's value is **already on the stack**
+    /// (a compound assignment pushed it), so `binary` must analyse `lhs` without
+    /// emitting it.
+    ///
+    /// A flag rather than a parameter so `binary`'s five separate left-operand
+    /// emit sites stay one decision, and consumed with `mem::take` at the top of
+    /// `binary` so a nested operand's own `binary` call never inherits it.
+    preloaded_lhs: bool,
 }
 
 /// The Groovy/Java type names a `case <Name>:` label can check against without
@@ -452,6 +461,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         obj_vars: HashSet::new(),
         wide_sites: HashSet::new(),
         cells: boxed_names(&[], &prog.body),
+        preloaded_lhs: false,
     };
     // Arm the host's exception machinery for this run. Emitted only by a program
     // that uses `try`/`throw`, and it is what lets a runtime `Throwable` (a zero
@@ -1383,6 +1393,15 @@ impl Compiler {
         self.emit_call_builtin(crate::host::GPROP, 0, self.cur_line)
     }
 
+    /// Emit `binary`'s left operand, unless a compound assignment already
+    /// pushed its value.
+    fn emit_binary_lhs(&mut self, preloaded: bool, lhs: &Expr) -> Result<(), String> {
+        if preloaded {
+            return Ok(());
+        }
+        self.expr(lhs)
+    }
+
     /// Lower the right-hand side of an assignment to an expression target,
     /// combining it with the old value the caller has already pushed.
     ///
@@ -1391,7 +1410,12 @@ impl Compiler {
     /// through their own builtins for the same reason the bare-name form does:
     /// Groovy's `/` promotes to `BigDecimal` and its `%` has a zero-divisor
     /// guard, neither of which the raw arithmetic op carries.
-    fn emit_compound_value(&mut self, op: AssignOp, value: &Expr) -> Result<(), String> {
+    fn emit_compound_value(
+        &mut self,
+        op: AssignOp,
+        target: &Expr,
+        value: &Expr,
+    ) -> Result<(), String> {
         match op {
             AssignOp::Assign => self.expr(value),
             AssignOp::Div => {
@@ -1401,6 +1425,21 @@ impl Compiler {
             AssignOp::Mod => {
                 self.expr(value)?;
                 self.emit_mod(value, self.cur_line)
+            }
+            // `<<=`, `>>=`, `>>>=`, `&=`, `|=`, `^=`, `**=`. Lowered by the
+            // binary-operator path itself rather than by a switch of their own:
+            // those operators route on the *operands* (a `BigInteger` takes a
+            // builtin where an `int` keeps a native op, a `>>` masks its count
+            // to the left operand's Java width), and a second implementation
+            // would drift from `x = x <op> n`. `target` is the left operand —
+            // its value is already on the stack, so `preloaded_lhs` tells
+            // `binary` to analyse it without emitting it again, which is what
+            // keeps `m[key()] <<= 5` calling `key` once.
+            AssignOp::Bin(bin) => {
+                self.preloaded_lhs = true;
+                let r = self.binary(bin, target, value);
+                self.preloaded_lhs = false;
+                r
             }
             _ => {
                 self.expr(value)?;
@@ -1430,6 +1469,22 @@ impl Compiler {
                 self.emit_field_get(name)?;
                 self.expr(value)?;
                 self.emit_mod(value, self.cur_line)?;
+            }
+            // As for a bare name: the bitwise/exponent forms take the binary
+            // path. The target is `this.<name>`, which is what `emit_field_get`
+            // just pushed.
+            AssignOp::Bin(bin) => {
+                self.emit_field_get(name)?;
+                let target = Expr::Property {
+                    recv: Box::new(Expr::This),
+                    name: name.to_string(),
+                    line: self.cur_line,
+                    safe: false,
+                };
+                self.preloaded_lhs = true;
+                let r = self.binary(bin, &target, value);
+                self.preloaded_lhs = false;
+                r?;
             }
             _ => {
                 self.emit_field_get(name)?;
@@ -1553,6 +1608,18 @@ impl Compiler {
                         self.expr(value)?;
                         self.emit_mod(value, self.cur_line)?;
                     }
+                    // `x <<= e` and the other bitwise/exponent forms lower
+                    // through the binary path, so they inherit its operand
+                    // routing rather than repeating it. The name's value is
+                    // pushed first and `preloaded_lhs` stops `binary` pushing it
+                    // again.
+                    AssignOp::Bin(bin) => {
+                        self.emit_name_load(name, self.cur_line)?;
+                        self.preloaded_lhs = true;
+                        let r = self.binary(*bin, &Expr::Var(name.clone()), value);
+                        self.preloaded_lhs = false;
+                        r?;
+                    }
                     _ => {
                         // `x <op>= e` → x = x <op> e
                         self.emit_name_load(name, self.cur_line)?;
@@ -1597,7 +1664,16 @@ impl Compiler {
                     self.b.emit(Op::LoadConst(c), self.cur_line);
                     self.emit_call_builtin(crate::host::GPROP, 0, self.cur_line)?;
                 }
-                self.emit_compound_value(*op, value)?;
+                // The target expression, for the operand analyses `binary` runs
+                // (its Java width, whether it may be a `BigInteger`). It is
+                // never emitted — its value is the one on the stack.
+                let target = Expr::Property {
+                    recv: Box::new(recv.clone()),
+                    name: name.clone(),
+                    line: self.cur_line,
+                    safe: false,
+                };
+                self.emit_compound_value(*op, &target, value)?;
                 let c = self.b.add_constant(Value::str(name.clone()));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
                 self.emit_call_builtin(crate::host::GSETPROP, 0, self.cur_line)?;
@@ -1624,7 +1700,12 @@ impl Compiler {
                     self.b.emit(Op::Dup2, self.cur_line);
                     self.emit_call_builtin(crate::host::GINDEX, 0, self.cur_line)?;
                 }
-                self.emit_compound_value(*op, value)?;
+                let target = Expr::Index {
+                    recv: Box::new(recv.clone()),
+                    index: Box::new(index.clone()),
+                    line: self.cur_line,
+                };
+                self.emit_compound_value(*op, &target, value)?;
                 self.emit_call_builtin(crate::host::GSETINDEX, 0, self.cur_line)?;
                 match recv {
                     Expr::Var(name) if !self.is_field(name) => {
@@ -3244,6 +3325,10 @@ impl Compiler {
     }
 
     fn binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<(), String> {
+        // A compound assignment (`x <<= n`) has already pushed the left
+        // operand's value. Taken here rather than read below, so the flag cannot
+        // reach a nested operand's own `binary` call.
+        let pre = std::mem::take(&mut self.preloaded_lhs);
         // `&&` / `||` short-circuit and evaluate to a `Boolean` (Groovy's
         // logical operators are boolean-valued: `5 && 3` is `true`, `0 || 7` is
         // `true`). Both operands lower through `bool_expr`, so the kept deciding
@@ -3284,7 +3369,7 @@ impl Compiler {
         // receivers are exactly what `shr_receiver_is_object` spots, so they go
         // to the builtin and every other `>>` keeps its native lowering.
         if matches!(op, BinOp::Shr) && self.shr_receiver_is_object(lhs) {
-            self.expr(lhs)?;
+            self.emit_binary_lhs(pre, lhs)?;
             self.expr(rhs)?;
             // The width rides along as `GSHL`/`GUSHR` take it, for the numeric
             // fallback a mis-typed receiver lands on.
@@ -3303,7 +3388,7 @@ impl Compiler {
         if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
             && (self.bit_operand_is_object(lhs) || self.bit_operand_is_object(rhs))
         {
-            self.expr(lhs)?;
+            self.emit_binary_lhs(pre, lhs)?;
             self.expr(rhs)?;
             let name = match op {
                 BinOp::BitAnd => "and",
@@ -3318,7 +3403,7 @@ impl Compiler {
         // A `>>` whose left operand may be a `BigInteger` needs the builtin for
         // the same reason: the native shift reads the handle as `0`.
         if matches!(op, BinOp::Shr) && self.bit_operand_is_object(lhs) {
-            self.expr(lhs)?;
+            self.emit_binary_lhs(pre, lhs)?;
             self.expr(rhs)?;
             self.b
                 .emit(Op::LoadInt(i64::from(self.is_wide(lhs))), self.cur_line);
@@ -3326,7 +3411,7 @@ impl Compiler {
             return Ok(());
         }
         if matches!(op, BinOp::Shr) && !self.is_wide(lhs) {
-            self.expr(lhs)?;
+            self.emit_binary_lhs(pre, lhs)?;
             self.emit_wrap32(self.cur_line);
             self.expr(rhs)?;
             self.b.emit(Op::LoadInt(31), self.cur_line);
@@ -3334,7 +3419,7 @@ impl Compiler {
             self.b.emit(Op::Shr, self.cur_line);
             return Ok(());
         }
-        self.expr(lhs)?;
+        self.emit_binary_lhs(pre, lhs)?;
         self.expr(rhs)?;
         // Groovy `/` is not a native op — it lowers to the GDIV builtin so
         // integer division promotes to a decimal (`7/2 → 3.5`).
@@ -3385,7 +3470,9 @@ impl Compiler {
                 self.emit_call_builtin(id, 2, self.cur_line)?;
             }
             // `list << x` appends in place, so it writes back like `list.add`.
-            if matches!(op, BinOp::Shl) {
+            // Not for `list <<= x`: the assignment stores the result into the
+            // target itself, and writing back here as well would append twice.
+            if matches!(op, BinOp::Shl) && !pre {
                 self.emit_receiver_writeback(lhs, "leftShift", &[])?;
             }
             return Ok(());
@@ -4371,5 +4458,8 @@ fn compound_op(op: AssignOp) -> Op {
         AssignOp::Mod => unreachable!("Mod lowers through Compiler::emit_mod, not compound_op"),
         AssignOp::Div => unreachable!("Div lowers through the GDIV builtin, not compound_op"),
         AssignOp::Assign => unreachable!("plain assign never lowers through compound_op"),
+        AssignOp::Bin(_) => {
+            unreachable!("the bitwise forms lower through Compiler::binary, not compound_op")
+        }
     }
 }

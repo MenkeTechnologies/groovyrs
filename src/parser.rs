@@ -2300,6 +2300,15 @@ fn assign_op(t: &Tok) -> Option<AssignOp> {
         Tok::StarAssign => AssignOp::Mul,
         Tok::SlashAssign => AssignOp::Div,
         Tok::PercentAssign => AssignOp::Mod,
+        // The bitwise / exponent forms carry the operator they apply, so the
+        // compiler lowers them through the binary-operator path itself.
+        Tok::ShlAssign => AssignOp::Bin(BinOp::Shl),
+        Tok::ShrAssign => AssignOp::Bin(BinOp::Shr),
+        Tok::UShrAssign => AssignOp::Bin(BinOp::UShr),
+        Tok::AmpAssign => AssignOp::Bin(BinOp::BitAnd),
+        Tok::PipeAssign => AssignOp::Bin(BinOp::BitOr),
+        Tok::CaretAssign => AssignOp::Bin(BinOp::BitXor),
+        Tok::PowerAssign => AssignOp::Bin(BinOp::Power),
         _ => return None,
     })
 }

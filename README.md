@@ -124,8 +124,10 @@ Implemented and checked against Apache Groovy:
   leading `#!` shebang and `package`/`import` lines are tolerated.
 - **Variables** — `def x = …`, typed `int` / `double` / `String` / `boolean`
   declarations, and bare `x = …` script bindings; plain and compound assignment
-  (`=`, `+=`, `-=`, `*=`, `/=`, `%=`) on a name, a field, a subscript
-  (`m['a'] += 1`) or a property (`p.x += 1`); increment / decrement in both
+  (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `<<=`, `>>=`, `>>>=`, `&=`, `|=`, `^=`,
+  `**=`) on a name, a field, a subscript (`m['a'] += 1`) or a property
+  (`p.x += 1`) — the bitwise forms lowered by the binary-operator path itself,
+  so `x <<= n` cannot drift from `x = x << n`; increment / decrement in both
   statement and expression position, postfix (`i++`) and prefix (`++i`), and on
   a subscript or property target in statement position (`l[0]++`, `p.x--`). A
   compound assignment to a subscript evaluates its receiver and index once, so
@@ -431,7 +433,7 @@ Implemented and checked against Apache Groovy:
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
 overloading by parameter type, script-declared class names as values, Java
 arrays, `GString` as a type, `++`/`--` not calling `next`/`previous`,
-the bitwise compound assignments).
+`String.leftShift`'s class).
 
 ---
 

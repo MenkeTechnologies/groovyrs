@@ -5162,3 +5162,71 @@ println(plain(1,2))"#);
         "0:[]\n3:[1, 2, 3]\na[1, 2]\nb[]\n6\n1|[]\n1|[2, 3]\n[2, 4]\n3\n"
     );
 }
+
+/// The bitwise and exponent compound assignments — `<<=`, `>>=`, `>>>=`, `&=`,
+/// `|=`, `^=`, `**=`. groovyrs parsed none of them, on any target.
+///
+/// They are lowered by the binary-operator path itself, so they inherit its
+/// operand routing rather than repeating it. That is what the second block
+/// checks: a `BigInteger` operand takes the builtin where an `int` keeps a
+/// native op, a shift masks its count to the left operand's *Java* width
+/// (`1 << 32` is `1`, `1L << 32` is `4294967296`), and `**` narrows to that same
+/// width. Every expectation is Apache Groovy 5.1.0's own output.
+#[test]
+fn the_bitwise_compound_assignments_reach_every_target() {
+    let (out, ok) = run(r#"def a=1; a <<= 3; println(a)
+def b=32; b >>= 2; println(b)
+def c=-32; c >>>= 2; println(c)
+def d=12; d &= 10; println(d)
+def e=12; e |= 3; println(e)
+def f=12; f ^= 10; println(f)
+def g=2; g **= 10; println(g)
+def m=[a:1]; m['a'] <<= 3; println(m)
+def n=[a:12]; n.a &= 10; println(n)
+def l=[1,2]; l[0] |= 6; println(l)
+def p=[a:2]; p['a'] **= 8; println(p)
+class C { int v = 12 }
+def cc = new C(); cc.v &= 10; println(cc.v)"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "8\n8\n1073741816\n8\n15\n6\n1024\n[a:8]\n[a:8]\n[7, 2]\n[a:256]\n8\n"
+    );
+}
+
+/// A compound assignment through a subscript evaluates its receiver and index
+/// **once**, the bitwise forms included — `m[key()] <<= 5` calls `key` a single
+/// time. The read is a stack duplicate, not a second evaluation of the target.
+#[test]
+fn a_bitwise_compound_assignment_evaluates_its_target_once() {
+    let (out, ok) = run(r#"def calls=0; def key={ calls++; 'a' }
+def q=[a:1]; q[key()] <<= 5
+println("calls=$calls q=$q")"#);
+    assert!(ok);
+    assert_eq!(out, "calls=1 q=[a:32]\n");
+}
+
+/// The compound forms take the same operand routing the binary operators do:
+/// a `BigInteger` operand, the `Integer`-versus-`Long` shift width, `**`'s
+/// narrowing, and `<<`'s append on a list.
+#[test]
+fn the_bitwise_compound_assignments_follow_the_operand_types() {
+    let (out, ok) = run(r#"def a=1G; a <<= 4; println(a + ' ' + a.getClass().getName())
+def b=12G; b &= 10; println(b)
+def c=1; c <<= 32; println(c)
+long d=1; d <<= 32; println(d)
+def e=256; e >>= 33; println(e)
+def f=2; f **= 40; println(f + ' ' + f.getClass().getName())
+long g=2; g **= 40; println(g + ' ' + g.getClass().getName())
+def l=[1,2]; l <<= 3; println(l)
+def m=[:]; m['k']=1G; m['k'] <<= 4; println(m)
+long o=-1; o >>>= 60; println(o)
+def p=[a:[1,2]]; p['a'] <<= 9; println(p)"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "16 java.math.BigInteger\n8\n1\n4294967296\n128\n\
+         1099511627776 java.math.BigInteger\n1099511627776 java.lang.Long\n\
+         [1, 2, 3]\n[k:16]\n15\n[a:[1, 2, 9]]\n"
+    );
+}

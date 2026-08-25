@@ -148,6 +148,13 @@ pub enum Tok {
     Shl,   // `<<` left shift / `leftShift`
     Shr,   // `>>` arithmetic right shift
     UShr,  // `>>>` unsigned right shift
+    ShlAssign,   // `<<=`
+    ShrAssign,   // `>>=`
+    UShrAssign,  // `>>>=`
+    AmpAssign,   // `&=`
+    PipeAssign,  // `|=`
+    CaretAssign, // `^=`
+    PowerAssign, // `**=`
     At,    // `@` annotation marker (e.g. `@Override`)
     Eof,
 }
@@ -536,6 +543,17 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         // the window ends inside a multi-byte character — `println("١٢")` puts
         // one two bytes past a `(`, and no operator spans a non-ASCII byte
         // anyway.
+        // `>>>=` is the only four-character operator, and it has to be matched
+        // before `>>>` claims its first three characters and leaves a bare `=`.
+        if src.get(i..i + 4).unwrap_or("") == ">>>=" {
+            out.push(Token {
+                kind: Tok::UShrAssign,
+                line,
+                offset: tok_start,
+            });
+            i += 4;
+            continue;
+        }
         let three = src.get(i..i + 3).unwrap_or("");
         // `==~` before both `==` and `=~`, so it is never split.
         if three == "==~" {
@@ -576,6 +594,23 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             i += 3;
             continue;
         }
+        // The three-character compound assignments, each ahead of the operator
+        // whose two characters it starts with (`<<=` before `<<`, `**=` before
+        // `**`, `>>=` before `>>`).
+        if let Some(kind) = match three {
+            "<<=" => Some(Tok::ShlAssign),
+            ">>=" => Some(Tok::ShrAssign),
+            "**=" => Some(Tok::PowerAssign),
+            _ => None,
+        } {
+            out.push(Token {
+                kind,
+                line,
+                offset: tok_start,
+            });
+            i += 3;
+            continue;
+        }
         if three == ">>>" {
             out.push(Token {
                 kind: Tok::UShr,
@@ -595,6 +630,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             "*." => (Tok::StarDot, 2),
             "?:" => (Tok::Elvis, 2),
             "?=" => (Tok::ElvisAssign, 2),
+            "&=" => (Tok::AmpAssign, 2),
+            "|=" => (Tok::PipeAssign, 2),
+            "^=" => (Tok::CaretAssign, 2),
             "+=" => (Tok::PlusAssign, 2),
             "-=" => (Tok::MinusAssign, 2),
             "*=" => (Tok::StarAssign, 2),

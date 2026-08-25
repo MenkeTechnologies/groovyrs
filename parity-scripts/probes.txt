@@ -2494,3 +2494,40 @@ def f = { int... n -> n.sum() }; println f(1,2,3)
 def g = { a, Object... rest -> "$a|$rest" }; println g(1); println g(1,2,3)
 %%
 def h = { Object... xs -> xs.collect{ it * 2 } }; println h(1,2)
+%%
+# the bitwise / exponent compound assignments
+def a=1; a <<= 3; println a
+%%
+def b=32; b >>= 2; println b
+%%
+def c=-32; c >>>= 2; println c
+%%
+def d=12; d &= 10; println d
+%%
+def e=12; e |= 3; println e
+%%
+def f=12; f ^= 10; println f
+%%
+def g=2; g **= 10; println g
+%%
+def m=[a:1]; m['a'] <<= 3; println m; m.a &= 9; println m
+%%
+def l=[1,2]; l[0] |= 6; println l
+%%
+def calls=0; def key={ calls++; 'a' }; def q=[a:1]; q[key()] <<= 5; println "calls=$calls q=$q"
+%%
+def a=1G; a <<= 4; println a; println a.getClass().getName()
+%%
+def c=1; c <<= 32; println c
+%%
+long d=1; d <<= 32; println d
+%%
+def e=256; e >>= 33; println e
+%%
+def f=2; f **= 40; println f; println f.getClass().getName()
+%%
+long g=2; g **= 40; println g; println g.getClass().getName()
+%%
+def l=[1,2]; l <<= 3; println l
+%%
+long o=-1; o >>>= 60; println o

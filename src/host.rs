@@ -5453,6 +5453,12 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             };
         }
     }
+    // Membership and append on a set, in place. Falling through to the general
+    // path below copies every element out of the heap first, which is what made
+    // filling a set quadratic even after the scan itself was indexed.
+    if let Some(v) = dispatch_set_fast(&recv, method, &args) {
+        return v;
+    }
     if let Some((items, kind)) = as_set(&recv) {
         if let Some(v) = dispatch_set_method(vm, &recv, &items, kind, method, &args) {
             return v;
@@ -6849,6 +6855,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
     }
     // A `Range` answers its own members and hands everything else to the list it
     // enumerates — which is faithful, because Groovy's `Range` is a `List`.
+    if let Some(v) = dispatch_set_fast(recv, method, args) {
+        return v;
+    }
     if let Some((items, kind)) = as_set(recv) {
         if let Some(v) = dispatch_set_method(vm, recv, &items, kind, method, args) {
             return v;
@@ -10838,6 +10847,58 @@ fn set_member(recv: &Value, items: &[Value], probe: &Value) -> bool {
             .unwrap_or(false),
         None => items.iter().any(|v| values_equal(v, probe)),
     }
+}
+
+/// Decide membership from a set handle's index **without copying its elements**.
+///
+/// `Some(present)` when the index settled it on its own; `None` when it could
+/// not — the receiver is not a set, or the index cannot answer for this probe —
+/// and the caller falls back to the copy-and-scan path.
+///
+/// The heap borrow ends before [`values_equal`] runs, because confirming a
+/// candidate can re-enter the VM for a user class's `equals`. Only the one
+/// candidate is cloned, so this is O(1) where the scan was O(n).
+fn set_membership_fast(recv: &Value, probe: &Value) -> Option<bool> {
+    let Value::Obj(id) = recv else { return None };
+    let candidate = HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::SetVal { items, index, .. }) => {
+            Some(index.find(probe).map(|p| p.map(|pos| items[pos].clone())))
+        }
+        _ => None,
+    })??;
+    match candidate {
+        None => Some(false),
+        Some(cand) => Some(values_equal(&cand, probe)),
+    }
+}
+
+/// `add` / `leftShift` / `contains` on a set, answered from its index alone.
+///
+/// Mirrors the root-list fast path (`list_push_root`) and exists for the same
+/// reason: the general path copies every element out of the heap, runs the call
+/// against the copy, and — for `add` — scans that copy. That is two passes over
+/// the whole set for an operation that touches one element, which is what left
+/// `s.add(i)` quadratic even once the scan itself was indexed.
+///
+/// `None` hands the call back to the general path, so a set the index cannot
+/// cover behaves exactly as it did.
+fn dispatch_set_fast(recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
+    if args.len() != 1 || !matches!(method, "add" | "leftShift" | "contains") {
+        return None;
+    }
+    let probe = &args[0];
+    let present = set_membership_fast(recv, probe)?;
+    if method == "contains" {
+        return Some(Value::bool(present));
+    }
+    if !present {
+        set_push(recv, probe.clone());
+    }
+    Some(if method == "leftShift" {
+        recv.clone()
+    } else {
+        Value::bool(!present)
+    })
 }
 
 /// The element count of a set handle, without copying its elements.

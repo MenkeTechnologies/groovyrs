@@ -4957,3 +4957,104 @@ println(u.isEmpty()); println((u << 'x').isEmpty())"#);
         "[3, 1, 2, 4]\njava.util.LinkedHashSet\n4\n[1, 2, 3]\ntrue\nfalse\n"
     );
 }
+
+/// A closure captures the *variable*, and a declaration inside a loop body makes
+/// a **new** variable each iteration — so the closures built by two iterations
+/// hold two different values.
+///
+/// groovyrs used to give every one of them the last iteration's value, because a
+/// captured local was copied into the closure's frame instead of shared through
+/// a cell. Every expectation below is Apache Groovy 5.1.0's own output.
+#[test]
+fn a_declaration_inside_a_loop_body_is_a_fresh_binding_per_iteration() {
+    let (out, ok) = run(r#"def e=[]; int k=0; while (k<3) { def m=k; e << { m }; k++ }
+println(e.collect{it()})
+def q=[]; for (x in 0..2) { def y = x*2; q << { y } }
+println(q.collect{y -> y()})
+def n=[]; for (a in 0..1) { for (b in 0..1) { def p = "$a$b"; n << { p } } }
+println(n.collect{it()})"#);
+    assert!(ok);
+    assert_eq!(out, "[0, 1, 2]\n[0, 2, 4]\n[00, 01, 10, 11]\n");
+}
+
+/// The `for` variable itself is the opposite case: Groovy binds it **once** for
+/// the whole loop, so every closure built in the body shares it and they all
+/// read the value it was left at. Both `for (x in …)` forms and the C-style
+/// loop agree, and so does a `while` over a variable declared outside it.
+///
+/// This is the rule the per-iteration cell above must not overrun — desugaring
+/// the loop variable to a declaration inside the body would give each iteration
+/// its own binding and print `[0, 1, 2]`, which Groovy does not.
+#[test]
+fn the_for_variable_is_one_binding_for_the_whole_loop() {
+    let (out, ok) = run(r#"def a=[]; for (x in 0..2) a << { x }
+println(a.collect{it()})
+def b=[]; for (x in ['p','q','r']) b << { x }
+println(b.collect{it()})
+def c=[]; for (int i=0;i<3;i++) c << { i }
+println(c.collect{it()})
+def d=[]; int j=0; while (j<3) { d << { j }; j++ }
+println(d.collect{it()})
+def r=[]; for (x in 0..2) { r << { x }; x = x + 10 }
+println(r.collect{it()})"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[2, 2, 2]\n[r, r, r]\n[3, 3, 3]\n[3, 3, 3]\n[12, 12, 12]\n"
+    );
+}
+
+/// Sharing the variable is what a closure that *mutates* an outer name depends
+/// on, so boxing must not turn a capture into a private copy: an accumulator
+/// still accumulates, a name assigned after the closure was created reads its
+/// new value, and a closure parameter is still per-call.
+#[test]
+fn a_captured_name_is_shared_not_copied() {
+    let (out, ok) = run(r#"def cnt=0; def inc={ cnt++ }; inc(); inc(); println(cnt)
+def tot=0; def s=[]; for (x in 0..2) { s << { tot += x } }; s.each{it()}; println(tot)
+def outer=10; def p=[]; for (x in 0..2) p << { x + outer }; outer=100
+println(p.collect{it()})
+def fn = { z -> { -> z } }
+println([fn(1)(), fn(2)()])
+def g=[]; [0,1,2].each { v -> g << { v } }
+println(g.collect{it()})
+def h=[]; 3.times { t -> h << { t } }
+println(h.collect{it()})"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "2\n6\n[102, 102, 102]\n[1, 2]\n[0, 1, 2]\n[0, 1, 2]\n"
+    );
+}
+
+/// The membership index is an accelerator, never the answer: it must not change
+/// which elements a set considers equal, and it must not disturb iteration
+/// order. The cross-type probes are the ones that would break if a hash lookup
+/// were treated as decisive, because `Set.contains` is `equals` and a hash of
+/// the value cannot model it.
+#[test]
+fn the_set_membership_index_does_not_change_what_a_set_holds() {
+    let (out, ok) = run(r#"def s = [3, 1, 2, 1] as Set
+println(s); println(s.size())
+println(s.add(3)); println(s.add(4)); println(s)
+println(s.contains(1)); println(s.contains(9))
+def m = [] as Set
+m.add(1); m.add('a'); m.add(1); m.add('a'); m.add(2.5)
+println(m); println(m.size())
+println(m.contains('a')); println(m.contains(2.5))
+def n = [] as Set
+n.add(null); n.add(null); println(n.size())
+def big = [] as Set
+big.add(9223372036854775807L); big.add(9223372036854775806L); println(big.size())
+def r = [1,2,3,4] as Set
+println(r.minus([2,4] as Set)); println(r.intersect([3,4,5] as Set))
+r.removeAll([1] as Set); println(r)
+r.retainAll([2,3] as Set); println(r)"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[3, 1, 2]\n3\nfalse\ntrue\n[3, 1, 2, 4]\ntrue\nfalse\n\
+         [1, a, 2.5]\n3\ntrue\ntrue\n1\n2\n\
+         [1, 3]\n[3, 4]\n[2, 3, 4]\n[2, 3]\n"
+    );
+}

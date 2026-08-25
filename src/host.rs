@@ -1310,6 +1310,7 @@ fn register_throwables() {
                 },
                 field_inits: Vec::new(),
                 methods: std::collections::HashMap::new(),
+                overloads: std::collections::HashMap::new(),
                 method_arity: std::collections::HashMap::new(),
                 ctors: std::collections::HashMap::new(),
             });
@@ -1903,6 +1904,12 @@ struct ClassMeta {
     field_inits: Vec<(String, u16)>,
     /// method name → subroutine name-pool index.
     methods: std::collections::HashMap<String, u16>,
+    /// `name/arity` → subroutine name-pool index. What separates two same-named
+    /// methods: [`ClassMeta::methods`] keeps only the last, and this keeps both.
+    /// Consulted by every dispatch that knows how many arguments it has;
+    /// `methods` remains the answer where the arity is implied by the question
+    /// (`toString`, `compareTo`, a getter, a setter).
+    overloads: std::collections::HashMap<String, u16>,
     /// method name → its declared parameter count. Read only where the *shape*
     /// of a call has to match the declaration rather than just its name:
     /// `propertyMissing` is one method name with a one-argument reader and a
@@ -3386,6 +3393,41 @@ fn method_arity(class: u32, method: &str) -> Option<u8> {
     None
 }
 
+/// The method `class` resolves `method` to **for a call of `argc` arguments** —
+/// most-derived first, then implemented interfaces, exactly as
+/// [`lookup_method`] searches.
+///
+/// Falls back to the name-only answer when no declaration takes that many
+/// arguments, so a call whose arity matches nothing still reaches the method it
+/// always did rather than becoming a miss.
+fn lookup_method_argc(class: u32, method: &str, argc: usize) -> Option<u16> {
+    lookup_overload_exact(class, method, argc).or_else(|| lookup_method(class, method))
+}
+
+/// The declaration of `method` taking exactly `argc` arguments, or `None`.
+///
+/// No fallback, unlike [`lookup_method_argc`]: used where the arity *is* the
+/// question — `propertyMissing(String)` reads and `propertyMissing(String, value)`
+/// writes, and dispatching one for the other would push the wrong number of
+/// values into the body's prologue.
+fn lookup_overload_exact(class: u32, method: &str, argc: usize) -> Option<u16> {
+    let key = format!("{method}/{argc}");
+    let mut cur = Some(class);
+    while let Some(id) = cur {
+        let meta = class_meta(id)?;
+        if let Some(idx) = meta.overloads.get(&key) {
+            return Some(*idx);
+        }
+        cur = meta.superclass.as_deref().and_then(find_class);
+    }
+    for id in interface_closure(class) {
+        if let Some(idx) = class_meta(id).and_then(|m| m.overloads.get(&key).copied()) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
 fn lookup_method(class: u32, method: &str) -> Option<u16> {
     let mut cur = Some(class);
     while let Some(id) = cur {
@@ -3634,7 +3676,8 @@ fn capitalize(s: &str) -> String {
 /// field-name array, the method table, the field-initializer table, and the
 /// constructor table on top.
 fn b_class(vm: &mut VM, _argc: u8) -> Value {
-    // Pushed last by `register_class`, so it pops first.
+    // Pushed last by `register_class`, so these pop first and in reverse.
+    let overloads_h = vm.stack.pop().unwrap_or(Value::Undef);
     let arities_h = vm.stack.pop().unwrap_or(Value::Undef);
     let ctors_h = vm.stack.pop().unwrap_or(Value::Undef);
     let inits_h = vm.stack.pop().unwrap_or(Value::Undef);
@@ -3705,9 +3748,14 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
         Value::Hash(h) => h.into_iter().map(|(k, v)| (k, v.to_int() as u8)).collect(),
         _ => std::collections::HashMap::new(),
     };
+    let overloads: std::collections::HashMap<String, u16> = match overloads_h {
+        Value::Hash(h) => h.into_iter().map(|(k, v)| (k, v.to_int() as u16)).collect(),
+        _ => std::collections::HashMap::new(),
+    };
     CLASSES.with(|c| {
         c.borrow_mut().push(ClassMeta {
             name,
+            overloads,
             method_arity,
             superclass,
             interfaces,
@@ -5189,8 +5237,9 @@ fn dispatch_instance_method(
     let inst = as_instance(recv)?;
     // A handle whose class is not in the registry is not an instance call.
     class_meta(inst.class)?;
-    // Virtual dispatch: resolve the method most-derived-first through the chain.
-    if let Some(idx) = lookup_method(inst.class, method) {
+    // Virtual dispatch: resolve the method most-derived-first through the chain,
+    // preferring the declaration whose arity matches this call.
+    if let Some(idx) = lookup_method_argc(inst.class, method, args.len()) {
         let mut pushes = Vec::with_capacity(args.len() + 1);
         pushes.push(recv.clone());
         pushes.extend_from_slice(args);
@@ -5334,14 +5383,12 @@ fn dispatch_instance_prop_get(
     // own order. The one-argument form is the reader; the two-argument form is
     // the writer, and `lookup_method` keys by name alone, so the arity has to be
     // checked before dispatching (see `method_param_count`).
-    if let Some(idx) = lookup_method(inst.class, "propertyMissing") {
-        if method_arity(inst.class, "propertyMissing") == Some(1) {
-            return Some(invoke_sub(
-                vm,
-                idx,
-                &[recv.clone(), Value::str(name.to_string())],
-            ));
-        }
+    if let Some(idx) = lookup_overload_exact(inst.class, "propertyMissing", 1) {
+        return Some(invoke_sub(
+            vm,
+            idx,
+            &[recv.clone(), Value::str(name.to_string())],
+        ));
     }
     Some(Ok(raise_missing_property(vm, recv, name)))
 }
@@ -5393,20 +5440,18 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
         // one-argument form is the reader, and both register under one name (see
         // `ClassMeta::method_arity`).
         if !inst.fields.contains_key(&name) {
-            if let Some(idx) = lookup_method(inst.class, "propertyMissing") {
-                if method_arity(inst.class, "propertyMissing") == Some(2) {
-                    return match invoke_sub(
-                        vm,
-                        idx,
-                        &[recv.clone(), Value::str(name.clone()), value],
-                    ) {
-                        Ok(_) => Value::Undef,
-                        Err(e) => {
-                            fault(vm, e);
-                            Value::Undef
-                        }
-                    };
-                }
+            if let Some(idx) = lookup_overload_exact(inst.class, "propertyMissing", 2) {
+                return match invoke_sub(
+                    vm,
+                    idx,
+                    &[recv.clone(), Value::str(name.clone()), value],
+                ) {
+                    Ok(_) => Value::Undef,
+                    Err(e) => {
+                        fault(vm, e);
+                        Value::Undef
+                    }
+                };
             }
         }
         // A field the class chain never declared: Groovy raises rather than
@@ -6072,6 +6117,11 @@ fn b_spread_args(vm: &mut VM, _argc: u8) -> Value {
 fn b_call_spread(vm: &mut VM, _argc: u8) -> Value {
     let idx = vm.stack.pop().unwrap_or(Value::Undef).to_int() as u16;
     let args = take_spread_args().unwrap_or_default();
+    // An overloaded function's bodies are registered as `name/arity`, and only
+    // now is the arity known — so the overload is picked here rather than by the
+    // compiler. A name with one declaration is registered plainly and this finds
+    // nothing, leaving `idx` as it was.
+    let idx = overload_sub(vm, idx, args.len()).unwrap_or(idx);
     match invoke_sub(vm, idx, &args) {
         Ok(v) => v,
         Err(e) => {
@@ -6079,6 +6129,18 @@ fn b_call_spread(vm: &mut VM, _argc: u8) -> Value {
             Value::Undef
         }
     }
+}
+
+/// The name-pool index of `<base>/<argc>`, when the chunk holds such a name.
+///
+/// How a spread call reaches the right overload: the compiler cannot choose one
+/// because the argument count is not known until the operand is evaluated, so it
+/// hands over the base name and the arity is matched here.
+fn overload_sub(vm: &VM, base: u16, argc: usize) -> Option<u16> {
+    let name = vm.chunk.names.get(base as usize)?;
+    let want = format!("{name}/{argc}");
+    let idx = vm.chunk.names.iter().position(|n| *n == want)? as u16;
+    vm.chunk.find_sub(idx).map(|_| idx)
 }
 
 /// The parked spread arguments, if a [`GSPREAD_ARGS`] ran for this call.

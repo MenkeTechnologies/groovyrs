@@ -116,6 +116,9 @@ struct Compiler {
     /// call can resolve to a forward-declared function (Groovy lets a script call
     /// a function defined later in the file).
     fn_names: HashSet<String>,
+    /// The arities each user function name is declared at, so a call can pick
+    /// the body matching its argument count.
+    fn_arities: HashMap<String, HashSet<usize>>,
     /// The subset of [`Compiler::fn_names`] that can reach itself through the
     /// static call graph. Each of these gets a [`crate::host::GDEPTH`] check in
     /// its prologue, so runaway native recursion raises a catchable
@@ -383,9 +386,17 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     let has_ffi = body_has_ffi(&prog.body);
     // Collect user-function names up front so calls can resolve forward references.
     let mut fn_names = HashSet::new();
+    // Which arities each function name is declared at. A same-named function of
+    // a different arity is a *different* function, so its body needs a name of
+    // its own — see `Compiler::fn_sub_name`.
+    let mut fn_arities: HashMap<String, HashSet<usize>> = HashMap::new();
     for stmt in &prog.body {
-        if let StmtKind::Function { name, .. } = &stmt.kind {
+        if let StmtKind::Function { name, params, .. } = &stmt.kind {
             fn_names.insert(name.clone());
+            fn_arities
+                .entry(name.clone())
+                .or_default()
+                .insert(params.len());
         }
     }
     // Index every class's inheritance shape up front so a subclass body can
@@ -427,6 +438,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         debug,
         has_ffi,
         fn_names,
+        fn_arities,
         recursive_fns: recursive,
         scope: None,
         cur_class_fields: None,
@@ -777,7 +789,8 @@ impl Compiler {
         body: &[Stmt],
     ) -> Result<(), String> {
         let entry = self.b.current_pos();
-        let nidx = self.b.add_name(name);
+        let sub = self.fn_sub_name(name, params.len());
+        let nidx = self.b.add_name(&sub);
         self.b.add_sub_entry(nidx, entry);
 
         let mut vars = HashMap::new();
@@ -1051,9 +1064,26 @@ impl Compiler {
 
     // ── Classes ─────────────────────────────────────────────────────────────
 
+    /// The subroutine name a user function's body is registered under.
+    ///
+    /// The plain name while it is the only declaration at that name — which
+    /// keeps the emitted chunk unchanged for every program that does not
+    /// overload — and `name/arity` once there is more than one, so the bodies do
+    /// not collide. A call whose arity matches no declaration falls back to the
+    /// plain name, and so reaches the body it always did.
+    fn fn_sub_name(&self, name: &str, arity: usize) -> String {
+        match self.fn_arities.get(name) {
+            Some(set) if set.len() > 1 && set.contains(&arity) => format!("{name}/{arity}"),
+            _ => name.to_string(),
+        }
+    }
+
     /// Synthetic sub name for a class method body.
-    fn method_sub_name(class: &str, method: &str) -> String {
-        format!("$cls_{class}_m_{method}")
+    ///
+    /// The arity is part of the name, so two same-named methods of different
+    /// arities compile to two bodies rather than the second replacing the first.
+    fn method_sub_name(class: &str, method: &str, arity: usize) -> String {
+        format!("$cls_{class}_m_{method}_{arity}")
     }
     /// Synthetic sub name for a class constructor of the given arity.
     fn ctor_sub_name(class: &str, arity: usize) -> String {
@@ -1125,7 +1155,7 @@ impl Compiler {
         for m in methods {
             let k = self.b.add_constant(Value::str(m.name.clone()));
             self.b.emit(Op::LoadConst(k), line);
-            let sub = self.b.add_name(&Self::method_sub_name(name, &m.name));
+            let sub = self.b.add_name(&Self::method_sub_name(name, &m.name, m.params.len()));
             self.b.emit(Op::LoadInt(sub as i64), line);
         }
         self.b.emit(Op::MakeHash((methods.len() * 2) as u16), line);
@@ -1153,15 +1183,28 @@ impl Compiler {
             self.b.emit(Op::LoadInt(sub as i64), line);
         }
         self.b.emit(Op::MakeHash((ctors.len() * 2) as u16), line);
-        // method-arity table: name -> declared parameter count. Methods are keyed
-        // by name alone (see the overloading entry in BUGS.md), so this does not
-        // separate overloads — what it answers is how many parameters the method
-        // that *did* register under a name takes, which is what
-        // `propertyMissing` needs to tell its reader form from its writer form.
+        // method-arity table: name -> the declared parameter count of whichever
+        // method registered last under that name. Read where only one arity can
+        // be meant.
         for m in methods {
             let k = self.b.add_constant(Value::str(m.name.clone()));
             self.b.emit(Op::LoadConst(k), line);
             self.b.emit(Op::LoadInt(m.params.len() as i64), line);
+        }
+        self.b.emit(Op::MakeHash((methods.len() * 2) as u16), line);
+        // overload table: `name/arity` -> sub name-pool index. This is what
+        // separates two same-named methods; the name-only table above stays for
+        // the lookups where the arity is implied by the question being asked
+        // (`toString`, `compareTo`, `hashCode`, a getter, a setter).
+        for m in methods {
+            let k = self
+                .b
+                .add_constant(Value::str(format!("{}/{}", m.name, m.params.len())));
+            self.b.emit(Op::LoadConst(k), line);
+            let sub = self
+                .b
+                .add_name(&Self::method_sub_name(name, &m.name, m.params.len()));
+            self.b.emit(Op::LoadInt(sub as i64), line);
         }
         self.b.emit(Op::MakeHash((methods.len() * 2) as u16), line);
         self.b.emit(Op::CallBuiltin(crate::host::GCLASS, 0), line);
@@ -1206,7 +1249,7 @@ impl Compiler {
             )?;
         }
         for m in methods {
-            let sub = Self::method_sub_name(name, &m.name);
+            let sub = Self::method_sub_name(name, &m.name, m.params.len());
             self.emit_member(line, &sub, &m.params, &m.body, &field_set, &method_set)?;
         }
         self.cur_class_super = prev_super;
@@ -3090,17 +3133,18 @@ impl Compiler {
         // A user-defined function: push the args (left-to-right) and call through
         // the fusevm frame ABI; `Op::Call` leaves the return value on the stack.
         if self.fn_names.contains(name) {
-            let nidx = self.b.add_name(name);
-            // `Op::Call` binds a fixed number of stack values into the callee's
-            // frame, so a spread — whose count is a run-time value — enters the
-            // same subroutine through the host instead.
+            // A spread call's arity is a run-time value, so it cannot pick the
+            // overload here: it hands the *base* name over and `GCALL_SPREAD`
+            // resolves `name/arity` once the list is built.
             if Self::has_spread(args) {
+                let base = self.b.add_name(name);
                 self.emit_spread_args(args, line)?;
-                self.b.emit(Op::LoadInt(nidx as i64), line);
+                self.b.emit(Op::LoadInt(base as i64), line);
                 self.emit_call_builtin(crate::host::GCALL_SPREAD, 0, line)?;
                 self.emit_exc_check(line)?;
                 return Ok(());
             }
+            let nidx = self.b.add_name(&self.fn_sub_name(name, args.len()));
             for a in args {
                 self.expr(a)?;
             }

@@ -603,18 +603,15 @@ infinite loop on both sides.
   synthetic per-closure class (`Script1$_run_closure1`), whose name depends on
   the enclosing script's name and the closure's position; groovyrs has no such
   class to name.
-- **Method overloading, by arity as well as by parameter type.** A class's
-  methods (and its operator methods) are keyed by *name alone* — `ClassMeta`
-  holds a `HashMap<String, u16>`, and the synthetic subroutine each method
-  compiles to is named `$cls_<class>_m_<name>` with no arity in it — so every
-  same-named declaration collapses onto one entry and the **first** declared
-  body answers every call. `class C { def g() { "zero" }; def g(a) { "one" };
-  def g(a, b) { "two" } }` answers `[zero, zero, zero]` where Groovy answers
-  `[zero, one, two]`, and the extra arguments are silently discarded rather
-  than raising. Top-level script functions collapse the same way (`def f() {
-  "f0" }; def f(a) { "f1" }` makes `f(1)` answer `f0`). Constructors are the
-  exception and already work: they are keyed by *arity* (`HashMap<u8, u16>`,
-  `$cls_<class>_ctor_<arity>`), which is the shape the method table needs.
+- **Method overloading by *parameter type*.** Overloading by **arity** now
+  works — for class methods, interface and trait methods, and top-level script
+  functions — but two declarations taking the same *number* of arguments still
+  collapse onto one, because the runtime is dynamically typed and nothing
+  distinguishes them. `def m(String s)` and `def m(int i)` are one method here,
+  and the last declared body answers both calls. A call whose arity matches no
+  declaration also still reaches the name's other body rather than raising, which
+  is deliberate: it is what every program that relied on the old name-only
+  lookup did.
 - **A `BigInteger` argument where the JDK overload wants an `int`.**
   `255.toString(16G)` answers `16` in Groovy — the `BigInteger` coerces to the
   `int` the static `Integer.toString(int)` wants — where groovyrs raises
@@ -1162,12 +1159,6 @@ infinite loop on both sides.
   Calling it on an *instance* works, because that is ordinary dispatch. This is
   not trait-specific — a `static` method in a `trait` is unreachable for the same
   reason.
-- **A class defining both `propertyMissing` forms gets only one.** The reader
-  (`propertyMissing(String)`) and the writer (`propertyMissing(String, value)`)
-  share a name, and methods are keyed by name alone (see the overloading entry
-  above), so the second declaration replaces the first and only its half of the
-  hook fires. Either form alone works. Same root as the overloading gap, not a
-  hook-specific one.
 - **A user instance renders as its class name, not `Class@hash`.** `new W()`
   prints `W` where Groovy prints `W@60fa3495`, and `toString()` agrees with it.
   The suffix is the JVM identity hash, which is not reproducible here — the same

@@ -5865,3 +5865,127 @@ println([1,2,3].inject(0) { a, b -> a + b })"#);
     assert!(ok);
     assert_eq!(out, "6\n7\n6\n");
 }
+
+/// Method overloading **by arity**. Methods were keyed by name alone, so two
+/// same-named declarations collapsed onto one — and the surviving one answered
+/// calls of every arity.
+///
+/// The arity is now part of the synthetic sub's name, so both bodies exist, and
+/// a second table keyed `name/arity` is what separates them. A call whose arity
+/// matches no declaration still reaches the method it always did, so nothing
+/// that worked before became a miss. Every expectation is Apache Groovy 5.1.0's
+/// own output.
+#[test]
+fn methods_overload_by_arity() {
+    let (out, ok) = run(r#"class C {
+  String toString() { 'C!' }
+  def f() { 'zero' }
+  def f(a) { "one:$a" }
+  def f(a, b) { "two:$a$b" }
+  def g(a) { f(a) }
+}
+def c = new C()
+println(c)
+println(c.f()); println(c.f(1)); println(c.f(1,2))
+println(c.g(7))
+println(c.f(*[1,2]))
+class Over { def m(a) { "1:$a" }; def m(a,b) { "2:$a,$b" } }
+class Sub2 extends Over { def m(a) { "sub:$a" } }
+def s = new Sub2()
+println(s.m(1)); println(s.m(1,2))
+interface I { default String d() { 'id' }; default String d(x) { "id:$x" } }
+class J implements I {}
+println(new J().d()); println(new J().d(5))
+trait T { String t() { 't0' }; String t(x) { "t1:$x" } }
+class K implements T {}
+println(new K().t()); println(new K().t(9))"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "C!\nzero\none:1\ntwo:12\none:7\ntwo:12\n\
+         sub:1\n2:1,2\nid\nid:5\nt0\nt1:9\n"
+    );
+}
+
+/// A class may now define **both** `propertyMissing` forms — the one-argument
+/// reader and the two-argument writer. They share a name, so before arity keying
+/// the second replaced the first and only half the hook fired.
+#[test]
+fn a_class_can_define_both_property_missing_forms() {
+    let (out, ok) = run(r#"class F {
+  def store = [:]
+  def propertyMissing(String n, v) { store[n] = v }
+  def propertyMissing(String n) { store[n] }
+}
+def f = new F()
+f.x = 9
+println(f.x)
+f.y = 'q'
+println(f.y)
+println(f.zz)"#);
+    assert!(ok);
+    assert_eq!(out, "9\nq\nnull\n");
+}
+
+/// Every dispatch hook, in a program containing **no `try`**.
+///
+/// This is a regression guard for a real mistake: the first `methodMissing`
+/// implementation appeared to pass because every probe happened to contain a
+/// `try`. `raise_with` parks a pending throwable only when the program has armed
+/// exceptions — a `try` anywhere does that — and otherwise hard-faults and halts
+/// the VM. A hook that reads the miss off the pending exception therefore works
+/// in one kind of program and not the other, and the corpus wrapped every probe
+/// in a `try`, so it could not tell them apart.
+///
+/// The hooks intercept the miss where it happens (`MISS_PROBE`) rather than
+/// reading it afterwards, which is what makes them independent of that. Keeping
+/// a `try`-free program in the suite is what keeps them so.
+#[test]
+fn the_dispatch_hooks_work_in_a_program_with_no_try() {
+    let src = r#"class F {
+  def store = [:]
+  def propertyMissing(String n, v) { store[n] = v }
+  def propertyMissing(String n) { store[n] }
+}
+def f = new F()
+f.x = 9
+println(f.x)
+println(f.zz)
+class M { def methodMissing(String n, args) { "mm:$n/${args.size()}" } }
+def m = new M()
+println(m.anything())
+println(m.other(1,2))
+println(m.with { 'gdk wins' })
+class NumCat { static int twice(Integer i) { i * 2 } }
+use (NumCat) { println 3.twice() }"#;
+    assert!(!src.contains("try"), "this test is only meaningful without a try");
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "9\nnull\nmm:anything/0\nmm:other/2\ngdk wins\n6\n");
+}
+
+/// Top-level script functions overload by arity too — and a spread call reaches
+/// the right one, which the compiler cannot choose because the argument count is
+/// not known until the operand is evaluated.
+#[test]
+fn script_functions_overload_by_arity() {
+    let (out, ok) = run(r#"def f() { "f0" }
+def f(a) { "f1:$a" }
+def f(a,b) { "f2:$a$b" }
+println(f()); println(f(1)); println(f(1,2))
+def only(a) { "only:$a" }
+println(only(5))
+def rec(n) { n <= 0 ? 'done' : rec(n-1) }
+println(rec(3))
+def fact(n) { n <= 1 ? 1 : n * fact(n-1) }
+println(fact(5))
+def g(a) { "g1" }
+def g(a,b) { g(a) + "/g2" }
+println(g(1,2))
+println(f(*[1,2]))"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "f0\nf1:1\nf2:12\nonly:5\ndone\n120\ng1/g2\nf2:12\n"
+    );
+}

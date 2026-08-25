@@ -395,6 +395,10 @@ Implemented and checked against Apache Groovy:
   `BigDecimal`/`BigInteger`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, the assigning
   `a ?= b`, and `a?.member` / `a?.method()`.
+- **Method overloading by arity** — `def f()`, `def f(a)` and `def f(a, b)` are
+  three methods, for a class, an interface, a trait and a top-level script
+  function alike. A spread call resolves its overload at run time, since its
+  argument count is not known until the operand is evaluated.
 - **Category `use` blocks** — `use (NumCat) { 3.twice() }`. A category makes a
   class's methods available on the type of their first parameter, for the
   duration of the block, and only where the receiver has no such method of its
@@ -578,10 +582,9 @@ Debug Adapter (`--dap`).
 
 Next waves, in priority order:
 
-1. **Method overloading, by arity as well as by parameter type** — today methods
-   and operator methods are keyed by name only, so same-named declarations
-   collapse onto the first, which then answers calls of every arity.
-   Constructors already key by arity and are the shape to follow.
+1. **Method overloading by parameter type** — overloading by *arity* works;
+   two declarations taking the same number of arguments still collapse, because
+   the runtime is dynamically typed and nothing tells them apart.
 2. **`static` methods on a class.** `Z.s()` does not resolve — a class name in
    expression position is a `java.lang.Class`, and the static half of a method
    table is not modeled. On an instance it is ordinary dispatch and works.

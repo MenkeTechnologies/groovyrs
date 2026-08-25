@@ -699,7 +699,7 @@ pub fn format_double(f: f64) -> String {
     // ulp spanning a large fraction of the value — can differ.
     let (digits, exponent) = match digits.len() {
         1 => nearest_two_digits(f).unwrap_or((digits, exponent)),
-        _ => (digits, exponent),
+        _ => java_tie_break(f, &digits, exponent).unwrap_or((digits, exponent)),
     };
     let body = if (-3..7).contains(&exponent) {
         if exponent >= 0 {
@@ -719,6 +719,37 @@ pub fn format_double(f: f64) -> String {
         format!("{}.{fraction}E{exponent}", &digits[..1])
     };
     format!("{sign}{body}")
+}
+
+/// Re-round `f` to the digit count Rust chose, **half to even**, which is how
+/// `Double.toString` breaks a tie and how Rust's `{:e}` does not.
+///
+/// Both pick the shortest decimal that reads back as `f`. When two decimals of
+/// that length are *equidistant* from `f`'s exact value they both read back,
+/// and the two disagree about which to print: Java takes the one with an even
+/// last digit, Rust takes the one further from zero. `-758507325198948.25` is
+/// exactly halfway between `…48.2` and `…48.3`, so Groovy prints
+/// `-7.585073251989482E14` where this printed `…483` — and the same for every
+/// double whose shortest form lands on a tie.
+///
+/// `f`'s exact value is a finite decimal (a binary fraction always is), so
+/// `BigDecimal::from_f64` loses nothing. `None` when the re-rounded decimal
+/// does not read back as `f`, in which case the caller keeps Rust's digits.
+fn java_tie_break(f: f64, digits: &str, exponent: i64) -> Option<(String, i64)> {
+    // Rounding to `digits.len()` significant digits is rounding to the scale
+    // that puts the last of them just past the point.
+    let scale = digits.len() as i64 - 1 - exponent;
+    let rounded = BigDecimal::from_f64(f)?.with_scale_round(scale, RoundingMode::HalfEven);
+    if to_f64(&rounded) != f {
+        return None;
+    }
+    let (unscaled, scale) = rounded.as_bigint_and_exponent();
+    let out = unscaled.abs().to_string();
+    // A carry out of the leading digit (`9.99` → `10.0`) moves the exponent,
+    // so it is recomputed from the rounded value rather than carried over.
+    let exponent = out.len() as i64 - 1 - scale;
+    let out = out.trim_end_matches('0');
+    Some((if out.is_empty() { "0" } else { out }.to_string(), exponent))
 }
 
 /// The two-significant-digit decimal nearest `f`, as `(digits, exponent)` in the
@@ -975,6 +1006,32 @@ mod tests {
         assert_eq!(format_double(1.0e23), "1.0E23");
         assert_eq!(format_double(f64::from_bits(202)), "1.0E-321");
         assert_eq!(format_double(1.0e-310), "1.0E-310");
+    }
+
+    /// A double whose shortest round-tripping decimal is an exact *tie* between
+    /// two candidates. Both read back as the same double, so both are "the
+    /// shortest form" — `Double.toString` takes the one with an even last digit
+    /// and Rust's `{:e}` takes the one further from zero, and the two disagree
+    /// on the last digit printed.
+    ///
+    /// `-758507325198948.25` is exactly halfway between `…48.2` and `…48.3`.
+    /// Each expectation is the stdout of Apache Groovy 5.1.0 on JVM 26.
+    #[test]
+    fn a_shortest_form_tie_rounds_half_to_even_like_java() {
+        // Spelled as bits because the exact value — `-758507325198948.25`,
+        // halfway between the two 16-digit candidates — is more precision than
+        // a Rust literal is allowed to carry even though the double holds it.
+        let tie = f64::from_bits(0xc305_8edd_fd6c_9322);
+        assert_eq!(format_double(tie), "-7.585073251989482E14");
+        assert_eq!(format_double(-tie), "7.585073251989482E14");
+        // The digits Rust would have produced still read back as the value, so
+        // nothing but the tie rule distinguishes them — which is exactly why
+        // this went unnoticed.
+        assert_eq!("-7.585073251989483E14".parse::<f64>().unwrap(), tie);
+        // A value that is *not* a tie keeps Rust's digits untouched.
+        assert_eq!(format_double(0.1), "0.1");
+        assert_eq!(format_double(1.0 / 3.0), "0.3333333333333333");
+        assert_eq!(format_double(2.0f64.powi(70)), "1.1805916207174113E21");
     }
 
     #[test]

@@ -395,6 +395,12 @@ Implemented and checked against Apache Groovy:
   `BigDecimal`/`BigInteger`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, the assigning
   `a ?= b`, and `a?.member` / `a?.method()`.
+- **`trait`s** — stateful interfaces with method bodies: a trait declares fields
+  that every implementing class materialises, its methods need no `default`
+  keyword, `instanceof` answers for it, and it may `extends` another trait and
+  reach it with `super`. Resolution is Groovy's: the class's own method wins over
+  any trait's, and between two traits the one declared **last** in `implements`
+  wins.
 - **The spread operator** — in a literal (`[a, *b, c]`, `[k: v, *:m]`) and in an
   argument position (`f(*args)`, `obj.m(*args)`, `new T(*args)`, `super(*args)`).
   A list spread takes everything the operand enumerates (a list, a range, a set,
@@ -448,10 +454,9 @@ Implemented and checked against Apache Groovy:
   `catch (groovy.lang.MissingMethodException e)`, a multi-catch arm,
   `instanceof`, and `new`.
 
-See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
-overloading by parameter type, script-declared class names as values,
-`GString` as a type, `++`/`--` not calling `next`/`previous`,
-`String.leftShift`'s class).
+See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`static` methods on a
+class, method overloading by parameter type, script-declared class names as
+values, `GString` as a type, `++`/`--` not calling `next`/`previous`).
 
 ---
 
@@ -550,8 +555,9 @@ Next waves, in priority order:
    and operator methods are keyed by name only, so same-named declarations
    collapse onto the first, which then answers calls of every arity.
    Constructors already key by arity and are the shape to follow.
-2. **`trait`s** — `interface` and `implements` are modeled (including `default`
-   methods); `trait` is not.
+2. **`static` methods on a class.** `Z.s()` does not resolve — a class name in
+   expression position is a `java.lang.Class`, and the static half of a method
+   table is not modeled. On an instance it is ordinary dispatch and works.
 3. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
    `"$s".getClass()` reports `java.lang.String` where Groovy reports
    `org.codehaus.groovy.runtime.GStringImpl`.

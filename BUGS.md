@@ -1128,6 +1128,12 @@ infinite loop on both sides.
 - **`"abc".chars()` is not modeled.** It answers an `IntStream`, which groovyrs
   has no value for. (`toArray()`, `toCharArray()` and `String.bytes` no longer
   share this gap — they answer real `Object[]` / `char[]` / `byte[]` arrays.)
+- **A `static` method is not callable on the class.** `class Z { static String s() { 'x' } }; Z.s()`
+  raises: a class name in expression position is a `java.lang.Class` and the
+  static half of a class's method table is not modeled, so nothing answers.
+  Calling it on an *instance* works, because that is ordinary dispatch. This is
+  not trait-specific — a `static` method in a `trait` is unreachable for the same
+  reason.
 - **A class defining both `propertyMissing` forms gets only one.** The reader
   (`propertyMissing(String)`) and the writer (`propertyMissing(String, value)`)
   share a name, and methods are keyed by name alone (see the overloading entry

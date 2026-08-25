@@ -1284,6 +1284,7 @@ fn register_throwables() {
                 superclass: superclass.map(str::to_string),
                 interfaces: Vec::new(),
                 is_interface: false,
+                is_trait: false,
                 field_names: if superclass.is_none() {
                     vec!["message".to_string()]
                 } else {
@@ -1853,6 +1854,12 @@ struct ClassMeta {
     interfaces: Vec<String>,
     /// True for an `interface` declaration — it cannot be instantiated.
     is_interface: bool,
+    /// True for a `trait`. A trait registers as an interface (non-instantiable,
+    /// and `instanceof` answers for it) but differs in two ways an interface
+    /// does not: it carries **state**, so every implementing class materialises
+    /// its fields, and two traits declaring the same method are resolved
+    /// last-declared-first rather than being an ambiguity.
+    is_trait: bool,
     field_names: Vec<String>,
     /// Field initializer thunks: name-pool index of a synthetic 0-arg subroutine
     /// that computes the initial value, per field that has an initializer.
@@ -3349,6 +3356,22 @@ fn lookup_method(class: u32, method: &str) -> Option<u16> {
 /// from the most-derived class, so a nearer `default` method shadows a farther
 /// one. Cycles (`interface A extends B`, `B extends A`) terminate on the seen
 /// set.
+/// The traits `class` implements, transitively — the subset of its interface
+/// closure that is declared `trait`.
+///
+/// In the order a *field* should be materialised: the closure is built
+/// last-declared-first (see [`interface_closure`]), and this reverses it back so
+/// an earlier trait's initializer runs before a later one's, which is the order
+/// Groovy runs them in.
+fn trait_closure(class: u32) -> Vec<u32> {
+    let mut out: Vec<u32> = interface_closure(class)
+        .into_iter()
+        .filter(|id| class_meta(*id).is_some_and(|m| m.is_trait))
+        .collect();
+    out.reverse();
+    out
+}
+
 fn interface_closure(class: u32) -> Vec<u32> {
     let mut queue: Vec<u32> = class_chain(class);
     queue.reverse(); // most-derived class first
@@ -3360,7 +3383,13 @@ fn interface_closure(class: u32) -> Vec<u32> {
             i += 1;
             continue;
         };
-        for name in &meta.interfaces {
+        // Walked **last-declared-first**. Groovy resolves a method two traits
+        // both define to the one declared last in `implements A, B` — `B` wins —
+        // and searching in reverse is what makes the first hit that one. For
+        // plain interfaces the order is unobservable in any program that
+        // compiles: two interfaces with conflicting `default` methods are an
+        // ambiguity Java refuses, so nothing valid can tell the two orders apart.
+        for name in meta.interfaces.iter().rev() {
             if let Some(id) = find_class(name) {
                 if !seen.contains(&id) {
                     seen.push(id);
@@ -3462,6 +3491,7 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
     // (empty string ⇒ root class) are pushed first by `register_class`, so they
     // pop last and in that order.
     let interfaces_a = vm.stack.pop().unwrap_or(Value::Undef);
+    let is_trait = matches!(vm.stack.pop(), Some(Value::Bool(true)));
     let is_interface = matches!(vm.stack.pop(), Some(Value::Bool(true)));
     let super_name = vm
         .stack
@@ -3510,6 +3540,7 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
             superclass,
             interfaces,
             is_interface,
+            is_trait,
             field_names,
             field_inits,
             methods,
@@ -3842,8 +3873,12 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
     // Materialise every field across the superclass chain (root → leaf), each
     // defaulting to null — an inherited field is a real field of the instance.
     let chain = class_chain(cid);
+    // A trait carries state, so its fields are the instance's too — that is what
+    // separates a trait from an interface. Traits come first so a class's own
+    // field of the same name wins the initializer order below.
+    let traits: Vec<u32> = trait_closure(cid);
     let mut fields = std::collections::HashMap::new();
-    for id in &chain {
+    for id in traits.iter().chain(chain.iter()) {
         if let Some(m) = class_meta(*id) {
             for f in &m.field_names {
                 fields.insert(f.clone(), Value::Undef);
@@ -3853,7 +3888,7 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
     let handle = heap_push(HeapObj::Instance(Instance { class: cid, fields }));
     // Run field initializers superclass-first so a subclass initializer can rely
     // on inherited state.
-    for id in &chain {
+    for id in traits.iter().chain(chain.iter()) {
         let Some(m) = class_meta(*id) else { continue };
         for (fname, init_idx) in &m.field_inits {
             match invoke_sub(vm, *init_idx, &[]) {

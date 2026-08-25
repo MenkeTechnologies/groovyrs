@@ -478,6 +478,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             superclass,
             interfaces,
             is_interface,
+            is_trait,
             fields,
             ctors,
             methods,
@@ -489,6 +490,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
                 superclass.as_deref(),
                 interfaces,
                 *is_interface,
+                *is_trait,
                 fields,
                 ctors,
                 methods,
@@ -537,20 +539,22 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         if let StmtKind::Class {
             name,
             superclass,
+            interfaces,
+            is_trait,
             fields,
             ctors,
             methods,
             ..
         } = &stmt.kind
         {
-            c.class_bodies(
-                stmt.line,
-                name,
-                superclass.as_deref(),
-                fields,
-                ctors,
-                methods,
-            )?;
+            // A trait's `extends` names land in `interfaces` (the declaration is
+            // a list, as an interface's is), so its `super.m()` has to resolve
+            // through there — a trait has no superclass slot to publish.
+            let parent = match (is_trait, superclass.as_deref()) {
+                (true, None) => interfaces.first().map(String::as_str),
+                (_, s) => s,
+            };
+            c.class_bodies(stmt.line, name, parent, fields, ctors, methods)?;
         }
     }
     // Emit queued closure bodies as subroutine regions. Draining may enqueue
@@ -1069,6 +1073,7 @@ impl Compiler {
         superclass: Option<&str>,
         interfaces: &[String],
         is_interface: bool,
+        is_trait: bool,
         fields: &[Field],
         ctors: &[Ctor],
         methods: &[Method],
@@ -1080,9 +1085,13 @@ impl Compiler {
             .b
             .add_constant(Value::str(superclass.unwrap_or("").to_string()));
         self.b.emit(Op::LoadConst(sidx), line);
-        // `interface` flag, then the implemented-interface name array.
+        // `interface` flag, the `trait` flag, then the implemented-interface
+        // name array. Pushed in that order, so the register builtin pops the
+        // trait flag before the interface one.
         let iidx = self.b.add_constant(Value::bool(is_interface));
         self.b.emit(Op::LoadConst(iidx), line);
+        let tidx = self.b.add_constant(Value::bool(is_trait));
+        self.b.emit(Op::LoadConst(tidx), line);
         for i in interfaces {
             let c = self.b.add_constant(Value::str(i.clone()));
             self.b.emit(Op::LoadConst(c), line);

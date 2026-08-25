@@ -5599,3 +5599,58 @@ println(sb == sb); println(sb == new StringBuilder('ab')); println(sb.equals(sb)
         "true\ntrue\ntrue\ntrue\nfalse\nfalse\ntrue\ntrue\ntrue\ntrue\n"
     );
 }
+
+/// `trait` — a stateful interface with method bodies. groovyrs did not parse the
+/// keyword at all.
+///
+/// A trait registers as an interface (non-instantiable, and `instanceof`
+/// answers for it) and differs in the two ways that make it a trait: it carries
+/// **state**, so every implementing class materialises its fields, and two
+/// traits declaring the same method resolve last-declared-first rather than
+/// being an ambiguity. Every expectation is Apache Groovy 5.1.0's own output.
+#[test]
+fn a_trait_carries_state_and_method_bodies() {
+    let (out, ok) = run(r#"trait Named { String name = 'anon'; String who() { "I am $name" } }
+trait Aged { int age = 0; String info() { "age=$age" } }
+class Person implements Named, Aged {}
+def p = new Person()
+println(p.who())
+println(p.info())
+p.name = 'bo'; p.age = 7
+println(p.who() + ' ' + p.info())
+println(p instanceof Named)
+println(p instanceof Aged)
+class Sub extends Person {}
+def s = new Sub(); s.name = 'sub'; println(s.who())"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "I am anon\nage=0\nI am bo age=7\ntrue\ntrue\nI am sub\n"
+    );
+}
+
+/// Trait linearization: the class's own method wins over any trait's, the trait
+/// declared **last** wins between two that conflict, and `super` inside a trait
+/// reaches the trait it extends — through a chain of them.
+#[test]
+fn trait_methods_resolve_last_declared_first() {
+    let (out, ok) = run(r#"trait A { String who() { 'A' } }
+trait B { String who() { 'B' } }
+class D implements A, B {}
+println(new D().who())
+class E implements A, B { String who() { 'E' } }
+println(new E().who())
+trait Base { String tag() { 'base' } }
+trait Mid extends Base { String tag() { 'mid>' + super.tag() } }
+trait Top extends Mid { String tag() { 'top>' + super.tag() } }
+class T implements Top {}
+println(new T().tag())
+trait Abs { abstract String must(); String call2() { 'via ' + must() } }
+class Impl implements Abs { String must() { 'impl' } }
+println(new Impl().call2())
+trait Cnt { int n = 0; def inc() { n = n + 1; this } }
+class K implements Cnt {}
+def k = new K(); k.inc().inc(); println(k.n)"#);
+    assert!(ok);
+    assert_eq!(out, "B\nE\ntop>mid>base\nvia impl\n2\n");
+}

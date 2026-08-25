@@ -144,6 +144,14 @@ pub enum StmtKind {
         /// An interface cannot be instantiated; its method declarations with a
         /// body are Java 8 `default` methods, inherited by every implementor.
         is_interface: bool,
+        /// A `trait` rather than a `class` or an `interface`.
+        ///
+        /// A trait is an interface that also carries **state**: it may declare
+        /// fields, which every implementing class materialises, and its method
+        /// bodies are inherited without the `default` keyword. It is not
+        /// instantiable, and it participates in `instanceof`, so it registers as
+        /// an interface — this flag is what separates the parts that differ.
+        is_trait: bool,
         fields: Vec<Field>,
         ctors: Vec<Ctor>,
         methods: Vec<Method>,

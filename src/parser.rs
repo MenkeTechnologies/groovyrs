@@ -251,10 +251,12 @@ impl Parser {
             // (`abstract class C`, `public final class C`).
             Tok::Ident(_) if self.type_decl_ahead().is_some() => {
                 let is_interface = self.type_decl_ahead() == Some(true);
-                while !matches!(self.peek(), Tok::Ident(w) if w == "class" || w == "interface") {
+                while !matches!(self.peek(), Tok::Ident(w) if w == "class" || w == "interface" || w == "trait")
+                {
                     self.advance();
                 }
-                self.class_decl(is_interface)?
+                let is_trait = matches!(self.peek(), Tok::Ident(w) if w == "trait");
+                self.class_decl(is_interface, is_trait)?
             }
             // `try`/`throw` are contextual keywords (the lexer emits them as
             // identifiers); a `try` is only a statement when a block follows.
@@ -587,9 +589,13 @@ impl Parser {
         let mut i = 0;
         loop {
             match self.peek_at(i) {
-                Tok::Ident(w) if w == "class" || w == "interface" => {
-                    return matches!(self.peek_at(i + 1), Tok::Ident(_))
-                        .then_some(w == "interface");
+                Tok::Ident(w) if w == "class" || w == "interface" || w == "trait" => {
+                    if !matches!(self.peek_at(i + 1), Tok::Ident(_)) {
+                        return None;
+                    }
+                    // `interface` and `trait` both declare a non-instantiable
+                    // type; the caller separates them by the keyword itself.
+                    return Some(w != "class");
                 }
                 Tok::Ident(w)
                     if matches!(
@@ -616,8 +622,8 @@ impl Parser {
     /// and methods (`def m(params){..}` / typed). Inside an interface a method
     /// with no body is an abstract declaration and contributes nothing; one with
     /// a body is a `default` method every implementor inherits.
-    fn class_decl(&mut self, is_interface: bool) -> Result<StmtKind, String> {
-        self.advance(); // `class` / `interface`
+    fn class_decl(&mut self, is_interface: bool, is_trait: bool) -> Result<StmtKind, String> {
+        self.advance(); // `class` / `interface` / `trait`
         let name = self.ident()?;
         self.skip_newlines();
         let mut superclass = None;
@@ -682,6 +688,7 @@ impl Parser {
             superclass,
             interfaces,
             is_interface,
+            is_trait,
             fields,
             ctors,
             methods,

@@ -1063,6 +1063,9 @@ fn java_class_name(v: &Value) -> String {
         _ if as_list_raw(v).is_some() => "java.util.ArrayList",
         _ if as_bigint(v).is_some() => "java.math.BigInteger",
         _ if as_dec(v).is_some() => "java.math.BigDecimal",
+        // A `withDefault` view names its own wrapper class, not the class of the
+        // map it wraps — tested ahead of the map arm, which resolves through it.
+        _ if is_map_with_default(v) => "groovy.lang.MapWithDefault",
         _ if omap_kind(v).is_some() => map_class(omap_kind(v).unwrap()),
         _ if closure_meta(v).is_some() => "groovy.lang.Closure",
         _ if as_iter(v).is_some() => return as_iter(v).unwrap().0.to_string(),
@@ -1377,6 +1380,16 @@ enum HeapObj {
     /// every access to a boxed name, so nothing but a capture ever holds the
     /// handle.
     Cell(Value),
+    /// A `groovy.lang.MapWithDefault` — a live **view** onto the map whose heap
+    /// id this holds, with its own default closure in [`MAP_DEFAULTS`].
+    ///
+    /// A view rather than a copy because that is what `withDefault` answers: a
+    /// default written through it appears in the map it was taken from, a later
+    /// `put` on that map is visible through it, and the two compare equal — but
+    /// it is a distinct handle, so `wd.is(m)` is `false` and only the view
+    /// defaults a missing key. [`map_backing`] resolves it, and every
+    /// entry-level map operation goes through that.
+    MapWithDefault(u32),
     Instance(Instance),
     /// A Groovy map. Entries are *stored* in insertion order whatever the
     /// implementation; [`MapKind`] decides the order they are iterated and
@@ -2346,11 +2359,47 @@ fn as_omap(v: &Value) -> Option<Vec<(String, Value)>> {
     Some(map_order(entries, kind))
 }
 
+/// The map a handle really stores its entries in.
+///
+/// `map.withDefault { … }` answers a **view**, not a copy — `groovy.lang.MapWithDefault`
+/// wraps the map it was taken from, so a default written through the view is
+/// visible in the original and a later `put` on the original is visible through
+/// the view. The view is its own handle (`wd.is(m)` is `false`, and only the
+/// view has a default) whose heap object names the map it wraps, and every
+/// entry-level operation below resolves through here before touching storage.
+///
+/// Not a chain: a view is only ever taken over a real map, because
+/// `withDefault` itself resolves its receiver first.
+fn map_backing(v: &Value) -> Value {
+    let Value::Obj(id) = v else { return v.clone() };
+    match HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::MapWithDefault(target)) => Some(*target),
+        _ => None,
+    }) {
+        Some(target) => Value::Obj(target),
+        None => v.clone(),
+    }
+}
+
+/// Is `v` a `withDefault` view rather than a map of its own? The one question
+/// [`map_backing`] deliberately hides, and `getClass()` is what asks it.
+fn is_map_with_default(v: &Value) -> bool {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| {
+            matches!(
+                h.borrow().get(*id as usize),
+                Some(HeapObj::MapWithDefault(_))
+            )
+        }),
+        _ => false,
+    }
+}
+
 /// The entries of an ordered-map handle in **storage** (insertion) order, with
 /// the kind that decides how they are presented.
 fn as_omap_kind(v: &Value) -> Option<(Vec<(String, Value)>, MapKind)> {
-    match v {
-        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+    match map_backing(v) {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(id as usize) {
             Some(HeapObj::OrderedMap { entries, kind, .. }) => Some((entries.clone(), *kind)),
             _ => None,
         }),
@@ -2433,8 +2482,8 @@ fn gmap_kind(entries: Vec<(String, Value)>, kind: MapKind) -> Value {
 /// took 17.6 s that way against Apache Groovy's 1.4 s. Presentation order does
 /// not matter to a keyed read, so this skips it entirely.
 fn omap_get(v: &Value, key: &str) -> Option<Option<Value>> {
-    match v {
-        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+    match map_backing(v) {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(id as usize) {
             Some(HeapObj::OrderedMap { entries, index, .. }) => {
                 Some(index.get(key).map(|i| entries[*i].1.clone()))
             }
@@ -2447,10 +2496,10 @@ fn omap_get(v: &Value, key: &str) -> Option<Option<Value>> {
 /// Is `v` an ordered-map handle? The cheap question — [`as_omap`] answers it
 /// too, but only by building the copy the caller may not want.
 fn is_omap(v: &Value) -> bool {
-    match v {
+    match map_backing(v) {
         Value::Obj(id) => HEAP.with(|h| {
             matches!(
-                h.borrow().get(*id as usize),
+                h.borrow().get(id as usize),
                 Some(HeapObj::OrderedMap { .. })
             )
         }),
@@ -2460,8 +2509,8 @@ fn is_omap(v: &Value) -> bool {
 
 /// The entry count of an ordered-map handle, without copying it.
 fn omap_len(v: &Value) -> Option<usize> {
-    match v {
-        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+    match map_backing(v) {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(id as usize) {
             Some(HeapObj::OrderedMap { entries, .. }) => Some(entries.len()),
             _ => None,
         }),
@@ -2617,8 +2666,8 @@ fn similar_map_kind(kind: MapKind) -> MapKind {
 /// (updating an existing key keeps its position; a new key appends). Returns
 /// `false` if `v` is not an ordered map.
 fn omap_set(v: &Value, key: String, val: Value) -> bool {
-    match v {
-        Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
+    match map_backing(v) {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(id as usize) {
             Some(HeapObj::OrderedMap { entries, index, .. }) => {
                 match index.get(&key) {
                     Some(i) => entries[*i].1 = val,
@@ -5729,7 +5778,7 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     if map_iteration && is_omap(&recv) {
         let (entries, kind) = as_omap_kind(&recv).unwrap_or_else(|| (Vec::new(), MapKind::Linked));
         let entries = map_order(entries, kind);
-        if let Some(res) = dispatch_map_iteration(vm, &entries, kind, method, &args) {
+        if let Some(res) = dispatch_map_iteration(vm, &recv, &entries, kind, method, &args) {
             return match res {
                 Ok(v) => v,
                 Err(e) => {
@@ -6411,6 +6460,7 @@ fn entry_pairs(v: &Value) -> Vec<(String, Value)> {
 /// `LinkedHashMap` whatever they were called on, as Groovy's do.
 fn dispatch_map_iteration(
     vm: &mut VM,
+    recv: &Value,
     entries: &[(String, Value)],
     kind: MapKind,
     method: &str,
@@ -6672,11 +6722,17 @@ fn dispatch_map_iteration(
         // does. The closure is remembered in `MAP_DEFAULTS` against the copy.
         "withDefault" => {
             let clo = clo?;
-            let copy = gmap(entries.to_vec());
-            if let Value::Obj(id) = copy {
+            // A **view** onto the receiver, not a copy: `MapWithDefault` wraps
+            // the map it was taken from, so the default it writes for a missing
+            // key lands in that map and a later `put` on it is visible here.
+            let Value::Obj(target) = map_backing(recv) else {
+                return Some(Ok(Value::Undef));
+            };
+            let view = heap_push(HeapObj::MapWithDefault(target));
+            if let Value::Obj(id) = view {
                 MAP_DEFAULTS.with(|m| m.borrow_mut().insert(id, clo.clone()));
             }
-            Some(Ok(copy))
+            Some(Ok(view))
         }
         // `map.max { it.value }` / `min` yield the extreme *entry*.
         "max" | "min" => {
@@ -11449,8 +11505,8 @@ fn subsequences_of(items: &[Value]) -> Vec<Value> {
 /// Drop the entries of an ordered-map handle whose key `keep` rejects, mutating
 /// through the handle (a map is shared, unlike a list).
 fn omap_retain(v: &Value, keep: impl Fn(&str) -> bool) -> bool {
-    match v {
-        Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
+    match map_backing(v) {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(id as usize) {
             Some(HeapObj::OrderedMap {
                 entries: m, index, ..
             }) => {

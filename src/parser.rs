@@ -442,11 +442,13 @@ impl Parser {
                 Expr::Property { recv, name, .. } => Ok(StmtKind::SetProperty {
                     recv: *recv,
                     name,
+                    op: AssignOp::Assign,
                     value: guarded,
                 }),
                 Expr::Index { recv, index, .. } => Ok(StmtKind::SetIndex {
                     recv: *recv,
                     index: *index,
+                    op: AssignOp::Assign,
                     value: guarded,
                 }),
                 _ => Err(format!(
@@ -455,32 +457,29 @@ impl Parser {
                 )),
             };
         }
-        if self.is(&Tok::Assign) {
-            if let Expr::Property { recv, name, .. } = lhs {
-                self.advance();
-                self.skip_newlines();
-                let value = self.expression()?;
-                return Ok(StmtKind::SetProperty {
-                    recv: *recv,
-                    name,
-                    value,
-                });
-            }
-            // `recv[index] = value` — Groovy's `putAt`.
-            if let Expr::Index { recv, index, .. } = lhs {
-                self.advance();
-                self.skip_newlines();
-                let value = self.expression()?;
-                return Ok(StmtKind::SetIndex {
-                    recv: *recv,
-                    index: *index,
-                    value,
-                });
-            }
-            return Err(format!(
-                "groovyrs: invalid assignment target on line {}",
-                self.line()
-            ));
+        // `recv.name <op>= value` / `recv[index] <op>= value`, plain `=` included.
+        // The compound forms are not rewritten to `t = t <op> v` here: Groovy
+        // evaluates the receiver and the index once, so the op is carried into
+        // the statement and the compiler duplicates them on the stack.
+        if let Some(op) = assign_op(self.peek()) {
+            self.advance();
+            self.skip_newlines();
+            let value = self.expression()?;
+            return self.assign_to_target(lhs, op, value);
+        }
+        // `recv.name++` / `recv[index]--` in statement position, which is
+        // `<target> += 1` / `-= 1`. Only as a statement: the postfix value a
+        // Groovy expression sees is the *old* one, and nothing here reads it.
+        if matches!(self.peek(), Tok::PlusPlus | Tok::MinusMinus)
+            && matches!(lhs, Expr::Property { .. } | Expr::Index { .. })
+        {
+            let op = if matches!(self.peek(), Tok::PlusPlus) {
+                AssignOp::Add
+            } else {
+                AssignOp::Sub
+            };
+            self.advance();
+            return self.assign_to_target(lhs, op, Expr::Int(1, IntWidth::Int));
         }
         Ok(StmtKind::Expr(lhs))
     }
@@ -527,6 +526,35 @@ impl Parser {
             name: tmp,
             init: Some(value),
         })
+    }
+
+    /// Build the assignment statement for an expression target — a property or
+    /// a subscript. Anything else is not assignable.
+    fn assign_to_target(
+        &mut self,
+        target: Expr,
+        op: AssignOp,
+        value: Expr,
+    ) -> Result<StmtKind, String> {
+        match target {
+            Expr::Property { recv, name, .. } => Ok(StmtKind::SetProperty {
+                recv: *recv,
+                name,
+                op,
+                value,
+            }),
+            // `recv[index] = value` — Groovy's `putAt`.
+            Expr::Index { recv, index, .. } => Ok(StmtKind::SetIndex {
+                recv: *recv,
+                index: *index,
+                op,
+                value,
+            }),
+            _ => Err(format!(
+                "groovyrs: invalid assignment target on line {}",
+                self.line()
+            )),
+        }
     }
 
     /// Parse an optional `= expr` initializer (newlines after `=` continue).
@@ -1086,12 +1114,10 @@ impl Parser {
         if self.for_is_in() {
             return self.for_in();
         }
-        // C-style `for (init; cond; update)`.
-        let init = if self.is(&Tok::Semi) {
-            None
-        } else {
-            Some(Box::new(self.simple_statement()?))
-        };
+        // C-style `for (init; cond; update)`. Both `init` and `update` may be
+        // comma-separated lists (`for (int i = 0, j = n; i < j; i++, j--)`).
+        let line = self.line();
+        let inits = self.for_clause(&Tok::Semi)?;
         self.eat(&Tok::Semi)?;
         let cond = if self.is(&Tok::Semi) {
             None
@@ -1099,19 +1125,95 @@ impl Parser {
             Some(self.expression()?)
         };
         self.eat(&Tok::Semi)?;
-        let update = if self.is(&Tok::RParen) {
-            None
-        } else {
-            Some(Box::new(self.simple_statement()?))
-        };
+        let updates = self.for_clause(&Tok::RParen)?;
         self.eat(&Tok::RParen)?;
         let body = self.braced_or_single()?;
+        // One update statement fits the `For` node; several are wrapped in a
+        // block so `continue` still runs them all, which is what the node's
+        // single-statement update slot means.
+        let update = match updates.len() {
+            0 => None,
+            1 => Some(Box::new(updates.into_iter().next().unwrap())),
+            _ => Some(Box::new(Stmt::new(
+                line,
+                StmtKind::If {
+                    cond: Expr::Bool(true),
+                    then: updates,
+                    els: vec![],
+                },
+            ))),
+        };
+        // Every initializer runs once before the loop, so they are hoisted ahead
+        // of it rather than crowded into the single `init` slot — the same block
+        // wrapper the `for (x in …)` desugaring uses to scope its temporaries.
+        if inits.len() > 1 {
+            let loop_stmt = Stmt::new(
+                line,
+                StmtKind::For {
+                    init: None,
+                    cond,
+                    update,
+                    body,
+                },
+            );
+            let mut then = inits;
+            then.push(loop_stmt);
+            return Ok(StmtKind::If {
+                cond: Expr::Bool(true),
+                then,
+                els: vec![],
+            });
+        }
         Ok(StmtKind::For {
-            init,
+            init: inits.into_iter().next().map(Box::new),
             cond,
             update,
             body,
         })
+    }
+
+    /// The `init` or `update` clause of a C-style `for` header: zero or more
+    /// simple statements separated by commas, up to `end`.
+    ///
+    /// A declarator after the first inherits the first's type, the way Java's
+    /// and Groovy's do — `for (int i = 0, j = 3; …)` declares two `int`s, not an
+    /// `int` and an assignment to an undeclared `j`.
+    fn for_clause(&mut self, end: &Tok) -> Result<Vec<Stmt>, String> {
+        if self.is(end) {
+            return Ok(Vec::new());
+        }
+        let line = self.line();
+        let first = self.simple_statement()?;
+        let decl_ty = match &first.kind {
+            StmtKind::Local { ty, .. } => Some(ty.clone()),
+            _ => None,
+        };
+        let mut out = vec![first];
+        // A declarator can also have arrived through `self.pending` (`def a = 1,
+        // b = 2` queues its later names there); in a header there is no
+        // enclosing statement list to drain it into, so take them here.
+        out.append(&mut self.pending);
+        while self.is(&Tok::Comma) {
+            self.advance();
+            self.skip_newlines();
+            match &decl_ty {
+                Some(ty) => {
+                    let name = self.ident()?;
+                    let init = self.opt_initializer()?;
+                    out.push(Stmt::new(
+                        line,
+                        StmtKind::Local {
+                            ty: ty.clone(),
+                            name,
+                            init,
+                        },
+                    ));
+                }
+                None => out.push(self.simple_statement()?),
+            }
+            out.append(&mut self.pending);
+        }
+        Ok(out)
     }
 
     /// Lookahead: is the `for (` header a `for (x in …)` range loop? (An `in`

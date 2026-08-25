@@ -2454,3 +2454,32 @@ def r = [1,2,3,4] as Set; println r.minus([2,4] as Set); println r.intersect([3,
 def n = [] as Set; n.add(null); n.add(null); println n.size()
 %%
 def big = [] as Set; big.add(9223372036854775807L); big.add(9223372036854775806L); println big.size()
+%%
+# withDefault is a view onto the map it was taken from, not a copy
+def m = [a:1]; def wd = m.withDefault{ k -> k.toUpperCase() }; println m['zz']; wd['q']; println m; println wd
+%%
+def m = [a:1]; def wd = m.withDefault{ 0 }; m.put('b', 2); println wd['b']; wd.put('c', 3); println m; println wd.getClass().getName(); println wd.is(m); println (wd == m)
+%%
+def t = new TreeMap([b:2, a:1]).withDefault{ 0 }; println t.getClass().getName(); println t['z']; println t
+%%
+# compound assignment and ++/-- on subscript and property targets
+def calls = 0; def key = { calls++; 'a' }; def m = [a:1]; m[key()] += 5; println "calls=$calls m=$m"
+%%
+def l = [1,2,3]; l[0] += 10; l[1] *= 3; l[2] -= 1; println l
+%%
+def o = [a:1]; o.a += 7; println o
+%%
+def s = [x:'p']; s['x'] += 'q'; println s
+%%
+def mm = [a:1]; mm['a']++; println mm; mm.a++; println mm
+%%
+def ll = [1,2]; ll[0]++; ll[1]--; println ll
+%%
+def d = [a:10]; d.a /= 4; println d; d['a'] = 10; d['a'] %= 3; println d
+%%
+# comma-separated C-style for clauses
+for (int i=0, j=3; i<j; i++, j--) println "i=$i j=$j"
+%%
+for (int i=0, j=0, k=9; i<2; i++, j+=2, k--) println "$i $j $k"
+%%
+for (int i=0, j=6; i<j; i++, j--) { if (i==1) continue; println "i=$i j=$j" }

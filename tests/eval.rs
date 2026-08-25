@@ -5058,3 +5058,80 @@ r.retainAll([2,3] as Set); println(r)"#);
          [1, 3]\n[3, 4]\n[2, 3, 4]\n[2, 3]\n"
     );
 }
+
+/// `withDefault` answers a live **view** onto the receiver, not a copy: the
+/// default it writes for a missing key lands in the map it was taken from, a
+/// later `put` on that map is visible through the view, and the two compare
+/// equal — but it is a distinct handle, and only the view defaults a key.
+///
+/// groovyrs used to copy, so `m` never saw the default and the view never saw a
+/// later `put`. Expectations are Apache Groovy 5.1.0's own output.
+#[test]
+fn with_default_is_a_view_onto_the_map_it_was_taken_from() {
+    let (out, ok) = run(r#"def m = [a:1]
+def wd = m.withDefault{ k -> k.toUpperCase() }
+println(m['zz']); println(m)
+wd['q']
+println(m); println(wd)
+m.put('b', 2)
+println(wd['b']); println(wd)
+wd.put('c', 3)
+println(m)
+println(wd.getClass().getName()); println(wd.is(m)); println(wd == m)"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "null\n[a:1]\n[a:1, q:Q]\n[a:1, q:Q]\n2\n[a:1, q:Q, b:2]\n\
+         [a:1, q:Q, b:2, c:3]\ngroovy.lang.MapWithDefault\nfalse\ntrue\n"
+    );
+}
+
+/// A compound assignment or a `++`/`--` on a **subscript** or a **property**
+/// target. groovyrs parsed neither — `m['a'] += 1`, `l[0]++`, `p.x += 1` were
+/// all syntax errors — and the lowering has to evaluate the receiver and the
+/// index exactly once, which is why the read is a stack duplicate rather than a
+/// second evaluation of the target expression.
+#[test]
+fn compound_assignment_reaches_subscript_and_property_targets() {
+    let (out, ok) = run(r#"def calls = 0
+def key = { calls++; 'a' }
+def m = [a:1]
+m[key()] += 5
+println("calls=$calls m=$m")
+def rc = 0
+def rf = { rc++; m }
+rf()['a'] += 5
+println("rc=$rc m=$m")
+def l = [1,2,3]
+l[0] += 10; l[1] *= 3; l[2] -= 1; println(l)
+def o = [a:1]; o.a += 7; println(o)
+def s = [x:'p']; s['x'] += 'q'; println(s)
+def mm = [a:1]; mm['a']++; println(mm)
+def nn = [a:1]; nn.a++; println(nn)
+def ll = [1,2]; ll[0]++; ll[1]--; println(ll)
+def d = [a:10]; d.a /= 4; println(d)
+def e = [a:10]; e['a'] %= 3; println(e)"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "calls=1 m=[a:6]\nrc=1 m=[a:11]\n[11, 6, 2]\n[a:8]\n[x:pq]\n\
+         [a:2]\n[a:2]\n[2, 1]\n[a:2.5]\n[a:1]\n"
+    );
+}
+
+/// A C-style `for` header may declare or update several names at once, and a
+/// declarator after the first inherits the first's type.
+#[test]
+fn a_c_style_for_header_takes_comma_separated_clauses() {
+    let (out, ok) = run(r#"for (int i=0, j=3; i<j; i++, j--) println("a i=$i j=$j")
+for (i=0, j=5; i<j; i++, j--) println("b i=$i j=$j")
+for (int i=0, j=0, k=9; i<2; i++, j+=2, k--) println("c $i $j $k")
+for (int i=0, j=6; i<j; i++, j--) { if (i==1) continue; println("d i=$i j=$j") }
+int q=0; for (; q<2; q++) println("e $q")"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "a i=0 j=3\na i=1 j=2\nb i=0 j=5\nb i=1 j=4\nb i=2 j=3\n\
+         c 0 0 9\nc 1 2 8\nd i=0 j=6\nd i=2 j=4\ne 0\ne 1\n"
+    );
+}

@@ -1384,6 +1384,33 @@ impl Compiler {
         self.emit_call_builtin(crate::host::GPROP, 0, self.cur_line)
     }
 
+    /// Lower the right-hand side of an assignment to an expression target,
+    /// combining it with the old value the caller has already pushed.
+    ///
+    /// A plain `=` just lowers the value; a compound op expects the old value on
+    /// top of the stack and leaves the new one in its place. `/=` and `%=` go
+    /// through their own builtins for the same reason the bare-name form does:
+    /// Groovy's `/` promotes to `BigDecimal` and its `%` has a zero-divisor
+    /// guard, neither of which the raw arithmetic op carries.
+    fn emit_compound_value(&mut self, op: AssignOp, value: &Expr) -> Result<(), String> {
+        match op {
+            AssignOp::Assign => self.expr(value),
+            AssignOp::Div => {
+                self.expr(value)?;
+                self.emit_call_builtin(crate::host::GDIV, 2, self.cur_line)
+            }
+            AssignOp::Mod => {
+                self.expr(value)?;
+                self.emit_mod(value, self.cur_line)
+            }
+            _ => {
+                self.expr(value)?;
+                self.b.emit(compound_op(op), self.cur_line);
+                Ok(())
+            }
+        }
+    }
+
     /// Lower an assignment to a bare field inside a method: `field <op>= value`
     /// becomes `this.field = this.field <op> value` through the property-set
     /// builtin. Stack for the builtin is `this` (deepest), the new value, then
@@ -1553,24 +1580,52 @@ impl Compiler {
                 }
                 Ok(())
             }
-            StmtKind::SetProperty { recv, name, value } => {
+            StmtKind::SetProperty {
+                recv,
+                name,
+                op,
+                value,
+            } => {
                 // `recv.name = value` — stack: recv (deepest), value, name.
                 self.expr(recv)?;
-                self.expr(value)?;
+                if !matches!(op, AssignOp::Assign) {
+                    // `recv.name <op>= value`. The receiver is already on the
+                    // stack and is duplicated to read the old value through, so
+                    // the receiver expression runs once — `f().x += 1` calls `f`
+                    // a single time, as Groovy's does.
+                    self.b.emit(Op::Dup, self.cur_line);
+                    let c = self.b.add_constant(Value::str(name.clone()));
+                    self.b.emit(Op::LoadConst(c), self.cur_line);
+                    self.emit_call_builtin(crate::host::GPROP, 0, self.cur_line)?;
+                }
+                self.emit_compound_value(*op, value)?;
                 let c = self.b.add_constant(Value::str(name.clone()));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
                 self.emit_call_builtin(crate::host::GSETPROP, 0, self.cur_line)?;
                 self.b.emit(Op::Pop, self.cur_line);
                 Ok(())
             }
-            StmtKind::SetIndex { recv, index, value } => {
+            StmtKind::SetIndex {
+                recv,
+                index,
+                op,
+                value,
+            } => {
                 // `recv[index] = value` — stack: recv (deepest), index, value.
                 // The builtin answers the receiver's new contents, which a
                 // variable receiver stores back (a fusevm list is a value, so a
                 // list element cannot be written through the handle).
                 self.expr(recv)?;
                 self.expr(index)?;
-                self.expr(value)?;
+                if !matches!(op, AssignOp::Assign) {
+                    // `recv[index] <op>= value`. Both are already on the stack
+                    // and are duplicated to read the old element through, so
+                    // each runs once — `m[key()] += 5` calls `key` a single
+                    // time, as Groovy's does.
+                    self.b.emit(Op::Dup2, self.cur_line);
+                    self.emit_call_builtin(crate::host::GINDEX, 0, self.cur_line)?;
+                }
+                self.emit_compound_value(*op, value)?;
                 self.emit_call_builtin(crate::host::GSETINDEX, 0, self.cur_line)?;
                 match recv {
                     Expr::Var(name) if !self.is_field(name) => {
@@ -3775,7 +3830,12 @@ fn free_in_stmt(s: &Stmt, bound: &HashSet<String>, cx: &mut FreeCtx) {
             free_in_expr(recv, bound, cx);
             free_in_expr(value, bound, cx);
         }
-        StmtKind::SetIndex { recv, index, value } => {
+        StmtKind::SetIndex {
+            recv,
+            index,
+            value,
+            ..
+        } => {
             free_in_expr(recv, bound, cx);
             free_in_expr(index, bound, cx);
             free_in_expr(value, bound, cx);
@@ -4025,7 +4085,12 @@ fn body_uses_exceptions(body: &[Stmt]) -> bool {
         StmtKind::SetProperty { recv, value, .. } => {
             expr_uses_exceptions(recv) || expr_uses_exceptions(value)
         }
-        StmtKind::SetIndex { recv, index, value } => {
+        StmtKind::SetIndex {
+            recv,
+            index,
+            value,
+            ..
+        } => {
             expr_uses_exceptions(recv) || expr_uses_exceptions(index) || expr_uses_exceptions(value)
         }
         StmtKind::Class {
@@ -4134,7 +4199,12 @@ fn body_any(body: &[Stmt], f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         StmtKind::Return { value } => value.as_ref().is_some_and(|e| expr_any(e, f)),
         StmtKind::Function { body, .. } => body_any(body, f),
         StmtKind::SetProperty { recv, value, .. } => expr_any(recv, f) || expr_any(value, f),
-        StmtKind::SetIndex { recv, index, value } => {
+        StmtKind::SetIndex {
+            recv,
+            index,
+            value,
+            ..
+        } => {
             expr_any(recv, f) || expr_any(index, f) || expr_any(value, f)
         }
         StmtKind::Class {

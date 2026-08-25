@@ -64,9 +64,16 @@ pub enum StmtKind {
     /// A subscript assignment `recv[index] = value` — Groovy's `putAt`. Held
     /// apart from [`StmtKind::Assign`] because the receiver is an expression and
     /// a list receiver has to be written back (a fusevm list is a value).
+    ///
+    /// `op` carries the compound forms (`m[k] += 1`, and the `m[k]++` that
+    /// desugars to one). They are not `value: Binary { Index, … }` because
+    /// Groovy evaluates the receiver and the index **once** — `m[key()] += 5`
+    /// calls `key` a single time — so the compiler duplicates them on the stack
+    /// rather than lowering the read twice.
     SetIndex {
         recv: Expr,
         index: Expr,
+        op: AssignOp,
         value: Expr,
     },
     /// An expression evaluated for its side effects: `println(x)`.
@@ -149,9 +156,13 @@ pub enum StmtKind {
     /// A property assignment to a receiver: `recv.name = value` (e.g. `p.x = 10`
     /// or `this.v = x`). Routes through the host property-set builtin, honouring a
     /// user `set<Name>` setter and Groovy's auto-setter on a field.
+    /// `op` carries the compound forms (`p.x += 1`, `p.x++`), lowered with the
+    /// receiver duplicated on the stack so it is evaluated once — see
+    /// [`StmtKind::SetIndex`].
     SetProperty {
         recv: Expr,
         name: String,
+        op: AssignOp,
         value: Expr,
     },
     /// `try { … } catch (T e) { … }* [finally { … }]`. At least one `catch` or a

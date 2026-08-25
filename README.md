@@ -47,8 +47,11 @@ Cranelift tracing JIT. groovyrs carries no VM or JIT of its own; it is a pure
 frontend over the shared engine. Highlights:
 
 - **Compiled, not tree-walked** — arithmetic, comparisons, and control flow
-  lower to native fusevm ops (`LoadInt`, `Add`, `NumLt`, `JumpIfFalse`, …), so
-  the tracing JIT compiles hot loops to native code.
+  lower to native fusevm ops (`LoadInt`, `Add`, `NumLt`, `JumpIfFalse`, …), and
+  every `for` / `while` is emitted **rotated** — the test as an entry guard plus
+  a conditional backward branch — which is the shape fusevm's tracing JIT needs
+  to close a trace, so a hot loop reaches native code. `groovy --tiers` reports
+  whether it did.
 - **fusevm-hosted, no JVM** — no local `vm.rs` / `jit.rs`, no `.class` files, no
   `libjvm`. The same three-tier Cranelift engine that hosts zshrs, stryke,
   awkrs, elisp, ruby, python, php, node, and java runs Groovy too.

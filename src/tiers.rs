@@ -279,23 +279,55 @@ mod tests {
         assert!(report.reaches_native(), "{report}");
     }
 
-    /// A counted loop in a function counts in frame slots, so its body holds
-    /// nothing the tiers refuse and fusevm's recorder accepts the sequence. It
-    /// still installs no trace: the loop is emitted in the unrotated shape — a
-    /// forward `JumpIfFalse` exit closed by an unconditional backward `Jump` —
-    /// which the trace compiler records and then declines. This pins the gap
-    /// the report exists to expose; if loop lowering is rotated later, this
-    /// test is the one that says so.
+    /// A counted loop written in the frontend's own syntax reaches a compiled
+    /// trace. This used to assert the opposite, and said so: the loop was
+    /// lowered with a forward `JumpIfFalse` exit closed by an unconditional
+    /// backward `Jump`, which the trace compiler records and then declines, so
+    /// the hottest shape a Groovy program has stayed in the interpreter
+    /// forever. `Compiler::while_stmt` now emits every `for` and `while`
+    /// rotated — the test duplicated as an entry guard and a conditional
+    /// backward branch — which is the shape
+    /// [`a_rotated_slot_loop_reaches_a_compiled_trace`] proves fusevm accepts.
+    ///
+    /// Keeping it as an assertion rather than deleting it is the point: rotate
+    /// the lowering back, or emit a loop whose body holds an op the tiers
+    /// refuse, and this fails.
+    ///
+    /// It does not assert `!blacklisted`, because this program's accumulator
+    /// leaves 32-bit `Integer` range — `f(200000)` sums to 19 999 900 000, which
+    /// wraps — and fusevm blacklists a strict-mode trace that bails on integer
+    /// overflow. That is a different mechanism from loop shape, and
+    /// [`a_loop_that_does_not_overflow_keeps_its_trace`] is what covers it.
     #[test]
-    fn a_counted_loop_is_trace_eligible_but_installs_no_trace() {
+    fn a_counted_loop_reaches_a_compiled_trace() {
         let report = report(PROGRAM).expect("runs");
         let counted = report.chunks[0]
             .loops
             .iter()
             .find(|l| l.trace_eligible)
             .unwrap_or_else(|| panic!("a trace-eligible loop: {report}"));
-        assert!(!counted.traced, "{report}");
+        assert!(counted.traced, "{report}");
+        assert!(report.reaches_native(), "{report}");
+    }
+
+    /// The same loop shape whose accumulator stays inside `Integer` range keeps
+    /// its trace: nothing deopts, so the header is never blacklisted. Together
+    /// with the test above this separates the two reasons a loop can end up
+    /// back in the interpreter — the shape the frontend emits (fixed) and
+    /// Groovy's 32-bit wrap reaching the trace's overflow bail (not).
+    #[test]
+    fn a_loop_that_does_not_overflow_keeps_its_trace() {
+        let report = report(
+            "def f(int n) { def t = 0; for (int i = 0; i < n; i++) { t = i % 1000 }; return t }\nf(200000)",
+        )
+        .expect("runs");
+        let counted = report.chunks[0]
+            .loops
+            .iter()
+            .find(|l| l.trace_eligible)
+            .unwrap_or_else(|| panic!("a trace-eligible loop: {report}"));
+        assert!(counted.traced, "{report}");
         assert!(!counted.blacklisted, "{report}");
-        assert!(!report.reaches_native(), "{report}");
+        assert!(report.reaches_native(), "{report}");
     }
 }

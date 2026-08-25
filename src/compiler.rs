@@ -1902,21 +1902,45 @@ impl Compiler {
         Ok(())
     }
 
+    /// Lower `while (cond) { … }` **rotated**: the test is emitted once as an
+    /// entry guard and once at the bottom, so the loop closes with a
+    /// *conditional* backward branch instead of an unconditional `Jump` back to
+    /// a test at the top.
+    ///
+    /// That shape is what fusevm's tracing JIT needs — it only closes a trace
+    /// on a conditional backward branch. Emitted the other way, `--tiers`
+    /// reported `trace-eligible=true traced=false` and `reaches native code
+    /// false` for every `for` and `while` groovyrs produced, and the loop
+    /// stayed in the interpreter however hot it got; the same arithmetic
+    /// written as `do { … } while (…)` — the one loop form that already ended
+    /// in a conditional branch — reported `traced=true` and ran three orders of
+    /// magnitude faster (3 000 000 iterations of `s += i % 7`: 3.88 s
+    /// against 0.01 s, measured).
+    ///
+    /// Rotation costs one copy of the condition's code and saves one jump per
+    /// iteration. Evaluation order and count are unchanged: a top-test loop
+    /// runs the test `n + 1` times for `n` iterations, and so does this — one
+    /// entry test, plus one after each body run.
     fn while_stmt(&mut self, cond: &Expr, body: &[Stmt]) -> Result<(), String> {
         let label = self.pending_label.take();
-        let top = self.b.current_pos();
+        let cond_line = self.cur_line;
         self.cond_expr(cond)?;
         let jf = self.b.emit(Op::JumpIfFalse(0), self.cur_line);
+        let top = self.b.current_pos();
         self.loops.push(Loop::new(label, false));
         for s in body {
             self.stmt(s)?;
         }
-        // `continue` in a `while` re-tests the condition: patch to the top.
+        // `continue` in a `while` re-tests the condition, which is now the
+        // bottom copy of it.
+        let test = self.b.current_pos();
         let l = self.loops.pop().unwrap();
         for op in &l.continue_ops {
-            self.b.patch_jump(*op, top);
+            self.b.patch_jump(*op, test);
         }
-        self.b.emit(Op::Jump(top), self.cur_line);
+        self.cur_line = cond_line;
+        self.cond_expr(cond)?;
+        self.b.emit(Op::JumpIfTrue(top), self.cur_line);
         let end = self.b.current_pos();
         self.b.patch_jump(jf, end);
         for op in l.break_ops {
@@ -1925,6 +1949,9 @@ impl Compiler {
         Ok(())
     }
 
+    /// Lower the C-style `for (init; cond; update)`, rotated for the reason
+    /// [`Compiler::while_stmt`] gives. `continue` targets the update, which now
+    /// sits immediately before the bottom copy of the test.
     fn for_stmt(
         &mut self,
         init: &Option<Box<Stmt>>,
@@ -1936,7 +1963,7 @@ impl Compiler {
         if let Some(init) = init {
             self.stmt(init)?;
         }
-        let top = self.b.current_pos();
+        let cond_line = self.cur_line;
         let jf = match cond {
             Some(c) => {
                 self.cond_expr(c)?;
@@ -1944,6 +1971,7 @@ impl Compiler {
             }
             None => None,
         };
+        let top = self.b.current_pos();
         // `continue` runs the update clause, then re-tests — target it at the
         // step label emitted after the body.
         self.loops.push(Loop::new(label, false));
@@ -1960,7 +1988,18 @@ impl Compiler {
         if let Some(update) = update {
             self.stmt(update)?;
         }
-        self.b.emit(Op::Jump(top), self.cur_line);
+        self.cur_line = cond_line;
+        match cond {
+            Some(c) => {
+                self.cond_expr(c)?;
+                self.b.emit(Op::JumpIfTrue(top), self.cur_line);
+            }
+            // `for (;;)` has no test to branch on, so its back edge stays
+            // unconditional — and so, necessarily, does its JIT eligibility.
+            None => {
+                self.b.emit(Op::Jump(top), self.cur_line);
+            }
+        }
         let end = self.b.current_pos();
         if let Some(jf) = jf {
             self.b.patch_jump(jf, end);

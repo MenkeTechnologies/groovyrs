@@ -5736,3 +5736,42 @@ println(new R())"#);
         "P(1,2)\nP(0,5)\nP(0,0)\n[a:1]|9\n[k:1, j:2]\nQ(3)\n0/0/0.0/false/null\n"
     );
 }
+
+/// **GPath**: a property a collection does not itself have is collected from its
+/// elements, so `people.name` is every `name` and it chains through nesting.
+///
+/// The two absences Groovy distinguishes are both pinned: a `null` *element* is
+/// skipped rather than contributing `null`, while a missing *map key* still
+/// contributes `null`. A property the collection really has — `empty`, `class` —
+/// answers instead of spreading. Every expectation is Apache Groovy 5.1.0's own
+/// output.
+#[test]
+fn a_property_a_collection_lacks_is_collected_from_its_elements() {
+    let (out, ok) = run(r#"def l = [[n:[a:1]],[n:[a:2]]]
+println(l.n)
+println(l.n.a)
+class P { String name; int age }
+def ps = [new P(name:'x',age:1), new P(name:'y',age:2)]
+println(ps.name)
+println(ps.age)
+println(ps.name.size())
+println([[a:1],[b:2]].a)
+println([].nope)
+println(([[a:1],[a:2]] as Set).a)
+println([[a:1],[a:2]].a.getClass().getName())
+class Q { String n }
+println([new Q(n:'q'), null].n)
+println([1,2].empty)
+println([].empty)
+println(([1] as Set).empty)
+println([a:1].empty)
+println("".empty)
+println([1,2].class.name)"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[[a:1], [a:2]]\n[1, 2]\n[x, y]\n[1, 2]\n2\n[1, null]\n[]\n[1, 2]\n\
+         java.util.ArrayList\n[q]\nfalse\ntrue\nfalse\nnull\ntrue\n\
+         java.util.ArrayList\n"
+    );
+}

@@ -395,6 +395,11 @@ Implemented and checked against Apache Groovy:
   `BigDecimal`/`BigInteger`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, the assigning
   `a ?= b`, and `a?.member` / `a?.method()`.
+- **GPath** — a property a collection does not itself have is collected from its
+  elements, so `people.name` is every `name` and `orders.items.price` reaches two
+  levels down. A `null` element is skipped; a missing map key still contributes
+  `null`; a property the collection really has (`empty`, `class`) answers instead
+  of spreading.
 - **The AST-transform annotations** — `@ToString` (with `includeNames`),
   `@EqualsAndHashCode`, `@TupleConstructor`, and `@Canonical` (the three
   together). A declared member always wins over the generated one. The generated

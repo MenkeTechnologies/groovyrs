@@ -12414,6 +12414,48 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
         }
         // Groovy's property-for-getter rule: `s.bytes` is `s.getBytes()`.
         (Value::Str(_), "bytes") => dispatch_method(vm, recv, "getBytes", &[]),
+        // `empty` is a real property of a collection and a `String` (the
+        // `isEmpty()` getter), so it answers rather than spreading. A map's is
+        // still the key read handled above, which is why `[a:1].empty` is null.
+        (_, "empty") if as_list(recv).is_some() => {
+            Value::bool(as_list(recv).unwrap_or_default().is_empty())
+        }
+        (_, "empty") if as_set(recv).is_some() => Value::bool(set_len(recv) == Some(0)),
+        (Value::Str(t), "empty") => Value::bool(t.is_empty()),
+        // **GPath**: a property a collection does not itself have is collected
+        // from its elements — `people.name` is every `name`, and it chains, so
+        // `orders.items.price` reaches two levels down. Reached only here, after
+        // every property the collection really has (`empty`, `class`) was tried,
+        // which is what keeps `[1, 2].empty` the list's own `false`.
+        //
+        // A `null` element is skipped rather than contributing `null`, and a
+        // missing *map key* still contributes `null` — those are two different
+        // absences and Groovy distinguishes them.
+        _ if as_list(recv).is_some() || as_set(recv).is_some() => {
+            let items = match as_set(recv) {
+                Some((items, kind)) => set_elements(&items, kind),
+                None => as_list(recv).unwrap_or_default(),
+            };
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                if matches!(it, Value::Undef) {
+                    continue;
+                }
+                let v = match dispatch_instance_prop_get(vm, &it, name) {
+                    Some(Ok(v)) => v,
+                    Some(Err(e)) => {
+                        fault(vm, e);
+                        return Value::Undef;
+                    }
+                    None => dispatch_property(vm, &it, name),
+                };
+                if faulted() || pending_exc() {
+                    return Value::Undef;
+                }
+                out.push(v);
+            }
+            glist(out)
+        }
         // `size`/`length` are *methods* on a String and a list, not properties:
         // Groovy raises `MissingPropertyException` for `[1, 2].size` and
         // `"abc".length` alike (a map's `m.size` is the key read handled above).

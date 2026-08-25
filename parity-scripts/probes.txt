@@ -2633,3 +2633,12 @@ def sb = new StringBuilder('ab'); println(sb == sb); println(sb == new StringBui
 def f = { Map m, x -> "$m|$x" }; println f(a:1, 9)
 %%
 def m = [a:1]; println m.subMap(['a'])
+%%
+# GPath — a property a collection lacks is collected from its elements
+def l = [[n:[a:1]],[n:[a:2]]]; println l.n; println l.n.a
+%%
+println([[a:1],[b:2]].a); println([].nope); println(([[a:1],[a:2]] as Set).a)
+%%
+println([[a:1],[a:2]].a.getClass().getName()); println([1,2].empty); println([].empty)
+%%
+println(([1] as Set).empty); println([a:1].empty); println("".empty); println([1,2].class.name)

@@ -2531,3 +2531,36 @@ long g=2; g **= 40; println g; println g.getClass().getName()
 def l=[1,2]; l <<= 3; println l
 %%
 long o=-1; o >>>= 60; println o
+%%
+# java arrays are a list kind: their own class name, their own `.length`
+def a = new int[3]; println a; println a.length; println a.getClass().getName()
+%%
+def a = new int[3]; a[0] = 7; println a
+%%
+def b = [1,2,3] as int[]; println b.getClass().getName(); println b.length; println b
+%%
+println ([1,2,3] as Integer[]).getClass().getName()
+%%
+println (new String[2]).toString(); println (new String[2]).getClass().getName()
+%%
+println (new long[2]).getClass().getName(); println (new double[2]).getClass().getName(); println (new boolean[2]).getClass().getName(); println (new boolean[2]).toString()
+%%
+def b = [1,2,3] as int[]; println (b instanceof int[]); println (b as List).getClass().getName()
+%%
+def d = "a,b".split(","); println d.getClass().getName(); println d.length; println d
+%%
+def e = [1,2].toArray(); println e; println e.getClass().getName(); println e.length
+%%
+def f = "abc".toCharArray(); println f; println f.getClass().getName(); println f.length; println f[1]
+%%
+def g = "abc".bytes; println g; println g.getClass().getName(); println g.length
+%%
+println "é".bytes
+%%
+def v = { Object... xs -> xs.length + ' ' + xs.getClass().getName() }; println v(1,2)
+%%
+try { new int[-1] } catch (e) { println e.getClass().getName(); println e.getMessage() }
+%%
+println (new int[0]); println (new int[0]).length
+%%
+def a = "a,b,c".split(","); a[1] = 'Z'; println a; println a.length; println a.join('-')

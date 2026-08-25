@@ -395,6 +395,13 @@ Implemented and checked against Apache Groovy:
   `BigDecimal`/`BigInteger`.
 - **Ternary / Elvis / safe navigation** — `c ? t : e`, `a ?: b`, the assigning
   `a ?= b`, and `a?.member` / `a?.method()`.
+- **Java arrays** — `new int[3]`, `[1,2,3] as int[]`, `.length`, and the JVM
+  class descriptors (`[I`, `[J`, `[D`, `[Z`, `[B`, `[C`, `[Ljava.lang.String;`).
+  Modeled as a list *kind*, the way a `TreeMap` is a map kind, so an array
+  iterates, subscripts, `collect`s and prints as a list does; `split`,
+  `toArray()`, `toCharArray()`, `String.bytes` and a varargs closure parameter
+  all answer real arrays. `.length` stays an error on a plain `List`, as in
+  Groovy, and a `char[]` prints its characters run together.
 - **Control flow** — `if` / `else if` / `else`, `while`, `do`/`while`, the
   C-style `for (init; cond; update)` — whose `init` and `update` may each be a
   comma-separated list, `for (int i = 0, j = n; i < j; i++, j--)` — the
@@ -431,8 +438,8 @@ Implemented and checked against Apache Groovy:
   `instanceof`, and `new`.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`trait`s, method
-overloading by parameter type, script-declared class names as values, Java
-arrays, `GString` as a type, `++`/`--` not calling `next`/`previous`,
+overloading by parameter type, script-declared class names as values,
+`GString` as a type, `++`/`--` not calling `next`/`previous`,
 `String.leftShift`'s class).
 
 ---
@@ -534,24 +541,21 @@ Next waves, in priority order:
    Constructors already key by arity and are the shape to follow.
 2. **`trait`s** — `interface` and `implements` are modeled (including `default`
    methods); `trait` is not.
-3. **Java arrays.** `new int[3]` does not resolve — an array is a distinct type
-   from a `List` (`.length` versus `.size()`, class name `[I`), and modeling it
-   as a `List` would make `[1, 2, 3].length` answer where Groovy raises.
-4. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
+3. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
    `"$s".getClass()` reports `java.lang.String` where Groovy reports
    `org.codehaus.groovy.runtime.GStringImpl`.
-5. **A `List` implementation kind.** A set and a map each carry one, so a
+4. **A `List` implementation kind.** A set and a map each carry one, so a
    `TreeSet` and a `TreeMap` sort; a list does not, so
    `new LinkedList([1,2]).getClass()` reports `java.util.ArrayList`. The same
    missing kind is why `asImmutable()` takes a write instead of raising
    `UnsupportedOperationException` — a *wrapper* kind is unmodeled on every
    collection, maps included.
-6. **Collection view types.** `keySet()`, `entrySet()` and `values()` answer a
+5. **Collection view types.** `keySet()`, `entrySet()` and `values()` answer a
    plain `List` with the right contents in the right order, but they are copies
    rather than live views, and `getClass()` names `java.util.ArrayList` where
    Groovy names `java.util.TreeMap$KeySet`. A `Map.Entry` carries no class
    either.
-7. **Command-argument chains beyond one argument** — `println a, b` and
+6. **Command-argument chains beyond one argument** — `println a, b` and
    `foo bar baz` do not parse; the parenthesised call always does.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.

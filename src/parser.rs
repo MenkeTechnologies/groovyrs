@@ -1691,6 +1691,14 @@ impl Parser {
             name.push('.');
             name.push_str(&self.ident()?);
         }
+        // A trailing `[]` makes it an array type (`int[]`, `String[]`). Only the
+        // *empty* pair: `new int[3]` writes its length there and is read by the
+        // `new` form, which looks before calling this.
+        while self.is(&Tok::LBracket) && matches!(self.peek_at(1), Tok::RBracket) {
+            self.advance();
+            self.advance();
+            name.push_str("[]");
+        }
         Ok(name)
     }
 
@@ -1928,6 +1936,20 @@ impl Parser {
                 // the same way `as`, `instanceof` and a `catch` clause read
                 // theirs; `host::b_new` resolves the package.
                 let class = self.type_name()?;
+                // `new int[3]` — an array creation. The length is an expression,
+                // so it cannot ride in the type name; it becomes the single
+                // constructor argument of the array type, which is what
+                // `host::b_new` builds from.
+                if self.is(&Tok::LBracket) && !class.ends_with("[]") {
+                    self.advance();
+                    let len = self.expression()?;
+                    self.eat(&Tok::RBracket)?;
+                    return Ok(Expr::New {
+                        class: format!("{class}[]"),
+                        args: vec![len],
+                        line,
+                    });
+                }
                 let args = if self.is(&Tok::LParen) {
                     self.call_args()?
                 } else {

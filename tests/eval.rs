@@ -5230,3 +5230,82 @@ def p=[a:[1,2]]; p['a'] <<= 9; println(p)"#);
          [1, 2, 3]\n[k:16]\n15\n[a:[1, 2, 9]]\n"
     );
 }
+
+/// Java arrays. `new int[3]`, `as int[]`, `.length`, the class descriptors, and
+/// the array-returning library methods — none of which groovyrs modeled: an
+/// array was a `List`, so `new int[3]` did not resolve and `"abc".bytes.length`
+/// raised.
+///
+/// An array is a list *kind*, the way a `TreeMap` is a `MapKind`. Groovy treats
+/// the two almost identically — an array iterates, subscripts, `collect`s and
+/// prints as a list does — so what this pins is the small part that differs.
+/// Every expectation is Apache Groovy 5.1.0's own output.
+#[test]
+fn java_arrays_are_a_list_kind_with_their_own_class_and_length() {
+    let (out, ok) = run(r#"def a = new int[3]
+println("$a ${a.length} ${a.getClass().getName()}")
+a[0] = 7; println(a)
+def b = [1,2,3] as int[]
+println("${b.getClass().getName()} ${b.length}")
+println(([1,2,3] as Integer[]).getClass().getName())
+println("${new String[2]} ${(new String[2]).getClass().getName()}")
+println("${(new long[2]).getClass().getName()}${(new double[2]).getClass().getName()}")
+println("${new boolean[2]} ${(new boolean[2]).getClass().getName()}")
+println(b instanceof int[])
+println((b as List).getClass().getName())"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[0, 0, 0] 3 [I\n[7, 0, 0]\n[I 3\n[Ljava.lang.Integer;\n\
+         [null, null] [Ljava.lang.String;\n[J[D\n[false, false] [Z\n\
+         true\njava.util.ArrayList\n"
+    );
+}
+
+/// The library methods that answer an array rather than a `List`, and the one
+/// array Groovy does not print like a list: a `char[]` prints its characters
+/// run together where a `byte[]` prints `[97, 98, 99]`.
+#[test]
+fn the_array_returning_library_methods_answer_arrays() {
+    let (out, ok) = run(r#"def d = "a,b".split(",")
+println("${d.getClass().getName()} ${d.length}")
+def e = [1,2].toArray()
+println("$e ${e.getClass().getName()} ${e.length}")
+def f = "abc".toCharArray()
+println("$f ${f.getClass().getName()} ${f.length}")
+def g = "abc".bytes
+println("$g ${g.getClass().getName()} ${g.length}")
+println("é".bytes)
+def v = { Object... xs -> "${xs.length} ${xs.getClass().getName()}" }
+println(v(1,2))"#);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[Ljava.lang.String; 2\n[1, 2] [Ljava.lang.Object; 2\n\
+         abc [C 3\n[97, 98, 99] [B 3\n[-61, -87]\n2 [Ljava.lang.Object;\n"
+    );
+}
+
+/// `.length` stays an error on a `List`. Modeling an array as a plain list
+/// would make `[1, 2].length` answer where Groovy raises, which is why the
+/// property is gated on the array kind rather than added to every list.
+#[test]
+fn a_plain_list_still_has_no_length() {
+    let (out, err, ok) = run_full("println([1, 2].length)");
+    assert!(!ok, "expected a fault, got: {out}");
+    assert!(
+        err.contains("MissingPropertyException") && err.contains("length"),
+        "stderr was: {err}"
+    );
+}
+
+/// `new int[-1]` is a `NegativeArraySizeException` naming the size, not a
+/// zero-length array and not a bare `Throwable`.
+#[test]
+fn a_negative_array_size_raises() {
+    let (out, ok) = run(
+        r#"try { new int[-1] } catch (e) { println(e.getClass().getName()); println(e.getMessage()) }"#,
+    );
+    assert!(ok);
+    assert_eq!(out, "java.lang.NegativeArraySizeException\n-1\n");
+}

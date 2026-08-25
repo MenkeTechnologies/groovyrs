@@ -1060,6 +1060,9 @@ fn java_class_name(v: &Value) -> String {
         // accessor: `getClass()` is one of the two calls Groovy still answers on
         // a stale window (`is()` is the other), so it must not comodification-check.
         _ if is_sublist(v) => "java.util.ArrayList$SubList",
+        // An array is a list *kind*, so it has to be asked about before the
+        // plain-list arm claims it.
+        _ if array_elem(v).is_some() => return array_elem(v).unwrap().array_class(),
         _ if as_list_raw(v).is_some() => "java.util.ArrayList",
         _ if as_bigint(v).is_some() => "java.math.BigInteger",
         _ if as_dec(v).is_some() => "java.math.BigDecimal",
@@ -1367,6 +1370,88 @@ fn with_vm<R>(f: impl FnOnce(&mut VM) -> R) -> Option<R> {
 
 /// A heap object behind a `Value::Obj` handle: a closure, a class instance, or
 /// an insertion-ordered map.
+/// A Java array's element type — what its class name is built from and what a
+/// `new T[n]` slot starts at.
+///
+/// Only the types a script can actually name an array of are here; anything
+/// else an `as` cast asks for lands on [`ArrayElem::Object`], whose class name
+/// is the one Groovy gives an `Object[]`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ArrayElem {
+    Int,
+    Long,
+    Short,
+    Byte,
+    Char,
+    Float,
+    Double,
+    Boolean,
+    /// A boxed or reference element type, carrying the qualified class name its
+    /// array names — `java.lang.String` for a `String[]`.
+    Ref(&'static str),
+    Object,
+}
+
+impl ArrayElem {
+    /// The JVM class name of an array of this element type: the descriptor
+    /// Groovy's `getClass().getName()` reports (`[I`, `[Ljava.lang.String;`).
+    fn array_class(self) -> String {
+        match self {
+            ArrayElem::Int => "[I".to_string(),
+            ArrayElem::Long => "[J".to_string(),
+            ArrayElem::Short => "[S".to_string(),
+            ArrayElem::Byte => "[B".to_string(),
+            ArrayElem::Char => "[C".to_string(),
+            ArrayElem::Float => "[F".to_string(),
+            ArrayElem::Double => "[D".to_string(),
+            ArrayElem::Boolean => "[Z".to_string(),
+            ArrayElem::Ref(n) => format!("[L{n};"),
+            ArrayElem::Object => "[Ljava.lang.Object;".to_string(),
+        }
+    }
+
+    /// What every slot of a `new T[n]` holds before anything is written: Java's
+    /// default value for the element type — `0`, `0.0`, `false`, or `null` for
+    /// every reference type.
+    fn zero(self) -> Value {
+        match self {
+            ArrayElem::Int | ArrayElem::Long | ArrayElem::Short | ArrayElem::Byte => Value::int(0),
+            ArrayElem::Char => Value::str("\u{0}".to_string()),
+            ArrayElem::Float | ArrayElem::Double => Value::Float(0.0),
+            ArrayElem::Boolean => Value::Bool(false),
+            ArrayElem::Ref(_) | ArrayElem::Object => Value::Undef,
+        }
+    }
+
+    /// The element type an array-typed name (`int[]`, `String[]`) or a bare
+    /// element name asks for, or `None` when it is not a type an array can hold.
+    fn from_name(name: &str) -> Option<ArrayElem> {
+        Some(match name.trim().trim_end_matches("[]").trim() {
+            "int" => ArrayElem::Int,
+            "long" => ArrayElem::Long,
+            "short" => ArrayElem::Short,
+            "byte" => ArrayElem::Byte,
+            "char" => ArrayElem::Char,
+            "float" => ArrayElem::Float,
+            "double" => ArrayElem::Double,
+            "boolean" => ArrayElem::Boolean,
+            // A boxed element type is a *reference* type, so its array names the
+            // box (`[Ljava.lang.Integer;`), not the primitive descriptor `[I`.
+            "Integer" | "java.lang.Integer" => ArrayElem::Ref("java.lang.Integer"),
+            "Long" | "java.lang.Long" => ArrayElem::Ref("java.lang.Long"),
+            "Short" | "java.lang.Short" => ArrayElem::Ref("java.lang.Short"),
+            "Byte" | "java.lang.Byte" => ArrayElem::Ref("java.lang.Byte"),
+            "Character" | "java.lang.Character" => ArrayElem::Ref("java.lang.Character"),
+            "Float" | "java.lang.Float" => ArrayElem::Ref("java.lang.Float"),
+            "Double" | "java.lang.Double" => ArrayElem::Ref("java.lang.Double"),
+            "Boolean" | "java.lang.Boolean" => ArrayElem::Ref("java.lang.Boolean"),
+            "String" | "java.lang.String" => ArrayElem::Ref("java.lang.String"),
+            "Object" | "java.lang.Object" => ArrayElem::Object,
+            _ => return None,
+        })
+    }
+}
+
 enum HeapObj {
     Closure(ClosureMeta),
     /// A **boxed binding** — `groovy.lang.Reference`. Holds one local variable's
@@ -1532,6 +1617,19 @@ enum HeapObj {
     ListVal {
         items: Vec<Value>,
         mod_count: u64,
+        /// `Some(elem)` when this handle is a **Java array** rather than an
+        /// `ArrayList` — see [`ArrayElem`].
+        ///
+        /// An array is a list *kind*, the way a `TreeMap` is a [`MapKind`] and a
+        /// `TreeSet` a [`SetKind`], rather than a heap object of its own. Groovy
+        /// treats the two almost identically — an array iterates, subscripts,
+        /// `collect`s, `sum`s and prints exactly as a list does — so every one of
+        /// those paths is already right, and giving an array its own object
+        /// would mean teaching each of them a second shape. What actually
+        /// differs is small and local: the class name (`[I`, not
+        /// `java.util.ArrayList`), `.length` (a property on an array, an error
+        /// on a list), and the element each `new int[n]` slot starts at.
+        array: Option<ArrayElem>,
     },
     /// A `java.util.ArrayList$SubList` — a **live window** onto a `ListVal`,
     /// what `list.subList(from, to)` answers.
@@ -1725,6 +1823,27 @@ fn glist(items: Vec<Value>) -> Value {
     heap_push(HeapObj::ListVal {
         items,
         mod_count: 0,
+        array: None,
+    })
+}
+
+/// Build a **Java array** handle over `items` — the same storage a list uses,
+/// carrying the element type that decides its class name and its `.length`.
+fn garray(items: Vec<Value>, elem: ArrayElem) -> Value {
+    heap_push(HeapObj::ListVal {
+        items,
+        mod_count: 0,
+        array: Some(elem),
+    })
+}
+
+/// The element type of the array behind `v`, or `None` when `v` is not an array
+/// handle (a plain list included).
+fn array_elem(v: &Value) -> Option<ArrayElem> {
+    let Value::Obj(id) = v else { return None };
+    HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::ListVal { array, .. }) => *array,
+        _ => None,
     })
 }
 
@@ -1779,7 +1898,7 @@ fn as_list_raw(v: &Value) -> Option<Vec<Value>> {
 fn list_push_root(v: &Value, value: Value) -> bool {
     let Value::Obj(id) = v else { return false };
     HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
-        Some(HeapObj::ListVal { items, mod_count }) => {
+        Some(HeapObj::ListVal { items, mod_count, .. }) => {
             items.push(value);
             *mod_count += 1;
             true
@@ -1933,6 +2052,7 @@ fn list_store(id: u32, items: Vec<Value>, structural: bool) {
         if let Some(HeapObj::ListVal {
             items: slot,
             mod_count,
+            ..
         }) = h.borrow_mut().get_mut(root as usize)
         {
             let end = (offset + len).min(slot.len());
@@ -2959,8 +3079,12 @@ fn invoke_closure(vm: &mut VM, clo: &Value, args: &[Value]) -> Result<Value, Str
         vm.stack.push(args.get(i).cloned().unwrap_or(Value::Undef));
     }
     if meta.varargs && want > 0 {
-        vm.stack
-            .push(glist(args.iter().skip(last).cloned().collect()));
+        // An `Object[]`, which is what Groovy hands a varargs parameter — so
+        // `xs.length` answers and `xs.getClass()` is `[Ljava.lang.Object;`.
+        vm.stack.push(garray(
+            args.iter().skip(last).cloned().collect(),
+            ArrayElem::Object,
+        ));
     }
     for cap in &meta.captures {
         vm.stack.push(cap.clone());
@@ -3511,6 +3635,17 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
         args.push(vm.stack.pop().unwrap_or(Value::Undef));
     }
     args.reverse();
+    // `new T[n]` — an array of `n` slots, each holding Java's default for the
+    // element type (`0`, `0.0`, `false`, `null`). The parser routes it here as a
+    // `new` of the array type with the length as its only argument.
+    if let Some(elem) = name.strip_suffix("[]").and_then(ArrayElem::from_name) {
+        let len = args.first().map(|v| v.to_int()).unwrap_or(0);
+        if len < 0 {
+            raise(vm, "NegativeArraySizeException", &len.to_string());
+            return Value::Undef;
+        }
+        return garray(vec![elem.zero(); len as usize], elem);
+    }
     // A script-declared class shadows a JDK one of the same name, so the
     // registry is consulted first. A *qualified* name (`new
     // java.io.IOException(…)`) resolves through `resolve_class_name`, which
@@ -4530,6 +4665,12 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         }
         // Named type is not a user class — fall through to built-in checks (an
         // instance is still an `Object`/`GroovyObject`).
+    }
+    // An array type — `x instanceof int[]`. Only an array satisfies one, and
+    // only one of the same element type, so a `List` and an `int[]` are not
+    // instances of each other whatever they contain.
+    if let Some(want) = class.strip_suffix("[]").and_then(ArrayElem::from_name) {
+        return array_elem(value) == Some(want);
     }
     // Built-in Groovy/Java types (short or common fully-qualified names).
     let short = class.rsplit('.').next().unwrap_or(class);
@@ -7196,17 +7337,21 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `StringTokenizer`'s whitespace tokenizing, which drops every empty
         // field including the leading and trailing ones, so `" a b ".split()`
         // is `[a, b]` and `"".split()` is `[]`.
-        (Value::Str(s), "split") if args.is_empty() => Value::array(
+        (Value::Str(s), "split") if args.is_empty() => garray(
             s.split_whitespace()
                 .map(|w| Value::str(w.to_string()))
                 .collect(),
+            ArrayElem::Ref("java.lang.String"),
         ),
         (Value::Str(s), "split") => {
             let pattern = args.first().map(pattern_source_of).unwrap_or_default();
             let limit = args.get(1).and_then(as_i64).unwrap_or(0);
             match &*crate::regex::compile(&pattern) {
                 Ok(p) => match p.split(s, limit) {
-                    Ok(parts) => Value::array(parts.into_iter().map(Value::str).collect()),
+                    Ok(parts) => garray(
+                        parts.into_iter().map(Value::str).collect(),
+                        ArrayElem::Ref("java.lang.String"),
+                    ),
                     Err(e) => {
                         raise(vm, "IllegalArgumentException", &e);
                         Value::Undef
@@ -7273,17 +7418,22 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             };
             Value::array(parts)
         }
-        (Value::Str(s), "toList" | "toCharArray" | "chars") => {
+        (Value::Str(s), "toCharArray") => garray(
+            s.chars().map(|c| Value::str(c.to_string())).collect(),
+            ArrayElem::Char,
+        ),
+        (Value::Str(s), "toList" | "chars") => {
             Value::array(s.chars().map(|c| Value::str(c.to_string())).collect())
         }
         // `s.bytes` / `s.getBytes()` — the UTF-8 encoding as *signed* bytes, so
         // a non-ASCII character's units print negative the way a Java `byte[]`
-        // does. Modeled as a list, like every other array here.
-        (Value::Str(s), "getBytes") => Value::array(
+        // does.
+        (Value::Str(s), "getBytes") => garray(
             s.as_bytes()
                 .iter()
                 .map(|b| Value::int(*b as i8 as i64))
                 .collect(),
+            ArrayElem::Byte,
         ),
         // `s.tr(from, to)` — `tr(1)`-style character translation. Both sides
         // expand `a-c` ranges (reversed ones too); a `from` character past the
@@ -7566,6 +7716,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // asks for a table sized to the *element count* — a smaller one than
         // `new HashSet(collection)` asks for, and that difference is visible as
         // a different iteration order for the same elements.
+        // `list.toArray()` answers an `Object[]` — a real array, so its
+        // `getClass()` is `[Ljava.lang.Object;` and it has a `.length`.
+        (Value::Array(a), "toArray") if args.is_empty() => {
+            garray(a.to_vec(), ArrayElem::Object)
+        }
         (Value::Array(a), "toSet") => make_set(
             a.to_vec(),
             SetKind::Hash {
@@ -9130,6 +9285,19 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
             // `BigDecimal`, `Object` — keeps the null.
             None => Value::Undef,
         };
+    }
+    // `[1, 2, 3] as int[]` — the elements of whatever `v` enumerates, carried
+    // into an array of the named element type. Answered ahead of the table
+    // below because the target is an *array* type, which none of its arms name.
+    // The element values are not narrowed: Groovy's own `as int[]` coerces each
+    // element, and the coercion that matters here (a `String` element into an
+    // `int`) is the one the table below performs, so it is applied per element.
+    if ty.ends_with("[]") {
+        let Some(elem) = ArrayElem::from_name(&ty) else {
+            return raise_cast(vm, &v, &ty_simple);
+        };
+        let items = iteration_elements(&v);
+        return garray(items, elem);
     }
     match ty_simple.as_str() {
         // Integral targets truncate toward zero, as Java's narrowing casts do.
@@ -11599,6 +11767,15 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     if name == "class" {
         return class_ref_of(recv);
     }
+    // `.length` is a **field of a Java array**, not a property of a `List`, and
+    // that distinction is observable: `([1,2] as int[]).length` is 2 while
+    // `[1,2].length` raises `MissingPropertyException`. Answered only for the
+    // array kind, so the list keeps raising.
+    if name == "length" && array_elem(recv).is_some() {
+        if let Some(n) = list_len_root(recv) {
+            return Value::int(n as i64);
+        }
+    }
     // A `Matcher`'s properties are its getters, Groovy's property-for-getter
     // rule: `m.count` is `getCount()` and `m.pattern` is `pattern()`.
     if let Some(m) = as_matcher(recv) {
@@ -12293,6 +12470,14 @@ pub fn groovy_str(v: &Value) -> String {
     // `Map.Entry.toString` is `key=value`.
     if let Some((k, val)) = as_entry(v) {
         return format!("{k}={}", groovy_str(&val));
+    }
+    // A `char[]` is the one array that does not render like a list: Groovy
+    // prints its characters run together, so `"abc".toCharArray()` prints `abc`
+    // where a `byte[]` prints `[97, 98, 99]`.
+    if array_elem(v) == Some(ArrayElem::Char) {
+        if let Some(items) = as_list(v) {
+            return items.iter().map(groovy_str).collect();
+        }
     }
     // A list handle renders `[a, b, c]` (`[]` when empty), exactly as the
     // transient `Value::Array` form below does.

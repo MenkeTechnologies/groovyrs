@@ -80,6 +80,8 @@ const THROWABLES: &[(&str, &str, &str)] = &[
         "java.util.regex",
     ),
     ("ArithmeticException", "RuntimeException", "java.lang"),
+    // `new int[-1]`.
+    ("NegativeArraySizeException", "RuntimeException", "java.lang"),
     ("NullPointerException", "RuntimeException", "java.lang"),
     ("IndexOutOfBoundsException", "RuntimeException", "java.lang"),
     (

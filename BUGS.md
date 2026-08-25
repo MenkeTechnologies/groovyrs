@@ -562,19 +562,14 @@ infinite loop on both sides.
   `MissingMethodException` that lists one among its argument types says
   `String`). Modeling the enum properly means a heap object with an identity,
   which nothing else in the frontend needs yet.
-- **Java arrays.** `new int[3]` does not resolve: an array is a distinct type
-  from a `List` (it has `.length` where a `List` has `.size()`, and its class
-  name is `[I`), and groovyrs models only the `List`. Modeling it as a `List`
-  would make `[1, 2, 3].length` answer where Groovy raises, so the construct
-  faults instead.
-
-  This is also what a **varargs closure parameter** binds. `{ Object... xs -> }`
-  collects the call's remaining arguments, which Groovy hands over as an
-  `Object[]`; groovyrs hands over a `List`. Everything the corpus does with one
-  agrees (`size()`, `toList()`, `sum()`, `collect`, `each`, and the `"$xs"`
-  rendering), but `xs.length` raises `MissingPropertyException` where Groovy
-  answers, and `xs.getClass().getName()` is `java.util.ArrayList` rather than
-  `[Ljava.lang.Object;`.
+- **An array answers the whole `List` GDK, where Groovy's answers only part of
+  it.** Arrays are modeled as a list *kind*, so `([3,1] as int[]).sort()` and
+  `([1,2] as int[]) + [3]` work here; real Groovy raises
+  `MissingMethodException` for both, because a Java array is not a `Collection`
+  and only the GDK methods defined on arrays apply. This is deliberate
+  permissiveness of the same sort as `println [1,2].toString()` — every program
+  that works in Groovy works here, and tightening it would reject working
+  programs to gain nothing but a matching error.
 - **`new Random(…)` / `new Date(…)` and the other stateful JDK classes.**
   Reproducing them means reproducing Java's exact LCG and clock, so they fault
   rather than answering a plausible-looking different number. The instantiable
@@ -1001,11 +996,6 @@ infinite loop on both sides.
   every interpolation where the literal is written, so it has nothing to defer
   to — the same root as the *A `GString` is a `String`* entry above. The literal
   is currently a parse error rather than a wrong answer.
-- **A `List` has no `.length`.** `"a/b".split(/\//)` answers a `List` where
-  Groovy answers a `String[]` array, so `.length` on the result raises
-  `MissingPropertyException` — `.size()` is the spelling that works. Adding
-  `.length` to every `List` would make `[1, 2, 3].length` answer where Groovy
-  raises, which is the worse of the two errors.
 - **A list a GDK method *returns* is not a reference; only a literal is.** A list
   literal is built behind a heap handle, so every claim in the *Lists are
   references* entry above holds for one — including a list reached through a map
@@ -1132,13 +1122,9 @@ infinite loop on both sides.
   and `nCopies` have the same name divergence (`Collections$EmptyList`,
   `$SingletonList`, `$CopiesList`) but no behaviour one, since nothing in the
   corpus mutates them.
-- **`toArray()` and `toCharArray()` answer a `List`.** Same root as the *Java
-  arrays* entry: `[1,2,3].toArray().getClass()` reports `java.util.ArrayList`
-  where Groovy reports `[Ljava.lang.Object;`, `"abc".toCharArray()` reports it
-  where Groovy reports `[C`, and `.length` on either raises where Groovy
-  answers. `String.bytes` and `"abc".chars()` are not modeled at all for the
-  same reason — a `byte[]` and an `IntStream` are types groovyrs has no value
-  for.
+- **`"abc".chars()` is not modeled.** It answers an `IntStream`, which groovyrs
+  has no value for. (`toArray()`, `toCharArray()` and `String.bytes` no longer
+  share this gap — they answer real `Object[]` / `char[]` / `byte[]` arrays.)
 - **A closure is called with the arguments it is given, padded with nulls.**
   Groovy resolves a closure call against the declared parameter count and raises
   `MissingMethodException` when nothing matches, so

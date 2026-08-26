@@ -633,7 +633,8 @@ impl Parser {
             }
             // The annotation name, which may be package-qualified.
             i += 1;
-            while matches!(self.peek_at(i), Tok::Dot) && matches!(self.peek_at(i + 1), Tok::Ident(_))
+            while matches!(self.peek_at(i), Tok::Dot)
+                && matches!(self.peek_at(i + 1), Tok::Ident(_))
             {
                 i += 2;
             }

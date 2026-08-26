@@ -5211,7 +5211,8 @@ println("calls=$calls q=$q")"#);
 /// narrowing, and `<<`'s append on a list.
 #[test]
 fn the_bitwise_compound_assignments_follow_the_operand_types() {
-    let (out, ok) = run(r#"def a=1G; a <<= 4; println(a + ' ' + a.getClass().getName())
+    let (out, ok) = run(
+        r#"def a=1G; a <<= 4; println(a + ' ' + a.getClass().getName())
 def b=12G; b &= 10; println(b)
 def c=1; c <<= 32; println(c)
 long d=1; d <<= 32; println(d)
@@ -5221,7 +5222,8 @@ long g=2; g **= 40; println(g + ' ' + g.getClass().getName())
 def l=[1,2]; l <<= 3; println(l)
 def m=[:]; m['k']=1G; m['k'] <<= 4; println(m)
 long o=-1; o >>>= 60; println(o)
-def p=[a:[1,2]]; p['a'] <<= 9; println(p)"#);
+def p=[a:[1,2]]; p['a'] <<= 9; println(p)"#,
+    );
     assert!(ok);
     assert_eq!(
         out,
@@ -5384,12 +5386,14 @@ println(w.anything())"#);
 /// `MissingMethodException` for the call itself hands over.
 #[test]
 fn a_failure_inside_a_real_method_does_not_reach_method_missing() {
-    let (out, ok) = run(r#"class X { def v = 1; def methodMissing(String n, args) { throw new IllegalStateException("boom:$n") } }
+    let (out, ok) = run(
+        r#"class X { def v = 1; def methodMissing(String n, args) { throw new IllegalStateException("boom:$n") } }
 try { new X().nope() } catch (e) { println(e.getClass().getName() + ':' + e.getMessage()) }
 class Y { def go() { throw new IllegalArgumentException('inner') }; def methodMissing(String n, args) { 'mm' } }
 try { new Y().go() } catch (e) { println(e.getClass().getSimpleName() + ':' + e.getMessage()) }
 class Z2 { def v = 1 }
-try { new Z2().nope() } catch (e) { println(e.getClass().getSimpleName()) }"#);
+try { new Z2().nope() } catch (e) { println(e.getClass().getSimpleName()) }"#,
+    );
     assert!(ok);
     assert_eq!(
         out,
@@ -5402,12 +5406,14 @@ try { new Z2().nope() } catch (e) { println(e.getClass().getSimpleName()) }"#);
 /// writes, after the getter/setter and the declared fields — Groovy's own order.
 #[test]
 fn property_missing_answers_an_unknown_read_and_write() {
-    let (out, ok) = run(r#"class P { def propertyMissing(String n) { "pm:$n" }; def known = 'k' }
+    let (out, ok) = run(
+        r#"class P { def propertyMissing(String n) { "pm:$n" }; def known = 'k' }
 def p = new P()
 println(p.known)
 println(p.unknown)
 class Q { def propertyMissing(String n, v) { println("set $n=$v") } }
-def q = new Q(); q.zzz = 3"#);
+def q = new Q(); q.zzz = 3"#,
+    );
     assert!(ok);
     assert_eq!(out, "k\npm:unknown\nset zzz=3\n");
 }
@@ -5475,10 +5481,7 @@ println(cl.call(*[3,4]))
 def outer = { x -> { y -> "$x$y" } }
 println(outer(*[1])(*[2]))"#);
     assert!(ok);
-    assert_eq!(
-        out,
-        "1|2\n1|2\n1|2\n3\n123\nb\n9\n[k:1]\n12\n12\n"
-    );
+    assert_eq!(out, "1|2\n1|2\n1|2\n3\n123\nb\n9\n[k:1]\n12\n12\n");
 }
 
 /// A spread's interaction with the parameter shapes it has to agree with:
@@ -5488,7 +5491,8 @@ println(outer(*[1])(*[2]))"#);
 /// a set and an array.
 #[test]
 fn a_spread_argument_agrees_with_varargs_defaults_and_emptiness() {
-    let (out, ok) = run(r#"def v = { Object... xs -> "v:${xs.length}:${xs.toList()}" }
+    let (out, ok) = run(
+        r#"def v = { Object... xs -> "v:${xs.length}:${xs.toList()}" }
 println(v(*[1,2,3]))
 println(v(*[]))
 println(v(1, *[2,3]))
@@ -5507,7 +5511,8 @@ println(g(1, *[2,3], 4))
 def n = 0
 def side = { n++; [1,2] }
 println(f(*side()))
-println("side=$n")"#);
+println("side=$n")"#,
+    );
     assert!(ok);
     assert_eq!(
         out,
@@ -5521,7 +5526,8 @@ println("side=$n")"#);
 /// rather than from the opcode, which carries zero.
 #[test]
 fn a_spread_argument_picks_a_constructor_by_its_runtime_arity() {
-    let (out, ok) = run(r#"class P { int a; int b; P(int a, int b) { this.a=a; this.b=b }; String toString() { "P($a,$b)" } }
+    let (out, ok) = run(
+        r#"class P { int a; int b; P(int a, int b) { this.a=a; this.b=b }; String toString() { "P($a,$b)" } }
 println(new P(*[1,2]))
 class Q extends P { Q(xs) { super(*xs) }; String toString(){ "Q(${a},${b})" } }
 println(new Q([3,4]))
@@ -5529,7 +5535,8 @@ class C { def sum(a, b) { a + b }; def go(xs) { sum(*xs) } }
 println(new C().go([4,5]))
 println(new C().sum(*[6,7]))
 def sb = new StringBuilder(*['seed'])
-println(sb)"#);
+println(sb)"#,
+    );
     assert!(ok);
     assert_eq!(out, "P(1,2)\nQ(3,4)\n9\n13\nseed\n");
 }
@@ -5610,7 +5617,8 @@ println(sb == sb); println(sb == new StringBuilder('ab')); println(sb.equals(sb)
 /// being an ambiguity. Every expectation is Apache Groovy 5.1.0's own output.
 #[test]
 fn a_trait_carries_state_and_method_bodies() {
-    let (out, ok) = run(r#"trait Named { String name = 'anon'; String who() { "I am $name" } }
+    let (out, ok) = run(
+        r#"trait Named { String name = 'anon'; String who() { "I am $name" } }
 trait Aged { int age = 0; String info() { "age=$age" } }
 class Person implements Named, Aged {}
 def p = new Person()
@@ -5621,7 +5629,8 @@ println(p.who() + ' ' + p.info())
 println(p instanceof Named)
 println(p instanceof Aged)
 class Sub extends Person {}
-def s = new Sub(); s.name = 'sub'; println(s.who())"#);
+def s = new Sub(); s.name = 'sub'; println(s.who())"#,
+    );
     assert!(ok);
     assert_eq!(
         out,
@@ -5806,10 +5815,7 @@ println(two())
 two.delegate = [tag: { 'second' }]
 println(two())"#);
     assert!(ok);
-    assert_eq!(
-        out,
-        "0\n1\n2\n3\n0\n1\n[a:1]\ndele\n42\nfirst\nsecond\n"
-    );
+    assert_eq!(out, "0\n1\n2\n3\n0\n1\n[a:1]\ndele\n42\nfirst\nsecond\n");
 }
 
 /// Groovy's map-as-object idiom: a map entry holding a closure is callable as a
@@ -5958,7 +5964,10 @@ println(m.other(1,2))
 println(m.with { 'gdk wins' })
 class NumCat { static int twice(Integer i) { i * 2 } }
 use (NumCat) { println 3.twice() }"#;
-    assert!(!src.contains("try"), "this test is only meaningful without a try");
+    assert!(
+        !src.contains("try"),
+        "this test is only meaningful without a try"
+    );
     let (out, ok) = run(src);
     assert!(ok);
     assert_eq!(out, "9\nnull\nmm:anything/0\nmm:other/2\ngdk wins\n6\n");
@@ -5984,8 +5993,5 @@ def g(a,b) { g(a) + "/g2" }
 println(g(1,2))
 println(f(*[1,2]))"#);
     assert!(ok);
-    assert_eq!(
-        out,
-        "f0\nf1:1\nf2:12\nonly:5\ndone\n120\ng1/g2\nf2:12\n"
-    );
+    assert_eq!(out, "f0\nf1:1\nf2:12\nonly:5\ndone\n120\ng1/g2\nf2:12\n");
 }

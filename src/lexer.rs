@@ -142,12 +142,12 @@ pub enum Tok {
     Pipe,
     /// `**` — Groovy's power operator (right-associative).
     Power,
-    Amp,   // `&` bitwise and
-    Caret, // `^` bitwise xor
-    Tilde, // `~` bitwise complement (a `~/…/` regex literal lexes separately)
-    Shl,   // `<<` left shift / `leftShift`
-    Shr,   // `>>` arithmetic right shift
-    UShr,  // `>>>` unsigned right shift
+    Amp,         // `&` bitwise and
+    Caret,       // `^` bitwise xor
+    Tilde,       // `~` bitwise complement (a `~/…/` regex literal lexes separately)
+    Shl,         // `<<` left shift / `leftShift`
+    Shr,         // `>>` arithmetic right shift
+    UShr,        // `>>>` unsigned right shift
     ShlAssign,   // `<<=`
     ShrAssign,   // `>>=`
     UShrAssign,  // `>>>=`
@@ -155,7 +155,7 @@ pub enum Tok {
     PipeAssign,  // `|=`
     CaretAssign, // `^=`
     PowerAssign, // `**=`
-    At,    // `@` annotation marker (e.g. `@Override`)
+    At,          // `@` annotation marker (e.g. `@Override`)
     Eof,
 }
 

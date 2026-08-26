@@ -1155,7 +1155,9 @@ impl Compiler {
         for m in methods {
             let k = self.b.add_constant(Value::str(m.name.clone()));
             self.b.emit(Op::LoadConst(k), line);
-            let sub = self.b.add_name(&Self::method_sub_name(name, &m.name, m.params.len()));
+            let sub = self
+                .b
+                .add_name(&Self::method_sub_name(name, &m.name, m.params.len()));
             self.b.emit(Op::LoadInt(sub as i64), line);
         }
         self.b.emit(Op::MakeHash((methods.len() * 2) as u16), line);

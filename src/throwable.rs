@@ -81,7 +81,11 @@ const THROWABLES: &[(&str, &str, &str)] = &[
     ),
     ("ArithmeticException", "RuntimeException", "java.lang"),
     // `new int[-1]`.
-    ("NegativeArraySizeException", "RuntimeException", "java.lang"),
+    (
+        "NegativeArraySizeException",
+        "RuntimeException",
+        "java.lang",
+    ),
     ("NullPointerException", "RuntimeException", "java.lang"),
     ("IndexOutOfBoundsException", "RuntimeException", "java.lang"),
     (

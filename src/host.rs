@@ -374,7 +374,7 @@ pub const GCELL_SET: u16 = 770;
 /// and allocates otherwise. The reuse is unobservable, and the argument is
 /// local: an unescaped cell's handle exists nowhere but the slot it came from —
 /// every read of a boxed name goes through [`GCELL_GET`], which answers the
-/// *value*, so only [`b_make_closure`] can copy a handle, and it marks what it
+/// *value*, so only `b_make_closure` can copy a handle, and it marks what it
 /// copies. Overwriting a cell nothing else can name cannot change what any
 /// closure sees.
 ///
@@ -399,7 +399,7 @@ pub const GSPREAD_ARGS: u16 = 772;
 ///
 /// `Op::Call` binds a fixed number of stack values into the callee's frame, so
 /// it cannot express a call whose argument count is a run-time value. This
-/// enters the same subroutine through [`invoke_sub`], which pushes a vector.
+/// enters the same subroutine through `invoke_sub`, which pushes a vector.
 pub const GCALL_SPREAD: u16 = 773;
 
 /// Builtin id for `use (Cat, …) { … }` — Groovy's category block. Stack: the
@@ -2036,7 +2036,9 @@ fn as_list_raw(v: &Value) -> Option<Vec<Value>> {
 fn list_push_root(v: &Value, value: Value) -> bool {
     let Value::Obj(id) = v else { return false };
     HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
-        Some(HeapObj::ListVal { items, mod_count, .. }) => {
+        Some(HeapObj::ListVal {
+            items, mod_count, ..
+        }) => {
             items.push(value);
             *mod_count += 1;
             true
@@ -5441,11 +5443,7 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
         // `ClassMeta::method_arity`).
         if !inst.fields.contains_key(&name) {
             if let Some(idx) = lookup_overload_exact(inst.class, "propertyMissing", 2) {
-                return match invoke_sub(
-                    vm,
-                    idx,
-                    &[recv.clone(), Value::str(name.clone()), value],
-                ) {
+                return match invoke_sub(vm, idx, &[recv.clone(), Value::str(name.clone()), value]) {
                     Ok(_) => Value::Undef,
                     Err(e) => {
                         fault(vm, e);
@@ -5634,8 +5632,7 @@ fn b_setindex(vm: &mut VM, _argc: u8) -> Value {
     let index = vm.stack.pop().unwrap_or(Value::Undef);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
     if as_instance(&recv).is_some() {
-        if let Some(Err(e)) =
-            dispatch_instance_method_or_miss(vm, &recv, "putAt", &[index, value])
+        if let Some(Err(e)) = dispatch_instance_method_or_miss(vm, &recv, "putAt", &[index, value])
         {
             fault(vm, e);
         }
@@ -5831,14 +5828,62 @@ fn dispatch_category(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) ->
 fn dispatch_map_method_exists(method: &str) -> bool {
     matches!(
         method,
-        "size" | "getSize" | "isEmpty" | "containsKey" | "containsValue" | "get" | "getAt"
-            | "put" | "putAt" | "putAll" | "remove" | "clear" | "keySet" | "values" | "entrySet"
-            | "each" | "eachWithIndex" | "collect" | "collectEntries" | "find" | "findAll"
-            | "findResult" | "any" | "every" | "count" | "countBy" | "groupBy" | "inject"
-            | "sort" | "toSorted" | "max" | "min" | "sum" | "withDefault" | "subMap" | "plus"
-            | "minus" | "leftShift" | "asImmutable" | "toString" | "toMapString" | "inspect"
-            | "getClass" | "equals" | "hashCode" | "is" | "with" | "tap" | "asBoolean"
-            | "iterator" | "spread" | "dump" | "grep" | "reverseEach" | "take" | "drop"
+        "size"
+            | "getSize"
+            | "isEmpty"
+            | "containsKey"
+            | "containsValue"
+            | "get"
+            | "getAt"
+            | "put"
+            | "putAt"
+            | "putAll"
+            | "remove"
+            | "clear"
+            | "keySet"
+            | "values"
+            | "entrySet"
+            | "each"
+            | "eachWithIndex"
+            | "collect"
+            | "collectEntries"
+            | "find"
+            | "findAll"
+            | "findResult"
+            | "any"
+            | "every"
+            | "count"
+            | "countBy"
+            | "groupBy"
+            | "inject"
+            | "sort"
+            | "toSorted"
+            | "max"
+            | "min"
+            | "sum"
+            | "withDefault"
+            | "subMap"
+            | "plus"
+            | "minus"
+            | "leftShift"
+            | "asImmutable"
+            | "toString"
+            | "toMapString"
+            | "inspect"
+            | "getClass"
+            | "equals"
+            | "hashCode"
+            | "is"
+            | "with"
+            | "tap"
+            | "asBoolean"
+            | "iterator"
+            | "spread"
+            | "dump"
+            | "grep"
+            | "reverseEach"
+            | "take"
+            | "drop"
     )
 }
 
@@ -6761,8 +6806,6 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // Pure GDK dispatch — no closure, no VM re-entrancy.
     dispatch_method(vm, &recv, method, &args)
 }
-
-
 
 /// The closure-driven GDK collection methods over a list (or the elements a
 /// range enumerates): `each`, `collect`, `findAll`, `find`, `inject`, `sum`. Returns `None`
@@ -8525,9 +8568,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // a different iteration order for the same elements.
         // `list.toArray()` answers an `Object[]` — a real array, so its
         // `getClass()` is `[Ljava.lang.Object;` and it has a `.length`.
-        (Value::Array(a), "toArray") if args.is_empty() => {
-            garray(a.to_vec(), ArrayElem::Object)
-        }
+        (Value::Array(a), "toArray") if args.is_empty() => garray(a.to_vec(), ArrayElem::Object),
         (Value::Array(a), "toSet") => make_set(
             a.to_vec(),
             SetKind::Hash {

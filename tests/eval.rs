@@ -5995,3 +5995,84 @@ println(f(*[1,2]))"#);
     assert!(ok);
     assert_eq!(out, "f0\nf1:1\nf2:12\nonly:5\ndone\n120\ng1/g2\nf2:12\n");
 }
+
+/// A range subscript resolves each endpoint against the receiver's length
+/// BEFORE walking it. Enumerating first and resolving each element after is a
+/// different operation, and it was what `"Hello, World"[7..-1]` did: it walked
+/// 7, 6, … 0, -1, read a character at each, and answered `"W ,olleHd"` where
+/// Groovy answers `"World"`. Both-negative agreed by luck, since `-5..-1`
+/// already ascends.
+///
+/// Every expectation is Apache Groovy's own output for the same source.
+#[test]
+fn a_range_subscript_resolves_its_endpoints_before_walking() {
+    let cases = [
+        // positive start, negative end — the shape that was wrong
+        (r#"println "Hello, World"[7..-1]"#, "World"),
+        (r#"println "Hello, World"[0..-1]"#, "Hello, World"),
+        (r#"println "Hello, World"[0..-2]"#, "Hello, Worl"),
+        (
+            r#"println([10, 20, 30, 40, 50][1..-1])"#,
+            "[20, 30, 40, 50]",
+        ),
+        (
+            r#"println([10, 20, 30, 40, 50][0..-2])"#,
+            "[10, 20, 30, 40]",
+        ),
+        // both negative, and both positive — these already agreed and must stay
+        (r#"println "Hello, World"[-5..-1]"#, "World"),
+        (r#"println "Hello, World"[2..4]"#, "llo"),
+        (r#"println([10, 20, 30, 40, 50][-2..-1])"#, "[40, 50]"),
+        // descending, which reverses
+        (r#"println "Hello, World"[4..2]"#, "oll"),
+        (r#"println "Hello, World"[-1..-3]"#, "dlr"),
+        (r#"println([10, 20, 30, 40, 50][3..1])"#, "[40, 30, 20]"),
+        // exclusive: drops the endpoint, and coinciding endpoints are EMPTY
+        // rather than a range that has crossed into descending
+        (r#"println "Hello, World"[0..<5]"#, "Hello"),
+        (r#"println "Hello, World"[7..<-1]"#, "Worl"),
+        (r#"println([10, 20, 30, 40, 50][1..<-1])"#, "[20, 30, 40]"),
+        (r#"println([10, 20, 30, 40, 50][0..<0])"#, "[]"),
+    ];
+    for (src, want) in cases {
+        let (out, ok) = run(src);
+        assert!(ok, "failed to run: {src}");
+        assert_eq!(out.trim_end(), want, "for source: {src}");
+    }
+}
+
+/// `Pattern.matcher(s)` builds the same `Matcher` that `s =~ p` does. It was
+/// the one `java.util.regex.Pattern` method with no arm, so a pattern held in a
+/// variable could be used for `replaceAll` but not asked for a matcher.
+#[test]
+fn a_compiled_pattern_builds_a_matcher() {
+    let cases = [
+        (
+            r#"def p = ~/[aeiou]/; println p.matcher("banana").count"#,
+            "3",
+        ),
+        (
+            r#"def p = ~/(\d+)/; def m = p.matcher("a12b3"); m.find(); println m.group(1)"#,
+            "12",
+        ),
+        (
+            r#"def p = ~/(\d+)/; println(p.matcher("a12b3").collect { it[1] })"#,
+            "[12, 3]",
+        ),
+        // the pattern itself is unchanged by handing out a matcher
+        (
+            r#"def p = ~/[aeiou]/; p.matcher("x"); println p.toString()"#,
+            "[aeiou]",
+        ),
+        // and the existing replaceAll path still takes a Pattern
+        (
+            r#"def p = ~/[aeiou]/; println "banana".replaceAll(p, "*")"#,
+            "b*n*n*",
+        ),
+    ];
+    for (src, want) in cases {
+        let (out, ok) = run(src);
+        assert!(ok, "failed to run: {src}");
+        assert_eq!(out.trim_end(), want, "for source: {src}");
+    }
+}

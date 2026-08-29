@@ -5527,6 +5527,16 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
     // is `1`, and `list[1..2]` is the sublist at those positions. A list handle
     // reads through the same transient array form the arms below match on.
     let recv = deref_list(&range_as_list(&recv));
+    // A range INDEX has its endpoints normalized against the receiver's length
+    // BEFORE it is enumerated. Enumerating first and normalizing each element
+    // after is a different operation: `"Hello, World"[7..-1]` would walk
+    // 7, 6, … 0, -1 and read a character at each, answering "W ,olleHd" where
+    // Groovy answers "World". Both-negative happened to agree because
+    // `-5..-1` already ascends.
+    let index = match (subscript_len(&recv), as_range(&index)) {
+        (Some(len), Some(r)) => normalize_range_index(&r, len).unwrap_or(index),
+        _ => index,
+    };
     let index = deref_list(&range_as_list(&index));
     // `m[0]` is `Matcher.getAt(0)` — the i-th match, as the matched text or as
     // `[whole, g1, …]` when the pattern has groups.
@@ -6499,6 +6509,24 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // A `Matcher` is mutable too — `find()` moves its cursor — so it is answered
     // through its handle. Anything it does not define runs over its matches,
     // which is Groovy's collection view of a matcher (`each`, `collect`, …).
+    // `Pattern.matcher(s)` builds the same Matcher `s =~ p` does. Groovy reaches
+    // it through the compiled pattern a `~/…/` literal produces, and it was the
+    // one `java.util.regex.Pattern` method with no arm here.
+    if let Some(source) = regex_source(&recv) {
+        if method == "matcher" && args.len() == 1 {
+            let text = groovy_str(&args[0]);
+            if let Err(e) = &*crate::regex::compile(&source) {
+                raise(vm, "PatternSyntaxException", e);
+                return Value::Undef;
+            }
+            return heap_push(HeapObj::Matcher(MatcherVal {
+                source,
+                text,
+                pos: 0,
+                last: None,
+            }));
+        }
+    }
     if let Some(m) = as_matcher(&recv) {
         if let Some(v) = dispatch_matcher_method(vm, &recv, &m, method, &args) {
             return v;
@@ -12204,6 +12232,42 @@ fn set_class(kind: SetKind) -> &'static str {
 /// This is what lets every list operation groovyrs already models — `+`, `==`,
 /// `collect`, subscripting, `instanceof List` — apply to a range for free, which
 /// is faithful because Groovy's `Range` *is* a `java.util.List`.
+/// The length a range subscript normalizes against: a list's element count, a
+/// string's UTF-16 length. `None` for a receiver that does not subscript by
+/// position, which leaves the index untouched.
+fn subscript_len(recv: &Value) -> Option<usize> {
+    match recv {
+        Value::Array(a) => Some(a.len()),
+        Value::Str(s) => Some(utf16_len(s)),
+        _ => None,
+    }
+}
+
+/// A range index with each endpoint resolved against `len` — negative counts
+/// back from the end — enumerated in the direction the resolved endpoints give.
+/// `None` when an endpoint is not an integer (a `'a'..'c'` subscript is not a
+/// position range and keeps its own handling).
+fn normalize_range_index(r: &RangeVal, len: usize) -> Option<Value> {
+    let (from, to) = (as_i64(&r.from)?, as_i64(&r.to)?);
+    let norm = |i: i64| if i < 0 { len as i64 + i } else { i };
+    let (a, mut b) = (norm(from), norm(to));
+    if !r.inclusive {
+        // An exclusive range drops its endpoint. When the endpoints coincide
+        // that leaves NOTHING — `l[0..<0]` is `[]`, not a range that has
+        // crossed over into descending.
+        if a == b {
+            return Some(Value::array(Vec::new()));
+        }
+        b += if b > a { -1 } else { 1 };
+    }
+    let idxs: Vec<Value> = if a <= b {
+        (a..=b).map(Value::Int).collect()
+    } else {
+        (b..=a).rev().map(Value::Int).collect()
+    };
+    Some(Value::array(idxs))
+}
+
 fn range_as_list(v: &Value) -> Value {
     match as_range(v) {
         Some(r) => Value::array(range_elements(&r)),

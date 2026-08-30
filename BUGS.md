@@ -211,7 +211,10 @@ reported as parse or compile errors, never silently mis-run.
   `instanceof` walks the whole type closure — superclasses and interfaces,
   transitively — so `impl instanceof I` answers through a superclass that
   implements `I` and through an interface that extends another. An interface
-  cannot be instantiated. `trait` is still not implemented.
+  cannot be instantiated. `trait` is implemented too: a trait's methods and
+  its state are inherited by an implementor, and a class implementing two
+  traits that define the same method takes the LAST one in the
+  `implements` list, which is Groovy's linearization.
 - **Closure-driven GDK iteration.** Over lists (and the elements a `Range`
   enumerates):
   `each`, `eachWithIndex`, `collect`, `findAll`, `find`, `inject` (both the
@@ -538,9 +541,21 @@ infinite loop on both sides.
 
 ## Not implemented (errors today)
 
-- **`trait`.** `class`, `interface`, `extends` (single inheritance for a class,
-  multiple for an interface), `implements`, and interface `default` methods are
-  supported; `trait` is not, and a `trait` declaration is a parse error.
+- **The Java-style cast `(Type) expr`.** `expr as Type` is supported and is the
+  spelling this frontend reads; the parenthesised form is a parse error
+  (`expected RParen but found …`). The two are NOT the same operator, which is
+  why the missing one cannot be lowered to the one that works: measured against
+  Groovy 5.1.1 on a JDK 26, `"7" as Integer` is `7` while `(Integer) "7"` is
+  `55` — the cast takes the character's value where the coercion parses the
+  string. Reading the parenthesised form as `asType` would answer 7 there, a
+  wrong value in place of a visible parse error, so it is left refused until the
+  cast's own conversion table is written.
+
+  Its grammar is also not the obvious one. `(a) - b` is a cast to the class `a`
+  in Groovy — it fails with "unable to resolve class a", not with 7 — so the
+  disambiguation is not "upper case means a type"; `(a) * b` IS multiplication,
+  because `*` cannot begin a cast's operand. Any implementation has to
+  reproduce that split rather than guess from the name.
 - **A *script-declared* class name is not a value.** `Foo.class` and `Foo.name`
   for a class the script declares do not resolve — such a name is only meaningful
   in `new`, `instanceof`, a `catch` clause, and a `switch` `case` label;

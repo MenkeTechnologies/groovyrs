@@ -353,6 +353,27 @@ sum 1..5 = 15
 1
 4
 9
+==== Regex.groovy ====
+true
+false
+true
+true
+[1, 22, 333]
+3
+found
+missing
+[2026-08-29, 2026, 08, 29]
+2026/08/29
+3
+[[a=1, a, 1], [b=22, b, 22]]
+a#b#
+a<1>b<22>
+a#b22
+smith, john
+[a, b, , c]
+[1, 2]
+o w
+true
 ==== RuntimeFaults.groovy ====
 nomethod MME
 noprop MPE No such property: zork for class: java.lang.String
@@ -374,6 +395,26 @@ null
 null
 43
 3.5
+==== SafeNavigation.groovy ====
+London
+null
+NPE without ?.
+null
+unknown
+empty-is-falsy
+zero-is-falsy
+empty-list-is-falsy
+set
+1
+assigned kept
+[Ada, Bob]
+[London, null]
+[2, 3]
+[1, 2, 3]
+7
+xy
+z
+Eve is 3
 ==== Switch.groovy ====
 1 -> one
 2 -> two-or-three
@@ -401,6 +442,20 @@ always once
 scan 0
 scan 2
 done
+==== Traits.groovy ====
+hello, world
+HELLO, world
+2 1
+Beta
+Alpha
+Duck walks and swims
+derived on base
+true
+true
+false
+animal that walks
+true
+true
 ==== Truthiness.groovy ====
 0 -> false
 1 -> true

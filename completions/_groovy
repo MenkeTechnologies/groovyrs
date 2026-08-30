@@ -5,9 +5,13 @@ _groovy() {
   _arguments -s \
     '(-v -version --version)'{-v,-version,--version}'[print the version banner and exit]' \
     '(-h --help -help)'{-h,--help,-help}'[print usage and exit]' \
+    '(-e --eval)'{-e,--eval}'[run an inline script string and exit]:script' \
     '--dump-tokens[print the lexer token stream and exit]' \
     '--dump-ast[print the parsed AST and exit]' \
     '--disasm[print the lowered fusevm bytecode and exit]' \
+    '--tiers[run the script, then report which fusevm tiers took its chunks]' \
+    '--lsp[speak the Language Server Protocol over stdio]' \
+    '--dap[speak the Debug Adapter Protocol over stdio]' \
     '*:groovy file:_files -g "*.groovy"'
 }
 

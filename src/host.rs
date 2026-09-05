@@ -5613,6 +5613,29 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
     // filter over `as_i64` skipped every range element and every out-of-range
     // index, so those two answered `[4]` and `[1]`.
     if let Value::Array(idxs) = &index {
+        // Fast path for the shape that carries every range slice: an array
+        // receiver and plain integer indices, none of them nested. The general
+        // walk below re-enters `index_read` once per index, and each re-entry
+        // redoes the receiver normalization at the top of this function — so
+        // `list[0..999]` did a thousand of them. The semantics are the array
+        // arm's, inlined: a negative index counts from the end, one still
+        // negative after that raises, and one past the end reads `null`.
+        if let (Value::Array(a), true) = (
+            &recv,
+            idxs.iter()
+                .all(|v| as_i64(v).is_some() && as_range(v).is_none() && as_list(v).is_none()),
+        ) {
+            let mut out: Vec<Value> = Vec::with_capacity(idxs.len());
+            for one in idxs.iter() {
+                let i = one.to_int();
+                let idx = if i < 0 { a.len() as i64 + i } else { i };
+                if idx < 0 {
+                    return raise_negative_index(vm, i, a.len());
+                }
+                out.push(a.get(idx as usize).cloned().unwrap_or(Value::Undef));
+            }
+            return Value::array(out);
+        }
         if matches!(recv, Value::Array(_) | Value::Str(_)) {
             let mut out: Vec<Value> = Vec::with_capacity(idxs.len());
             for one in idxs.iter() {
@@ -6002,6 +6025,17 @@ fn b_name_get(vm: &mut VM, _argc: u8) -> Value {
         );
         return Value::Undef;
     };
+    // `delegate` is the closure body's own pseudo-variable, not a property of
+    // whatever the delegate happens to be — Groovy resolves it BEFORE the
+    // delegate is consulted, so `[a: 1].with { delegate }` is the map and
+    // `[delegate: 9].with { delegate }` is the map too, not `9`. Asking the
+    // delegate for a property of that name is what used to happen: a map
+    // answered `null` for the missing key and a list answered
+    // `MissingPropertyException: No such property: delegate for class:
+    // java.lang.Integer`, the spread read over its elements.
+    if name == "delegate" {
+        return recv;
+    }
     if let Some(res) = dispatch_instance_prop_get(vm, &recv, &name) {
         return match res {
             Ok(v) => v,
@@ -6815,8 +6849,12 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // point with a copy in hand is what made every ordinary `m.put(k, v)` cost
     // a clone (twice: `as_omap` and `omap_kind` each built one) plus, for a
     // `HashMap`/`TreeMap`, a re-ordering of every entry.
-    let map_iteration =
-        matches!(method, "sort" | "grep") || args.iter().any(|a| closure_meta(a).is_some());
+    let map_iteration = matches!(method, "sort" | "grep")
+        // …plus the no-closure spellings of the four predicates, whose answer
+        // is decided by the entries alone (a `Map.Entry` is always Groovy-true,
+        // so only emptiness distinguishes them).
+        || (args.is_empty() && matches!(method, "findAll" | "find" | "any" | "every"))
+        || args.iter().any(|a| closure_meta(a).is_some());
     if map_iteration && is_omap(&recv) {
         let (entries, kind) = as_omap_kind(&recv).unwrap_or_else(|| (Vec::new(), MapKind::Linked));
         let entries = map_order(entries, kind);
@@ -7041,6 +7079,11 @@ fn dispatch_iteration(
             }
             Some(Ok(Value::array(out)))
         }
+        // `list.findAll()` with no closure keeps the Groovy-TRUE elements, the
+        // same filter `grep()` applies — `[1, null, 2].findAll()` is `[1, 2]`.
+        // It is the identity predicate, so it shares `grep`'s body rather than
+        // growing a second copy of Groovy truth.
+        "findAll" if args.is_empty() => dispatch_iteration(vm, items, "grep", args),
         // `list.findAll { it -> pred }` — keep the elements the closure accepts.
         "findAll" => {
             let clo = args.last()?;
@@ -7268,6 +7311,18 @@ fn dispatch_iteration(
                 }
             }
             Some(Ok(Value::array(out)))
+        }
+        // `list.any()` / `list.every()` with no closure test the elements'
+        // own Groovy truth: `[1, 2].any()` is true, `[0, null].any()` false,
+        // and an empty list is `false` for `any` and `true` for `every`.
+        "any" | "every" if args.is_empty() => {
+            let want_all = method == "every";
+            for it in items {
+                if groovy_truthy(vm, it) != want_all {
+                    return Some(Ok(Value::bool(!want_all)));
+                }
+            }
+            Some(Ok(Value::bool(want_all)))
         }
         // `list.any { … }` / `list.every { … }` — short-circuiting predicates.
         // `any` stops at the first accepted element, `every` at the first
@@ -7679,6 +7734,32 @@ fn dispatch_map_iteration(
             }
             Some(Ok(Value::array(out)))
         }
+        // The no-closure spellings test each ENTRY's Groovy truth, and a
+        // `Map.Entry` is an object — always true, whatever its value is. So
+        // `[a: 0].any()` is true, `every()` is true of any map, `findAll()`
+        // copies the whole map, and only an EMPTY map answers differently.
+        // Measured against Apache Groovy 5.1.1: `[a: null].findAll()` is
+        // `[a:null]`, not `[:]`.
+        "findAll" | "find" | "any" | "every" if clo.is_none() => Some(Ok(match method {
+            // The no-closure `findAll` is `DefaultGroovyMethods.findAll(Object)`,
+            // which coerces its receiver with `asCollection` — for a map that is
+            // the ENTRY SET, so the answer is a LIST of entries, not a map:
+            // `[a: 1, b: 0].findAll()` prints `[a=1, b=0]` and `[:].findAll()`
+            // is `[]`, not `[:]`. The closure form below is a different method
+            // and does rebuild a map.
+            "findAll" => Value::array(
+                entries
+                    .iter()
+                    .map(|(k, v)| heap_push(HeapObj::Entry(k.clone(), v.clone())))
+                    .collect(),
+            ),
+            "find" => match entries.first() {
+                Some((k, v)) => heap_push(HeapObj::Entry(k.clone(), v.clone())),
+                None => Value::Undef,
+            },
+            "any" => Value::bool(!entries.is_empty()),
+            _ => Value::bool(true),
+        })),
         // `map.findAll { … }` yields a *map* of the accepted entries; `find`
         // yields the first accepted entry (a `Map.Entry`), else `null`.
         "findAll" | "find" | "any" | "every" => {

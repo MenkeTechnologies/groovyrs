@@ -2661,3 +2661,71 @@ println([size: 9].size()); println([size: 9].size)
 def f = { a, c -> c(a) }; println(f(3) { it * 2 })
 %%
 println([1,2,3].inject(0) { a, b -> a + b })
+%%
+# Matcher.matches() records the match, so the captures are readable after it
+def m = ("foo=1" =~ /(\w+)=(\d+)/); m.matches(); println(m.group(1) + ":" + m.group(2))
+%%
+def m = ("ab" =~ /(a)(b)/); println(m.matches()); println(m.group(0)); println(m.group(1)); println(m.start()); println(m.end())
+%%
+def m = ("abc" =~ /(?<w>[a-z]+)/); m.matches(); println(m.group("w"))
+%%
+# a successful matches() runs the cursor to the match's end
+def m = ("ab" =~ /(a)(b)/); m.matches(); println(m.find())
+%%
+# a FAILED matches() clears the match state but leaves the cursor
+def m = ("a1b2" =~ /(\w)(\d)/); m.find(); m.matches(); m.find(); println(m.group(0))
+%%
+def m = ("a1b2" =~ /(\w)(\d)/); m.matches(); try { m.group(1) } catch (e) { println(e.getClass().getName()) }
+%%
+def m = ("ab" =~ /a/); try { m.start() } catch (e) { println(e.getClass().getName()) }
+%%
+# `/` on two integers is BigDecimal division even when it comes out exact
+println((6 / 3).getClass().getName()); println((4 / 2).getClass().getName()); println(6 / 3); println(7 / 2); println((6 / 3) + 1)
+%%
+println([1,2,3].average()); println([1,2,3,4].average()); println([1,2,3].average().getClass().getName()); println([1.0d,2.0d].average().getClass().getName())
+%%
+# null + <String> is "null" + s; every other right operand raises
+println(null + "x"); def n = null; println(n + "x"); println((null + "").getClass().getName())
+%%
+try { println(null + 1) } catch (e) { println(e.getClass().getName()) }
+%%
+try { println(null + [1]) } catch (e) { println(e.getClass().getName()) }
+%%
+# the comma subscript, and the collection index it compiles to
+println("abcdef"[1,3,5]); println([10,20,30,40][0,2]); println([1,2,3,4][0..1,3]); println([1,2,3][1..2,0..0]); println("abcd"[1..2,0])
+%%
+println([1,2][5,0]); println([1,2,3][0]); println([1,2,3][[0]]); println([[1,2],[3]][0,1])
+%%
+try { println([1,2][-5,0]) } catch (e) { println(e.getClass().getName()) }
+%%
+# asBoolean() is Groovy truth spelled as a call, on every receiver
+println([null,"","abc",0,0.0,[],[0],[:],1G].collect { it.asBoolean() })
+%%
+# mod is the FLOORED modulus, not %
+println(7.mod(3)); println((-7).mod(3)); println(7L.mod(3L)); println((-7.0).mod(3)); println((-7.5G).mod(2G)); println(1.5.mod(0.4))
+%%
+try { println(7.mod(-3)) } catch (e) { println(e.getClass().getName() + ":" + e.getMessage()) }
+%%
+try { println(7G.mod(-3G)) } catch (e) { println(e.getClass().getName() + ":" + e.getMessage()) }
+%%
+# stripTrailingZeros may drive the scale negative, which prints as an exponent
+println(1.100G.stripTrailingZeros()); println(100.00G.stripTrailingZeros()); println(0.00G.stripTrailingZeros()); println(100.00G.stripTrailingZeros().toPlainString())
+%%
+println(1.5E+3G.toString()); println(1.5E+3G.toPlainString()); println(1.0G.toPlainString()); println(0.001G.toPlainString())
+%%
+println("x".repeat(3)); println("x".repeat(0)); println("aB".compareToIgnoreCase("Ab")); println("a".compareToIgnoreCase("B")); println("B".compareToIgnoreCase("a"))
+%%
+try { println("x".repeat(-1)) } catch (e) { println(e.getClass().getName() + ":" + e.getMessage()) }
+%%
+def a = [1,2,3]; def b = a.collect(); b << 4; println(a); println(b)
+%%
+# the no-closure predicates test the elements' own Groovy truth
+println([1,2,3].any()); println([0,null].any()); println([].any()); println([].every()); println([0].every()); println([1,null,"",2].findAll())
+%%
+# on a map they read the ENTRY SET, so findAll() is a list of entries
+println([a:1,b:0].any()); println([:].any()); println([a:null].any()); println([a:1].every()); println([a:1,b:0].findAll()); println([:].findAll()); println([a:1].find())
+%%
+# `delegate` is the closure's own pseudo-variable, resolved before the delegate
+println([a:1].with { delegate }); println([a:1,b:2].with { delegate.size() }); println([1,2].with { delegate.sum() }); println([delegate:9].with { delegate })
+%%
+def c = { -> delegate }; c.delegate = [1,2]; println(c()); def d = { -> delegate?.size() }; d.delegate = [1,2]; println(d())

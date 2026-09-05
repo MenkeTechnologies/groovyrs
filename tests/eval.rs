@@ -6312,3 +6312,79 @@ fn the_gdk_methods_added_this_round_answer_groovys_values() {
         "stderr was: {err}"
     );
 }
+
+/// The no-closure spellings of the four predicates test the elements' own Groovy
+/// truth. On a MAP they are a different method from the closure form — Groovy
+/// coerces the receiver with `asCollection`, so the receiver is its entry set and
+/// `findAll()` answers a LIST of entries, never a map. Measured against Apache
+/// Groovy 5.1.1 / JVM 26.
+#[test]
+fn the_no_closure_predicates_filter_on_groovy_truth() {
+    let cases = [
+        (
+            r#"println([[1, 2, 3].any(), [0, null].any(), [].any()])"#,
+            "[true, false, false]",
+        ),
+        (
+            r#"println([[].every(), [0].every(), [1, 0].every()])"#,
+            "[true, false, false]",
+        ),
+        (r#"println([1, null, "", 2].findAll())"#, "[1, 2]"),
+        (r#"println(([1, 0] as Set).findAll())"#, "[1]"),
+        (r#"println((1..3).any())"#, "true"),
+        // a `Map.Entry` is an object, so it is true whatever its value is —
+        // only an EMPTY map answers differently
+        (
+            r#"println([[a: 1, b: 0].any(), [:].any(), [a: null].any(), [a: 1].every()])"#,
+            "[true, false, true, true]",
+        ),
+        // …and the map `findAll()` is the entry list, not a filtered map
+        (r#"println([a: 1, b: 0].findAll())"#, "[a=1, b=0]"),
+        (r#"println([:].findAll())"#, "[]"),
+        (r#"println([a: 1].find())"#, "a=1"),
+        // the closure forms are untouched and still rebuild a map
+        (
+            r#"println([a: 1, b: 2].findAll { k, v -> v > 1 })"#,
+            "[b:2]",
+        ),
+    ];
+    for (src, want) in cases {
+        let (out, ok) = run(src);
+        assert!(ok, "failed to run: {src}");
+        assert_eq!(out.trim_end(), want, "for source: {src}");
+    }
+}
+
+/// `delegate` inside a closure body is the closure's own pseudo-variable, so it
+/// answers the delegate itself — and it is resolved BEFORE the delegate is asked
+/// for a property, which is what makes `[delegate: 9].with { delegate }` the map
+/// rather than `9`.
+#[test]
+fn delegate_reads_the_delegate_not_a_property_of_it() {
+    let cases = [
+        (r#"println([a: 1].with { delegate })"#, "[a:1]"),
+        (r#"println([a: 1, b: 2].with { delegate.size() })"#, "2"),
+        (r#"println([1, 2].with { delegate.sum() })"#, "3"),
+        // the pseudo-variable wins over a delegate key of the same name
+        (
+            r#"println([delegate: 9].with { delegate })"#,
+            "[delegate:9]",
+        ),
+        // a closure with an explicitly set delegate reads it the same way
+        (
+            r#"def c = { -> delegate }; c.delegate = [1, 2]; println(c())"#,
+            "[1, 2]",
+        ),
+        (
+            r#"def c = { -> delegate?.size() }; c.delegate = [1, 2]; println(c())"#,
+            "2",
+        ),
+        // and the delegate's own names still resolve bare
+        (r#"println([a: 1].with { a })"#, "1"),
+    ];
+    for (src, want) in cases {
+        let (out, ok) = run(src);
+        assert!(ok, "failed to run: {src}");
+        assert_eq!(out.trim_end(), want, "for source: {src}");
+    }
+}

@@ -6388,3 +6388,29 @@ fn delegate_reads_the_delegate_not_a_property_of_it() {
         assert_eq!(out.trim_end(), want, "for source: {src}");
     }
 }
+
+/// Groovy puts `..` at the shift band, above the relational one, so a range is
+/// a legal RIGHT operand of `in`, `==` and the rest of that band — and an
+/// operator that binds tighter takes the range's ENDPOINT instead. Both halves
+/// measured against Apache Groovy 5.1.1 / JVM 26.
+#[test]
+fn a_range_binds_tighter_than_in_and_looser_than_plus() {
+    let cases = [
+        (r#"println(1 in 1..3)"#, "true"),
+        (r#"println(0 in 1..3)"#, "false"),
+        (r#"println(1 in 1..<3)"#, "true"),
+        (r#"println(3 in 1..<3)"#, "false"),
+        // the endpoint itself is a full expression at the range's own band
+        (r#"println(1 in 1..2 + 1)"#, "true"),
+        (r#"println([1, 2] == 1..2)"#, "true"),
+        (r#"println(2 in 1..3 && true)"#, "true"),
+        (r#"def x = 1 in 1..3; println(x)"#, "true"),
+        // `+` binds tighter than `..`, so it takes the START, not the range
+        (r#"println(1 + 1..3)"#, "2..3"),
+    ];
+    for (src, want) in cases {
+        let (out, ok) = run(src);
+        assert!(ok, "failed to run: {src}");
+        assert_eq!(out.trim_end(), want, "for source: {src}");
+    }
+}

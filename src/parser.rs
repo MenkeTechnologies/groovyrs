@@ -1807,6 +1807,27 @@ impl Parser {
             } else {
                 bp + 1
             })?;
+            // Groovy puts `..` at the shift band, ABOVE the relational one, so a
+            // range can be the right operand of everything from `in` down —
+            // `1 in 1..3` is `1 in (1..3)` and `[1, 2] == 1..2` compares against
+            // the range. The RHS parse above stops at the `..` because that
+            // operator has no binding power in this table, which left `..3`
+            // unconsumed and `1 in 1..3` a parse error. An operator that binds
+            // TIGHTER than the range takes the endpoint instead and must not
+            // absorb it: `1 + 1..3` is `(1 + 1)..3`, measured.
+            let rhs = if bp <= RELATIONAL_BP && matches!(self.peek(), Tok::DotDot | Tok::DotDotLt) {
+                let inclusive = matches!(self.peek(), Tok::DotDot);
+                self.advance();
+                self.skip_newlines();
+                let end = self.binary(RANGE_OPERAND_BP)?;
+                Expr::Range {
+                    start: Box::new(rhs),
+                    end: Box::new(end),
+                    inclusive,
+                }
+            } else {
+                rhs
+            };
             lhs = self.record(
                 col,
                 Expr::Binary {

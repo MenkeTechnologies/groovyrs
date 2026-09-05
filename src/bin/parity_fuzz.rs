@@ -1603,16 +1603,42 @@ fn ours_bin() -> PathBuf {
         .join("groovy")
 }
 
+/// Resolve `prog` to an ABSOLUTE launcher path, searching `PATH` when it is a
+/// bare name. Every oracle invocation then names the same file for the whole
+/// run: a `PATH` that changes mid-run, or a shell function shadowing `groovy`,
+/// cannot swap the reference out from under a campaign whose earlier cases were
+/// measured against a different one.
+fn absolutize(prog: &str) -> Option<PathBuf> {
+    let p = Path::new(prog);
+    if p.components().count() > 1 || p.is_absolute() {
+        return std::fs::canonicalize(p).ok();
+    }
+    for dir in std::env::split_paths(&std::env::var_os("PATH")?) {
+        let cand = dir.join(prog);
+        if cand.is_file() {
+            return std::fs::canonicalize(&cand).ok();
+        }
+    }
+    None
+}
+
 /// The ORACLE — reference Apache Groovy. Every divergence is "groovyrs disagrees
 /// with THIS runtime", so which runtime it is matters. `GROOVYRS_FUZZ_GROOVY`
 /// names the oracle explicitly; if set but unusable this is a HARD ERROR.
 fn resolve_oracle() -> String {
+    let ok = |p: &str| -> Option<String> {
+        version_of(p)?;
+        Some(
+            absolutize(p)
+                .map(|a| a.display().to_string())
+                .unwrap_or_else(|| p.to_string()),
+        )
+    };
     if let Ok(p) = std::env::var("GROOVYRS_FUZZ_GROOVY") {
-        if version_of(&p).is_none() {
+        return ok(&p).unwrap_or_else(|| {
             eprintln!("parity-fuzz: GROOVYRS_FUZZ_GROOVY={p}: not a usable groovy");
             std::process::exit(2);
-        }
-        return p;
+        });
     }
     for p in [
         "groovy",
@@ -1620,28 +1646,33 @@ fn resolve_oracle() -> String {
         "/usr/local/bin/groovy",
         "/usr/bin/groovy",
     ] {
-        if version_of(p).is_some() {
-            return p.to_string();
+        if let Some(abs) = ok(p) {
+            return abs;
         }
     }
     eprintln!("parity-fuzz: no reference groovy found; set GROOVYRS_FUZZ_GROOVY");
     std::process::exit(2);
 }
 
-/// Refuse an oracle whose JVM or default locale would make its answers the wrong
-/// reference — the same gate `parity-scripts/oracle-jvm.sh` applies to the shell
-/// harnesses, which this binary did not have.
+/// PIN the oracle's JVM, or refuse — the same gate `parity-scripts/oracle-jvm.sh`
+/// applies to the shell harnesses.
 ///
 /// The `groovy` launcher resolves its JVM from an ambient `JAVA_HOME`, so which
 /// JVM answers depends on the caller's environment rather than on which `groovy`
 /// is on PATH. A pre-JDK-19 JVM renders every double by the old
-/// `Double.toString` algorithm (`1.0e23` prints `9.999999999999999E22`), and a
-/// non-en-US locale changes `String.format`'s separators and `toUpperCase`'s
-/// case mapping. Either one reports divergences on correct groovyrs output —
-/// and worse, invites "fixing" groovyrs to match the wrong oracle.
+/// `Double.toString` algorithm (`1.0e23` prints `9.999999999999999E22`, the
+/// JDK-4511638 rewrite), and a non-en-US locale changes `String.format`'s
+/// separators and `toUpperCase`'s case mapping. Either one reports divergences
+/// on correct groovyrs output — and worse, invites "fixing" groovyrs to match
+/// the wrong oracle. An interactive shell on a jenv-managed machine exports a
+/// JDK 17 home, so this is the DEFAULT environment, not an exotic one.
 ///
-/// Exits 2 (fails closed) rather than returning, so no caller can continue past
-/// a refusal.
+/// Refusing alone left the caller to fix their shell by hand. This probes a list
+/// of candidate homes and sets the first conforming one into this process's
+/// environment, which every spawned oracle inherits; it prints exactly which
+/// JVM it pinned, on every run, because that fact decides whether the campaign's
+/// verdicts mean anything. It still fails closed: no conforming candidate exits
+/// 2 naming each one tried and what that one rendered.
 fn gate_oracle(oracle: &str) {
     const PROBE: &str = concat!(
         "println 1.0e23d\n",
@@ -1649,15 +1680,7 @@ fn gate_oracle(oracle: &str) {
         "println String.format('%,.2f', 1234.5)\n",
         "println 'hi'.toUpperCase()\n",
     );
-    let out = Command::new(oracle).arg("-e").arg(PROBE).output();
-    let text = match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
-        Err(e) => {
-            eprintln!("parity-fuzz: cannot run oracle {oracle}: {e}");
-            std::process::exit(2);
-        }
-    };
-    let want: [(&str, &str); 4] = [
+    const WANT: [(&str, &str); 4] = [
         (
             "1.0E23",
             "a JVM predating the JDK 19 Double.toString rewrite",
@@ -1672,18 +1695,94 @@ fn gate_oracle(oracle: &str) {
         ),
         ("HI", "a default locale that is not en-US (case mapping)"),
     ];
-    for (needle, why) in want {
-        if !text.lines().any(|l| l == needle) {
-            eprintln!("parity-fuzz: REFUSING oracle {oracle} — {why}.");
-            eprintln!("parity-fuzz:   {}", version_of(oracle).unwrap_or_default());
-            eprintln!(
-                "parity-fuzz:   JAVA_HOME={}",
-                std::env::var("JAVA_HOME").unwrap_or_else(|_| "<unset>".into())
-            );
-            eprintln!("parity-fuzz:   expected a line {needle:?}; got {:?}", text);
-            std::process::exit(2);
+
+    // Candidates in preference order. An explicit GROOVYRS_PARITY_JAVA_HOME is
+    // honoured ALONE: naming a JVM means measure that one or refuse.
+    let mut cands: Vec<Option<String>> = Vec::new();
+    if let Ok(pinned) = std::env::var("GROOVYRS_PARITY_JAVA_HOME") {
+        cands.push(Some(pinned));
+    } else {
+        if let Ok(ambient) = std::env::var("JAVA_HOME") {
+            cands.push(Some(ambient));
+        }
+        cands.push(None);
+        for h in [
+            "/opt/homebrew/opt/openjdk",
+            "/opt/homebrew/opt/openjdk@25",
+            "/opt/homebrew/opt/openjdk@21",
+            "/usr/local/opt/openjdk",
+            "/usr/lib/jvm/default-java",
+        ] {
+            if Path::new(h).is_dir() {
+                cands.push(Some(h.to_string()));
+            }
         }
     }
+
+    let mut tried = Vec::new();
+    for cand in cands {
+        let mut cmd = Command::new(oracle);
+        cmd.arg("-e").arg(PROBE);
+        match &cand {
+            Some(h) => {
+                cmd.env("JAVA_HOME", h);
+            }
+            None => {
+                cmd.env_remove("JAVA_HOME");
+            }
+        }
+        let text = match cmd.output() {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+            Err(e) => {
+                eprintln!("parity-fuzz: cannot run oracle {oracle}: {e}");
+                std::process::exit(2);
+            }
+        };
+        match WANT
+            .iter()
+            .find(|(needle, _)| !text.lines().any(|l| l == *needle))
+        {
+            None => {
+                // Pin it into this process; every oracle subprocess inherits it.
+                match &cand {
+                    Some(h) => std::env::set_var("JAVA_HOME", h),
+                    None => std::env::remove_var("JAVA_HOME"),
+                }
+                eprintln!("parity-fuzz: oracle    {oracle}");
+                eprintln!(
+                    "parity-fuzz: banner    {}",
+                    version_of(oracle).unwrap_or_default()
+                );
+                eprintln!(
+                    "parity-fuzz: JAVA_HOME {} (pinned)",
+                    cand.as_deref().unwrap_or("<unset>")
+                );
+                return;
+            }
+            Some((_, why)) => tried.push(format!(
+                "  JAVA_HOME={} → {why}; got {:?}",
+                cand.as_deref().unwrap_or("<unset>"),
+                text
+            )),
+        }
+    }
+    eprintln!("parity-fuzz: REFUSING oracle {oracle} — no candidate JVM qualifies.");
+    for t in &tried {
+        eprintln!("parity-fuzz: {t}");
+    }
+    eprintln!(
+        "parity-fuzz: want a JDK 19+ JVM under an en-US locale; \
+         set GROOVYRS_PARITY_JAVA_HOME to one."
+    );
+    std::process::exit(2);
+}
+
+/// `(length, mtime)` of a binary — enough to notice a rebuild that replaced it.
+/// `None` when it cannot be read, which compares equal to itself, so a path the
+/// harness cannot stat is not turned into a spurious refusal.
+fn binary_identity(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let md = std::fs::metadata(path).ok()?;
+    Some((md.len(), md.modified().ok()?))
 }
 
 fn version_of(prog: &str) -> Option<String> {
@@ -2003,7 +2102,39 @@ fn main() {
         args.jobs
     );
 
+    // The identity of BOTH binaries, taken before the first case. A campaign of
+    // a few thousand cases runs for the better part of an hour, which is long
+    // enough for a `cargo build` in another window to replace
+    // `target/debug/groovy` underneath it — after which the earlier half of the
+    // run measured one binary and the later half another, and the verdict
+    // describes neither. The check at the end refuses to report rather than
+    // publishing a number nothing can reproduce.
+    let ours_id = binary_identity(&bin);
+    let oracle_id = binary_identity(Path::new(&oracle));
+
     std::thread::scope(|scope| {
+        // A heartbeat, because a silent hour is indistinguishable from a hang.
+        // It reads the same counters the workers bump and stops with them.
+        scope.spawn(|| {
+            let mut last = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(15));
+                let done = checked.load(Ordering::Relaxed);
+                if done >= args.count {
+                    break;
+                }
+                if done == last {
+                    continue;
+                }
+                last = done;
+                eprintln!(
+                    "  … {done}/{} cases, {} divergences, {:.0}s elapsed",
+                    args.count,
+                    divergences.lock().map(|d| d.len()).unwrap_or(0),
+                    start.elapsed().as_secs_f64()
+                );
+            }
+        });
         for _ in 0..args.jobs {
             scope.spawn(|| loop {
                 if stop.load(Ordering::Relaxed) {
@@ -2062,6 +2193,22 @@ fn main() {
     });
 
     let elapsed = start.elapsed();
+    // Neither binary may have moved while the campaign ran (see `ours_id`).
+    for (what, path, before) in [
+        ("groovyrs", bin.clone(), ours_id),
+        ("the oracle", PathBuf::from(&oracle), oracle_id),
+    ] {
+        let after = binary_identity(&path);
+        if before != after {
+            eprintln!(
+                "parity-fuzz: REFUSING to report — {what} ({}) was REPLACED during the \
+                 run ({before:?} → {after:?}), so the cases before and after the swap \
+                 measured different binaries. Re-run against a settled build.",
+                path.display()
+            );
+            std::process::exit(2);
+        }
+    }
     let mut divs = divergences.into_inner().unwrap();
     divs.sort_by_key(|(s, _)| *s);
     let done = checked.load(Ordering::Relaxed);

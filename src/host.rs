@@ -13,8 +13,8 @@
 //!    builtin ([`GPRINTLN`]/[`GPRINT`]) that formats through [`groovy_str`] —
 //!    `true`/`false`, `3.0`, `null` — matching Groovy.
 //! 2. **`/` division.** Groovy divides two integers as `BigDecimal`, so `7/2`
-//!    is `3.5`, not `3`. `/` lowers to [`GDIV`], which returns an integer only
-//!    when the division is exact and a decimal otherwise.
+//!    is `3.5`, not `3` — and `4/2` is the *BigDecimal* `2`, not the Integer 2.
+//!    `/` lowers to [`GDIV`], which promotes every integer pair.
 //! 3. **`+` overloading.** Groovy's `+` dispatches on its left operand: a list
 //!    concatenates/appends, a map merges, and a `String` (or other scalar)
 //!    concatenates. fusevm runs *strict* once a numeric hook is installed,
@@ -4591,13 +4591,52 @@ fn dispatch_matcher_method(
             Ok(p) => p.group_count() as i64,
             Err(_) => 0,
         }),
+        // `start()`/`end()` read the LAST match, so with no match state they are
+        // Java's `IllegalStateException` — the same refusal `group()` makes, and
+        // for the same reason. They used to answer `-1`, which is `Matcher`'s
+        // "group did not participate" value and reads as a real offset.
+        "start" | "end" if m.last.is_none() => {
+            raise(vm, "IllegalStateException", "No match found");
+            Value::Undef
+        }
         "start" => Value::int(m.last.as_ref().map(|h| h.start as i64).unwrap_or(-1)),
         "end" => Value::int(m.last.as_ref().map(|h| h.end as i64).unwrap_or(-1)),
         // `matches()` asks whether the pattern covers the whole subject, which
-        // is a different question from `find()` and does not move the cursor.
+        // is a different question from `find()`.
+        //
+        // It also SETS THE MATCH STATE, which this used to skip: Java's
+        // `Matcher.matches()` records the match it found, so `m.matches()`
+        // followed by `m.group(1)` reads the capture — the idiom every
+        // `if (m.matches()) { … m.group(1) … }` is written in. Answering only
+        // the boolean left `last` empty, so the very next `group` raised
+        // `IllegalStateException: No match found` on a matcher that had just
+        // matched. Measured against Apache Groovy 5.1.1 / JVM 26:
+        //
+        //   `("ab" =~ /(a)(b)/).with { matches(); group(1) }` is `a`, and
+        //   `start()`/`end()` are `0`/`2`.
+        //
+        // A match runs the cursor to its end, so a following `find()` resumes
+        // after it (`m.matches(); m.find()` on `"ab"` is false). A FAILED
+        // `matches()` clears the match state but leaves the cursor where it was,
+        // which is why the `None` arm re-parks `m.pos` rather than resetting:
+        // `m.find(); m.matches(); m.find()` walks to the second match, not back
+        // to the first.
         "matches" => match &*crate::regex::compile_whole(&m.source) {
-            Ok(p) => Value::bool(p.matches_whole(&m.text).unwrap_or(false)),
-            Err(_) => Value::bool(false),
+            Ok(p) => match p.find(&m.text, 0) {
+                Ok(Some(hit)) => {
+                    let end = hit.end;
+                    matcher_advance(handle, end, Some(hit));
+                    Value::bool(true)
+                }
+                _ => {
+                    matcher_advance(handle, m.pos, None);
+                    Value::bool(false)
+                }
+            },
+            Err(_) => {
+                matcher_advance(handle, m.pos, None);
+                Value::bool(false)
+            }
         },
         "size" | "count" | "getCount" => Value::int(matcher_all(m).len() as i64),
         "pattern" | "getPattern" => heap_push(HeapObj::Regex(m.source.clone())),
@@ -5561,34 +5600,41 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
         };
     }
     // Subscripting by a *collection* of indices — which is what a range
-    // subscript is (it is rewritten to its element list above). `list[0..1]` is the
-    // sublist and `"abc"[0..1]` the substring at those positions.
+    // subscript is (it is rewritten to its element list above), and what the
+    // comma form `list[0, 2]` compiles to. `list[0..1]` is the sublist and
+    // `"abc"[0..1]` the substring at those positions.
+    //
+    // Each index is read by re-entering this function, which is what makes the
+    // collection form agree with the scalar one on every edge it has: an index
+    // past the end reads `null` (`[1, 2][5, 0]` is `[null, 1]`), one still
+    // negative after wrapping raises `ArrayIndexOutOfBoundsException`, and a
+    // NESTED range expands in place (`[1, 2, 3][1..2, 0..0]` is `[2, 3, 1]`).
+    // Picking the elements directly here instead silently dropped both — a
+    // filter over `as_i64` skipped every range element and every out-of-range
+    // index, so those two answered `[4]` and `[1]`.
     if let Value::Array(idxs) = &index {
-        let pick = |len: usize| -> Vec<i64> {
-            idxs.iter()
-                .filter_map(as_i64)
-                .map(|i| if i < 0 { len as i64 + i } else { i })
-                .collect()
-        };
-        match &recv {
-            Value::Array(a) => {
-                return Value::array(
-                    pick(a.len())
-                        .into_iter()
-                        .filter_map(|i| usize::try_from(i).ok().and_then(|u| a.get(u)).cloned())
-                        .collect(),
-                )
+        if matches!(recv, Value::Array(_) | Value::Str(_)) {
+            let mut out: Vec<Value> = Vec::with_capacity(idxs.len());
+            for one in idxs.iter() {
+                // A range or list element expands into the receiver's elements
+                // at those positions; a scalar contributes exactly one.
+                let nested = as_range(one).is_some() || as_list(one).is_some();
+                let v = index_read(vm, recv.clone(), one.clone());
+                if faulted() || pending_exc() {
+                    return Value::Undef;
+                }
+                match (nested, deref_list(&v)) {
+                    (true, Value::Array(inner)) => out.extend(inner.iter().cloned()),
+                    (true, Value::Str(t)) => {
+                        out.extend(t.chars().map(|c| Value::str(c.to_string())))
+                    }
+                    _ => out.push(v),
+                }
             }
-            Value::Str(s) => {
-                let chars: Vec<char> = s.chars().collect();
-                return Value::str(
-                    pick(chars.len())
-                        .into_iter()
-                        .filter_map(|i| usize::try_from(i).ok().and_then(|u| chars.get(u)))
-                        .collect::<String>(),
-                );
-            }
-            _ => {}
+            return match &recv {
+                Value::Str(_) => Value::str(out.iter().map(groovy_str).collect::<String>()),
+                _ => Value::array(out),
+            };
         }
     }
     match &recv {
@@ -6276,6 +6322,11 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             "equals" => Value::bool(matches!(args.first(), None | Some(Value::Undef))),
             // Groovy routes `null.getClass()` to `NullObject`, which answers.
             "getClass" => class_ref_of(&recv),
+            // `NullObject.asBoolean()` answers `false` — Groovy truth spelled as
+            // a call, and null is the falsest value there is. It raising here
+            // was the one receiver the universal `asBoolean` arm never saw,
+            // because a null receiver is intercepted before the per-type table.
+            "asBoolean" if args.is_empty() => Value::bool(false),
             _ => {
                 raise(
                     vm,
@@ -6905,6 +6956,9 @@ fn dispatch_iteration(
             Some(Ok(Value::array(items.to_vec())))
         }
         // `list.collect { it -> ... }` — map to a new list of closure results.
+        // With no closure it is Groovy's identity copy: a NEW `ArrayList` with
+        // the same elements, which is what `collect()` is used for.
+        "collect" if args.is_empty() => Some(Ok(Value::array(items.to_vec()))),
         "collect" => {
             let clo = args.last()?;
             closure_meta(clo)?;
@@ -7079,6 +7133,24 @@ fn dispatch_iteration(
                 });
             }
             Some(Ok(acc.unwrap_or(Value::Undef)))
+        }
+        // `list.average()` is `sum() / size()` — through Groovy's `/`, so an
+        // integer list averages to a `BigDecimal` (`[1, 2, 3].average()` is the
+        // BigDecimal `2`, not the Integer 2) and `[1, 2, 3, 4]` is `2.5`.
+        // `average { … }` averages the closure's results, exactly as `sum` does.
+        // An empty list has no sum to divide, and Groovy's own answer there is a
+        // NullPointerException out of the division, so it is left to `/`.
+        "average" => {
+            let total = match dispatch_iteration(vm, items, "sum", args)? {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if pending_exc() {
+                return Some(Ok(Value::Undef));
+            }
+            vm.stack.push(total);
+            vm.stack.push(Value::int(items.len() as i64));
+            Some(Ok(b_div(vm, 0)))
         }
         // `list.sort()` / `sort { it.key }` / `sort { a, b -> … }`. Groovy sorts
         // the receiver *in place* and returns it; the compiler writes the result
@@ -7976,6 +8048,14 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // Universal size query (String chars / list elements / map entries).
         (_, "size") => Value::int(value_size(recv)),
 
+        // `value.asBoolean()` is Groovy truth spelled as a call — the same rule
+        // `if (v)` applies, which is why it answers on every receiver rather
+        // than living in a per-type arm: `"".asBoolean()` is false, `[0]` is
+        // true (a non-empty list, whatever it holds), `0.0` is false. A user
+        // class that declares its own `asBoolean` is dispatched before this
+        // (see `dispatch_instance_method`), exactly as `if (obj)` consults it.
+        (_, "asBoolean") if args.is_empty() => Value::bool(groovy_truthy(vm, recv)),
+
         // `value.asType(Type)` is the method spelling of `value as Type`, so it
         // runs the one coercion rather than a second, drifting copy of it. The
         // argument is a `java.lang.Class`; `as` takes the name.
@@ -8138,6 +8218,39 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 .unwrap_or(a.len() as i64 - b.len() as i64);
             Value::int(diff)
         }
+        // `String.compareToIgnoreCase` compares the case-folded UTF-16 units and,
+        // unlike `compareTo`, answers the difference of the FOLDED units — Java
+        // folds each unit to upper then back to lower before subtracting, so
+        // `"a".compareToIgnoreCase("B")` is `-1` (`a` vs `b`), not `-33`.
+        (Value::Str(s), "compareToIgnoreCase") => {
+            let fold = |t: &str| -> Vec<u16> { t.to_lowercase().encode_utf16().collect() };
+            let (a, b) = (
+                fold(s),
+                fold(&args.first().map(groovy_str).unwrap_or_default()),
+            );
+            Value::int(
+                a.iter()
+                    .zip(b.iter())
+                    .find(|(x, y)| x != y)
+                    .map(|(x, y)| i64::from(*x) - i64::from(*y))
+                    .unwrap_or(a.len() as i64 - b.len() as i64),
+            )
+        }
+        // `String.repeat(n)` is the JDK method, not the `*` operator: it REFUSES
+        // a negative count where `"x" * -1` answers the empty string, so the two
+        // cannot share an arm.
+        (Value::Str(s), "repeat") => match args.first().and_then(as_i64) {
+            Some(n) if n < 0 => {
+                raise(
+                    vm,
+                    "IllegalArgumentException",
+                    &format!("count is negative: {n}"),
+                );
+                Value::Undef
+            }
+            Some(n) => Value::str(s.repeat(n as usize)),
+            None => raise_missing_method(vm, recv, method, args),
+        },
         (Value::Str(s), "charAt") => {
             let i = args.first().and_then(as_i64).unwrap_or(0);
             let len = utf16_len(s);
@@ -9033,6 +9146,25 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             // back to `Integer.MIN_VALUE`, exactly as Java's `/` does.
             Some(d) => Value::int(wrap_to_width_of(*n, n.wrapping_div(d))),
         },
+        // `n.mod(m)` is the FLOORED modulus, not `%`: `(-7).mod(3)` is `2` where
+        // `-7 % 3` is `-1`. On the integral types Groovy routes it through
+        // `BigInteger.mod`, which requires a POSITIVE modulus and reports its own
+        // wording for anything else — `7.mod(0)` and `(-7).mod(-3)` both raise
+        // `ArithmeticException: BigInteger: modulus not positive`, where the
+        // sibling `intdiv(0)` says `/ by zero`.
+        (Value::Int(n), "mod") if args.first().is_some_and(is_integral) => {
+            match args.first().and_then(as_i64) {
+                Some(m) if m > 0 => Value::int(n.rem_euclid(m)),
+                _ => {
+                    raise(
+                        vm,
+                        "ArithmeticException",
+                        "BigInteger: modulus not positive",
+                    );
+                    Value::Undef
+                }
+            }
+        }
         // `Math.abs`/`.abs()` on `Integer.MIN_VALUE` is `Integer.MIN_VALUE`:
         // the positive counterpart is not an `Integer`, so the wrap stands.
         (Value::Int(n), "abs") => Value::int(abs_at_width(*n)),
@@ -9239,6 +9371,33 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         None => raise_missing_method(vm, recv, method, args),
                     }
                 }
+                // `stripTrailingZeros` drops the scale as it drops the zeros,
+                // and the scale may go negative — `100.00G` becomes the
+                // unscaled `1` at scale `-2`, which prints `1E+2`. Java defines
+                // it on `BigDecimal` only, so a `BigInteger` receiver misses.
+                "stripTrailingZeros" if args.is_empty() && as_bigint(recv).is_none() => {
+                    dec_value(decimal::strip_trailing_zeros(&d))
+                }
+                // `toPlainString` is the same digits with the exponent expanded:
+                // `1E+10G` prints `10000000000` where `toString` keeps `1E+10`.
+                "toPlainString" if args.is_empty() => Value::str(decimal::to_plain_string(&d)),
+                // The floored modulus (see the integral arm above). A
+                // `BigDecimal` receiver does NOT go through `BigInteger.mod` —
+                // the `BigInteger` spelling is the `"divide" | "remainder" |
+                // "mod"` arm below, which is why this one is guarded off it. So
+                // a zero divisor reports `BigDecimal.divide`'s wording instead,
+                // and a negative divisor is accepted rather than refused:
+                // `(-7.5).mod(2)` is `0.5` and `1.5.mod(0.4)` is `0.3`.
+                "mod" if as_bigint(recv).is_none() => match args.first().and_then(as_exact_dec) {
+                    Some(y) => match decimal::floored_mod(&d, &y) {
+                        Some(r) => dec_value(r),
+                        None => {
+                            raise(vm, "ArithmeticException", "Division by zero");
+                            Value::Undef
+                        }
+                    },
+                    None => raise_missing_method(vm, recv, method, args),
+                },
                 // `intdiv` is Groovy's integer division: exact, truncating, and
                 // (unlike `/`) not promoted to a `BigDecimal`.
                 "intdiv" => match args.first().and_then(as_exact_dec) {
@@ -9412,18 +9571,28 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                                 Value::Undef
                             }
                         },
-                        // `BigInteger.mod` takes the sign of the *modulus*,
-                        // which is always positive here; `remainder` takes the
-                        // dividend's.
+                        // `BigInteger.mod` REQUIRES a positive modulus and
+                        // raises its own wording for anything else —
+                        // `7G.mod(-3G)` is `ArithmeticException: BigInteger:
+                        // modulus not positive`, not `1`. (A zero modulus is
+                        // caught by the divide-by-zero check above, which
+                        // reports `BigInteger divide by zero`; Groovy answers
+                        // the "not positive" message there too, so the sign
+                        // check has to run first.) Its result takes the sign of
+                        // the modulus, where `remainder` takes the dividend's.
                         ("mod", _) => {
+                            if !y.is_positive() {
+                                raise(
+                                    vm,
+                                    "ArithmeticException",
+                                    "BigInteger: modulus not positive",
+                                );
+                                return Value::Undef;
+                            }
                             let r = decimal::remainder(&d, &y).unwrap_or_else(|| d.clone());
                             let negative =
                                 decimal::cmp(&r, &decimal::from_i64(0)) == std::cmp::Ordering::Less;
-                            bigint_value(if negative {
-                                decimal::add(&r, &decimal::abs(&y))
-                            } else {
-                                r
-                            })
+                            bigint_value(if negative { decimal::add(&r, &y) } else { r })
                         }
                         (_, big) => {
                             let r = decimal::remainder(&d, &y).unwrap_or_else(|| d.clone());
@@ -12870,9 +13039,10 @@ fn print_args(vm: &mut VM, argc: u8, newline: bool) -> Value {
 }
 
 /// Groovy `/` division builtin. Pops two operands (`a / b`) and applies Groovy's
-/// `BigDecimal`-promoting semantics: two integers divide exactly to an integer
-/// when there is no remainder (`4/2 → 2`) and to a decimal otherwise
-/// (`7/2 → 3.5`); any decimal operand forces decimal division (`10.0/4 → 2.5`).
+/// `BigDecimal`-promoting semantics: two integers divide to a `BigDecimal`
+/// whether or not the division is exact (`4/2` is the BigDecimal `2`, `7/2` is
+/// `3.5`), and any decimal operand forces decimal division (`10.0/4 → 2.5`). A
+/// `double` operand keeps the IEEE path instead.
 fn b_div(vm: &mut VM, _argc: u8) -> Value {
     let b = vm.stack.pop().unwrap_or(Value::Undef);
     let a = vm.stack.pop().unwrap_or(Value::Undef);
@@ -12898,14 +13068,15 @@ fn b_div(vm: &mut VM, _argc: u8) -> Value {
         );
         return Value::Undef;
     }
-    // Groovy divides two integers exactly when it can (`4/2` is the Integer 2)
-    // and promotes to `BigDecimal` otherwise (`7/2` is 3.5, `1/3` is
-    // 0.3333333333) — never to a double.
-    if let (Some(x), Some(y)) = (as_i64(&a), as_i64(&b)) {
-        if y != 0 && x % y == 0 {
-            return Value::int(x / y);
-        }
-    }
+    // Groovy's `/` on two integers is `NumberMath.divide`, which is
+    // `BigDecimalMath` — it promotes to `BigDecimal` even when the division is
+    // exact. This used to short-circuit an exact pair to an `Integer` on the
+    // grounds that `4/2` is the Integer 2; it is not. Measured against Apache
+    // Groovy 5.1.1 / JVM 26, `(6/3).getClass()` and `(4/2).getClass()` are both
+    // `java.math.BigDecimal`, so the shortcut answered the right digits under
+    // the wrong type — visible to `getClass()`, to `equals` (a `BigDecimal`
+    // compares scale as well as value), and to anything that dispatches on it.
+    // The value keeps rendering as `2`, so only the type moved.
     // A `double` operand keeps the IEEE path, where `5.0d / 0.0d` is Infinity.
     if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
         return Value::float(as_f64(&a) / as_f64(&b));
@@ -14006,6 +14177,16 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // `null`. `+` gets its own wording (verified against Apache Groovy 5.0.8),
     // and the comparisons stay total (`null > 1` is false, not a throw).
     if matches!(a, Value::Undef) {
+        // …except `null + <String>`, which is not an error at all: Groovy's
+        // `NullObject.plus(String)` answers `"null" + s`, so `null + "x"` is the
+        // String `nullx`. Only a String right operand takes this path — measured
+        // against Apache Groovy 5.1.1 / JVM 26, `null + 1`, `null + [1]` and
+        // `null + null` all still raise.
+        if matches!(op, NumOp::Add) {
+            if let Value::Str(s) = b {
+                return Ok(Value::str(format!("null{s}")));
+            }
+        }
         let message = match op {
             NumOp::Add => Some(format!("Cannot execute null+{}", groovy_str(b))),
             NumOp::Sub => Some("Cannot invoke method minus() on null object".to_string()),

@@ -24,15 +24,18 @@ PROBES="${1:-$ROOT/parity-scripts/probes.txt}"
 [ "${1:-}" = "-v" ] && { PROBES="$ROOT/parity-scripts/probes.txt"; VERBOSE=-v; } || VERBOSE="${2:-}"
 ORACLE="${GROOVYRS_PARITY_GROOVY:-groovy}"
 
-command -v "$ORACLE" >/dev/null || { echo "fuzz: no reference '$ORACLE' on PATH"; exit 2; }
 [ -x "$OURS" ] || { echo "fuzz: $OURS not built (cargo build)"; exit 2; }
 [ -f "$PROBES" ] || { echo "fuzz: no probe file $PROBES"; exit 2; }
 
 # The `groovy` launcher resolves its JVM from an ambient `JAVA_HOME`, and a
-# pre-JDK-19 one renders every double differently. Refuse it rather than
-# reporting its disagreements as groovyrs divergences.
+# pre-JDK-19 one renders every double differently. The gate pins a conforming
+# JVM (or refuses) rather than reporting its disagreements as groovyrs bugs.
 . "$ROOT/parity-scripts/oracle-jvm.sh"
 oracle_jvm_gate "$ORACLE" fuzz
+
+# The gate resolved the launcher to an absolute path and PINNED a conforming
+# JVM into this process; run THAT oracle from here on.
+ORACLE="$ORACLE_ABS"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

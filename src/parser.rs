@@ -1981,12 +1981,33 @@ impl Parser {
                 };
             } else if self.is(&Tok::LBracket) {
                 // Subscript `recv[index]`, recorded under the `[` column.
+                //
+                // Groovy allows a COMMA-SEPARATED subscript — `"abcdef"[1, 3, 5]`
+                // is `bdf` and `[10, 20, 30, 40][0, 2]` is `[10, 30]` — and it is
+                // the same operator as `recv[collection]`, not a second one:
+                // `getAt` receives the indices as one list. So the parse builds
+                // that list and leaves the semantics to the one `getAt` path,
+                // which already reads a range or list index. A single index
+                // stays a scalar, since `list[[0]]` and `list[0]` are different
+                // reads (a one-element list versus the element).
                 let line = self.line();
                 let col = self.col_at(0);
                 self.advance();
                 self.skip_newlines();
-                let index = self.expression()?;
+                let first = self.expression()?;
                 self.skip_newlines();
+                let index = if self.is(&Tok::Comma) {
+                    let mut parts = vec![first];
+                    while self.is(&Tok::Comma) {
+                        self.advance();
+                        self.skip_newlines();
+                        parts.push(self.expression()?);
+                        self.skip_newlines();
+                    }
+                    Expr::List(parts)
+                } else {
+                    first
+                };
                 self.eat(&Tok::RBracket)?;
                 e = self.record(
                     col,

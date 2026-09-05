@@ -160,8 +160,10 @@ Implemented and checked against Apache Groovy:
   fusevm's native and JIT'd fast paths.
 - **Collections** — list literals `[1, 2, 3]` / `[]` and insertion-ordered map
   literals `[a: 1, b: 2]` / `[:]`, printed Groovy-style; subscripting `list[i]`
-  (negative index counts from the end), `map[k]`, `str[i]`, and by a range
-  (`list[0..1]`, `"abcdef"[1..3]`); subscript *assignment* `list[i] = v` (growing
+  (negative index counts from the end), `map[k]`, `str[i]`, by a range
+  (`list[0..1]`, `"abcdef"[1..3]`) and by a comma list of either
+  (`"abcdef"[1, 3, 5]` is `bdf`, `[1, 2, 3, 4][0..1, 3]` is `[1, 2, 4]`);
+  subscript *assignment* `list[i] = v` (growing
   the list with nulls past the end) and `map[k] = v`. A multi-entry map keeps
   insertion order and `m.k = v` mutates it in place.
 - **A map carries its implementation**, so the class a script names decides the
@@ -548,7 +550,7 @@ Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm
 | --- | --- |
 | **fusevm-hosted** | No local `vm.rs` / `jit.rs`, no JVM. Groovy lowers to fusevm bytecode and runs on the shared three-tier Cranelift JIT; `jit-disk-cache` persists native code across runs. |
 | **Native arithmetic** | `+ - * %`, comparisons, and logic lower to native fusevm ops; the JIT traces hot integer loops. `%` additionally carries a four-op zero-divisor guard (Java's `%` throws where fusevm's `Op::Mod` answers `0`), elided entirely when the divisor is a non-zero literal — see BUGS.md for what it costs when it is not. A strict numeric hook supplies Groovy's `+` string concatenation for non-numeric operands, and dispatches a user-class instance's operator method (`plus`/`minus`/`compareTo`/…) by re-entering the VM through a published thread-local pointer — a user-class operand is the only thing that routes to a method. The hook also answers a *primitive* pair whenever fusevm declines to natively (an `Integer`-range overflow, or an integral/`double` mix whose integer is past 2^53 and so cannot be widened exactly), with the identical result the native path gives — Groovy promotes to `double`, so the rounded answer is the correct one. |
-| **Groovy division** | `/` lowers to the `GDIV` builtin: two integers divide exactly to an integer and to a `BigDecimal` otherwise (`7/2 → 3.5`, `1/3 → 0.3333333333`), following Groovy's `BigDecimalMath` scale policy; a zero divisor raises Groovy's catchable `ArithmeticException`. |
+| **Groovy division** | `/` lowers to the `GDIV` builtin: two integers divide to a `BigDecimal` whether or not the division is exact (`4/2` is the BigDecimal `2`, `7/2 → 3.5`, `1/3 → 0.3333333333`), following Groovy's `BigDecimalMath` scale policy; a zero divisor raises Groovy's catchable `ArithmeticException`. |
 | **`BigDecimal` value model** | An unsuffixed decimal literal is an exact (unscaled value, scale) pair on the host heap (`src/decimal.rs`), so scale propagates through `+ - * / %` (`1.25 * 0 → 0.00`, `2.5e7 + 1 → 25000001`) and magnitude is unbounded (`1.5e300 * 1.5e300 → 2.25E+600`). Being non-numeric to fusevm, decimals route through the strict numeric hook; `d`/`f`-suffixed literals are IEEE doubles, answered natively except where the other operand is an integer too large to widen exactly, which the hook promotes to `double` the same way. |
 | **Groovy print semantics** | `println`/`print` lower to a registered builtin that formats values Groovy-style (`true`/`false`, `3.0`, `null`), rather than the VM's shell-flavoured `PrintLn`. |
 

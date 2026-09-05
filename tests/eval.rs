@@ -6076,3 +6076,239 @@ fn a_compiled_pattern_builds_a_matcher() {
         assert_eq!(out.trim_end(), want, "for source: {src}");
     }
 }
+
+/// `Matcher.matches()` SETS the match state, so the `if (m.matches()) { … }`
+/// idiom can read its captures. Every expectation here was measured against
+/// Apache Groovy 5.1.1 / JVM 26: answering only the boolean left `group()`
+/// raising `IllegalStateException: No match found` on a matcher that had just
+/// matched, which is the shape this pins.
+#[test]
+fn matches_records_the_match_so_group_can_read_it() {
+    let cases = [
+        // the whole point: captures are readable after a successful `matches()`
+        (
+            r#"def m = ("foo=1" =~ /(\w+)=(\d+)/); m.matches(); println(m.group(1) + ":" + m.group(2))"#,
+            "foo:1",
+        ),
+        // …and so are the offsets and the whole match
+        (
+            r#"def m = ("ab" =~ /(a)(b)/); m.matches(); println([m.group(0), m.group(1), m.start(), m.end()])"#,
+            "[ab, a, 0, 2]",
+        ),
+        // a named group reads through the same state
+        (
+            r#"def m = ("abc" =~ /(?<w>[a-z]+)/); m.matches(); println(m.group("w"))"#,
+            "abc",
+        ),
+        // a successful match runs the cursor to its end, so `find` resumes after
+        (
+            r#"def m = ("ab" =~ /(a)(b)/); m.matches(); println(m.find())"#,
+            "false",
+        ),
+        // a FAILED `matches()` clears the state but leaves the cursor: the walk
+        // continues from where `find` had reached, not from the start
+        (
+            r#"def m = ("a1b2" =~ /(\w)(\d)/); m.find(); m.matches(); m.find(); println(m.group(0))"#,
+            "b2",
+        ),
+        // and reading a capture after a failed one is Java's refusal
+        (
+            r#"def m = ("a1b2" =~ /(\w)(\d)/); m.matches(); try { m.group(1) } catch (e) { println(e.getClass().getName()) }"#,
+            "java.lang.IllegalStateException",
+        ),
+        // `start()`/`end()` before any match are the same refusal, not `-1`
+        (
+            r#"def m = ("ab" =~ /a/); try { m.start() } catch (e) { println(e.getClass().getName()) }"#,
+            "java.lang.IllegalStateException",
+        ),
+    ];
+    for (src, want) in cases {
+        let (out, ok) = run(src);
+        assert!(ok, "failed to run: {src}");
+        assert_eq!(out.trim_end(), want, "for source: {src}");
+    }
+}
+
+/// The comma subscript `recv[i, j, …]` is the SAME operator as `recv[collection]`,
+/// so it has to agree with the scalar read on every edge: a range element
+/// expands in place, an index past the end reads `null`, and one still negative
+/// after wrapping raises. Measured against Apache Groovy 5.1.1 / JVM 26.
+#[test]
+fn a_comma_subscript_reads_every_index_the_scalar_one_would() {
+    let cases = [
+        (r#"println("abcdef"[1, 3, 5])"#, "bdf"),
+        (r#"println([10, 20, 30, 40][0, 2])"#, "[10, 30]"),
+        // a nested range expands where it sits rather than being skipped
+        (r#"println([1, 2, 3, 4][0..1, 3])"#, "[1, 2, 4]"),
+        (r#"println([1, 2, 3][1..2, 0..0])"#, "[2, 3, 1]"),
+        (r#"println("abcd"[1..2, 0])"#, "bca"),
+        // past the end is the `null` a scalar read answers, not a dropped slot
+        (r#"println([1, 2][5, 0])"#, "[null, 1]"),
+        // a single index stays a scalar: `list[0]` is the element, `list[[0]]`
+        // the one-element list, and the comma form must not collapse them
+        (r#"println([1, 2, 3][0])"#, "1"),
+        (r#"println([1, 2, 3][[0]])"#, "[1]"),
+        // a list of lists is picked, never flattened
+        (r#"println([[1, 2], [3]][0, 1])"#, "[[1, 2], [3]]"),
+    ];
+    for (src, want) in cases {
+        let (out, ok) = run(src);
+        assert!(ok, "failed to run: {src}");
+        assert_eq!(out.trim_end(), want, "for source: {src}");
+    }
+    // a negative index that stays negative after wrapping raises, on both a list
+    // and a String receiver — the array message, which is what Groovy reports
+    for src in [r#"println([1, 2][-5, 0])"#, r#"println("ab"[-5, 0])"#] {
+        let (_, err, ok) = run_full(src);
+        assert!(!ok, "expected a raise from: {src}");
+        assert!(
+            err.contains("ArrayIndexOutOfBoundsException")
+                && err.contains("Negative array index [-5]"),
+            "for source {src}, stderr was: {err}"
+        );
+    }
+}
+
+/// `/` on two integers is `BigDecimal` division even when it comes out exact.
+/// The value renders the same either way, so only `getClass()` shows it — which
+/// is exactly why an `Integer` short-circuit survived here unnoticed.
+#[test]
+fn exact_integer_division_is_still_a_big_decimal() {
+    let cases = [
+        (
+            r#"println((6 / 3).getClass().getName())"#,
+            "java.math.BigDecimal",
+        ),
+        (
+            r#"println((4 / 2).getClass().getName())"#,
+            "java.math.BigDecimal",
+        ),
+        (r#"println(6 / 3)"#, "2"),
+        (r#"println(7 / 2)"#, "3.5"),
+        (r#"println((6 / 3) + 1)"#, "3"),
+        // `average()` is `sum() / size()`, so it inherits the same promotion
+        (r#"println([1, 2, 3].average())"#, "2"),
+        (
+            r#"println([1, 2, 3].average().getClass().getName())"#,
+            "java.math.BigDecimal",
+        ),
+        (r#"println([1, 2, 3, 4].average())"#, "2.5"),
+        // …but a `double` element keeps the IEEE path
+        (
+            r#"println([1.0d, 2.0d].average().getClass().getName())"#,
+            "java.lang.Double",
+        ),
+    ];
+    for (src, want) in cases {
+        let (out, ok) = run(src);
+        assert!(ok, "failed to run: {src}");
+        assert_eq!(out.trim_end(), want, "for source: {src}");
+    }
+}
+
+/// `null + <String>` is not an error: Groovy's `NullObject.plus(String)` answers
+/// `"null" + s`. Every other right operand still raises, which is the half that
+/// makes this a rule rather than a blanket coercion.
+#[test]
+fn null_plus_a_string_concatenates_the_word_null() {
+    let cases = [
+        (r#"println(null + "x")"#, "nullx"),
+        (r#"def n = null; println(n + "x")"#, "nullx"),
+        (r#"def g = "v"; println(null + "a${g}b")"#, "nullavb"),
+        (
+            r#"println((null + "").getClass().getName())"#,
+            "java.lang.String",
+        ),
+    ];
+    for (src, want) in cases {
+        let (out, ok) = run(src);
+        assert!(ok, "failed to run: {src}");
+        assert_eq!(out.trim_end(), want, "for source: {src}");
+    }
+    for src in [
+        r#"println(null + 1)"#,
+        r#"println(null + [1])"#,
+        r#"println(null + null)"#,
+    ] {
+        let (_, err, ok) = run_full(src);
+        assert!(!ok, "expected a raise from: {src}");
+        assert!(
+            err.contains("NullPointerException"),
+            "for source {src}, stderr was: {err}"
+        );
+    }
+}
+
+/// The GDK methods this round added, each with the edge that distinguishes it
+/// from the method it is easy to mistake it for.
+#[test]
+fn the_gdk_methods_added_this_round_answer_groovys_values() {
+    let cases = [
+        // `asBoolean()` is Groovy truth spelled as a call — including on null
+        (
+            r#"println([null, "", "abc", 0, 0.0, [], [0], [:], 1G].collect { it.asBoolean() })"#,
+            "[false, false, true, false, false, false, true, false, true]",
+        ),
+        // `mod` is the FLOORED modulus, not `%`
+        (
+            r#"println([7.mod(3), (-7).mod(3), 7L.mod(3L)])"#,
+            "[1, 2, 1]",
+        ),
+        (
+            r#"println([(-7.0).mod(3), (-7.5G).mod(2G), 1.5.mod(0.4)])"#,
+            "[2.0, 0.5, 0.3]",
+        ),
+        // `stripTrailingZeros` may drive the scale NEGATIVE, which prints as an
+        // exponent — `100.00G` is not `100`
+        (
+            r#"println([1.100G.stripTrailingZeros(), 100.00G.stripTrailingZeros(), 0.00G.stripTrailingZeros()])"#,
+            "[1.1, 1E+2, 0]",
+        ),
+        (
+            r#"println(100.00G.stripTrailingZeros().toPlainString())"#,
+            "100",
+        ),
+        (
+            r#"println([1.5E+3G.toString(), 1.5E+3G.toPlainString()])"#,
+            "[1.5E+3, 1500]",
+        ),
+        // `repeat` is the JDK method; `"x" * n` is the operator
+        (r#"println(["x".repeat(3), "x".repeat(0)])"#, "[xxx, ]"),
+        // folded comparison, so the answer is the folded difference
+        (
+            r#"println(["aB".compareToIgnoreCase("Ab"), "a".compareToIgnoreCase("B"), "B".compareToIgnoreCase("a")])"#,
+            "[0, -1, 1]",
+        ),
+        // `collect()` with no closure is the identity copy
+        (
+            r#"def a = [1, 2, 3]; def b = a.collect(); b << 4; println([a, b])"#,
+            "[[1, 2, 3], [1, 2, 3, 4]]",
+        ),
+    ];
+    for (src, want) in cases {
+        let (out, ok) = run(src);
+        assert!(ok, "failed to run: {src}");
+        assert_eq!(out.trim_end(), want, "for source: {src}");
+    }
+    // `BigInteger.mod` refuses a non-positive modulus, where the `BigDecimal`
+    // spelling accepts one — the two are different methods, not one with a cast
+    for src in [
+        r#"println(7.mod(-3))"#,
+        r#"println(7.mod(0))"#,
+        r#"println(7G.mod(-3G))"#,
+    ] {
+        let (_, err, ok) = run_full(src);
+        assert!(!ok, "expected a raise from: {src}");
+        assert!(
+            err.contains("BigInteger: modulus not positive"),
+            "for source {src}, stderr was: {err}"
+        );
+    }
+    // `"x".repeat(-1)` is the JDK's own refusal
+    let (_, err, ok) = run_full(r#"println("x".repeat(-1))"#);
+    assert!(!ok);
+    assert!(
+        err.contains("IllegalArgumentException") && err.contains("count is negative: -1"),
+        "stderr was: {err}"
+    );
+}

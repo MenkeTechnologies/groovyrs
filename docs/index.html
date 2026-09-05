@@ -90,7 +90,7 @@
                                           strict numeric hook + print / division builtins (Groovy semantics)</pre>
         <div class="cat-grid">
           <div class="cat-card"><h4>fusevm-hosted</h4><p>No local <code>vm.rs</code> / <code>jit.rs</code> and no JVM. Groovy is lowered to fusevm bytecode and executed on the shared three-tier Cranelift JIT; <code>jit-disk-cache</code> persists compiled native code across runs.</p></div>
-          <div class="cat-card"><h4>BigDecimal division</h4><p>Groovy divides two integers as BigDecimal, so <code>7/2</code> is <code>3.5</code> and <code>4/2</code> is <code>2</code>. <code>/</code> lowers to a division builtin that returns an integer only when the division is exact.</p></div>
+          <div class="cat-card"><h4>BigDecimal division</h4><p>Groovy divides two integers as BigDecimal, so <code>7/2</code> is <code>3.5</code> and <code>4/2</code> is the BigDecimal <code>2</code> — not the Integer 2. <code>/</code> lowers to a division builtin that promotes every integer pair.</p></div>
           <div class="cat-card"><h4>Editor tooling</h4><p><code>groovy --lsp</code> is a Language Server (diagnostics from the runtime parser, keyword/command completion, hover); <code>groovy --dap</code> is a Debug Adapter with source-line breakpoints, stepping, and locals.</p></div>
           <div class="cat-card"><h4>Introspection</h4><p><code>--disasm</code> prints the lowered bytecode with source line numbers; <code>--dump-tokens</code> and <code>--dump-ast</code> print the token stream and parsed AST.</p></div>
         </div>

@@ -434,8 +434,10 @@ reported as parse or compile errors, never silently mis-run.
   interpolate and span lines; `s =~ p` is a `java.util.regex.Matcher` and
   `s ==~ p` a whole-input `Boolean`. The `Matcher` is stateful as Java's is —
   `find()` moves its cursor, `group(n)` / `start()` / `end()` read the last
-  match, and its own truth is `find()`, so `while (m) { … }` walks — plus
-  `matches()`, `groupCount()`, `pattern()`, `reset()`, `size()` / `count`,
+  match (and raise `IllegalStateException` when there is none), `matches()`
+  *sets* that match state on success so `if (m.matches()) { … m.group(1) … }`
+  reads its captures, and its own truth is `find()`, so `while (m) { … }` walks
+  — plus `groupCount()`, `pattern()`, `reset()`, `size()` / `count`,
   `m[i]`, and iteration over its matches. `String` carries `matches`,
   `replaceAll` / `replaceFirst` (in both the `$n` and closure forms), `findAll`,
   `find`, and a `split` that follows Java's specified rules. The `/`-versus-

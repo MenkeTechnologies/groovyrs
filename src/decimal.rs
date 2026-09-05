@@ -225,6 +225,62 @@ pub fn to_groovy_string(d: &BigDecimal) -> String {
 // `1.25 * 0` is `0.00`, and a zero remainder is `0.000` — and the scale is the
 // whole point of this module.
 
+/// Java's `BigDecimal.stripTrailingZeros`: divide trailing zeros out of the
+/// unscaled value, dropping the scale by one per zero removed. The scale is
+/// allowed to go NEGATIVE, which is the whole reason the method is visible —
+/// `100.00.stripTrailingZeros()` is the unscaled `1` at scale `-2`, which
+/// [`to_groovy_string`] renders as `1E+2`, not `100`. Java short-circuits a
+/// zero of any scale to `BigDecimal.ZERO`, so `0.00.stripTrailingZeros()` is
+/// `0` rather than `0E+2`.
+pub fn strip_trailing_zeros(d: &BigDecimal) -> BigDecimal {
+    let (mut unscaled, mut scale) = d.as_bigint_and_exponent();
+    if unscaled.is_zero() {
+        return BigDecimal::from_bigint(BigInt::zero(), 0);
+    }
+    let ten = BigInt::from(10);
+    while (&unscaled % &ten).is_zero() {
+        unscaled /= &ten;
+        scale -= 1;
+    }
+    BigDecimal::from_bigint(unscaled, scale)
+}
+
+/// Java's `BigDecimal.toPlainString`: the same digits with no exponent, however
+/// large or small the value. `1E+10` prints `10000000000` and a negative scale
+/// pads with zeros, where [`to_groovy_string`] would keep the exponent form.
+pub fn to_plain_string(d: &BigDecimal) -> String {
+    let (unscaled, scale) = d.as_bigint_and_exponent();
+    let text = unscaled.to_string();
+    let (sign, digits) = match text.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", text.as_str()),
+    };
+    let body = if scale <= 0 {
+        // A negative scale is a multiplier: pad `-scale` zeros on the right.
+        format!("{digits}{}", "0".repeat((-scale) as usize))
+    } else {
+        let n = digits.len() as i64;
+        if n > scale {
+            let split = (n - scale) as usize;
+            format!("{}.{}", &digits[..split], &digits[split..])
+        } else {
+            format!("0.{}{}", "0".repeat((scale - n) as usize), digits)
+        }
+    };
+    format!("{sign}{body}")
+}
+
+/// Groovy's `Number.mod(n)` — the FLOORED modulus, which is `%` only when the
+/// operands share a sign: `(-7).mod(3)` is `2` where `-7 % 3` is `-1`, and
+/// `(-7.5).mod(2)` is `0.5`. Returns `None` for a zero divisor.
+pub fn floored_mod(a: &BigDecimal, b: &BigDecimal) -> Option<BigDecimal> {
+    let r = remainder(a, b)?;
+    if r.is_zero() || r.is_negative() == b.is_negative() {
+        return Some(r);
+    }
+    Some(add(&r, b))
+}
+
 /// `a + b` — scale is `max(scale(a), scale(b))` (`1.10 + 2.20` is `3.30`).
 pub fn add(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
     let (x, y, scale) = aligned(a, b);

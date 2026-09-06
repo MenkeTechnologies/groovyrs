@@ -7269,3 +7269,30 @@ println("abc".toCharArray())
     assert!(ok);
     assert_eq!(out, "[A(1)]\n[A(1)]\n[[A(1)]]\n[k:A(1)]\nA(1)\nabc\n");
 }
+
+#[test]
+fn percent_s_renders_a_map_the_java_way_not_the_groovy_way() {
+    // `java.util.Formatter` calls `AbstractMap.toString`, so a map is `{k=v}`
+    // there while every Groovy rendering of the same map is `[k:v]`. It applies
+    // per map wherever one sits, so the walk recurses.
+    let src = r#"
+println(String.format("%s", [a: 1]))
+println(String.format("%s", [b: [a: 1]]))
+println(String.format("%s", [[a: 1]]))
+println(String.format("%s", [:]))
+println(sprintf("%s", [a: 1]))
+printf("%s%n", [a: 1])
+println(String.format("%s", [1, 2]))
+println(String.format("%s", 1..3))
+def m = [a: 1]
+println("$m")
+println("" + m)
+println(m.toString())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "{a=1}\n{b={a=1}}\n[{a=1}]\n{}\n{a=1}\n{a=1}\n[1, 2]\n1..3\n[a:1]\n[a:1]\n[a:1]\n"
+    );
+}

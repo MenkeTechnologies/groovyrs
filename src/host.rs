@@ -11762,7 +11762,7 @@ fn format_one(vm: &mut VM, spec: &crate::format::Spec, arg: &Value) -> Option<St
             ))
         }
         's' | 'S' => {
-            let text = render_value(vm, arg);
+            let text = java_to_string(vm, arg);
             Some(pad_conversion(
                 spec,
                 &cased(&text, spec.conv, spec.precision),
@@ -13865,19 +13865,41 @@ fn is_incomparable(v: &Value) -> bool {
 }
 
 /// A value rendered the way *Java's* `toString` renders it, which is what the
-/// `Cannot compare …` diagnostic quotes: a map prints `{k=v, …}` where Groovy's
-/// own rendering prints `[k:v, …]`.
+/// `Cannot compare …` diagnostic quotes and what `java.util.Formatter`'s `%s`
+/// prints: a map is `{k=v, …}` where Groovy's own rendering is `[k:v, …]`.
+///
+/// It RECURSES, because the difference is per map wherever one sits:
+/// `String.format("%s", [b: [a: 1]])` is `{b={a=1}}` and
+/// `String.format("%s", [[a: 1]])` is `[{a=1}]`, while `"" + [a: 1]`, `"$m"` and
+/// `println` all stay Groovy's `[a:1]`. Measured on Groovy 5.1.1 / JVM 26.0.2.1.
+/// A `char[]` keeps its run-together rendering, and everything else — lists,
+/// sets, ranges, entries, instances — renders identically on both sides.
 fn java_to_string(vm: &mut VM, v: &Value) -> String {
-    match as_omap(v) {
-        Some(entries) => {
-            let items: Vec<String> = entries
-                .iter()
-                .map(|(k, val)| format!("{k}={}", groovy_str(val)))
-                .collect();
-            format!("{{{}}}", items.join(", "))
-        }
-        None => render_value(vm, v),
+    if let Some(entries) = as_omap(v) {
+        let items: Vec<String> = entries
+            .iter()
+            .map(|(k, val)| format!("{k}={}", java_to_string(vm, val)))
+            .collect();
+        return format!("{{{}}}", items.join(", "));
     }
+    if array_elem(v) != Some(ArrayElem::Char) {
+        if let Some(items) = as_list(v) {
+            let shown: Vec<String> = items.iter().map(|e| java_to_string(vm, e)).collect();
+            return format!("[{}]", shown.join(", "));
+        }
+        if let Some((items, kind)) = as_set(v) {
+            let shown: Vec<String> = set_elements(&items, kind)
+                .iter()
+                .map(|e| java_to_string(vm, e))
+                .collect();
+            return format!("[{}]", shown.join(", "));
+        }
+    }
+    if let Value::Array(a) = v {
+        let shown: Vec<String> = a.iter().map(|e| java_to_string(vm, e)).collect();
+        return format!("[{}]", shown.join(", "));
+    }
+    render_value(vm, v)
 }
 
 /// Groovy's natural ordering for two values with no user `compareTo`: a decimal

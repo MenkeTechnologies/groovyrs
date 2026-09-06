@@ -744,6 +744,11 @@ infinite loop on both sides.
   compares and hashes as 128 bits, not as its text), and answering the string
   instead would get all three wrong. The class *name* resolves, so the call
   raises `MissingMethodException` rather than failing to compile.
+- **`Closure.trampoline()`.** Not dispatched — `MissingMethodException` where
+  Groovy answers a trampolined closure, so a recursion written to be
+  stack-flattened runs as an ordinary one until it hits the frame limit. The
+  compositions (`>>`, `<<`, `curry`/`rcurry`/`ncurry`, `memoize`,
+  `maximumNumberOfParameters`, `delegate`) are all answered.
 - **`Closure.parameterTypes`.** A closure's declared parameter *types* are not
   kept — `ClosureMeta` carries the count and nothing else — so the list Groovy
   answers (`[class java.lang.Object]` for an untyped parameter, the declared

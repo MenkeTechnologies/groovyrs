@@ -7417,3 +7417,35 @@ t("int max exponent", { 2.5 ** 2147483647 })
         "long exponent = 0\nint max exponent ! ArithmeticException\n"
     );
 }
+
+#[test]
+fn a_big_integer_pair_with_a_negative_exponent_stays_integral() {
+    // Groovy computes `1 / base^|e|` and truncates it to a `BigInteger`, where
+    // the double fallback answered a fraction. Only a `BigInteger` EXPONENT
+    // takes this path: `2G ** -1` is still the Double `0.5`.
+    let src = r#"
+def t(String label, Closure c) {
+  try { def r = c(); println(label + " = " + r + " " + r.getClass().getName()) }
+  catch (e) { println(label + " ! " + e.getClass().getName() + ": " + e.getMessage()) }
+}
+t("2G ** -1G", { 2G ** -1G })
+t("2G ** -3G", { 2G ** -3G })
+t("1G ** -3G", { 1G ** -3G })
+t("-1G ** -3G", { -1G ** -3G })
+t("0G ** -1G", { 0G ** -1G })
+t("2G ** -1", { 2G ** -1 })
+t("2G ** 3G", { 2G ** 3G })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "2G ** -1G = 0 java.math.BigInteger\n\
+         2G ** -3G = 0 java.math.BigInteger\n\
+         1G ** -3G = 1 java.math.BigInteger\n\
+         -1G ** -3G = -1 java.math.BigInteger\n\
+         0G ** -1G ! java.lang.NumberFormatException: Infinite or NaN\n\
+         2G ** -1 = 0.5 java.lang.Double\n\
+         2G ** 3G = 8 java.math.BigInteger\n"
+    );
+}

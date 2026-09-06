@@ -10449,6 +10449,27 @@ fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
             None => return power_double(as_f64(&base), as_f64(&exp)),
         },
     };
+    // A `BigInteger` pair with a NEGATIVE exponent stays integral: Groovy
+    // computes `1 / base^|e|` and truncates it to a `BigInteger`, so `2G ** -1G`
+    // and `2G ** -3G` are both `0`, `1G ** -3G` is `1`, `-1G ** -3G` is `-1`,
+    // and `0G ** -1G` is `NumberFormatException: Infinite or NaN` (the
+    // reciprocal is not finite). Only a `BigInteger` EXPONENT takes this path —
+    // `2G ** -1` is the `Double` `0.5` — which is why it sits under the
+    // resolution above rather than beside the positive-exponent arms below.
+    if e < 0 && is_bigint_handle(&base) && is_bigint_handle(&exp) {
+        let d = as_bigint(&base).unwrap_or_default();
+        let Some(magnitude) = decimal::pow(&d, -e) else {
+            return power_double(as_f64(&base), e as f64);
+        };
+        if magnitude.is_zero() {
+            raise(vm, "NumberFormatException", "Infinite or NaN");
+            return Value::Undef;
+        }
+        return bigint_value(decimal::divide_to_integral(
+            &decimal::from_i64(1),
+            &magnitude,
+        ));
+    }
     // An exponent so large that Java itself refuses the operation. Two different
     // messages, because the two bases run through different JDK methods, and
     // both are `java.lang.ArithmeticException` (measured on Groovy 5.1.1 /

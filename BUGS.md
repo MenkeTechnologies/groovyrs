@@ -361,6 +361,12 @@ reported as parse or compile errors, never silently mis-run.
   entry below); the compiler passes the *base's* width to `**` but not the
   exponent's.
 
+  A `BigInteger` pair with a NEGATIVE exponent stays integral: Groovy computes
+  `1 / base^|e|` and truncates it to a `BigInteger`, so `2G ** -1G` and
+  `2G ** -3G` are `0`, `1G ** -3G` is `1`, `-1G ** -3G` is `-1`, and
+  `0G ** -1G` is `NumberFormatException: Infinite or NaN`. Only a `BigInteger`
+  exponent takes that path — `2G ** -1` is the `Double` `0.5`.
+
   The exponent that Java itself refuses now RAISES rather than answering
   `Infinity` out of the double fallback: `2.5 ** 2147483647` is
   `ArithmeticException: Invalid operation` (`BigDecimal.pow` takes an exponent in

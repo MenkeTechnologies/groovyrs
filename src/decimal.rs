@@ -521,6 +521,20 @@ pub fn round_half_up(d: &BigDecimal, scale: i64) -> BigDecimal {
     d.with_scale_round(scale, RoundingMode::HalfUp)
 }
 
+/// The exact `i64` a **scale-0** decimal holds, when it fits in one.
+///
+/// Allocation-free, which is the point: the scale is a field read, and
+/// `to_i64` at scale 0 reads the unscaled value's limbs directly (bigdecimal
+/// 0.4.10, `impl_num.rs:132`) rather than rescaling through a clone. The
+/// scale-0 restriction is not a convenience — Java's `+`/`-` keep the operands'
+/// scale, so `2.50 + 1` is `3.50`, and a caller that reconstructed a decimal
+/// from the `i64` alone would answer `3` and lose the trailing zeros.
+pub fn scale0_i64(d: &BigDecimal) -> Option<i64> {
+    (d.fractional_digit_count() == 0)
+        .then(|| d.to_i64())
+        .flatten()
+}
+
 /// `BigDecimal.scale()`: the number of digits to the right of the point. A
 /// value written in `E+n` form has a *negative* scale (`2.5e7` is scale -6).
 pub fn scale_of(d: &BigDecimal) -> i64 {

@@ -2533,6 +2533,22 @@ fn as_exact_dec(v: &Value) -> Option<BigDecimal> {
     }
 }
 
+/// The exact `i64` behind a machine integer or a **scale-0 `BigDecimal`
+/// handle**, without cloning the decimal out of the heap.
+///
+/// A `BigInteger` handle deliberately answers `None`: it is a different Groovy
+/// type and the arithmetic that tags a result as one has to keep running.
+fn scale0_i64(v: &Value) -> Option<i64> {
+    match v {
+        Value::Int(n) => Some(*n),
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Dec(d)) => decimal::scale0_i64(d),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 /// Put a `BigDecimal` on the heap and return its handle.
 fn dec_value(d: BigDecimal) -> Value {
     heap_push(HeapObj::Dec(d))
@@ -14300,6 +14316,40 @@ fn decimal_operator(op: NumOp, a: &Value, b: &Value) -> Option<Result<Value, Str
     }
     if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
         return Some(Ok(double_operator(op, as_f64(a), as_f64(b))));
+    }
+    // Two scale-0 values inside `i64` — which is what a `BigDecimal` loop
+    // accumulator and every quotient of an exact integer division is — under an
+    // operator whose Java answer is again scale 0. `+`/`-` keep the operands'
+    // (zero) scale and `*` adds them, so the result this builds is the SAME
+    // `BigDecimal` the general path below builds; a comparison is the same
+    // ordering.
+    //
+    // What it skips is the allocation. `as_exact_dec` clones each operand out
+    // of the heap, and every `BigDecimal` clone allocates a `BigInt`, so the
+    // general path costs two allocations before the operator runs and a third
+    // for its result. That is the cost the division fix inherited: `(6/3)` is a
+    // `BigDecimal` by Groovy's rule, so an accumulating loop pays it per
+    // iteration. `checked_*` throughout, so a pair near the range's edge falls
+    // through to the unbounded path rather than wrapping.
+    //
+    // A `BigInteger` operand is excluded by `scale0_i64` — it has to keep its
+    // own type tag, which the general path applies below.
+    if let (Some(x), Some(y)) = (scale0_i64(a), scale0_i64(b)) {
+        let answer = match op {
+            NumOp::Add => x.checked_add(y).map(|n| dec_value(decimal::from_i64(n))),
+            NumOp::Sub => x.checked_sub(y).map(|n| dec_value(decimal::from_i64(n))),
+            NumOp::Mul => x.checked_mul(y).map(|n| dec_value(decimal::from_i64(n))),
+            NumOp::Eq => Some(Value::bool(x == y)),
+            NumOp::Ne => Some(Value::bool(x != y)),
+            NumOp::Lt => Some(Value::bool(x < y)),
+            NumOp::Le => Some(Value::bool(x <= y)),
+            NumOp::Gt => Some(Value::bool(x > y)),
+            NumOp::Ge => Some(Value::bool(x >= y)),
+            _ => None,
+        };
+        if let Some(v) = answer {
+            return Some(Ok(v));
+        }
     }
     let (x, y) = (as_exact_dec(a)?, as_exact_dec(b)?);
     let ordering = || decimal::cmp(&x, &y);

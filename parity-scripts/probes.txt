@@ -2737,3 +2737,35 @@ println([1,2] == 1..2); println(2 in 1..3 && true); def x = 1 in 1..3; println(x
 %%
 # …and an operator that binds TIGHTER takes the endpoint, not the range
 println(1 + 1..3)
+%%
+# switch EXPRESSIONS — the arrow form, comma labels, and the isCase label set
+println(switch(2) { case 2 -> "two"; default -> "other" }); println(switch(9) { case 2 -> "two"; default -> "other" }); println(switch(3) { case 1, 2, 3 -> "low"; default -> "hi" })
+%%
+println(switch("abc") { case String -> "str"; default -> "o" }); println(switch(5) { case 1..4 -> "range"; case 5 -> "five" }); println(switch(7) { case { it > 5 } -> "big"; default -> "small" })
+%%
+# an unmatched subject with no default is null — Groovy asks no exhaustiveness
+def c = switch(7) { case 2 -> "two" }; println("unmatched=" + c)
+%%
+# a braced arrow body is a BLOCK, valued by its trailing expression
+def x = switch(2) { case 2 -> { 5 } }; println(x); println(x.getClass().name)
+%%
+# `println` is void, so an arm ending in one is null
+def y = switch(2) { case 2 -> println("hi") }; println("y=" + y)
+%%
+def z = switch(2) { case 2 -> { def a = 1; def b = 2; yield a + b }; default -> 0 }; println(z)
+%%
+# the colon form keeps fall-through and carries its value out with `yield`
+def w = switch(1) { case 1: case 2: yield "shared"; default: yield "d" }; println(w)
+%%
+def v = switch(3) { case 1, 2, 3: yield "low"; default: yield "d" }; println(v)
+%%
+# `yield` runs the `finally` it leaves on the way out
+def q = switch(1) { case 1: try { yield "from-try" } finally { println("cleanup") }; default: yield "d" }; println(q)
+%%
+# a switch expression composes as any other operand does, and nests
+println(1 + switch(2) { case 2 -> 10; default -> 0 }); println([switch(1) { case 1 -> "a"; default -> "b" }, 2]); println(switch(1) { case 1 -> switch(2) { case 2 -> "inner" }; default -> "x" })
+%%
+println(switch(null) { case null -> "isnull"; default -> "d" }); println(switch(null) { case 1 -> "one"; default -> "d" })
+%%
+# `yield` is contextual — elsewhere it is an ordinary name
+def yield = 7; println(yield + 1)

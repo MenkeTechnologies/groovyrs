@@ -84,6 +84,18 @@ struct Loop {
     is_switch: bool,
 }
 
+/// One enclosing `switch` *expression*'s value slot and exit jumps — what a
+/// `yield` inside it writes to and jumps out through.
+struct YieldFrame {
+    /// The temporary holding the switch expression's value.
+    result: String,
+    /// `yield` jump op indices, patched to the switch's exit once known.
+    end_jumps: Vec<usize>,
+    /// `Compiler::tries.len()` at the switch's entry — a `yield` runs the
+    /// `finally` bodies of every `try` it leaves on the way out.
+    try_depth: usize,
+}
+
 impl Loop {
     /// A fresh frame carrying `label`.
     fn new(label: Option<String>, is_switch: bool) -> Self {
@@ -99,6 +111,10 @@ impl Loop {
 struct Compiler {
     b: ChunkBuilder,
     loops: Vec<Loop>,
+    /// The enclosing `switch` expressions, innermost last — where a `yield`
+    /// puts its value and jumps to. Empty everywhere else, which is what makes
+    /// a stray `yield` an error rather than a silent no-op.
+    yields: Vec<YieldFrame>,
     /// A top-level `break`/`return` (no enclosing loop) jumps to script end.
     exit_ops: Vec<usize>,
     /// The source line of the statement currently being lowered — attached to
@@ -361,8 +377,8 @@ fn collect_script_vars(body: &[Stmt], out: &mut HashSet<String>) {
             StmtKind::Labeled { stmt, .. } => {
                 collect_script_vars(std::slice::from_ref(&**stmt), out)
             }
-            StmtKind::Switch { cases, .. } => {
-                for c in cases {
+            StmtKind::Switch(sw) => {
+                for c in &sw.cases {
                     collect_script_vars(&c.body, out);
                 }
             }
@@ -433,6 +449,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     let mut c = Compiler {
         b: ChunkBuilder::new(),
         loops: Vec::new(),
+        yields: Vec::new(),
         exit_ops: Vec::new(),
         cur_line: 0,
         debug,
@@ -979,8 +996,8 @@ impl Compiler {
             StmtKind::While { body, .. }
             | StmtKind::DoWhile { body, .. }
             | StmtKind::For { body, .. } => nested(self, body, saw_one, all_wide),
-            StmtKind::Switch { cases, .. } => {
-                for c in cases {
+            StmtKind::Switch(sw) => {
+                for c in &sw.cases {
                     nested(self, &c.body, saw_one, all_wide);
                 }
             }
@@ -1842,9 +1859,8 @@ impl Compiler {
             StmtKind::If { cond, then, els } => self.branch_stmt(|c| c.if_stmt(cond, then, els)),
             StmtKind::While { cond, body } => self.branch_stmt(|c| c.while_stmt(cond, body)),
             StmtKind::DoWhile { body, cond } => self.branch_stmt(|c| c.do_while_stmt(body, cond)),
-            StmtKind::Switch { subject, cases } => {
-                self.branch_stmt(|c| c.switch_stmt(subject, cases))
-            }
+            StmtKind::Switch(sw) => self.branch_stmt(|c| c.switch_lower(sw, None)),
+            StmtKind::Yield(value) => self.yield_stmt(value),
             StmtKind::Labeled { label, stmt } => {
                 self.pending_label = Some(label.clone());
                 let r = self.stmt(stmt);
@@ -2464,64 +2480,173 @@ impl Compiler {
         Ok(())
     }
 
-    /// Lower `switch (subject) { case L: … default: … }`.
+    /// Lower a `switch` in either form, in statement or in value position.
     ///
     /// ```text
+    ///   [result -> null]                               ; value position only
     ///   subject -> $switch_N
     ///   $switch_N; <L0>; GIS_CASE; JumpIfTrue body0    ; dispatch chain, in
     ///   $switch_N; <L1>; GIS_CASE; JumpIfTrue body1    ; source order
     ///   Jump default_body (or end)
-    /// body0: <stmts>                                   ; falls through …
-    /// body1: <stmts>                                   ; … into the next body
+    /// body0: <stmts> [Jump end]                        ; arrow: leaves here
+    /// body1: <stmts> [Jump end]                        ; colon: falls through
     /// end:
     /// ```
     ///
     /// The dispatch chain runs first so a label expression is evaluated at most
     /// once and only until one matches, and the bodies are laid out contiguously
-    /// so fall-through costs nothing. `break` targets `end` through a `switch`
-    /// [`Loop`] frame; `continue` passes through it to the enclosing loop.
-    fn switch_stmt(&mut self, subject: &Expr, cases: &[SwitchCase]) -> Result<(), String> {
+    /// so a colon form's fall-through costs nothing. An arrow arm ends with a
+    /// jump to `end` instead: Groovy's arrow arms never fall through.
+    ///
+    /// `result` names the temporary a value-position switch leaves its answer
+    /// in. It is set to `null` up front, which is the value Groovy gives a
+    /// switch expression that matched no label. An arrow arm stores its body's
+    /// trailing expression there (a `println` is void, so its arm is `null`, the
+    /// same rule a method body's implicit return uses); a colon arm stores
+    /// nothing on its own and has to say `yield`.
+    ///
+    /// `break` targets `end` through a `switch` [`Loop`] frame, which only the
+    /// colon form pushes — an arrow arm is not a `break` target in Groovy, so a
+    /// `break` written inside one belongs to the enclosing loop. `continue`
+    /// passes through either to the enclosing loop.
+    fn switch_lower(&mut self, sw: &SwitchBody, result: Option<&str>) -> Result<(), String> {
+        let SwitchBody {
+            subject,
+            cases,
+            arrow,
+        } = sw;
         let label = self.pending_label.take();
+        if let Some(r) = result {
+            // Groovy `null` rides as `Undef` (fusevm has no Null variant).
+            self.b.emit(Op::LoadUndef, self.cur_line);
+            self.emit_temp_set(r);
+        }
         let subject_tmp = self.fresh_temp("switch");
         self.expr(subject)?;
         self.emit_temp_set(&subject_tmp);
 
         let mut entry_jumps: Vec<(usize, usize)> = Vec::new(); // (case index, op)
         for (i, case) in cases.iter().enumerate() {
-            let Some(test) = &case.label else { continue };
-            self.emit_temp_get(&subject_tmp);
-            let builtin = self.case_label(test)?;
-            self.emit_call_builtin(builtin, 0, self.cur_line)?;
-            entry_jumps.push((i, self.b.emit(Op::JumpIfTrue(0), self.cur_line)));
+            for test in &case.labels {
+                self.emit_temp_get(&subject_tmp);
+                let builtin = self.case_label(test)?;
+                self.emit_call_builtin(builtin, 0, self.cur_line)?;
+                entry_jumps.push((i, self.b.emit(Op::JumpIfTrue(0), self.cur_line)));
+            }
         }
         // No label matched: enter `default` if the switch has one, else leave.
         let no_match = self.b.emit(Op::Jump(0), self.cur_line);
 
-        self.loops.push(Loop::new(label, true));
+        if !*arrow {
+            self.loops.push(Loop::new(label, true));
+        }
+        if let Some(r) = result {
+            self.yields.push(YieldFrame {
+                result: r.to_string(),
+                end_jumps: Vec::new(),
+                try_depth: self.tries.len(),
+            });
+        }
         let mut starts: Vec<usize> = Vec::with_capacity(cases.len());
+        let mut arm_exits: Vec<usize> = Vec::new();
         for case in cases {
             starts.push(self.b.current_pos());
-            for s in &case.body {
-                self.stmt(s)?;
+            match (*arrow, result) {
+                // An arrow arm in value position: its trailing expression is the
+                // arm's value, exactly as a method body's trailing expression is
+                // its return value.
+                (true, Some(r)) => self.arm_value(&case.body, r)?,
+                _ => {
+                    for s in &case.body {
+                        self.stmt(s)?;
+                    }
+                }
+            }
+            if *arrow {
+                arm_exits.push(self.b.emit(Op::Jump(0), self.cur_line));
             }
         }
         let end = self.b.current_pos();
-        let l = self.loops.pop().unwrap();
+        let yielded = result.map(|_| self.yields.pop().unwrap());
+        let l = if *arrow {
+            None
+        } else {
+            Some(self.loops.pop().unwrap())
+        };
 
         for (i, op) in entry_jumps {
             self.b.patch_jump(op, starts[i]);
         }
         let default_start = cases
             .iter()
-            .position(|c| c.label.is_none())
+            .position(|c| c.labels.is_empty())
             .map_or(end, |i| starts[i]);
         self.b.patch_jump(no_match, default_start);
-        for op in l.break_ops {
+        for op in arm_exits {
             self.b.patch_jump(op, end);
         }
-        // A `continue` inside a switch belongs to the enclosing loop, which the
-        // frame let through — nothing can be parked here.
-        debug_assert!(l.continue_ops.is_empty());
+        if let Some(y) = yielded {
+            for op in y.end_jumps {
+                self.b.patch_jump(op, end);
+            }
+        }
+        if let Some(l) = l {
+            for op in l.break_ops {
+                self.b.patch_jump(op, end);
+            }
+            // A `continue` inside a switch belongs to the enclosing loop, which
+            // the frame let through — nothing can be parked here.
+            debug_assert!(l.continue_ops.is_empty());
+        }
+        Ok(())
+    }
+
+    /// Lower one arrow arm's body so its trailing expression lands in `result`.
+    /// `println`/`print` are void — an arm that ends in one is `null`, which is
+    /// the same rule [`Compiler::fn_body`] applies to an implicit return.
+    fn arm_value(&mut self, body: &[Stmt], result: &str) -> Result<(), String> {
+        let Some((last, init)) = body.split_last() else {
+            return Ok(());
+        };
+        for s in init {
+            self.stmt(s)?;
+        }
+        match &last.kind {
+            StmtKind::Expr(Expr::Println { .. }) => self.stmt(last),
+            StmtKind::Expr(e) => {
+                self.cur_line = last.line;
+                self.expr(e)?;
+                self.emit_temp_set(result);
+                Ok(())
+            }
+            _ => self.stmt(last),
+        }
+    }
+
+    /// Lower `yield <expr>`: the value becomes the enclosing switch
+    /// expression's, and control leaves the switch — running, on the way out,
+    /// any `finally` bodies the jump would otherwise skip.
+    fn yield_stmt(&mut self, value: &Expr) -> Result<(), String> {
+        let Some(frame) = self.yields.last() else {
+            return Err(format!(
+                "groovyrs: `yield` outside a switch expression on line {}",
+                self.cur_line
+            ));
+        };
+        let (result, entry_depth) = (frame.result.clone(), frame.try_depth);
+        self.expr(value)?;
+        self.emit_temp_set(&result);
+        self.emit_finallys(|f| f.try_depth > entry_depth)?;
+        let op = self.b.emit(Op::Jump(0), self.cur_line);
+        self.yields.last_mut().unwrap().end_jumps.push(op);
+        Ok(())
+    }
+
+    /// A `switch` in value position: lower it into a temporary, then load it.
+    fn switch_expr(&mut self, sw: &SwitchBody) -> Result<(), String> {
+        let result = self.fresh_temp("switchval");
+        self.branch_stmt(|c| c.switch_lower(sw, Some(&result)))?;
+        self.emit_temp_get(&result);
         Ok(())
     }
 
@@ -2676,6 +2801,7 @@ impl Compiler {
                 // Groovy `null` — fusevm has no Null variant, so it rides as Undef.
                 self.b.emit(Op::LoadUndef, self.cur_line);
             }
+            Expr::Switch(sw) => self.switch_expr(sw)?,
             Expr::Var(name) => {
                 // A bare field name inside a method/constructor is `this.field`.
                 if self.is_field(name) {
@@ -3990,8 +4116,8 @@ fn collect_bound_stmts(body: &[Stmt], bound: &mut HashSet<String>) {
             StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
                 collect_bound_stmts(body, bound)
             }
-            StmtKind::Switch { cases, .. } => {
-                for c in cases {
+            StmtKind::Switch(sw) => {
+                for c in &sw.cases {
                     collect_bound_stmts(&c.body, bound);
                 }
             }
@@ -4066,17 +4192,8 @@ fn free_in_stmt(s: &Stmt, bound: &HashSet<String>, cx: &mut FreeCtx) {
                 free_in_stmt(s, bound, cx);
             }
         }
-        StmtKind::Switch { subject, cases } => {
-            free_in_expr(subject, bound, cx);
-            for c in cases {
-                if let Some(l) = &c.label {
-                    free_in_expr(l, bound, cx);
-                }
-                for s in &c.body {
-                    free_in_stmt(s, bound, cx);
-                }
-            }
-        }
+        StmtKind::Switch(sw) => free_in_switch(sw, bound, cx),
+        StmtKind::Yield(e) => free_in_expr(e, bound, cx),
         StmtKind::Labeled { stmt, .. } => free_in_stmt(stmt, bound, cx),
         StmtKind::For {
             init,
@@ -4155,9 +4272,24 @@ fn concat_expr(lhs: Expr, rhs: Expr) -> Expr {
     }
 }
 
+/// The free names of a `switch` in either position: its subject, every label,
+/// and every arm body.
+fn free_in_switch(sw: &SwitchBody, bound: &HashSet<String>, cx: &mut FreeCtx) {
+    free_in_expr(&sw.subject, bound, cx);
+    for c in &sw.cases {
+        for l in &c.labels {
+            free_in_expr(l, bound, cx);
+        }
+        for s in &c.body {
+            free_in_stmt(s, bound, cx);
+        }
+    }
+}
+
 fn free_in_expr(e: &Expr, bound: &HashSet<String>, cx: &mut FreeCtx) {
     match e {
         Expr::Regex(_) => {}
+        Expr::Switch(sw) => free_in_switch(sw, bound, cx),
         Expr::Iterable(inner) | Expr::SpreadArg(inner) => free_in_expr(inner, bound, cx),
         Expr::Recorded { inner, .. } => free_in_expr(inner, bound, cx),
         Expr::Var(n) => note_free(n, bound, cx),
@@ -4338,6 +4470,14 @@ fn tail_return(body: &[Stmt]) -> Option<Vec<Stmt>> {
 /// True when any statement in `body` (recursively, including class members and
 /// closure bodies) is a `try` or a `throw`. Gates every exception-related op the
 /// compiler emits, so an exception-free program's bytecode is unchanged.
+fn switch_uses_exceptions(sw: &SwitchBody) -> bool {
+    expr_uses_exceptions(&sw.subject)
+        || sw
+            .cases
+            .iter()
+            .any(|c| c.labels.iter().any(expr_uses_exceptions) || body_uses_exceptions(&c.body))
+}
+
 fn body_uses_exceptions(body: &[Stmt]) -> bool {
     body.iter().any(|s| match &s.kind {
         StmtKind::Try { .. } | StmtKind::Throw(_) => true,
@@ -4387,13 +4527,8 @@ fn body_uses_exceptions(body: &[Stmt]) -> bool {
         StmtKind::DoWhile { body, cond } => {
             expr_uses_exceptions(cond) || body_uses_exceptions(body)
         }
-        StmtKind::Switch { subject, cases } => {
-            expr_uses_exceptions(subject)
-                || cases.iter().any(|c| {
-                    c.label.as_ref().is_some_and(expr_uses_exceptions)
-                        || body_uses_exceptions(&c.body)
-                })
-        }
+        StmtKind::Switch(sw) => switch_uses_exceptions(sw),
+        StmtKind::Yield(e) => expr_uses_exceptions(e),
         StmtKind::Labeled { stmt, .. } => body_uses_exceptions(std::slice::from_ref(stmt)),
         // An `assert` raises an `AssertionError`, so a program containing one
         // needs the pending-exception checks even without a `throw`.
@@ -4504,18 +4639,23 @@ fn body_any(body: &[Stmt], f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         }
         StmtKind::Throw(e) => expr_any(e, f),
         StmtKind::DoWhile { body, cond } => expr_any(cond, f) || body_any(body, f),
-        StmtKind::Switch { subject, cases } => {
-            expr_any(subject, f)
-                || cases.iter().any(|c| {
-                    c.label.as_ref().is_some_and(|e| expr_any(e, f)) || body_any(&c.body, f)
-                })
-        }
+        StmtKind::Switch(sw) => switch_any(sw, f),
+        StmtKind::Yield(e) => expr_any(e, f),
         StmtKind::Labeled { stmt, .. } => body_any(std::slice::from_ref(stmt), f),
         StmtKind::Assert { cond, message, .. } => {
             expr_any(cond, f) || message.as_ref().is_some_and(|e| expr_any(e, f))
         }
         StmtKind::Break(_) | StmtKind::Continue(_) => false,
     })
+}
+
+/// [`expr_any`] over a whole `switch` — subject, labels, and arm bodies.
+fn switch_any(sw: &SwitchBody, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
+    expr_any(&sw.subject, f)
+        || sw
+            .cases
+            .iter()
+            .any(|c| c.labels.iter().any(|e| expr_any(e, f)) || body_any(&c.body, f))
 }
 
 /// [`body_any`] for a single expression: `f` is applied to `e` itself and to
@@ -4525,6 +4665,7 @@ fn expr_any(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         return true;
     }
     match e {
+        Expr::Switch(sw) => switch_any(sw, f),
         Expr::Iterable(inner) | Expr::SpreadArg(inner) => expr_any(inner, f),
         Expr::Recorded { inner, .. } => expr_any(inner, f),
         Expr::Call { args, .. } => args.iter().any(|a| expr_any(a, f)),

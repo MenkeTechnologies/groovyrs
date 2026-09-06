@@ -465,6 +465,14 @@ Implemented and checked against Apache Groovy:
 - **`switch`** — Groovy's, with the full `isCase` semantics: constant, range,
   list, type (`case String:`), `~/…/` pattern, closure, and `null` labels,
   source-order fall-through until a `break`, and a `default` anywhere.
+- **`switch` expressions** — both value forms. The arrow form `case L -> v`
+  runs one arm and never falls through, takes several labels per arm
+  (`case 1, 2 -> …`), and is valued by its arm's trailing expression, so a
+  braced body is a block (`case 2 -> { 5 }` is `5`) and an arm ending in
+  `println` is `null`. The colon form keeps fall-through and says `yield`. A
+  subject that matches no label is `null` — Groovy asks no exhaustiveness of a
+  switch expression. An arrow `switch` in statement position still carries its
+  value, so a method whose last statement is one returns the arm's value.
 - **Output** — `println` / `print` with Groovy value formatting, in both the
   `println(x)` and paren-less `println x` command forms.
 - **Comments** — `//` line, `/* … */` block.

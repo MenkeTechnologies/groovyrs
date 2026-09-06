@@ -47,6 +47,7 @@ pub fn parse(src: &str) -> Result<Program, String> {
         recording: None,
         pending: Vec::new(),
         depth: 0,
+        switch_exprs: 0,
     };
     p.program()
 }
@@ -75,6 +76,11 @@ struct Parser {
     /// nesting), and [`Parser::binary_from`]'s fold (a chain of `n` operators is
     /// an AST `n` deep).
     depth: usize,
+    /// How many `switch` bodies enclose the statement being parsed. `yield` is a
+    /// contextual keyword: only inside a `switch` arm is it the statement that
+    /// carries the switch expression's value, and everywhere else it is an
+    /// ordinary identifier that a program may use as a name.
+    switch_exprs: usize,
 }
 
 impl Parser {
@@ -285,7 +291,31 @@ impl Parser {
             Tok::If => self.if_stmt()?,
             Tok::While => self.while_stmt()?,
             Tok::Do => self.do_while_stmt()?,
-            Tok::Switch => self.switch_stmt()?,
+            // An arrow `switch` is a value even in statement position — a method
+            // whose last statement is one returns the arm's value — so it is
+            // lowered as an expression statement and picks the implicit return
+            // up for free. The colon form has no value and stays a statement.
+            Tok::Switch => {
+                let sw = self.switch_body()?;
+                if sw.arrow {
+                    StmtKind::Expr(Expr::Switch(Box::new(sw)))
+                } else {
+                    StmtKind::Switch(Box::new(sw))
+                }
+            }
+            // `yield <expr>` — only inside a `switch` expression arm; anywhere
+            // else `yield` is an ordinary identifier (Groovy's rule too).
+            Tok::Ident(w)
+                if w == "yield"
+                    && self.switch_exprs > 0
+                    && !matches!(
+                        self.peek_at(1),
+                        Tok::Nl | Tok::Semi | Tok::RBrace | Tok::Eof | Tok::Assign
+                    ) =>
+            {
+                self.advance();
+                StmtKind::Yield(self.expression()?)
+            }
             Tok::For => self.for_stmt()?,
             // `label: <loop or switch>` — the only place a bare `ident :` can
             // start a statement, so no other construct is shadowed.
@@ -1183,9 +1213,16 @@ impl Parser {
         Ok(StmtKind::DoWhile { body, cond })
     }
 
-    /// `switch (subject) { case L: … default: … }`. Sections keep source order;
-    /// a section with an empty body is how consecutive labels share one.
-    fn switch_stmt(&mut self) -> Result<StmtKind, String> {
+    /// `switch (subject) { … }` in both of Groovy's forms. Sections keep source
+    /// order; in the colon form a section with an empty body is how consecutive
+    /// labels share one.
+    ///
+    /// The two forms are decided by the token after the first section's labels
+    /// and then held for the rest of the switch: Groovy refuses a `switch` that
+    /// mixes `case L -> …` with `case L: …`, and so does this. An arrow arm's
+    /// body is one statement, or a braced block of them; a colon arm's body runs
+    /// to the next label.
+    fn switch_body(&mut self) -> Result<SwitchBody, String> {
         self.eat(&Tok::Switch)?;
         self.eat(&Tok::LParen)?;
         let subject = self.expression()?;
@@ -1193,17 +1230,51 @@ impl Parser {
         self.skip_newlines();
         self.eat(&Tok::LBrace)?;
         let mut cases: Vec<SwitchCase> = Vec::new();
+        let mut arrow: Option<bool> = None;
+        // `yield` is only the switch-value statement inside these sections.
+        self.switch_exprs += 1;
+        let sections = self.switch_sections(&mut cases, &mut arrow);
+        self.switch_exprs -= 1;
+        sections?;
+        self.eat(&Tok::RBrace)?;
+        if cases.iter().filter(|c| c.labels.is_empty()).count() > 1 {
+            return Err(format!(
+                "groovyrs: duplicate `default` in switch on line {}",
+                self.line()
+            ));
+        }
+        Ok(SwitchBody {
+            subject,
+            cases,
+            arrow: arrow.unwrap_or(false),
+        })
+    }
+
+    /// The `case`/`default` sections of a `switch`, up to (not through) the
+    /// closing brace. Split out so the caller can bracket it with the `yield`
+    /// context and still restore that context on the error path.
+    fn switch_sections(
+        &mut self,
+        cases: &mut Vec<SwitchCase>,
+        arrow: &mut Option<bool>,
+    ) -> Result<(), String> {
         self.skip_terminators();
         while !self.is(&Tok::RBrace) && !self.is(&Tok::Eof) {
-            let label = match self.peek() {
+            // `case L, M, N` shares one section between several labels; a
+            // `default` carries none.
+            let mut labels = Vec::new();
+            match self.peek() {
                 Tok::Case => {
                     self.advance();
-                    let e = self.expression()?;
-                    Some(e)
+                    labels.push(self.expression()?);
+                    while self.is(&Tok::Comma) {
+                        self.advance();
+                        self.skip_newlines();
+                        labels.push(self.expression()?);
+                    }
                 }
                 Tok::Default => {
                     self.advance();
-                    None
                 }
                 other => {
                     return Err(format!(
@@ -1211,29 +1282,42 @@ impl Parser {
                     self.line()
                 ))
                 }
-            };
-            self.eat(&Tok::Colon)?;
-            self.skip_terminators();
-            // The section body runs to the next label or the closing brace.
-            let mut body = Vec::new();
-            while !matches!(
-                self.peek(),
-                Tok::Case | Tok::Default | Tok::RBrace | Tok::Eof
-            ) {
-                body.push(self.statement()?);
-                self.expect_terminator()?;
-                self.skip_terminators();
             }
-            cases.push(SwitchCase { label, body });
+            let is_arrow = self.is(&Tok::Arrow);
+            match *arrow {
+                None => *arrow = Some(is_arrow),
+                Some(first) if first != is_arrow => {
+                    return Err(format!(
+                        "groovyrs: a switch cannot mix `->` and `:` sections, on line {}",
+                        self.line()
+                    ))
+                }
+                Some(_) => {}
+            }
+            let body = if is_arrow {
+                self.advance();
+                // A braced arrow body is a BLOCK, never a closure literal, and
+                // its value is its trailing expression: `case 2 -> { 5 }` is 5.
+                self.braced_or_single()?
+            } else {
+                self.eat(&Tok::Colon)?;
+                self.skip_terminators();
+                // The section body runs to the next label or the closing brace.
+                let mut body = Vec::new();
+                while !matches!(
+                    self.peek(),
+                    Tok::Case | Tok::Default | Tok::RBrace | Tok::Eof
+                ) {
+                    body.push(self.statement()?);
+                    self.expect_terminator()?;
+                    self.skip_terminators();
+                }
+                body
+            };
+            cases.push(SwitchCase { labels, body });
+            self.skip_terminators();
         }
-        self.eat(&Tok::RBrace)?;
-        if cases.iter().filter(|c| c.label.is_none()).count() > 1 {
-            return Err(format!(
-                "groovyrs: duplicate `default` in switch on line {}",
-                self.line()
-            ));
-        }
-        Ok(StmtKind::Switch { subject, cases })
+        Ok(())
     }
 
     fn while_stmt(&mut self) -> Result<StmtKind, String> {
@@ -2182,6 +2266,8 @@ impl Parser {
                 }
                 Ok(self.record(col, Expr::Var(name)))
             }
+            // A `switch` in value position — Groovy's switch expression.
+            Tok::Switch => Ok(Expr::Switch(Box::new(self.switch_body()?))),
             other => Err(format!(
                 "groovyrs: unexpected token {other} in expression on line {}",
                 self.line()
@@ -2975,6 +3061,7 @@ fn parse_interpolation(src: &str) -> Result<Expr, String> {
         recording: None,
         pending: Vec::new(),
         depth: 0,
+        switch_exprs: 0,
     };
     p.skip_newlines();
     let e = p.expression()?;

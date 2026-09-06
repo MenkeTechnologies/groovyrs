@@ -6414,3 +6414,191 @@ fn a_range_binds_tighter_than_in_and_looser_than_plus() {
         assert_eq!(out.trim_end(), want, "for source: {src}");
     }
 }
+
+// ── switch expressions (Groovy 4+ arrow and colon forms) ──────────────────
+//
+// Every expectation below is the byte output of Apache Groovy 5.1.1 on
+// JVM 26.0.2.1, captured by differential probe.
+
+#[test]
+fn an_arrow_switch_expression_answers_the_matching_arm() {
+    let src = r#"
+println(switch (2) { case 2 -> "two"; default -> "other" })
+println(switch (9) { case 2 -> "two"; default -> "other" })
+println(switch (3) { case 1, 2, 3 -> "low"; default -> "hi" })
+println(switch ("abc") { case String -> "str"; default -> "o" })
+println(switch (5) { case 1..4 -> "range"; case 5 -> "five" })
+println(switch (7) { case { it > 5 } -> "big"; default -> "small" })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "two\nother\nlow\nstr\nfive\nbig\n");
+}
+
+#[test]
+fn a_switch_expression_that_matches_nothing_is_null() {
+    // Groovy does not demand exhaustiveness of a switch expression the way Java
+    // does: an unmatched subject with no `default` is `null`, not an error.
+    let src = r#"
+def c = switch (7) { case 2 -> "two" }
+println("unmatched=$c")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "unmatched=null\n");
+}
+
+#[test]
+fn an_arrow_arm_is_valued_by_its_trailing_expression() {
+    // A braced arrow body is a BLOCK, not a closure — `{ 5 }` is the Integer 5.
+    // `println` is void, so an arm ending in one is `null`, the same rule an
+    // implicit return uses. An explicit `yield` overrides both.
+    let src = r#"
+def x = switch (2) { case 2 -> { 5 } }
+println(x + " " + x.getClass().name)
+def y = switch (2) { case 2 -> println("hi") }
+println("y=$y")
+def z = switch (2) { case 2 -> { def a = 1; def b = 2; yield a + b }; default -> 0 }
+println(z)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "5 java.lang.Integer\nhi\ny=null\n3\n");
+}
+
+#[test]
+fn a_colon_switch_expression_yields_and_falls_through() {
+    // The colon form keeps fall-through: `case 1:` has no body of its own and
+    // runs `case 2:`'s. `yield` is what carries the value out.
+    let src = r#"
+def z = switch (1) {
+    case 1:
+    case 2:
+        yield "shared"
+    default:
+        yield "d"
+}
+println(z)
+def w = switch (3) {
+    case 1, 2, 3:
+        yield "low"
+    default:
+        yield "d"
+}
+println(w)
+def v = switch (2) {
+    case 2:
+        def acc = 0
+        for (i in 1..3) { acc += i }
+        yield acc
+    default:
+        yield -1
+}
+println(v)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "shared\nlow\n6\n");
+}
+
+#[test]
+fn an_arrow_switch_statement_runs_one_arm_and_is_a_methods_value() {
+    // No fall-through in the arrow form — `case 2` does not run `case 3`. And a
+    // method whose last statement is an arrow switch returns the arm's value,
+    // which is why the form is lowered as an expression even in statement
+    // position.
+    let src = r#"
+switch (2) {
+    case 1 -> println("one")
+    case 2 -> println("two")
+    case 3 -> println("three")
+    default -> println("def")
+}
+def f(x) {
+    switch (x) {
+        case 1 -> "one"
+        default -> "other"
+    }
+}
+println(f(1))
+println(f(5))
+def c = { v -> switch (v) { case 1 -> "one"; default -> "d" } }
+println(c(1) + c(2))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "two\none\nother\noned\n");
+}
+
+#[test]
+fn switch_expressions_nest_and_compose() {
+    let src = r#"
+println(switch (1) { case 1 -> switch (2) { case 2 -> "inner" }; default -> "x" })
+println(1 + switch (2) { case 2 -> 10; default -> 0 })
+println([switch (1) { case 1 -> "a"; default -> "b" }, 2])
+println(switch (null) { case null -> "isnull"; default -> "d" })
+println(switch (null) { case 1 -> "one"; default -> "d" })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "inner\n11\n[a, 2]\nisnull\nd\n");
+}
+
+#[test]
+fn a_switch_expression_arm_may_throw() {
+    let src = r#"
+try {
+    def q = switch (1) { case 1 -> throw new RuntimeException("boom") }
+    println("unreached $q")
+} catch (e) {
+    println("caught ${e.message}")
+}
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "caught boom\n");
+}
+
+#[test]
+fn a_yield_runs_the_finally_it_leaves() {
+    // `yield` is an early exit out of the arm, so a `finally` it jumps over has
+    // to run first — the same contract `return` and `break` keep.
+    let src = r#"
+def z = switch (1) {
+    case 1:
+        try {
+            yield "from-try"
+        } finally {
+            println("cleanup")
+        }
+    default:
+        yield "d"
+}
+println(z)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "cleanup\nfrom-try\n");
+}
+
+#[test]
+fn a_switch_refuses_to_mix_arrow_and_colon_sections() {
+    // Groovy rejects the mixture too (`case 2: println "two"` after an arrow
+    // arm is a compile error), so the refusal is the faithful answer.
+    let (_, err, ok) = run_full("switch (2) {\n case 1 -> println(1)\n case 2: println(2)\n}\n");
+    assert!(!ok);
+    assert!(err.contains("cannot mix"), "stderr was: {err}");
+}
+
+#[test]
+fn yield_outside_a_switch_is_an_ordinary_identifier() {
+    // Groovy's `yield` is contextual: only inside a switch arm is it the
+    // value-carrying statement, so a program may still use the name.
+    let src = r#"
+def yield = 7
+println(yield + 1)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "8\n");
+}

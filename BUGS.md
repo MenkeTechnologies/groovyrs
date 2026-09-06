@@ -428,6 +428,22 @@ reported as parse or compile errors, never silently mis-run.
   is entered only when no label matched. The subject is evaluated once and the
   labels only until one matches. A `switch` is a `break` target but not a
   `continue` target — a `continue` inside one continues the enclosing loop.
+- **`switch` expressions.** Both of Groovy's value forms. `case L -> v` runs one
+  arm and never falls through, accepts several labels in one arm
+  (`case 1, 2, 3 -> …`), and is valued by its body's trailing expression — a
+  braced arrow body is a BLOCK, so `case 2 -> { 5 }` is `5` and not a closure,
+  and an arm ending in `println` is `null`, the rule an implicit return uses.
+  `case L:` keeps fall-through and carries its value out with `yield`, which
+  runs any `finally` it leaves on the way. A subject matching no label is `null`:
+  Groovy asks no exhaustiveness of a switch expression, unlike Java. An arrow
+  `switch` written in statement position is still a value, which is why a method
+  whose last statement is one returns the arm's value. Mixing `->` and `:`
+  sections in one `switch` is refused, as Groovy refuses it. `yield` is
+  contextual — only inside a switch arm; elsewhere it is an ordinary name.
+  groovyrs is *laxer* than Groovy on two syntax rules it does not need for
+  execution: comma labels in a colon-form statement switch, and a `default`
+  section written before a `case` in the arrow form, are both accepted here and
+  rejected by `groovyc`. Neither changes the answer to a program Groovy accepts.
 - **Regex: `~/…/`, `/…/`, `=~`, `==~`, `Matcher`.** `~/pattern/` is a
   `java.util.regex.Pattern` (it prints as its source and drives a `case` label);
   `/pattern/` is a slashy `String`, whose backslashes are literal and which may

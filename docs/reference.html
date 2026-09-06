@@ -118,48 +118,54 @@ println(i)   // =&gt; 3</code></pre>
         <article class="doc-entry" id="doc-reserved-words-8">
           <h3><a class="doc-anchor" href="#doc-reserved-words-8">#</a> <code>switch</code></h3>
           <pre><code class="lang-groovy">switch (subject) { case label: … default: … }</code></pre>
-          <p>Multi-way branch. Each label is tested with Groovy's `isCase` (`host::GIS_CASE`), so a constant, a range, a list, a type name, a `~/…/` pattern, or a closure all work as labels.</p>
+          <p>Multi-way branch, in statement or value position. Each label is tested with Groovy's `isCase` (`host::GIS_CASE`), so a constant, a range, a list, a type name, a `~/…/` pattern, or a closure all work as labels. As an expression it answers the matching arm, and `null` when none matched — no exhaustiveness is required.</p>
           <pre><code class="lang-groovy">switch (5) { case 4..6: println("in"); break; default: println("out") }   // =&gt; in</code></pre>
         </article>
         <article class="doc-entry" id="doc-reserved-words-9">
           <h3><a class="doc-anchor" href="#doc-reserved-words-9">#</a> <code>case</code></h3>
-          <pre><code class="lang-groovy">case label:</code></pre>
-          <p>One `switch` label. Sections fall through to the next one until a `break`, exactly as in Java.</p>
-          <pre><code class="lang-groovy">switch (1) { case 1: println("one"); break }   // =&gt; one</code></pre>
+          <pre><code class="lang-groovy">case label[, label…]: | case label[, label…] -&gt; value</code></pre>
+          <p>One `switch` label, or several sharing an arm. A colon section falls through to the next until a `break`; an arrow arm runs alone and is valued by its trailing expression, so a braced body is a block (`case 2 -&gt; { 5 }` is 5). The two forms may not be mixed in one `switch`.</p>
+          <pre><code class="lang-groovy">println(switch (1) { case 1, 2 -&gt; "low"; default -&gt; "hi" })   // =&gt; low</code></pre>
         </article>
         <article class="doc-entry" id="doc-reserved-words-10">
-          <h3><a class="doc-anchor" href="#doc-reserved-words-10">#</a> <code>default</code></h3>
+          <h3><a class="doc-anchor" href="#doc-reserved-words-10">#</a> <code>yield</code></h3>
+          <pre><code class="lang-groovy">yield expr</code></pre>
+          <p>The value of the enclosing `switch` expression, which it also leaves — running any `finally` it jumps over. Contextual: only inside a `switch` arm is `yield` this statement, so a program may still use the name elsewhere.</p>
+          <pre><code class="lang-groovy">println(switch (1) { case 1: yield "one"; default: yield "d" })   // =&gt; one</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-reserved-words-11">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-11">#</a> <code>default</code></h3>
           <pre><code class="lang-groovy">default: | default ReturnType method(params) { … }</code></pre>
           <p>The `switch` section entered when no `case` label matched; a duplicate `default` is a parse error. Inside an `interface` body it instead marks a method that carries an implementation.</p>
           <pre><code class="lang-groovy">switch (9) { case 1: break; default: println("d") }   // =&gt; d</code></pre>
         </article>
-        <article class="doc-entry" id="doc-reserved-words-11">
-          <h3><a class="doc-anchor" href="#doc-reserved-words-11">#</a> <code>assert</code></h3>
+        <article class="doc-entry" id="doc-reserved-words-12">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-12">#</a> <code>assert</code></h3>
           <pre><code class="lang-groovy">assert cond [ : message ]</code></pre>
           <p>Raise `PowerAssertionError` when the condition is falsy, printing the source text with each recorded sub-expression's value under the column it occupied. The `: message` form instead raises a plain `AssertionError` whose text is `&lt;message&gt;. Expression: &lt;condition&gt;`, with a `Values:` clause naming the condition's bare-variable operands.</p>
           <pre><code class="lang-groovy">assert 1 + 1 == 2   // passes silently</code></pre>
         </article>
-        <article class="doc-entry" id="doc-reserved-words-12">
-          <h3><a class="doc-anchor" href="#doc-reserved-words-12">#</a> <code>return</code></h3>
+        <article class="doc-entry" id="doc-reserved-words-13">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-13">#</a> <code>return</code></h3>
           <pre><code class="lang-groovy">return [expr]</code></pre>
           <p>Return from the enclosing method, closure, or constructor; at script level it ends the script. A method with no `return` yields its last expression.</p>
           <pre><code class="lang-groovy">def f() { return 7 }
 println(f())   // =&gt; 7</code></pre>
         </article>
-        <article class="doc-entry" id="doc-reserved-words-13">
-          <h3><a class="doc-anchor" href="#doc-reserved-words-13">#</a> <code>break</code></h3>
+        <article class="doc-entry" id="doc-reserved-words-14">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-14">#</a> <code>break</code></h3>
           <pre><code class="lang-groovy">break [label]</code></pre>
           <p>Exit the nearest enclosing loop or `switch`. `break label` exits the loop carrying that label; an unknown label is a compile error.</p>
           <pre><code class="lang-groovy">for (i in 0..9) { if (i == 3) break; print(i) }   // =&gt; 012</code></pre>
         </article>
-        <article class="doc-entry" id="doc-reserved-words-14">
-          <h3><a class="doc-anchor" href="#doc-reserved-words-14">#</a> <code>continue</code></h3>
+        <article class="doc-entry" id="doc-reserved-words-15">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-15">#</a> <code>continue</code></h3>
           <pre><code class="lang-groovy">continue [label]</code></pre>
           <p>Skip to the next iteration of the nearest enclosing loop, or of the labeled one.</p>
           <pre><code class="lang-groovy">for (i in 0..3) { if (i == 1) continue; print(i) }   // =&gt; 023</code></pre>
         </article>
-        <article class="doc-entry" id="doc-reserved-words-15">
-          <h3><a class="doc-anchor" href="#doc-reserved-words-15">#</a> <code>new</code></h3>
+        <article class="doc-entry" id="doc-reserved-words-16">
+          <h3><a class="doc-anchor" href="#doc-reserved-words-16">#</a> <code>new</code></h3>
           <pre><code class="lang-groovy">new Type([args])</code></pre>
           <p>Construct an instance. Fields across the whole superclass chain are materialised to `null`, initialisers run superclass-first, then the most-derived constructor of matching arity runs (`host::GNEW`).</p>
           <pre><code class="lang-groovy">class P { def x; P(v) { x = v } }

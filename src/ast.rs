@@ -89,14 +89,17 @@ pub enum StmtKind {
     /// `do { .. } while (cond)` — the body runs before the first test, so it
     /// always executes at least once.
     DoWhile { body: Vec<Stmt>, cond: Expr },
-    /// `switch (subject) { case L: .. default: .. }`. The cases keep source
-    /// order and fall through into one another exactly as Groovy's do; a `break`
-    /// leaves the switch. Each `case` label is matched with Groovy's `isCase`
-    /// rules, not `==` (see `host::GIS_CASE`).
-    Switch {
-        subject: Expr,
-        cases: Vec<SwitchCase>,
-    },
+    /// `switch (subject) { case L: .. default: .. }` — the colon form in
+    /// statement position. The cases keep source order and fall through into one
+    /// another exactly as Groovy's do; a `break` leaves the switch. Each `case`
+    /// label is matched with Groovy's `isCase` rules, not `==` (see
+    /// `host::GIS_CASE`).
+    ///
+    /// The arrow form (`case L -> …`) is *not* here: the parser lowers it to
+    /// `StmtKind::Expr(Expr::Switch)` even in statement position, because Groovy
+    /// gives it a value that a trailing position carries out (a method whose
+    /// last statement is an arrow `switch` returns the arm's value).
+    Switch(Box<SwitchBody>),
     /// `label: <loop or switch>` — the target a labeled `break`/`continue` names.
     Labeled { label: String, stmt: Box<Stmt> },
     /// `for (init; cond; update) { .. }` — the C-style loop. The `for (x in
@@ -114,6 +117,11 @@ pub enum StmtKind {
     /// the one carrying `label`. A `switch` is transparent here: a `continue`
     /// inside one continues the loop around it.
     Continue(Option<String>),
+    /// `yield <expr>` — the value of the enclosing `switch` *expression*, which
+    /// it also leaves. Groovy's `yield` is contextual: it is only this statement
+    /// inside a `switch` expression arm, and an ordinary identifier anywhere
+    /// else, so the parser only recognises it there.
+    Yield(Expr),
     /// `return` / `return <expr>`. Inside a user function the value is carried
     /// out through `Op::ReturnValue` (a bare `return` returns `null`); at script
     /// top level the value becomes the script's result and execution ends.
@@ -218,12 +226,27 @@ pub enum StmtKind {
     },
 }
 
-/// One `case L:` / `default:` section of a [`StmtKind::Switch`], in source
-/// order. `label` is `None` for `default`. An empty `body` is how consecutive
-/// labels (`case 2: case 3: …`) fall into a shared body.
+/// A whole `switch`, shared by the statement form ([`StmtKind::Switch`]) and
+/// the expression form ([`Expr::Switch`]) because Groovy's two forms differ
+/// only in where the value goes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwitchBody {
+    pub subject: Expr,
+    pub cases: Vec<SwitchCase>,
+    /// True for the arrow form `case L -> …`, false for the colon form
+    /// `case L: …`. Groovy refuses to mix them in one `switch`, and the two
+    /// carry different control flow: an arrow arm runs alone and leaves the
+    /// switch, a colon arm falls through into the next one.
+    pub arrow: bool,
+}
+
+/// One `case L[, L…]:` / `default:` section of a [`SwitchBody`], in source
+/// order. `labels` is empty for `default`. In the colon form an empty `body` is
+/// how consecutive labels (`case 2: case 3: …`) fall into a shared body; the
+/// comma form (`case 2, 3 ->`) says the same thing in one section.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwitchCase {
-    pub label: Option<Expr>,
+    pub labels: Vec<Expr>,
     pub body: Vec<Stmt>,
 }
 
@@ -355,6 +378,14 @@ pub enum Expr {
     Null,
     /// A bare identifier — a variable read.
     Var(String),
+    /// A `switch` in value position: `def r = switch (x) { case 1 -> "one" }`.
+    ///
+    /// An arrow arm's value is its body's trailing expression (`println` is void
+    /// and yields `null`, exactly as in a method body); a colon arm has to say
+    /// `yield`. Falling off the end without a match — or without yielding — is
+    /// `null`, which is what Groovy answers for a switch expression no label
+    /// matched.
+    Switch(Box<SwitchBody>),
     /// A sub-expression of an `assert` condition whose value the power-assert
     /// renderer records, tagged with the 1-based source column Groovy prints it
     /// under. Produced only inside an `assert`, so no other program pays for it.

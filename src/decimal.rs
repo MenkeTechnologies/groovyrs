@@ -270,15 +270,24 @@ pub fn to_plain_string(d: &BigDecimal) -> String {
     format!("{sign}{body}")
 }
 
-/// Groovy's `Number.mod(n)` — the FLOORED modulus, which is `%` only when the
-/// operands share a sign: `(-7).mod(3)` is `2` where `-7 % 3` is `-1`, and
-/// `(-7.5).mod(2)` is `0.5`. Returns `None` for a zero divisor.
+/// Groovy's `Number.mod(n)` on decimals — `remainder` with a NEGATIVE result
+/// shifted by the modulus, which is the floored modulus only while the modulus
+/// is positive: `(-7).mod(3)` is `2` where `-7 % 3` is `-1`, and `(-7.5).mod(2)`
+/// is `0.5`. Returns `None` for a zero divisor.
+///
+/// A negative modulus is where the two rules part, and it is the remainder's
+/// sign alone that Groovy tests — not whether the signs agree. `7.5.mod(-2)` is
+/// `1.5` (the remainder is already positive and stands) and `(-7.5).mod(-2)` is
+/// `-3.5` (the remainder `-1.5` takes the modulus once more), where the floored
+/// rule would answer `-0.5` and `-1.5`. Measured against Apache Groovy 5.1.1 /
+/// JVM 26.0.2.1; the two agree on every positive modulus, which is why the
+/// difference went unnoticed.
 pub fn floored_mod(a: &BigDecimal, b: &BigDecimal) -> Option<BigDecimal> {
     let r = remainder(a, b)?;
-    if r.is_zero() || r.is_negative() == b.is_negative() {
-        return Some(r);
+    if r.is_negative() {
+        return Some(add(&r, b));
     }
-    Some(add(&r, b))
+    Some(r)
 }
 
 /// `a + b` — scale is `max(scale(a), scale(b))` (`1.10 + 2.20` is `3.30`).
@@ -334,7 +343,12 @@ pub fn remainder(a: &BigDecimal, b: &BigDecimal) -> Option<BigDecimal> {
 /// or with trailing zeros stripped down to it, never past. The scale is not
 /// cosmetic here: [`remainder`] subtracts `q * b` from `a`, so this scale is
 /// what decides the remainder's own.
-fn divide_to_integral(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
+///
+/// Public because it is also `intdiv`, whose answer is this quotient. Reaching
+/// it through [`divide`] and truncating instead reads a *rounded* quotient: that
+/// division rounds half-up at ten fraction digits, so a true quotient just under
+/// an integer can round onto it and truncate one too high.
+pub fn divide_to_integral(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
     let preferred = a.fractional_digit_count() - b.fractional_digit_count();
     // Java short-circuits a quotient of zero straight to the preferred scale.
     if a.abs() < b.abs() {

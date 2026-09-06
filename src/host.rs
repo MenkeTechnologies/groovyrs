@@ -2457,6 +2457,17 @@ fn as_bigint(v: &Value) -> Option<BigDecimal> {
     }
 }
 
+/// A numeric value truncated toward zero, as a scale-0 `BigDecimal` — the view
+/// `mod` takes of a `double` operand. `None` for a non-number and for a `double`
+/// with no exact decimal form (an infinity or a NaN).
+fn truncated_dec(v: &Value) -> Option<BigDecimal> {
+    let d = match v {
+        Value::Float(f) => decimal::from_f64_exact(*f)?,
+        _ => as_exact_dec(v)?,
+    };
+    Some(decimal::truncate_to_scale(&d, 0))
+}
+
 /// Allocate a `java.math.BigInteger`, truncating any fractional part the way
 /// Java's `BigDecimal.toBigInteger` does.
 fn bigint_value(d: BigDecimal) -> Value {
@@ -9234,6 +9245,18 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             );
             Value::Undef
         }
+        // A `BigInteger` divisor takes the call out of the native path and into
+        // `BigInteger.divide`: `7.intdiv(3G)` is the BigInteger 2, truncating
+        // toward zero like every other `intdiv`, and a zero divisor reports
+        // `BigInteger divide by zero` rather than the JVM's `/ by zero`.
+        (Value::Int(n), "intdiv") if args.first().is_some_and(|a| as_bigint(a).is_some()) => {
+            let y = as_bigint(&args[0]).unwrap();
+            if y.is_zero() {
+                raise(vm, "ArithmeticException", "BigInteger divide by zero");
+                return Value::Undef;
+            }
+            bigint_value(decimal::divide_to_integral(&decimal::from_i64(*n), &y))
+        }
         (Value::Int(n), "intdiv") => match args.first().and_then(as_i64) {
             Some(0) | None => {
                 // Three different wordings reach an `ArithmeticException` for a
@@ -9253,6 +9276,41 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             // back to `Integer.MIN_VALUE`, exactly as Java's `/` does.
             Some(d) => Value::int(wrap_to_width_of(*n, n.wrapping_div(d))),
         },
+        // `mod` with a `double`/`float` on either side TRUNCATES both operands
+        // to integers and takes the modulus on those: `9.mod(4.9d)` is `1.0`,
+        // not `4.1`, and `9.5d.mod(4)` is `1.0`. `BigInteger.mod`'s
+        // positive-modulus rule applies to the truncated modulus, which is why
+        // `9.mod(0.5d)` raises `modulus not positive` — `0.5` truncates to zero.
+        // The answer comes back a `Double`. Measured against Apache Groovy
+        // 5.1.1 / JVM 26.0.2.1.
+        (_, "mod")
+            if args.len() == 1
+                && matches!(recv, Value::Int(_) | Value::Float(_))
+                && is_number(&args[0])
+                && (matches!(recv, Value::Float(_)) || matches!(args[0], Value::Float(_))) =>
+        {
+            match (truncated_dec(recv), truncated_dec(&args[0])) {
+                (Some(x), Some(y)) if y.is_positive() => match decimal::floored_mod(&x, &y) {
+                    Some(r) => Value::float(decimal::to_f64(&r)),
+                    None => {
+                        raise(
+                            vm,
+                            "ArithmeticException",
+                            "BigInteger: modulus not positive",
+                        );
+                        Value::Undef
+                    }
+                },
+                _ => {
+                    raise(
+                        vm,
+                        "ArithmeticException",
+                        "BigInteger: modulus not positive",
+                    );
+                    Value::Undef
+                }
+            }
+        }
         // `n.mod(m)` is the FLOORED modulus, not `%`: `(-7).mod(3)` is `2` where
         // `-7 % 3` is `-1`. On the integral types Groovy routes it through
         // `BigInteger.mod`, which requires a POSITIVE modulus and reports its own
@@ -9262,12 +9320,41 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (Value::Int(n), "mod") if args.first().is_some_and(is_integral) => {
             match args.first().and_then(as_i64) {
                 Some(m) if m > 0 => Value::int(n.rem_euclid(m)),
+                // A `BigInteger` modulus keeps the same rule and answers a
+                // `BigInteger`: `7.mod(3G)` is 1 and `(-7).mod(3G)` is 2.
+                None => match as_exact_dec(&args[0]).filter(|m| m.is_positive()) {
+                    Some(m) => bigint_value(
+                        decimal::floored_mod(&decimal::from_i64(*n), &m).unwrap_or_default(),
+                    ),
+                    None => {
+                        raise(
+                            vm,
+                            "ArithmeticException",
+                            "BigInteger: modulus not positive",
+                        );
+                        Value::Undef
+                    }
+                },
                 _ => {
                     raise(
                         vm,
                         "ArithmeticException",
                         "BigInteger: modulus not positive",
                     );
+                    Value::Undef
+                }
+            }
+        }
+        // An integer receiver with a `BigDecimal` modulus leaves `BigInteger.mod`
+        // for the decimal rule, which accepts a negative modulus and reports a
+        // zero one as `BigDecimal.divide`'s `Division by zero`: `7.mod(2.5)` is
+        // `2.0` and `7.mod(-2.5)` is `2.0` too.
+        (Value::Int(n), "mod") if args.first().and_then(as_dec).is_some() => {
+            let y = as_dec(&args[0]).unwrap();
+            match decimal::floored_mod(&decimal::from_i64(*n), &y) {
+                Some(r) => dec_value(r),
+                None => {
+                    raise(vm, "ArithmeticException", "Division by zero");
                     Value::Undef
                 }
             }
@@ -9509,13 +9596,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // `intdiv` is Groovy's integer division: exact, truncating, and
                 // (unlike `/`) not promoted to a `BigDecimal`.
                 "intdiv" => match args.first().and_then(as_exact_dec) {
-                    Some(y) => match decimal::divide(&d, &y) {
-                        Some(q) => bigint_value(q),
-                        None => {
-                            raise(vm, "ArithmeticException", "BigInteger divide by zero");
-                            Value::Undef
-                        }
-                    },
+                    Some(y) if !y.is_zero() => bigint_value(decimal::divide_to_integral(&d, &y)),
+                    Some(_) => {
+                        raise(vm, "ArithmeticException", "BigInteger divide by zero");
+                        Value::Undef
+                    }
                     None => raise_missing_method(vm, recv, method, args),
                 },
                 // Truncating conversions; `round` goes to the nearest integer.

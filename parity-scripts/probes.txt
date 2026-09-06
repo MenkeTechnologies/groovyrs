@@ -2780,3 +2780,23 @@ println((4.0d ** 0.5) + " " + (4.0d ** 0.5).getClass().name); println((1 ** -1) 
 %%
 # a BigInteger exponent keeps the exact path only under a BigInteger base
 println((2 ** 2G).getClass().name); println((2G ** 2G).getClass().name); println((2G ** 2.0).getClass().name); println((2.0 ** 2).getClass().name); println((2.0 ** 2G).getClass().name)
+%%
+# `mod` shifts only a NEGATIVE remainder, so a negative modulus is not floored
+println(7.5.mod(-2)); println((-7.5).mod(-2)); println(7.5.mod(-2.5)); println((-7.5).mod(2)); println(1.5.mod(0.4)); println(7.mod(-2.5)); println((-7).mod(-2.5))
+%%
+# `mod`/`intdiv` accept a BigInteger and answer one
+println(7.intdiv(3G) + " " + 7.intdiv(3G).getClass().name); println((-7).intdiv(3G)); println(7.intdiv(-3G)); println(7.mod(3G) + " " + 7.mod(3G).getClass().name); println((-7).mod(3G)); println(7.intdiv(12345678901234567890G)); println((-7).mod(12345678901234567890G))
+%%
+try { println(7.intdiv(0G)) } catch (e) { println(e.getClass().getSimpleName() + ": " + e.message) }
+%%
+try { println(7.mod(-3G)) } catch (e) { println(e.getClass().getSimpleName() + ": " + e.message) }
+%%
+# a `double` operand truncates BOTH sides and answers a Double
+println(9.mod(4.9d) + " " + 9.mod(4.9d).getClass().name); println((-9).mod(4.9d)); println(9.5d.mod(4)); println((-9.5d).mod(4)); println(9.5d.mod(4.9d))
+%%
+try { println(9.mod(0.5d)) } catch (e) { println(e.getClass().getSimpleName() + ": " + e.message) }
+%%
+# an integer receiver with a BigDecimal modulus takes the decimal rule
+println(7.mod(2.5) + " " + 7.mod(2.5).getClass().name); println((-7).mod(2.5)); println(9.mod(4.0)); println(9.mod(4.00)); println(9.mod(4.5)); println((-9).mod(4.5))
+%%
+try { println(7.mod(0.0)) } catch (e) { println(e.getClass().getSimpleName() + ": " + e.message) }

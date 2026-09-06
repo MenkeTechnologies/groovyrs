@@ -325,6 +325,36 @@ reported as parse or compile errors, never silently mis-run.
   width, which is the run-time width a `Value::Int` cannot carry (see the `Long`
   entry below); the compiler passes the *base's* width to `**` but not the
   exponent's.
+
+  Two more `**` gaps are open. An **exponent past 10,000** falls back to a
+  `double` where Groovy keeps computing: `2 ** 100000` is a 30,103-digit
+  `BigInteger` there and `Infinity` here, and `7 ** 2147483647` is Groovy's
+  `ArithmeticException: BigInteger would overflow supported range` rather than
+  `Infinity`. The ceiling exists because an exact decimal power multiplies the
+  *scale* by the exponent; lifting it for an integral base needs a separate
+  bit-length budget and a square-and-multiply loop. And a **fractional exponent
+  can differ in the last place** — `2147483647 ** 2.5` is
+  `2.137099110014612E23` under Java's `Math.pow` and `2.1370991100146124E23`
+  under Rust's `powf`. Both are within one ulp; matching Java exactly means
+  implementing `StrictMath.pow`.
+- **`mod` shifts a negative *remainder*, which is the floored modulus only for a
+  positive modulus.** Groovy computes `remainder` and adds the modulus back when
+  that result is negative. With a positive modulus this is the floored rule
+  (`(-7).mod(3)` is `2` where `-7 % 3` is `-1`); with a negative one the two part
+  company, and it is Groovy's rule that is modeled: `7.5.mod(-2)` is `1.5` (the
+  remainder is already positive and stands) and `(-7.5).mod(-2)` is `-3.5` (the
+  remainder `-1.5` takes the modulus once more).
+
+  Which rule `mod` uses depends on the operand types, and all four spellings are
+  modeled. A **`double`/`float` on either side truncates BOTH operands to
+  integers** and answers a `Double` — `9.mod(4.9d)` is `1.0`, not `4.1`, and
+  `9.mod(0.5d)` raises `modulus not positive` because `0.5` truncates to zero. A
+  **`BigInteger`** modulus keeps `BigInteger.mod`'s positive-modulus rule and
+  answers a `BigInteger`. A **`BigDecimal`** modulus leaves that rule: a negative
+  one is accepted and a zero one reports `BigDecimal.divide`'s `Division by
+  zero`. `intdiv` takes a `BigInteger` on either side and answers one,
+  truncating toward zero, and reads the truncating quotient directly rather than
+  truncating a rounded division.
 - **Groovy truthiness.** `null`, `0`, a zero `BigDecimal` (`0.0`, `0.00`, `0e0`),
   `""`, an empty list, an empty map, and `false` are false; every other value is
   true, and a class decides its own truth with `asBoolean()`. `!x`, `if`,

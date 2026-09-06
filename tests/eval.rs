@@ -6686,3 +6686,103 @@ println((7 ** 3) + " " + (7 ** 3).getClass().name)
          343 java.lang.Integer\n"
     );
 }
+
+// ── `mod` and `intdiv` across the numeric types ──────────────────────────
+//
+// Every expectation is the byte output of Apache Groovy 5.1.1 on JVM 26.0.2.1.
+
+#[test]
+fn mod_shifts_only_a_negative_remainder() {
+    // Groovy's `mod` is `remainder` with a NEGATIVE result shifted by the
+    // modulus — not the floored modulus, which is the same rule only while the
+    // modulus is positive. `7.5.mod(-2)` keeps its already-positive remainder
+    // and `(-7.5).mod(-2)` takes the modulus once more.
+    let src = r#"
+println(7.5.mod(-2))
+println((-7.5).mod(-2))
+println(7.5.mod(-2.5))
+println((-7.5).mod(2))
+println(1.5.mod(0.4))
+println(7.mod(-2.5) + " " + (-7).mod(-2.5))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "1.5\n-3.5\n0.0\n0.5\n0.3\n2.0 -4.5\n");
+}
+
+#[test]
+fn mod_and_intdiv_accept_a_biginteger() {
+    let src = r#"
+println(7.intdiv(3G) + " " + 7.intdiv(3G).getClass().name)
+println((-7).intdiv(3G) + " " + 7.intdiv(-3G))
+println(7.mod(3G) + " " + 7.mod(3G).getClass().name)
+println((-7).mod(3G))
+println(7.intdiv(12345678901234567890G))
+println((-7).mod(12345678901234567890G))
+try { 7.intdiv(0G) } catch (e) { println(e.getClass().simpleName + ": " + e.message) }
+try { 7.mod(-3G) } catch (e) { println(e.getClass().simpleName + ": " + e.message) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "2 java.math.BigInteger\n\
+         -2 -2\n\
+         1 java.math.BigInteger\n\
+         2\n\
+         0\n\
+         12345678901234567883\n\
+         ArithmeticException: BigInteger divide by zero\n\
+         ArithmeticException: BigInteger: modulus not positive\n"
+    );
+}
+
+#[test]
+fn mod_truncates_a_double_operand_to_an_integer() {
+    // A `double` on either side takes `mod` through `BigInteger.mod` on the
+    // TRUNCATED operands and answers a `Double`: `9.mod(4.9d)` is `1.0`, and a
+    // modulus that truncates to zero is "not positive".
+    let src = r#"
+println(9.mod(4.9d) + " " + 9.mod(4.9d).getClass().name)
+println((-9).mod(4.9d))
+println(9.5d.mod(4) + " " + (-9.5d).mod(4))
+println(9.5d.mod(4.9d))
+try { 9.mod(0.5d) } catch (e) { println(e.getClass().simpleName + ": " + e.message) }
+try { 9.mod(-4.9d) } catch (e) { println(e.getClass().simpleName + ": " + e.message) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "1.0 java.lang.Double\n\
+         3.0\n\
+         1.0 3.0\n\
+         1.0\n\
+         ArithmeticException: BigInteger: modulus not positive\n\
+         ArithmeticException: BigInteger: modulus not positive\n"
+    );
+}
+
+#[test]
+fn an_integer_receiver_takes_a_bigdecimal_modulus_by_the_decimal_rule() {
+    // A `BigDecimal` modulus leaves `BigInteger.mod`: a negative one is accepted
+    // and a zero one reports `BigDecimal.divide`'s wording. The scale is the
+    // subtraction's, so `9.mod(4.00)` keeps two places.
+    let src = r#"
+println(7.mod(2.5) + " " + 7.mod(2.5).getClass().name)
+println((-7).mod(2.5))
+println(9.mod(4.0) + " " + 9.mod(4.00))
+println(9.mod(4.5) + " " + (-9).mod(4.5))
+try { 7.mod(0.0) } catch (e) { println(e.getClass().simpleName + ": " + e.message) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "2.0 java.math.BigDecimal\n\
+         0.5\n\
+         1.0 1.00\n\
+         0.0 0.0\n\
+         ArithmeticException: Division by zero\n"
+    );
+}

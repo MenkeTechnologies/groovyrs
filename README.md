@@ -52,6 +52,18 @@ frontend over the shared engine. Highlights:
   a conditional backward branch — which is the shape fusevm's tracing JIT needs
   to close a trace, so a hot loop reaches native code. `groovy --tiers` reports
   whether it did.
+
+  What reaches it is **numeric** loops. Measured with `/usr/bin/time -l`
+  (instructions retired, which the machine's load does not move): `x = 2` in a
+  100k-iteration loop is 69M instructions and `--tiers` says `traced=true`,
+  while `x = true`, `x = "abc"` and `x = 0.5` in the same loop are 1.38G, 1.40G
+  and 1.82G with `traced=false` — a 20x cliff on chunks with the identical
+  49-op shape. It is not op eligibility: lowering `true` as a constant rather
+  than `Op::LoadTrue` moves the loop from `trace-eligible=false` to `true` and
+  changes the instruction count by 0.7%, because fusevm's recorder still
+  declines to install a trace that stores a non-numeric value. That decision is
+  inside the shared engine, so it is a fusevm-level ceiling on the frontend's
+  non-numeric loops rather than something groovyrs lowers its way out of.
 - **fusevm-hosted, no JVM** — no local `vm.rs` / `jit.rs`, no `.class` files, no
   `libjvm`. The same three-tier Cranelift engine that hosts zshrs, stryke,
   awkrs, elisp, ruby, python, php, node, and java runs Groovy too.

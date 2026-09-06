@@ -35,7 +35,7 @@ const DIVISION_MIN_SCALE: i64 = 10;
 /// The largest `**` exponent computed exactly. An exact decimal power multiplies
 /// the scale by the exponent, so beyond this the result is measured in megabytes
 /// of digits; [`pow`] declines instead, and the caller falls back to `double`.
-const MAX_EXACT_EXPONENT: i64 = 10_000;
+const MAX_EXACT_EXPONENT: i64 = 200_000;
 
 /// The plain-notation window of `BigDecimal.toString`: a value whose adjusted
 /// exponent is below this (and any value with a negative scale) prints in
@@ -363,11 +363,26 @@ pub fn divide_to_integral(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
 /// so large that the exact result would not fit memory.
 pub fn pow(a: &BigDecimal, e: i64) -> Option<BigDecimal> {
     (0..=MAX_EXACT_EXPONENT).contains(&e).then(|| {
-        // Repeated [`mul`], not the crate's operator: `0.0 ** 3` is `0.000`, and
-        // a zero operand there would collapse the scale.
+        // Square-and-multiply, through [`mul`] rather than the crate's operator:
+        // `0.0 ** 3` is `0.000`, and a zero operand there would collapse the
+        // scale. The scale is unaffected by the association — a product's scale
+        // is the sum of its operands' — so `a^e` still carries `scale(a) * e`,
+        // which is what the repeated-multiplication loop this replaces was for.
+        // The loop was O(e) multiplications of a growing number, which is why
+        // the exact exponent ceiling had to sit at 10,000; `2.5 ** 100000` came
+        // back `Infinity` from the double fallback where Groovy answers the
+        // exact 39,795-digit value.
         let mut acc = BigDecimal::from(1);
-        for _ in 0..e {
-            acc = mul(&acc, a);
+        let mut base = a.clone();
+        let mut e = e;
+        while e > 0 {
+            if e & 1 == 1 {
+                acc = mul(&acc, &base);
+            }
+            e >>= 1;
+            if e > 0 {
+                base = mul(&base, &base);
+            }
         }
         acc
     })

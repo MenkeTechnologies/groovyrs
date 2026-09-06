@@ -124,7 +124,7 @@ println(i)   // =&gt; 3</code></pre>
         <article class="doc-entry" id="doc-reserved-words-9">
           <h3><a class="doc-anchor" href="#doc-reserved-words-9">#</a> <code>case</code></h3>
           <pre><code class="lang-groovy">case label[, label…]: | case label[, label…] -&gt; value</code></pre>
-          <p>One `switch` label, or several sharing an arm. A colon section falls through to the next until a `break`; an arrow arm runs alone and is valued by its trailing expression, so a braced body is a block (`case 2 -&gt; { 5 }` is 5). The two forms may not be mixed in one `switch`.</p>
+          <p>One `switch` label, or several sharing an arm. A colon section falls through to the next until a `break`; an arrow arm runs alone and is valued by its trailing expression, so a braced body is a block (`case 2 -&gt; { 5 }` is 5). The two forms may not be mixed in one `switch`. A COMMA list is switch-expression grammar: writing `case 3, 4:` makes the whole switch an expression, so every arm must yield or throw and `break` is no longer one of its statements.</p>
           <pre><code class="lang-groovy">println(switch (1) { case 1, 2 -&gt; "low"; default -&gt; "hi" })   // =&gt; low</code></pre>
         </article>
         <article class="doc-entry" id="doc-reserved-words-10">

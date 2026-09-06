@@ -6835,3 +6835,397 @@ println("abc".find(/z/) { it })
         "[1, 2]\n[1, 2]\n1\n1\n[1, 1]\nnull\nem 1 1\nem 2 2\nbare 1\nbare 2\n"
     );
 }
+
+// ── Round 3: the switch-expression grammar, `withDefault`'s missing-key reads,
+// the `plus` overload table, and the `Object`-level collection GDK. Every
+// expectation below was measured against Apache Groovy 5.1.1 on JVM 26.0.2.1.
+
+#[test]
+fn a_comma_case_label_makes_the_whole_switch_an_expression() {
+    // Groovy's comma label list is switch-EXPRESSION grammar: writing one turns
+    // the construct into an expression wherever it stands, so every arm has to
+    // yield or throw and `break` is no longer a statement it accepts.
+    let (_, err, ok) = run_full(r#"switch (3) { case 3, 4: println "hi" }"#);
+    assert!(!ok);
+    assert!(err.contains("`yield` or `throw` is expected"), "{err}");
+
+    let (_, err, ok) = run_full(r#"switch (3) { case 3, 4: println "hi"; break }"#);
+    assert!(!ok);
+    assert!(
+        err.contains("break statement is only allowed inside loops or switches"),
+        "{err}"
+    );
+
+    // The same switch with a `yield` is legal in statement position, its value
+    // simply discarded.
+    let (out, ok) = run("switch (3) { case 3, 4: yield 1 }\nprintln \"after\"");
+    assert!(ok);
+    assert_eq!(out, "after\n");
+
+    // A single label keeps the plain statement switch, `break` and all.
+    let (out, ok) = run(r#"switch (3) { case 3: println "hi"; break }"#);
+    assert!(ok);
+    assert_eq!(out, "hi\n");
+}
+
+#[test]
+fn a_colon_switch_expression_needs_one_yield_or_throw() {
+    let (_, err, ok) = run_full(r#"def r = switch (9) { default: println "d" }; println r"#);
+    assert!(!ok);
+    assert!(err.contains("`yield` or `throw` is expected"), "{err}");
+
+    // One yielding arm is enough — the others fall through, and the switch's
+    // value is the last statement that ran.
+    let (out, ok) =
+        run("def r = switch (9) { case 3: yield 1\n default: println \"d\" }\nprintln r");
+    assert!(ok);
+    assert_eq!(out, "d\nnull\n");
+
+    // The arrow form is exempt: it has no fall-through to need `yield` for.
+    let (out, ok) = run(r#"def r = switch (3) { case 3 -> println "x" }; println r"#);
+    assert!(ok);
+    assert_eq!(out, "x\nnull\n");
+}
+
+#[test]
+fn break_is_not_a_statement_of_a_switch_expression() {
+    for src in [
+        "def r = switch (3) { case 3: yield 1\n case 4: break }",
+        "def r = switch (3) { case 3 -> { break } }",
+    ] {
+        let (_, err, ok) = run_full(src);
+        assert!(!ok, "{src}");
+        assert!(
+            err.contains("break statement is only allowed inside loops or switches"),
+            "{src}: {err}"
+        );
+    }
+    // A loop written inside an arm may break out of ITSELF.
+    let (out, ok) = run(
+        "def r = switch (3) { case 3: yield 1\n case 4: for (i in 1..2) { break } }\nprintln r",
+    );
+    assert!(ok);
+    assert_eq!(out, "1\n");
+}
+
+#[test]
+fn an_uncaught_throw_from_a_switch_expression_arm_aborts() {
+    // The exception machinery is gated on the program containing a `try` or a
+    // `throw`, and the scan never looked inside a switch in VALUE position — so
+    // this used to print nothing and exit 0, losing the exception outright.
+    let (out, err, ok) =
+        run_full("def r = switch (9) { default: throw new RuntimeException(\"x\") }\nprintln r");
+    assert!(!ok);
+    assert_eq!(out, "");
+    assert!(err.contains("java.lang.RuntimeException: x"), "{err}");
+}
+
+#[test]
+fn with_default_runs_its_closure_on_every_missing_key_read() {
+    // `m.k`, `m.get(k)` and `m[k]` are one operation on a `MapWithDefault`, and
+    // each STORES what the closure answered. Only the subscript did.
+    let src = r#"
+def a = [x: 1].withDefault { 7 }
+println a.y
+println a
+def b = [x: 1].withDefault { 7 }
+println b.get("q")
+println b
+def c = [x: 1].withDefault { 7 }
+println c["z"]
+println c
+// The closure beats the caller's own fallback, and is stored too.
+def d = [x: 1].withDefault { 7 }
+println d.getOrDefault("nope", 99)
+println d
+// An ordinary map still answers the supplied default and stores nothing.
+def e = [x: 1]
+println e.getOrDefault("nope", 99)
+println e
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "7\n[x:1, y:7]\n7\n[x:1, q:7]\n7\n[x:1, z:7]\n7\n[x:1, nope:7]\n99\n[x:1]\n"
+    );
+}
+
+#[test]
+fn plus_raises_where_groovy_has_no_such_overload() {
+    // `Integer.plus` accepts `(Character, String, Number)` and nothing else;
+    // `Boolean` and `Closure` have no `plus` at all. groovyrs used to answer
+    // every one of these by CONCATENATING the two rendered operands.
+    let src = r#"
+def t(String label, Closure c) {
+  try { println(label + " = " + c()) } catch (e) { println(label + " ! " + e.getClass().getName()) }
+}
+t("int+list", { 1 + [1, 2] })
+t("int+map", { 1 + [a: 1] })
+t("int+bool", { 1 + true })
+t("int+range", { 1 + (1..2) })
+t("dec+list", { 2.5 + [1] })
+t("bool+int", { true + 1 })
+t("bool+str", { true + "s" })
+t("map+int", { [a: 1] + 1 })
+t("map+str", { [a: 1] + "s" })
+t("map+list", { [a: 1] + [1, 2] })
+t("int+str", { 1 + "s" })
+t("int+num", { 1 + 2.5 })
+t("str+list", { "s" + [1] })
+t("list+int", { [1] + 2 })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "int+list ! groovy.lang.MissingMethodException\n\
+         int+map ! groovy.lang.MissingMethodException\n\
+         int+bool ! groovy.lang.MissingMethodException\n\
+         int+range ! groovy.lang.MissingMethodException\n\
+         dec+list ! groovy.lang.MissingMethodException\n\
+         bool+int ! groovy.lang.MissingMethodException\n\
+         bool+str ! groovy.lang.MissingMethodException\n\
+         map+int ! groovy.lang.MissingMethodException\n\
+         map+str = [a:1]s\n\
+         map+list ! java.lang.ClassCastException\n\
+         int+str = 1s\n\
+         int+num = 3.5\n\
+         str+list = s[1]\n\
+         list+int = [1, 2]\n"
+    );
+}
+
+#[test]
+fn plus_null_is_the_ambiguity_error_not_a_missing_method() {
+    // Every `plus` overload takes a reference type, so a `null` argument matches
+    // all of them: Groovy reports the ambiguity, and the exception CLASS differs
+    // from the missing-method one a `catch` arm would be written for.
+    let src = r#"
+try { 1 + null } catch (e) { println(e.getClass().getName()); println(e.getMessage()) }
+try { true + null } catch (e) { println(e.getClass().getName()) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "groovy.lang.GroovyRuntimeException\n\
+         Ambiguous method overloading for method java.lang.Integer#plus.\n\
+         Cannot resolve which method to invoke for [null] due to overlapping prototypes between:\n\
+         \t[class java.lang.Character]\n\
+         \t[class java.lang.String]\n\
+         \t[class java.lang.Number]\n\
+         groovy.lang.MissingMethodException\n"
+    );
+}
+
+#[test]
+fn sum_folds_through_the_same_plus_overload_table() {
+    // `sum` used to call the concatenating `plus` directly, so a fold Groovy
+    // refuses answered a plausible string instead.
+    let src = r#"
+def t(String label, Closure c) {
+  try { println(label + " = " + c()) } catch (e) { println(label + " ! " + e.getClass().getSimpleName()) }
+}
+t("lists", { [[1, 2], [3, 4]].sum(0) })
+t("null", { [1, null, 3].sum(0) })
+t("ints", { [1, 2, 3].sum(0) })
+t("concat", { [[1, 2], [3]].sum([]) })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "lists ! MissingMethodException\n\
+         null ! GroovyRuntimeException\n\
+         ints = 6\n\
+         concat = [1, 2, 3]\n"
+    );
+}
+
+#[test]
+fn the_object_level_collection_gdk_iterates_a_scalar_once() {
+    // Groovy puts part of the collection GDK on `Object`, where a non-collection
+    // is a one-element iteration. The methods NOT on `Object` keep raising.
+    let src = r#"
+def t(String label, Closure c) {
+  try { println(label + " = " + c()) } catch (e) { println(label + " ! " + e.getClass().getSimpleName()) }
+}
+t("each", { def s = ""; 42.each { s += it }; s })
+t("collect", { 42.collect { it } })
+t("find", { 42.find { true } })
+t("findAll", { 42.findAll { true } })
+t("any", { 42.any { true } })
+t("every", { 42.every { false } })
+t("inject", { 42.inject(1) { a, b -> a + b } })
+t("spread", { 42*.toString() })
+t("bool each", { def s = ""; true.each { s += it }; s })
+t("null spread", { def z = null; z*.toString() })
+t("size", { 42.size() })
+t("toList", { 42.toList() })
+t("first", { 42.first() })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "each = 42\n\
+         collect = [42]\n\
+         find = 42\n\
+         findAll = [42]\n\
+         any = true\n\
+         every = false\n\
+         inject = 43\n\
+         spread = [42]\n\
+         bool each = true\n\
+         null spread = null\n\
+         size ! MissingMethodException\n\
+         toList ! MissingMethodException\n\
+         first ! MissingMethodException\n"
+    );
+}
+
+#[test]
+fn combinations_reads_each_element_the_way_groovy_does() {
+    // A String contributes its CHARACTERS, a `null` contributes nothing (which
+    // empties the product), and an empty receiver has no combinations at all.
+    let src = r#"
+println([].combinations())
+println([1, 2, 3, 4].combinations())
+println([[1, 2], [3, 4]].combinations())
+println(["a", "bb", "a"].combinations())
+println([1, null, 3].combinations())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[]\n[[1, 2, 3, 4]]\n[[1, 3], [2, 3], [1, 4], [2, 4]]\n[[a, b, a], [a, b, a]]\n[]\n"
+    );
+}
+
+#[test]
+fn transpose_refuses_a_row_that_is_not_a_collection() {
+    let src = r#"
+try { println([1, 2, 3].transpose()) } catch (e) { println(e.getClass().getName() + ": " + e.getMessage()) }
+println([[1, 2], [3, 4]].transpose())
+println([].transpose())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "org.codehaus.groovy.runtime.typehandling.GroovyCastException: \
+         Cannot cast object '1' with class 'java.lang.Integer' to class 'java.util.List'\n\
+         [[1, 3], [2, 4]]\n[]\n"
+    );
+}
+
+#[test]
+fn upto_and_downto_refuse_a_bound_on_the_wrong_side() {
+    // A backwards bound is a raise, not a loop that runs zero times.
+    let src = r#"
+try { 2.upto(1) { } } catch (e) { println(e.getClass().getName() + ": " + e.getMessage()) }
+try { 1.downto(2) { } } catch (e) { println(e.getClass().getName() + ": " + e.getMessage()) }
+def s = ""
+1.upto(3) { s += it }
+3.downto(1) { s += it }
+println s
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "groovy.lang.GroovyRuntimeException: The argument (1) to upto() cannot be less than the value (2) it's called on.\n\
+         groovy.lang.GroovyRuntimeException: The argument (2) to downto() cannot be greater than the value (1) it's called on.\n\
+         123321\n"
+    );
+}
+
+#[test]
+fn mod_promotes_the_way_every_mixed_operation_does() {
+    // `mod` with a `double` operand truncates BOTH sides and answers a `Double`,
+    // whatever the receiver's type; a `BigInteger` receiver with a `BigDecimal`
+    // argument leaves `BigInteger.mod` for the decimal rule.
+    let src = r#"
+def t(String label, Closure c) {
+  try { def r = c(); println(label + " = " + r + " " + r.getClass().getName()) }
+  catch (e) { println(label + " ! " + e.getClass().getSimpleName()) }
+}
+t("dec.mod(d)", { 2.5.mod(1.0d) })
+t("negdec.mod(d)", { (-2.5).mod(3.0d) })
+t("big.mod(d)", { 3G.mod(1.0d) })
+t("big.mod(dec)", { 3G.mod(2.5) })
+t("negbig.mod(dec)", { (-3G).mod(2.5) })
+t("big.mod(big)", { 7G.mod(3G) })
+t("int.mod(dec)", { 7.mod(2.5) })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "dec.mod(d) = 0.0 java.lang.Double\n\
+         negdec.mod(d) = 1.0 java.lang.Double\n\
+         big.mod(d) = 0.0 java.lang.Double\n\
+         big.mod(dec) = 0.5 java.math.BigDecimal\n\
+         negbig.mod(dec) = 2.0 java.math.BigDecimal\n\
+         big.mod(big) = 1 java.math.BigInteger\n\
+         int.mod(dec) = 2.0 java.math.BigDecimal\n"
+    );
+}
+
+#[test]
+fn the_shifts_take_a_big_integer_distance_and_a_big_integer_receiver() {
+    // The native `>>` lowering reads a heap handle as `0`, so every
+    // `BigInteger >>` answered `0` (as an `Integer`); and a `BigInteger` shift
+    // DISTANCE was refused as non-integral, which is the fractional case's raise.
+    let src = r#"
+def a = 3G
+def b = -3G
+println(a << 3G)
+println(a >> 1)
+println((a >> 1).getClass().getName())
+println(b << 3G)
+println(b >> 3)
+println(a >> 0)
+println(7 << 3G)
+println(7 >>> 3G)
+try { 7 >> 2.5 } catch (e) { println(e.getClass().getSimpleName() + ": " + e.getMessage()) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "24\n1\njava.math.BigInteger\n-24\n-1\n3\n56\n0\n\
+         UnsupportedOperationException: Shift distance must be an integral type, \
+         but 2.5 (java.math.BigDecimal) was supplied\n"
+    );
+}
+
+#[test]
+fn an_exponent_java_refuses_raises_rather_than_answering_infinity() {
+    // The exact path used to decline past its ceiling and let the double
+    // fallback answer `Infinity` — a value where the reference raises.
+    let src = r#"
+def t(String label, Closure c) {
+  try { println(label + " = " + c()) } catch (e) { println(label + " ! " + e.getClass().getName() + ": " + e.getMessage()) }
+}
+t("dec huge", { 2.5 ** 2147483647 })
+t("int huge", { 2 ** 2147483647 })
+t("big huge", { 2G ** 2147483647 })
+t("one huge", { 1 ** 2147483647 })
+t("dec 1000 digits", { ("" + (2.5 ** 1000)).size() })
+t("dec 100000 digits", { ("" + (2.5 ** 100000)).size() })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "dec huge ! java.lang.ArithmeticException: Invalid operation\n\
+         int huge ! java.lang.ArithmeticException: BigInteger would overflow supported range\n\
+         big huge ! java.lang.ArithmeticException: BigInteger would overflow supported range\n\
+         one huge = 1\n\
+         dec 1000 digits = 1399\n\
+         dec 100000 digits = 139796\n"
+    );
+}

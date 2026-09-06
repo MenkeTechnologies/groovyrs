@@ -1050,6 +1050,9 @@ fn cast_target_class(ty_simple: &str) -> String {
         "String" => "java.lang.String",
         "BigDecimal" => "java.math.BigDecimal",
         "BigInteger" => "java.math.BigInteger",
+        "List" => "java.util.List",
+        "Map" => "java.util.Map",
+        "Set" => "java.util.Set",
         other => other,
     }
     .to_string()
@@ -1077,6 +1080,44 @@ fn raise_cast(vm: &mut VM, v: &Value, ty_simple: &str) -> Value {
         )
     };
     raise(vm, "GroovyCastException", &message);
+    Value::Undef
+}
+
+/// Raise the `groovy.lang.GroovyRuntimeException` Groovy answers `x + null`
+/// with. Every `plus` overload takes a reference type, so a `null` argument
+/// matches all of them and the dispatcher reports the ambiguity rather than a
+/// missing method — a different exception CLASS, which a `catch
+/// (MissingMethodException)` arm would otherwise fail to catch. The prototype
+/// list is per receiver class and is quoted from the oracle: `BigDecimal` has a
+/// fourth `MathContext` overload, and a `Map`'s two are interfaces.
+fn raise_ambiguous_plus(vm: &mut VM, recv: &Value) -> Value {
+    let class = java_class_name(recv);
+    let protos: &[&str] = if as_omap(recv).is_some() || matches!(recv, Value::Hash(_)) {
+        &["interface java.util.Collection", "interface java.util.Map"]
+    } else if is_dec_handle(recv) && as_bigint(recv).is_none() {
+        &[
+            "class java.lang.Character",
+            "class java.lang.String",
+            "class java.lang.Number",
+            "class java.math.MathContext",
+        ]
+    } else {
+        &[
+            "class java.lang.Character",
+            "class java.lang.String",
+            "class java.lang.Number",
+        ]
+    };
+    let body: String = protos.iter().map(|p| format!("\n\t[{p}]")).collect();
+    raise(
+        vm,
+        "GroovyRuntimeException",
+        &format!(
+            "Ambiguous method overloading for method {class}#plus.\n\
+             Cannot resolve which method to invoke for [null] due to overlapping \
+             prototypes between:{body}"
+        ),
+    );
     Value::Undef
 }
 
@@ -7017,6 +7058,52 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             return v;
         }
     }
+    // Groovy defines part of the collection GDK on `Object`, where a value that
+    // is not a collection iterates as ONE element: `42.each { }` runs once with
+    // `42`, `42.collect { it }` is `[42]`, `42.inject(1) { a, b -> a + b }` is
+    // `43`. groovyrs raised `MissingMethodException` for all of them.
+    //
+    // The set is exactly the methods measured to answer on `java.lang.Integer`
+    // — `count`, `min`, `max`, `sum`, `toList`, `first`, `flatten` and the rest
+    // of the list GDK are NOT on `Object` and must keep raising. The receiver
+    // test is narrowed to numbers and booleans: a class instance can define its
+    // own `each`, and routing one here would shadow it.
+    if matches!(recv, Value::Int(_) | Value::Float(_) | Value::Bool(_))
+        || is_dec_handle(&recv)
+        || as_bigint(&recv).is_some()
+    {
+        if matches!(
+            method,
+            "each"
+                | "eachWithIndex"
+                | "collect"
+                | "find"
+                | "findAll"
+                | "findResult"
+                | "any"
+                | "every"
+                | "inject"
+                | "split"
+        ) {
+            if let Some(res) = dispatch_iteration(vm, std::slice::from_ref(&recv), method, &args) {
+                return match res {
+                    Ok(v) => {
+                        // `each` answers its RECEIVER, and the list dispatcher
+                        // answers the list it walked.
+                        if method == "each" || method == "eachWithIndex" {
+                            recv.clone()
+                        } else {
+                            v
+                        }
+                    }
+                    Err(e) => {
+                        fault(vm, e);
+                        Value::Undef
+                    }
+                };
+            }
+        }
+    }
     // Pure GDK dispatch — no closure, no VM re-entrancy.
     dispatch_method(vm, &recv, method, &args)
 }
@@ -7271,6 +7358,12 @@ fn dispatch_iteration(
                     Some(a) => groovy_sum_add(&a, &v),
                     None => v,
                 });
+                // A `plus` that raised ends the fold. Carrying on would add the
+                // next element to the `null` the raise left behind and replace
+                // the real exception with a `NullPointerException`.
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
             }
             Some(Ok(acc.unwrap_or(Value::Undef)))
         }
@@ -7666,8 +7759,33 @@ fn dispatch_number_iteration(
     // `times` counts 0 .. n-1; the others run from the receiver to the bound.
     let (mut i, to, by) = match method {
         "times" => (0, from - 1, 1),
-        "upto" => (from, as_i64(args.first()?)?, 1),
-        "downto" => (from, as_i64(args.first()?)?, -1),
+        // `upto` may not count DOWN and `downto` may not count up: Groovy
+        // refuses the call outright rather than running the closure zero times,
+        // which is what groovyrs did (answering an empty accumulation).
+        "upto" | "downto" => {
+            let to = as_i64(args.first()?)?;
+            let up = method == "upto";
+            if (up && to < from) || (!up && to > from) {
+                let (rel, word) = if up {
+                    ("less", "upto")
+                } else {
+                    ("greater", "downto")
+                };
+                let raised = with_vm(|vm| {
+                    raise(
+                        vm,
+                        "GroovyRuntimeException",
+                        &format!(
+                            "The argument ({to}) to {word}() cannot be {rel} than the \
+                             value ({from}) it's called on."
+                        ),
+                    );
+                });
+                raised?;
+                return Some(Ok(Value::Undef));
+            }
+            (from, to, if up { 1 } else { -1 })
+        }
         // `step` excludes its bound, so pull the limit in by one step.
         _ => {
             let to = as_i64(args.first()?)?;
@@ -8065,8 +8183,12 @@ fn groovy_sum_add(a: &Value, b: &Value) -> Value {
         return Value::float(as_f64(a) + as_f64(b));
     }
     // A non-numeric element sums with Groovy's `plus` — strings concatenate,
-    // lists append — exactly as the `+` operator does.
-    groovy_add(a, b)
+    // lists append — exactly as the `+` operator does, INCLUDING the pairs it
+    // has no overload for: `[[1, 2], [3, 4]].sum(0)` is a `MissingMethodException`
+    // and `[1, null, 3].sum(0)` the ambiguity `GroovyRuntimeException`. Calling
+    // `groovy_add` directly skipped those checks and concatenated instead, so
+    // `sum` answered the string `0[1, 2][3, 4]`.
+    numeric_hook(NumOp::Add, a, b).unwrap_or(Value::Undef)
 }
 
 /// Groovy property-read builtin: the stack holds the receiver then the property
@@ -8223,8 +8345,18 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         }
     }
     match (recv, method) {
-        // Universal size query (String chars / list elements / map entries).
-        (_, "size") => Value::int(value_size(recv)),
+        // Universal size query (String chars / list elements / map entries) —
+        // for the values that HAVE one. A number does not: `42.size()` is a
+        // `MissingMethodException` in Groovy, and answering `0` here (which is
+        // what the unguarded arm did, via `value_size`'s catch-all) turned a
+        // raise into a plausible wrong number.
+        (_, "size")
+            if !matches!(recv, Value::Int(_) | Value::Float(_) | Value::Bool(_))
+                && !is_dec_handle(recv)
+                && as_bigint(recv).is_none() =>
+        {
+            Value::int(value_size(recv))
+        }
 
         // `value.asBoolean()` is Groovy truth spelled as a call — the same rule
         // `if (v)` applies, which is why it answers on every receiver rather
@@ -8938,6 +9070,16 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `[[1, 2], [3, 4]].transpose()` == `[[1, 3], [2, 4]]`; the result is as
         // long as the *shortest* row, which is what Groovy's does.
         (Value::Array(a), "transpose") => {
+            // Every row has to BE a collection: `GroovyCollections.transpose`
+            // casts each element to `List`, so `[1, 2, 3].transpose()` is a
+            // `GroovyCastException` naming the first offender. groovyrs read a
+            // scalar as a one-element row and answered `[[1, 2, 3]]`.
+            if let Some(bad) = a.iter().find(|e| !is_list(e) && as_range(e).is_none()) {
+                let bad = bad.clone();
+                if let Some(v) = with_vm(|vm| raise_cast(vm, &bad, "List")) {
+                    return v;
+                }
+            }
             let rows: Vec<Vec<Value>> = a.iter().map(iteration_elements).collect();
             let cols = rows.iter().map(Vec::len).min().unwrap_or(0);
             Value::array(
@@ -8974,13 +9116,23 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // The *first* sub-collection varies fastest, which is the order
         // `GroovyCollections.combinations` produces: `[[1, 2], [3, 4]]` gives
         // `[[1, 3], [2, 3], [1, 4], [2, 4]]`.
+        // An empty receiver has NO combinations — `[].combinations()` is `[]`,
+        // not the one empty combination the product below would build.
+        (Value::Array(a), "combinations") if a.is_empty() => Value::array(Vec::new()),
         (Value::Array(a), "combinations") => {
             let mut out: Vec<Vec<Value>> = vec![Vec::new()];
             for e in a.iter() {
-                let choices = if is_list(e) {
-                    iteration_elements(e)
-                } else {
-                    vec![e.clone()]
+                // What one element contributes is what `InvokerHelper.asList`
+                // makes of it: a collection contributes its elements, a STRING
+                // its characters (`["a", "bb"].combinations()` has two, not
+                // one), and `null` contributes NOTHING — which empties the whole
+                // product, so `[1, null, 3].combinations()` is `[]`. Anything
+                // else is a single choice.
+                let choices = match e {
+                    Value::Undef => Vec::new(),
+                    Value::Str(_) => iteration_elements(e),
+                    _ if is_list(e) || as_range(e).is_some() => iteration_elements(e),
+                    _ => vec![e.clone()],
                 };
                 out = choices
                     .iter()
@@ -9345,7 +9497,12 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // 5.1.1 / JVM 26.0.2.1.
         (_, "mod")
             if args.len() == 1
-                && matches!(recv, Value::Int(_) | Value::Float(_))
+                // A `BigDecimal`/`BigInteger` receiver takes this path too — the
+                // rule is about the `double` OPERAND, not about the receiver's
+                // type, so `2.5.mod(3.0f)` is `2.0` and `3G.mod(1.0d)` is `0.0`.
+                // Restricting the receiver to the machine types left both of
+                // those raising `MissingMethodException`.
+                && (matches!(recv, Value::Int(_) | Value::Float(_)) || is_dec_handle(recv))
                 && is_number(&args[0])
                 && (matches!(recv, Value::Float(_)) || matches!(args[0], Value::Float(_))) =>
         {
@@ -9796,6 +9953,27 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         None => raise_missing_method(vm, recv, method, args),
                     }
                 }
+                // A `BigInteger` receiver with a `BigDecimal` argument is NOT
+                // `BigInteger.mod`: Groovy's `mod` promotes the pair the way
+                // every mixed operation does, so `3G.mod(2.5)` is the
+                // `BigDecimal` `0.5` and not the `BigInteger` `0` that
+                // truncating it produced.
+                "mod"
+                    if args.len() == 1
+                        && is_dec_handle(&args[0])
+                        && !is_bigint_handle(&args[0]) =>
+                {
+                    match args.first().and_then(as_exact_dec) {
+                        Some(y) => match decimal::floored_mod(&d, &y) {
+                            Some(r) => dec_value(r),
+                            None => {
+                                raise(vm, "ArithmeticException", "Division by zero");
+                                Value::Undef
+                            }
+                        },
+                        None => raise_missing_method(vm, recv, method, args),
+                    }
+                }
                 "divide" | "remainder" | "mod" => {
                     let big = as_bigint(recv).is_some();
                     let Some(y) = args
@@ -9917,9 +10095,15 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
         }
         (_, "get" | "getAt") if args.len() == 1 && is_omap(recv) => {
-            omap_get(recv, &groovy_str(&args[0]))
-                .flatten()
-                .unwrap_or(Value::Undef)
+            let k = groovy_str(&args[0]);
+            match omap_get(recv, &k).flatten() {
+                Some(v) => v,
+                // A missing key on a `withDefault` map runs the closure and
+                // stores it, on `get(k)` exactly as on `m[k]` — Groovy's
+                // `MapWithDefault` overrides `get`, and the subscript IS that
+                // `get`. Only the subscript reached the default here before.
+                None => map_default(vm, recv, &k),
+            }
         }
         (_, "containsKey") if args.len() == 1 && is_omap(recv) => {
             Value::bool(omap_get(recv, &groovy_str(&args[0])).flatten().is_some())
@@ -10088,11 +10272,20 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // latter also *stores* the default, which is what Groovy's does.
                 "getOrDefault" => {
                     let k = args.first().map(groovy_str).unwrap_or_default();
-                    entries
+                    match entries
                         .iter()
                         .find(|(ek, _)| *ek == k)
                         .map(|(_, v)| v.clone())
-                        .unwrap_or_else(|| args.get(1).cloned().unwrap_or(Value::Undef))
+                    {
+                        Some(v) => v,
+                        // On a `withDefault` map the CLOSURE wins over the
+                        // caller's fallback, and its answer is stored:
+                        // `[x:1].withDefault { 7 }.getOrDefault("nope", 99)` is
+                        // `7` and leaves `[x:1, nope:7]` (measured). The
+                        // supplied default only answers for an ordinary map.
+                        None if is_map_with_default(recv) => map_default(vm, recv, &k),
+                        None => args.get(1).cloned().unwrap_or(Value::Undef),
+                    }
                 }
                 "containsValue" => {
                     let want = args.first().cloned().unwrap_or(Value::Undef);
@@ -10234,6 +10427,36 @@ fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
             None => return power_double(as_f64(&base), as_f64(&exp)),
         },
     };
+    // An exponent so large that Java itself refuses the operation. Two different
+    // messages, because the two bases run through different JDK methods, and
+    // both are `java.lang.ArithmeticException` (measured on Groovy 5.1.1 /
+    // JVM 26.0.2.1):
+    //
+    //   `2 ** 2147483647`, `2G ** 2147483647`  BigInteger would overflow supported range
+    //   `2.5 ** 2147483647`                    Invalid operation
+    //
+    // Without this the exact path declined, the double fallback took over, and
+    // both printed `Infinity` — a value where the reference raises.
+    if e > 0 {
+        let integral = matches!(base, Value::Int(_)) || is_bigint_handle(&base);
+        let magnitude = as_f64(&base).abs();
+        // `BigInteger.pow` builds a value of `e * log2(|base|)` bits and refuses
+        // past `Integer.MAX_VALUE` of them. A magnitude of 1 or less never grows.
+        if integral && magnitude > 1.0 && (e as f64) * magnitude.log2() >= i32::MAX as f64 {
+            raise(
+                vm,
+                "ArithmeticException",
+                "BigInteger would overflow supported range",
+            );
+            return Value::Undef;
+        }
+        // `BigDecimal.pow` takes an `int` exponent in 0..999999999 and reports
+        // anything else as an invalid operation.
+        if !integral && !matches!(base, Value::Float(_)) && e > 999_999_999 {
+            raise(vm, "ArithmeticException", "Invalid operation");
+            return Value::Undef;
+        }
+    }
     // A `BigInteger` base keeps its type — `BigInteger.pow` answers a
     // `BigInteger`, so `2G ** 70` and `(2G).power(10)` are both `BigInteger`
     // while `1.5G ** 2` is a `BigDecimal`. Asked before `as_dec`, which answers
@@ -10358,7 +10581,7 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
         }),
         _ => match bigint_shift(true, &lhs, &rhs) {
             Some(v) => v,
-            None => match (as_i64(&lhs), as_i64(&rhs)) {
+            None => match (plain_int(&lhs), shift_count(&rhs)) {
                 (Some(a), Some(b)) => java_shift("leftShift", wide, a, b),
                 _ => raise_operator_operand(vm, "leftShift", &lhs, &rhs),
             },
@@ -10522,7 +10745,7 @@ fn b_shr(vm: &mut VM, _argc: u8) -> Value {
     if let Some(v) = bigint_shift(false, &lhs, &rhs) {
         return v;
     }
-    match (as_i64(&lhs), as_i64(&rhs)) {
+    match (plain_int(&lhs), shift_count(&rhs)) {
         (Some(a), Some(b)) => java_shift("rightShift", wide, a, b),
         _ => raise_operator_operand(vm, "rightShift", &lhs, &rhs),
     }
@@ -10535,8 +10758,25 @@ fn b_shr(vm: &mut VM, _argc: u8) -> Value {
 /// `Integer`/`Long` rules apply) or when the count is not an integer.
 fn bigint_shift(left: bool, lhs: &Value, rhs: &Value) -> Option<Value> {
     as_bigint(lhs)?;
-    let n = plain_int(rhs)?;
+    // The COUNT may itself be a `BigInteger`: `3G << 3G` is `24` and `7 << 3G`
+    // is `56`. Reading only a machine integer here left both raising the
+    // "Shift distance must be an integral type" `UnsupportedOperationException`
+    // that belongs to a *fractional* distance.
+    let n = match plain_int(rhs) {
+        Some(n) => n,
+        None => decimal::to_i64(&as_bigint(rhs)?)?,
+    };
     decimal::shift(left, &as_exact_dec(lhs)?, n).map(bigint_value)
+}
+
+/// The shift COUNT as an `i64` when it is an integral value — a machine integer
+/// or a `BigInteger`. A `BigDecimal` with a fraction answers `None`, which is
+/// what makes the "Shift distance must be an integral type" raise still fire.
+fn shift_count(v: &Value) -> Option<i64> {
+    match plain_int(v) {
+        Some(n) => Some(n),
+        None => decimal::to_i64(&as_bigint(v)?),
+    }
 }
 
 /// `GUSHR`: Java's `>>>`. The fill width is the left operand's Java type — 32
@@ -10549,7 +10789,7 @@ fn b_ushr(vm: &mut VM, _argc: u8) -> Value {
     let wide = shift_is_wide(vm);
     let rhs = vm.stack.pop().unwrap_or(Value::Undef);
     let lhs = vm.stack.pop().unwrap_or(Value::Undef);
-    match (as_i64(&lhs), as_i64(&rhs)) {
+    match (plain_int(&lhs), shift_count(&rhs)) {
         (Some(a), Some(b)) => java_shift("rightShiftUnsigned", wide, a, b),
         // Not two integers. Groovy has four different answers for that, none of
         // them this one — an `IllegalArgumentException` carrying a sentence
@@ -13144,7 +13384,13 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     // `null` in Groovy, while `[size: 9].size` is `9`. Checked first for that
     // reason.
     if let Some(found) = omap_get(recv, name) {
-        return found.unwrap_or(Value::Undef);
+        // A missing key on a `withDefault` map runs the closure and stores its
+        // answer here too: `[x:1].withDefault { 7 }.y` is `7` and leaves
+        // `[x:1, y:7]`, because Groovy's property read on a map IS `get(key)`.
+        return match found {
+            Some(v) => v,
+            None => map_default(vm, recv, name),
+        };
     }
     if let Value::Hash(h) = recv {
         return h.get(name).cloned().unwrap_or(Value::Undef);
@@ -14258,6 +14504,39 @@ fn groovy_add(a: &Value, b: &Value) -> Value {
                     None => entries.push((k, v)),
                 }
             }
+        } else {
+            // `Map.plus` takes a `Map`, a `Collection` (of entries) or a
+            // `String`/`GString` — and NOTHING else. A right operand of any
+            // other shape used to be silently DROPPED here, so `[a: 1] + 1`
+            // answered `[a:1]` where Groovy raises. The collection overload
+            // casts each element to `Map.Entry`, which is why a list of
+            // non-entries is a `ClassCastException` naming the first element
+            // rather than a `MissingMethodException`.
+            let raised = with_vm(|vm| match b {
+                Value::Str(s) => Value::str(format!("{}{}", render_value(vm, a), s)),
+                _ if matches!(b, Value::Array(_)) || as_range(b).is_some() => {
+                    let elem = iteration_elements(b)
+                        .first()
+                        .cloned()
+                        .unwrap_or(Value::Undef);
+                    let from = java_class_name(&elem);
+                    raise(
+                        vm,
+                        "ClassCastException",
+                        &format!(
+                            "class {from} cannot be cast to class java.util.Map$Entry \
+                             ({from} and java.util.Map$Entry are in module java.base of \
+                             loader 'bootstrap')"
+                        ),
+                    );
+                    Value::Undef
+                }
+                Value::Undef => raise_ambiguous_plus(vm, a),
+                _ => raise_missing_method(vm, a, "plus", std::slice::from_ref(b)),
+            });
+            if let Some(v) = raised {
+                return v;
+            }
         }
         // `Map.plus` clones the *left* operand and puts the right into it, so
         // the result is the left's implementation: `new TreeMap(…) + [d: 4]`
@@ -14523,6 +14802,50 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
             || (matches!(b, Value::Str(_)) && numeric(a));
         if mismatched {
             return Ok(Value::bool(matches!(op, NumOp::Ne)));
+        }
+    }
+    // `+` with an operand pair no `plus` overload accepts. Groovy raises
+    // `MissingMethodException`; groovyrs used to CONCATENATE, because
+    // `groovy_add` ends in a render-both-sides fallback that no shape check
+    // guarded. That made `1 + [1, 2]` the string `1[1, 2]`, `1 + true` the
+    // string `1true`, and — the one that surfaces in real code —
+    // `[[1, 2], [3, 4]].sum(0)` the string `0[1, 2][3, 4]` where Groovy refuses
+    // the whole call. A silently wrong value is worse than the raise it stands
+    // in for, so the shapes Groovy has no overload for are decided here, ahead
+    // of the decimal path (which would otherwise read a `Boolean` as a number
+    // and answer `2.5 + true` with `3.5`).
+    //
+    // What Groovy's `Integer.plus` accepts is `(Character, String, Number)`, so
+    // a number's right operand is legal when it is a number or a `String`.
+    // `Boolean` and `Closure` have no `plus` at all, whatever the argument. A
+    // `String` left operand concatenates anything, and list/map/set/range/
+    // instance operands are answered before this point.
+    //
+    // A `Character` right operand is Groovy's fourth overload (`1 + ('c' as
+    // Character)` is `100`); groovyrs models a `Character` as a one-character
+    // `String` (see `java_is_whitespace`'s note), so it takes the `String`
+    // overload here and concatenates. That follows from the missing type, not
+    // from this gate.
+    if matches!(op, NumOp::Add) {
+        let numberish = |v: &Value| is_number(v) || as_bigint(v).is_some();
+        let no_overload = if matches!(a, Value::Bool(_)) || closure_meta(a).is_some() {
+            true
+        } else {
+            numberish(a) && !numberish(b) && !matches!(b, Value::Str(_))
+        };
+        if no_overload {
+            let raised = with_vm(|vm| match b {
+                // `x + null` is not "no such method" — when the receiver HAS
+                // `plus` overloads. They all take a reference type, so a `null`
+                // argument matches every one and Groovy reports the ambiguity.
+                // A `Boolean` or a `Closure` has no `plus` at all, so `true +
+                // null` stays the missing-method raise.
+                Value::Undef if numberish(a) => raise_ambiguous_plus(vm, a),
+                _ => raise_operator_operand(vm, "plus", a, b),
+            });
+            if raised.is_some() {
+                return Ok(Value::Undef);
+            }
         }
     }
     // Decimal arithmetic. A `BigDecimal` is a host-heap handle, so fusevm sees a

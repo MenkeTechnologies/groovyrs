@@ -69,6 +69,15 @@ reported as parse or compile errors, never silently mis-run.
   methods whose Groovy result is a `List` rather than a `Set` (`collect`, `sort`,
   `toList`) still answer a list, and `+` dispatches on its left operand, so
   `[1, 2] + ([2, 3] as Set)` is the four-element `[1, 2, 2, 3]`.
+- **`Object`-level collection GDK.** Groovy defines `each`, `eachWithIndex`,
+  `collect`, `find`, `findAll`, `findResult`, `any`, `every`, `inject`, `split`
+  and the spread `*.` on `Object`, where a value that is not a collection
+  iterates as ONE element: `42.each { }` runs once with `42`, `42.collect { it }`
+  is `[42]`, `42*.toString()` is `[42]`, and `null*.toString()` is `null`. The
+  rest of the list GDK is not on `Object` and raises for such a receiver —
+  `42.size()`, `42.toList()`, `42.first()` and `42.sum()` are all
+  `MissingMethodException`, which is why `size` is not the universal query it
+  reads as.
 - **`permutations()` / `subsequences()`.** Both answer a
   `java.util.HashSet<List>`, so they de-duplicate (`[1, 1].permutations()` is one
   entry) and print in the JDK's bucket order rather than generation order —
@@ -78,6 +87,23 @@ reported as parse or compile errors, never silently mis-run.
   grown one element at a time and whose insertion order into each round's set is
   the previous round's bucket order. `permutations { … }` is `collect` over that
   same set and answers an `ArrayList`; `combinations()` really is a `List`.
+- **What one element contributes to `combinations()` / `transpose()`.**
+  `combinations` reads each element the way `InvokerHelper.asList` does: a
+  collection contributes its elements, a **String** its characters
+  (`["a", "bb"].combinations()` has two), and `null` contributes NOTHING, which
+  empties the whole product (`[1, null, 3].combinations()` is `[]`). An empty
+  receiver has no combinations at all. `transpose` is stricter — it casts every
+  row to `List`, so `[1, 2, 3].transpose()` is a `GroovyCastException` rather
+  than a one-row answer.
+- **`withDefault`'s missing-key reads.** `m.k`, `m.get(k)` and `m[k]` are one
+  operation on a `groovy.lang.MapWithDefault`: each runs the closure and
+  **stores** what it answered, so the map grows as it is read. On such a map
+  `getOrDefault(k, fallback)` ignores the caller's fallback and uses the closure
+  too; only an ordinary map answers the fallback.
+- **`upto` / `downto` refuse a backwards bound.** `2.upto(1) { }` is a
+  `groovy.lang.GroovyRuntimeException` ("The argument (1) to upto() cannot be
+  less than the value (2) it's called on."), not a loop that runs zero times;
+  `downto` mirrors it.
 - **`HashSet` iteration order.** A `HashSet` presents its elements in the JDK's
   table order — a stable sort of the insertion sequence by
   `(capacity - 1) & (h ^ (h >>> 16))` — rather than in insertion order, so
@@ -183,6 +209,15 @@ reported as parse or compile errors, never silently mis-run.
   concatenates. This is the built-in behavior for lists/maps/strings; a
   user-class left operand instead dispatches its `plus` method (see operator
   overloading below).
+- **`plus` has an overload table, and a pair outside it raises.** `Integer.plus`
+  takes `(Character, String, Number)`; `Map.plus` takes `(Map, Collection,
+  String)`; `Boolean` and `Closure` have no `plus` at all. A pair outside the
+  table is `groovy.lang.MissingMethodException` (`1 + [1, 2]`, `true + "s"`,
+  `[a: 1] + 1`), a `Map` handed a collection of non-entries is
+  `java.lang.ClassCastException`, and `x + null` is the
+  `groovy.lang.GroovyRuntimeException` naming every overload a `null` argument
+  matches at once. `sum` folds through the same table, so
+  `[[1, 2], [3, 4]].sum(0)` raises rather than concatenating.
 - **Operator overloading.** A user-class instance operand dispatches the Groovy
   operator method: `+`→`plus`, `-`→`minus`, `*`→`multiply`, `/`→`div`,
   `%`→`remainder`, `**`→`power`, unary `-`→`negative`; `<`/`>`/`<=`/`>=` and
@@ -326,17 +361,32 @@ reported as parse or compile errors, never silently mis-run.
   entry below); the compiler passes the *base's* width to `**` but not the
   exponent's.
 
-  Two more `**` gaps are open. An **exponent past 10,000** falls back to a
-  `double` where Groovy keeps computing: `2 ** 100000` is a 30,103-digit
-  `BigInteger` there and `Infinity` here, and `7 ** 2147483647` is Groovy's
-  `ArithmeticException: BigInteger would overflow supported range` rather than
-  `Infinity`. The ceiling exists because an exact decimal power multiplies the
-  *scale* by the exponent; lifting it for an integral base needs a separate
-  bit-length budget and a square-and-multiply loop. And a **fractional exponent
+  The exponent that Java itself refuses now RAISES rather than answering
+  `Infinity` out of the double fallback: `2.5 ** 2147483647` is
+  `ArithmeticException: Invalid operation` (`BigDecimal.pow` takes an exponent in
+  0..999999999) and `2 ** 2147483647` / `2G ** 2147483647` are
+  `ArithmeticException: BigInteger would overflow supported range` (the result
+  would need more than `Integer.MAX_VALUE` bits). The exact ceiling is 200,000
+  now that [`decimal::pow`] squares and multiplies instead of looping — `2.5 **
+  100000` is the exact 139,796-character value both sides print. **Between that
+  ceiling and Java's own limits the double fallback still answers `Infinity`**
+  where Groovy computes an exact value measured in megabytes of digits; that
+  window is the open residue. And a **fractional exponent
   can differ in the last place** — `2147483647 ** 2.5` is
   `2.137099110014612E23` under Java's `Math.pow` and `2.1370991100146124E23`
   under Rust's `powf`. Both are within one ulp; matching Java exactly means
   implementing `StrictMath.pow`.
+- **`mod` promotes its pair.** A `double`/`float` operand on EITHER side
+  truncates both to integers and answers a `Double`, whatever the receiver:
+  `2.5.mod(1.0d)` is `0.0` and `3G.mod(1.0d)` is `0.0`. A `BigInteger` receiver
+  with a `BigDecimal` argument leaves `BigInteger.mod` for the decimal rule, so
+  `3G.mod(2.5)` is the `BigDecimal` `0.5` and not a truncated `BigInteger`.
+- **The shifts read a `BigInteger` on either side.** `3G << 3G` is `24`,
+  `7 << 3G` is `56`, and a `BigInteger` receiver keeps its type through `>>`
+  (`(3G >> 1).getClass()` is `java.math.BigInteger`). A *fractional* distance is
+  still the `UnsupportedOperationException` Groovy raises. `>>` reaches the host
+  builtin through the same static test `&`/`|`/`^` use, with the same residue —
+  see the bitwise entry below.
 - **`mod` shifts a negative *remainder*, which is the floored modulus only for a
   positive modulus.** Groovy computes `remainder` and adds the modulus back when
   that result is negative. With a positive modulus this is the floored rule
@@ -494,10 +544,16 @@ reported as parse or compile errors, never silently mis-run.
   whose last statement is one returns the arm's value. Mixing `->` and `:`
   sections in one `switch` is refused, as Groovy refuses it. `yield` is
   contextual — only inside a switch arm; elsewhere it is an ordinary name.
-  groovyrs is *laxer* than Groovy on two syntax rules it does not need for
-  execution: comma labels in a colon-form statement switch, and a `default`
-  section written before a `case` in the arrow form, are both accepted here and
-  rejected by `groovyc`. Neither changes the answer to a program Groovy accepts.
+  A comma label list is switch-EXPRESSION grammar: `case 3, 4:` makes the whole
+  construct an expression wherever it stands, so every arm has to yield or throw
+  and `break` is not one of its statements. A colon-form switch expression needs
+  at least one `yield` or `throw` somewhere in its arms (the arrow form does
+  not); an arm without one falls through, and the switch's value is the last
+  statement that ran. All three are compile errors here, as they are in Groovy.
+  groovyrs stays *laxer* on one syntax rule it does not need for execution: a
+  `default` section written before a `case` in the arrow form is accepted here
+  and rejected by `groovyc`. It does not change the answer to a program Groovy
+  accepts.
 - **Regex: `~/…/`, `/…/`, `=~`, `==~`, `Matcher`.** `~/pattern/` is a
   `java.util.regex.Pattern` (it prints as its source and drives a `case` label);
   `/pattern/` is a slashy `String`, whose backslashes are literal and which may
@@ -613,6 +669,22 @@ infinite loop on both sides.
 
 ## Not implemented (errors today)
 
+- **`java.lang.Character` is a one-character `String`.** groovyrs has no
+  `Character` type, so `'c' as Character` is the `String` `"c"` and every
+  `plus` overload that names `Character` takes the `String` one instead:
+  `1 + ('c' as Character)` is `"1c"` where Groovy answers the number `100`, and
+  the whole `Character` row of the `+` matrix concatenates where Groovy either
+  adds or raises. The rest of the `plus` table is modeled (see above); this one
+  row waits on the type.
+- **`String.eachLine`, `String.collectReplacements`, `String.chars`.** Not
+  dispatched — `MissingMethodException` / `MissingPropertyException` where
+  Groovy answers. Found by a differential sweep of the string GDK in round 3.
+- **`42.iterator()`.** Groovy's `Object.iterator()` walks a non-collection as a
+  one-element sequence; the rest of that `Object`-level GDK is modeled (see
+  above) but the iterator itself is not.
+- **`MissingMethodException` carries no "Possible solutions:" line.** Groovy's
+  message has a second line listing candidate methods; groovyrs's stops after
+  the signature line. Only a program that prints `e.getMessage()` sees it.
 - **The Java-style cast `(Type) expr`.** `expr as Type` is supported and is the
   spelling this frontend reads; the parenthesised form is a parse error
   (`expected RParen but found …`). The two are NOT the same operator, which is
@@ -714,6 +786,20 @@ infinite loop on both sides.
 - **Command-argument chains beyond one arg** (`println a, b`, `foo bar baz`).
 
 ## Modeled with a documented simplification
+
+- **An empty comma-labelled section is a Groovy 5.1.1 defect, deliberately not
+  reproduced.** A colon-form switch expression whose comma label list has an
+  EMPTY body silently matches nothing at all: measured on Groovy 5.1.1 /
+  JVM 26.0.2.1, `switch (x) { case 1, 2: case 3: yield "A" }` answers `null` for
+  subjects 1, 3 and 9 alike, and a `println` written in that arm never runs — so
+  the section kills its own labels and the following section's. Written
+  `case 1: case 3:` the same switch matches both, and a comma section WITH a body
+  works, so this is the one shape that breaks. groovyrs falls through it the way
+  the single-label form does (`case 1, 2: case 3: yield "A"` is `"A"` for 1 and
+  3), because reproducing the defect would mean shipping silently dead cases and
+  would have to be un-shipped whenever the oracle fixes it. The fuzz generator
+  keeps the shape out of its corpus for the same reason — a case generated there
+  measures the oracle's defect, not groovyrs.
 
 - **Recursion depth is a fixed 2000 frames, not the JVM's stack.** Groovy's
   limit is whatever `-Xss` leaves and so varies by JVM, thread and frame size;

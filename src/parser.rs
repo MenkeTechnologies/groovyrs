@@ -294,10 +294,21 @@ impl Parser {
             // An arrow `switch` is a value even in statement position — a method
             // whose last statement is one returns the arm's value — so it is
             // lowered as an expression statement and picks the implicit return
-            // up for free. The colon form has no value and stays a statement.
+            // up for free. A colon `switch` is a statement, UNLESS one of its
+            // labels is a comma list: `case 3, 4:` is switch-*expression*
+            // grammar in Groovy, and writing it makes the whole construct an
+            // expression wherever it stands. Measured against Groovy 5.1.1:
+            // `switch (3) { case 3, 4: println "hi" }` is a compile error
+            // ("`yield` or `throw` is expected"), `… case 3, 4: println 1;
+            // break` is one too ("break statement is only allowed inside loops
+            // or switches"), and `switch (3) { case 3, 4: yield 1 }` in
+            // statement position is legal with its value discarded — all three
+            // of which groovyrs answered the other way before this.
             Tok::Switch => {
+                let line = self.line();
                 let sw = self.switch_body()?;
-                if sw.arrow {
+                if sw.arrow || sw.cases.iter().any(|c| c.labels.len() > 1) {
+                    Self::check_switch_expr(&sw, line)?;
                     StmtKind::Expr(Expr::Switch(Box::new(sw)))
                 } else {
                     StmtKind::Switch(Box::new(sw))
@@ -1320,6 +1331,80 @@ impl Parser {
         Ok(())
     }
 
+    /// The two rules Groovy enforces on a `switch` used as an EXPRESSION, both
+    /// at compile time and both measured against Groovy 5.1.1.
+    ///
+    /// * A colon-form switch expression has to carry at least one `yield` or
+    ///   `throw` somewhere in its arms — `def r = switch (9) { default: println
+    ///   "d" }` is rejected with "`yield` or `throw` is expected", while adding
+    ///   a yielding arm elsewhere makes the non-yielding one legal (it falls
+    ///   through, and the switch's value is the last statement that ran). The
+    ///   arrow form is exempt: `def r = switch (3) { case 3 -> println "x" }`
+    ///   compiles and answers `null`.
+    /// * `break` is not a statement of a switch *expression*, in either form:
+    ///   there is no loop for it to leave. A `break` inside a loop written in an
+    ///   arm is fine, which is why the walk stops at a loop boundary.
+    ///
+    /// A closure body is not walked: `yield` inside one is an ordinary call, not
+    /// this switch's value, and a `break` inside one belongs to its own body.
+    fn check_switch_expr(sw: &SwitchBody, line: u32) -> Result<(), String> {
+        if let Some(l) = sw.cases.iter().find_map(|c| Self::stray_break(&c.body)) {
+            return Err(format!(
+                "groovyrs: break statement is only allowed inside loops or switches, on line {l}"
+            ));
+        }
+        if !sw.arrow && !sw.cases.iter().any(|c| Self::body_yields(&c.body)) {
+            return Err(format!(
+                "groovyrs: `yield` or `throw` is expected in a switch expression on line {line}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The line of the first `break` in `body` that no loop written inside
+    /// `body` encloses, if there is one.
+    fn stray_break(body: &[Stmt]) -> Option<u32> {
+        body.iter().find_map(|s| match &s.kind {
+            StmtKind::Break(_) => Some(s.line),
+            StmtKind::If { then, els, .. } => {
+                Self::stray_break(then).or_else(|| Self::stray_break(els))
+            }
+            StmtKind::Labeled { stmt, .. } => Self::stray_break(std::slice::from_ref(stmt)),
+            StmtKind::Try {
+                body,
+                catches,
+                finally_body,
+            } => Self::stray_break(body)
+                .or_else(|| catches.iter().find_map(|c| Self::stray_break(&c.body)))
+                .or_else(|| Self::stray_break(finally_body)),
+            _ => None,
+        })
+    }
+
+    /// Does `body` carry a `yield` or a `throw` — the statements that give a
+    /// colon-form switch expression its value?
+    fn body_yields(body: &[Stmt]) -> bool {
+        body.iter().any(|s| match &s.kind {
+            StmtKind::Yield(_) | StmtKind::Throw(_) => true,
+            StmtKind::If { then, els, .. } => Self::body_yields(then) || Self::body_yields(els),
+            StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+                Self::body_yields(body)
+            }
+            StmtKind::For { body, .. } => Self::body_yields(body),
+            StmtKind::Labeled { stmt, .. } => Self::body_yields(std::slice::from_ref(stmt)),
+            StmtKind::Try {
+                body,
+                catches,
+                finally_body,
+            } => {
+                Self::body_yields(body)
+                    || catches.iter().any(|c| Self::body_yields(&c.body))
+                    || Self::body_yields(finally_body)
+            }
+            _ => false,
+        })
+    }
+
     fn while_stmt(&mut self) -> Result<StmtKind, String> {
         self.eat(&Tok::While)?;
         self.eat(&Tok::LParen)?;
@@ -2078,7 +2163,10 @@ impl Parser {
                         varargs: false,
                     }],
                     line,
-                    safe: false,
+                    // The spread is null-safe on its RECEIVER too:
+                    // `null*.toString()` is `null` in Groovy, not the
+                    // `NullPointerException` an unsafe `collect` would raise.
+                    safe: true,
                 };
             } else if self.is(&Tok::LParen) {
                 // Postfix call-application on a value: `f(a)(b)`, `getFn()(x)`.
@@ -2272,7 +2360,12 @@ impl Parser {
                 Ok(self.record(col, Expr::Var(name)))
             }
             // A `switch` in value position — Groovy's switch expression.
-            Tok::Switch => Ok(Expr::Switch(Box::new(self.switch_body()?))),
+            Tok::Switch => {
+                let line = self.line();
+                let sw = self.switch_body()?;
+                Self::check_switch_expr(&sw, line)?;
+                Ok(Expr::Switch(Box::new(sw)))
+            }
             other => Err(format!(
                 "groovyrs: unexpected token {other} in expression on line {}",
                 self.line()

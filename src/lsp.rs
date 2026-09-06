@@ -76,7 +76,7 @@ const CORPUS: &[(&str, &str, &str, &str, &str)] = &[
      "Multi-way branch, in statement or value position. Each label is tested with Groovy's `isCase` (`host::GIS_CASE`), so a constant, a range, a list, a type name, a `~/…/` pattern, or a closure all work as labels. As an expression it answers the matching arm, and `null` when none matched — no exhaustiveness is required.",
      "switch (5) { case 4..6: println(\"in\"); break; default: println(\"out\") }   // => in"),
     ("case", "Reserved Words", "case label[, label…]: | case label[, label…] -> value",
-     "One `switch` label, or several sharing an arm. A colon section falls through to the next until a `break`; an arrow arm runs alone and is valued by its trailing expression, so a braced body is a block (`case 2 -> { 5 }` is 5). The two forms may not be mixed in one `switch`.",
+     "One `switch` label, or several sharing an arm. A colon section falls through to the next until a `break`; an arrow arm runs alone and is valued by its trailing expression, so a braced body is a block (`case 2 -> { 5 }` is 5). The two forms may not be mixed in one `switch`. A COMMA list is switch-expression grammar: writing `case 3, 4:` makes the whole switch an expression, so every arm must yield or throw and `break` is no longer one of its statements.",
      "println(switch (1) { case 1, 2 -> \"low\"; default -> \"hi\" })   // => low"),
     ("yield", "Reserved Words", "yield expr",
      "The value of the enclosing `switch` expression, which it also leaves — running any `finally` it jumps over. Contextual: only inside a `switch` arm is `yield` this statement, so a program may still use the name elsewhere.",

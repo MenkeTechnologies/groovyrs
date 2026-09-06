@@ -3675,7 +3675,17 @@ impl Compiler {
         // `f >> g` answered a number instead of a composed closure. Those two
         // receivers are exactly what `shr_receiver_is_object` spots, so they go
         // to the builtin and every other `>>` keeps its native lowering.
-        if matches!(op, BinOp::Shr) && self.shr_receiver_is_object(lhs) {
+        // …and a `BigInteger` operand is the third receiver the native op
+        // cannot express: `Value::to_int` reads a handle as `0`, so `3G >> 3`
+        // answered `0` (and `java.lang.Integer`) where Groovy answers the
+        // `BigInteger` `0`, `3G >> 0` answered `0` where Groovy answers `3`, and
+        // every other `BigInteger >>` was `0` too. `bit_operand_is_object` is
+        // the same conservative test `&`/`|`/`^` already used for it.
+        if matches!(op, BinOp::Shr)
+            && (self.shr_receiver_is_object(lhs)
+                || self.bit_operand_is_object(lhs)
+                || self.bit_operand_is_object(rhs))
+        {
             self.emit_binary_lhs(pre, lhs)?;
             self.expr(rhs)?;
             // The width rides along as `GSHL`/`GUSHR` take it, for the numeric
@@ -4541,6 +4551,18 @@ fn expr_uses_exceptions(e: &Expr) -> bool {
     match e {
         Expr::Recorded { inner, .. } => expr_uses_exceptions(inner),
         Expr::Closure { body, .. } => body_uses_exceptions(body),
+        // A `switch` in VALUE position holds statements — including `throw` —
+        // in its arms. Missing this arm compiled `def r = switch (x) { default:
+        // throw new RuntimeException("x") }` with the exception machinery off,
+        // so the throw reached no `GEXC_ABORT` epilogue and the script exited 0
+        // in silence. Caught throws still worked, because the enclosing `try`
+        // turned the machinery on by itself, which is why it hid this long.
+        Expr::Switch(sw) => switch_uses_exceptions(sw),
+        // The three wrappers below can each carry a closure literal whose body
+        // throws (`(Closure) { throw … }`, `f(*[{ throw … }])`), which is the
+        // same silent-exit hazard one level down.
+        Expr::SpreadArg(inner) | Expr::Iterable(inner) => expr_uses_exceptions(inner),
+        Expr::Cast { value, .. } => expr_uses_exceptions(value),
         Expr::Unary { rhs, .. } => expr_uses_exceptions(rhs),
         Expr::Binary { lhs, rhs, .. } => expr_uses_exceptions(lhs) || expr_uses_exceptions(rhs),
         Expr::Println { arg, .. } => arg.as_deref().is_some_and(expr_uses_exceptions),

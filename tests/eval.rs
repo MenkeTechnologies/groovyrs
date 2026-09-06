@@ -6969,6 +6969,7 @@ t("bool+int", { true + 1 })
 t("bool+str", { true + "s" })
 t("map+int", { [a: 1] + 1 })
 t("map+str", { [a: 1] + "s" })
+t("map+entries", { [a: 1] + [b: 2].entrySet().toList() })
 t("map+list", { [a: 1] + [1, 2] })
 t("int+str", { 1 + "s" })
 t("int+num", { 1 + 2.5 })
@@ -6988,6 +6989,7 @@ t("list+int", { [1] + 2 })
          bool+str ! groovy.lang.MissingMethodException\n\
          map+int ! groovy.lang.MissingMethodException\n\
          map+str = [a:1]s\n\
+         map+entries = [a:1, b:2]\n\
          map+list ! java.lang.ClassCastException\n\
          int+str = 1s\n\
          int+num = 3.5\n\

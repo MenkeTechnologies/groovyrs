@@ -14570,9 +14570,26 @@ fn groovy_add(a: &Value, b: &Value) -> Value {
             // rather than a `MissingMethodException`.
             let raised = with_vm(|vm| match b {
                 Value::Str(s) => Value::str(format!("{}{}", render_value(vm, a), s)),
+                // The `Collection` overload takes a collection of ENTRIES —
+                // `[a: 1] + [b: 2].entrySet().toList()` merges — and casts each
+                // element to `Map.Entry`, so only a NON-entry element is the
+                // ClassCastException.
+                _ if (matches!(b, Value::Array(_)) || as_range(b).is_some())
+                    && iteration_elements(b).iter().all(|e| as_entry(e).is_some()) =>
+                {
+                    let mut merged = entries.clone();
+                    for (k, v) in iteration_elements(b).iter().filter_map(as_entry) {
+                        match merged.iter_mut().find(|(ek, _)| *ek == k) {
+                            Some(slot) => slot.1 = v,
+                            None => merged.push((k, v)),
+                        }
+                    }
+                    gmap_kind(merged, omap_kind(a).unwrap_or(MapKind::Linked))
+                }
                 _ if matches!(b, Value::Array(_)) || as_range(b).is_some() => {
                     let elem = iteration_elements(b)
-                        .first()
+                        .iter()
+                        .find(|e| as_entry(e).is_none())
                         .cloned()
                         .unwrap_or(Value::Undef);
                     let from = java_class_name(&elem);

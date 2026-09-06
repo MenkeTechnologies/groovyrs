@@ -1884,13 +1884,11 @@ impl Parser {
             let col = self.col_at(0);
             self.advance();
             self.skip_newlines(); // a binary operator may continue on the next line
-                                  // `**` is the one right-associative operator, so it recurses at its
-                                  // own binding power rather than one above it.
-            let rhs = self.binary(if matches!(op, BinOp::Power) {
-                bp
-            } else {
-                bp + 1
-            })?;
+                                  // Every operator here is LEFT-associative, `**` included: Groovy
+                                  // writes it as a left-recursive rule, so `2 ** 3 ** 2` is
+                                  // `(2 ** 3) ** 2` — the Integer 64, not 512. (Measured against
+                                  // Apache Groovy 5.1.1; it is not Python's `**`.)
+            let rhs = self.binary(bp + 1)?;
             // Groovy puts `..` at the shift band, ABOVE the relational one, so a
             // range can be the right operand of everything from `in` down —
             // `1 in 1..3` is `1 in (1..3)` and `[1, 2] == 1..2` compares against
@@ -1965,7 +1963,14 @@ impl Parser {
                 // Recorded under the operator's own column.
                 let col = self.col_at(0);
                 self.advance();
-                let rhs = Box::new(self.unary()?);
+                // `**` binds TIGHTER than a prefix operator, so `-2 ** 2` is
+                // `-(2 ** 2)` — the Integer -4, not 4. Groovy's grammar lists
+                // the power alternative above the unary ones, which is what
+                // makes the exponentiation the prefix's operand rather than the
+                // other way round; the right operand of `**` is still a full
+                // unary expression, so `2 ** -2` keeps working.
+                let operand = self.unary()?;
+                let rhs = Box::new(self.binary_from(operand, POWER_BP)?);
                 Ok(self.record(col, Expr::Unary { op, rhs }))
             }
             Tok::PlusPlus | Tok::MinusMinus => {
@@ -2817,10 +2822,14 @@ fn binop(t: &Tok) -> Option<(BinOp, u8)> {
         Tok::Star => (BinOp::Mul, 11),
         Tok::Slash => (BinOp::Div, 11),
         Tok::Percent => (BinOp::Mod, 11),
-        Tok::Power => (BinOp::Power, 12),
+        Tok::Power => (BinOp::Power, POWER_BP),
         _ => return None,
     })
 }
+
+/// The binding power of `**`, the tightest band — tighter than the prefix
+/// operators, which is why a prefix parses its operand up to here.
+const POWER_BP: u8 = 12;
 
 /// The binding power of the relational band — where `instanceof`, `in` and the
 /// `as` cast also sit.

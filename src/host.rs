@@ -9275,8 +9275,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `Math.abs`/`.abs()` on `Integer.MIN_VALUE` is `Integer.MIN_VALUE`:
         // the positive counterpart is not an `Integer`, so the wrap stands.
         (Value::Int(n), "abs") => Value::int(abs_at_width(*n)),
-        // `n.power(e)` is the `**` operator spelled out.
-        (Value::Int(_), "power") => {
+        // `n.power(e)` is the `**` operator spelled out — on a `double` receiver
+        // too, where the narrowing makes `(2.0d).power(3)` the Integer 8.
+        (Value::Int(_) | Value::Float(_), "power") => {
             power_of(vm, recv, args.first().unwrap_or(&Value::Undef), false)
         }
         // `255.toString(16)` is `16`, not `ff`: `Integer` has no *instance*
@@ -10034,6 +10035,30 @@ fn b_power(vm: &mut VM, _argc: u8) -> Value {
     power_of(vm, &base, &exp, wide)
 }
 
+/// The `double` half of Groovy's `**`, which is `DefaultGroovyMethods.power`:
+/// the answer is computed on IEEE doubles and then **narrowed** — an answer a
+/// Java `int` round-trips is an `Integer`, one a `long` round-trips is a `Long`,
+/// and only what neither holds stays a `Double`.
+///
+/// This is why `2.0d ** 3` is the Integer 8 rather than the Double 8.0, why
+/// `1 ** -1` is the Integer 1 even though a negative exponent leaves the exact
+/// path, and why `2.0d ** 63` is the *Long* `9223372036854775807`: Java's
+/// `(long)9.223372036854776E18` saturates to `Long.MAX_VALUE`, whose own
+/// `double` value is that same figure, so the round-trip succeeds. Rust's
+/// saturating `as` casts have exactly Java's narrowing behaviour (NaN to zero,
+/// out of range to the bound), so the round-trip test transcribes directly.
+/// Measured against Apache Groovy 5.1.1 / JVM 26.0.2.1.
+fn power_double(base: f64, exp: f64) -> Value {
+    let answer = base.powf(exp);
+    if (answer as i32) as f64 == answer {
+        Value::int(answer as i32 as i64)
+    } else if (answer as i64) as f64 == answer {
+        Value::int(answer as i64)
+    } else {
+        Value::float(answer)
+    }
+}
+
 /// `base ** exp`, shared by the `**` builtin and the `power(exp)` method Groovy
 /// defines as the same operation. `wide` is the base's statically-known `Long`
 /// width, which decides whether an integer result narrows to `Integer`.
@@ -10050,8 +10075,19 @@ fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
     }
     let e = match as_i64(&exp) {
         Some(e) => e,
-        // A fractional exponent has no exact form, so Groovy runs it as a double.
-        None => return Value::float(as_f64(&base).powf(as_f64(&exp))),
+        // A `BigInteger` exponent stays on the exact path only under a
+        // `BigInteger` base — `2G ** 2G` is a `BigInteger`, while `2 ** 2G`,
+        // `2.0 ** 2G` and `2.0d ** 2G` all run as doubles. Every other exponent
+        // type (a `BigDecimal`, a `Double`, a fraction) leaves the exact path
+        // whatever the base is.
+        None => match is_bigint_handle(&base)
+            .then(|| as_dec(&exp).filter(|_| is_bigint_handle(&exp)))
+            .flatten()
+            .and_then(|d| decimal::to_i64(&d))
+        {
+            Some(e) => e,
+            None => return power_double(as_f64(&base), as_f64(&exp)),
+        },
     };
     // A `BigInteger` base keeps its type — `BigInteger.pow` answers a
     // `BigInteger`, so `2G ** 70` and `(2G).power(10)` are both `BigInteger`
@@ -10063,17 +10099,19 @@ fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
     if let Some(d) = as_bigint(&base) {
         return match decimal::pow(&d, e) {
             Some(r) => bigint_value(r),
-            None => Value::float(as_f64(&base).powf(e as f64)),
+            None => power_double(as_f64(&base), e as f64),
         };
     }
     if let Some(d) = as_dec(&base) {
         return match decimal::pow(&d, e) {
             Some(r) => dec_value(r),
-            None => Value::float(as_f64(&base).powi(e as i32)),
+            None => power_double(as_f64(&base), e as f64),
         };
     }
+    // A `double`/`float` base never takes an exact path — `Number.power` runs it
+    // on IEEE doubles and narrows the answer, so `2.0d ** 3` is the *Integer* 8.
     if let Value::Float(f) = base {
-        return Value::float(f.powf(e as f64));
+        return power_double(f, e as f64);
     }
     let Some(b) = as_i64(&base) else {
         raise(
@@ -10087,7 +10125,7 @@ fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
     // `Math.pow` and answers a `Double` (`2 ** -1` is the `Double` `0.5`, not a
     // `BigDecimal`). Verified against Apache Groovy 5.0.8.
     if e < 0 {
-        return Value::float((b as f64).powf(e as f64));
+        return power_double(b as f64, e as f64);
     }
     // Groovy computes an integer power in `BigInteger` and then narrows to the
     // *base's* type if it fits: an `Integer` base answers an `Integer` while the
@@ -10096,7 +10134,7 @@ fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
     // is a perfectly good `Long`. A `Long` base narrows to `Long` instead, which
     // is why `2L ** 40` *is* a `Long`. Verified against Apache Groovy 5.0.8.
     let Some(exact) = decimal::pow(&decimal::from_i64(b), e) else {
-        return Value::float((b as f64).powi(e.min(i32::MAX as i64) as i32));
+        return power_double(b as f64, e as f64);
     };
     let fits = match decimal::to_i64(&exact) {
         Some(n) if wide => Some(n),

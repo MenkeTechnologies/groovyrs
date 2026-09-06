@@ -2769,3 +2769,14 @@ println(switch(null) { case null -> "isnull"; default -> "d" }); println(switch(
 %%
 # `yield` is contextual — elsewhere it is an ordinary name
 def yield = 7; println(yield + 1)
+%%
+# `**` binds tighter than a prefix operator and folds LEFT
+println(-2 ** 2); println(-2 ** 3); println(2 ** -2); def x3 = 3; println(-x3 ** 2); println(2 ** 3 ** 2)
+%%
+# the double half of `**` narrows its answer to Integer/Long when one round-trips
+println((2.0d ** 3).getClass().name); println((2.5d ** 2).getClass().name); println((2.0d ** 62).getClass().name); println((2.0d ** 63) + " " + (2.0d ** 63).getClass().name); println((1e30d ** 1).getClass().name)
+%%
+println((4.0d ** 0.5) + " " + (4.0d ** 0.5).getClass().name); println((1 ** -1) + " " + (1 ** -1).getClass().name); println((2 ** -1).getClass().name); println((2.0d).power(3) + " " + (2.0d).power(3).getClass().name)
+%%
+# a BigInteger exponent keeps the exact path only under a BigInteger base
+println((2 ** 2G).getClass().name); println((2G ** 2G).getClass().name); println((2G ** 2.0).getClass().name); println((2.0 ** 2).getClass().name); println((2.0 ** 2G).getClass().name)

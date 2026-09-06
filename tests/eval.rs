@@ -6602,3 +6602,87 @@ println(yield + 1)
     assert!(ok);
     assert_eq!(out, "8\n");
 }
+
+// ── `**`: precedence, associativity, and the narrowing overload table ─────
+//
+// Every expectation is the byte output of Apache Groovy 5.1.1 on JVM 26.0.2.1.
+
+#[test]
+fn power_binds_tighter_than_a_prefix_and_folds_left() {
+    // `-2 ** 2` is `-(2 ** 2)`, and `2 ** 3 ** 2` is `(2 ** 3) ** 2` — Groovy
+    // lists the power alternative above the unary ones and writes it as a
+    // left-recursive rule, so it is not Python's `**`.
+    let src = r#"
+println(-2 ** 2)
+println(-2 ** 3)
+println(2 ** -2)
+def x = 3
+println(-x ** 2)
+println(2 ** 3 ** 2)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "-4\n-8\n0.25\n-9\n64\n");
+}
+
+#[test]
+fn the_double_half_of_power_narrows_its_answer() {
+    // `Number.power` computes on doubles and narrows: an answer a Java `int`
+    // round-trips is an Integer, one a `long` round-trips is a Long. `2.0d ** 63`
+    // is the Long `Long.MAX_VALUE` because `(long)` saturates there and the
+    // saturated value's own double is that same figure.
+    let src = r#"
+println((2.0d ** 3) + " " + (2.0d ** 3).getClass().name)
+println((2.5d ** 2) + " " + (2.5d ** 2).getClass().name)
+println((1e30d ** 1) + " " + (1e30d ** 1).getClass().name)
+println((2.0d ** 62) + " " + (2.0d ** 62).getClass().name)
+println((2.0d ** 63) + " " + (2.0d ** 63).getClass().name)
+println((4.0d ** 0.5) + " " + (4.0d ** 0.5).getClass().name)
+println((2.0d ** 0.5) + " " + (2.0d ** 0.5).getClass().name)
+println((1 ** -1) + " " + (1 ** -1).getClass().name)
+println((2 ** -1) + " " + (2 ** -1).getClass().name)
+println((2.0d).power(3) + " " + (2.0d).power(3).getClass().name)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "8 java.lang.Integer\n\
+         6.25 java.lang.Double\n\
+         1.0E30 java.lang.Double\n\
+         4611686018427387904 java.lang.Long\n\
+         9223372036854775807 java.lang.Long\n\
+         2 java.lang.Integer\n\
+         1.4142135623730951 java.lang.Double\n\
+         1 java.lang.Integer\n\
+         0.5 java.lang.Double\n\
+         8 java.lang.Integer\n"
+    );
+}
+
+#[test]
+fn which_power_pairs_stay_exact_is_an_overload_table() {
+    // A `BigInteger` exponent keeps the exact path only under a `BigInteger`
+    // base; everywhere else it runs as a double and narrows.
+    let src = r#"
+println((2 ** 2G) + " " + (2 ** 2G).getClass().name)
+println((2G ** 2G) + " " + (2G ** 2G).getClass().name)
+println((2G ** 2.0) + " " + (2G ** 2.0).getClass().name)
+println((2.0 ** 2) + " " + (2.0 ** 2).getClass().name)
+println((2.0 ** 2G) + " " + (2.0 ** 2G).getClass().name)
+println((7 ** 20) + " " + (7 ** 20).getClass().name)
+println((7 ** 3) + " " + (7 ** 3).getClass().name)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "4 java.lang.Integer\n\
+         4 java.math.BigInteger\n\
+         4 java.lang.Integer\n\
+         4.00 java.math.BigDecimal\n\
+         4 java.lang.Integer\n\
+         79792266297612001 java.math.BigInteger\n\
+         343 java.lang.Integer\n"
+    );
+}

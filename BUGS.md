@@ -301,6 +301,30 @@ reported as parse or compile errors, never silently mis-run.
   `2 ** 40` is a `BigInteger` while `2L ** 40` is a `Long`; a negative exponent
   leaves the integers entirely and answers a `Double`. Magnitude is unbounded
   (`2 ** 100` is exact).
+- **`**` binds tighter than a prefix operator, and is LEFT-associative.**
+  `-2 ** 2` is `-(2 ** 2)`, the Integer `-4`; `2 ** 3 ** 2` is `(2 ** 3) ** 2`,
+  the Integer `64`. Groovy writes the power alternative above the unary ones and
+  as a left-recursive rule, so it is neither Python's `**` (right-associative)
+  nor a tighter unary minus. The right operand is still a full unary expression,
+  which is what keeps `2 ** -2` meaning `2 ** (-2)`.
+- **Which `**` pairs stay exact is an overload table, not a rule about
+  integers.** Only these four keep an exact result: `Integer ** Integer`,
+  `Long ** Integer`, `BigInteger ** Integer|Long|BigInteger`, and
+  `BigDecimal ** Integer`. Everything else — a `Double`/`Float` base, a
+  `BigDecimal` or `Double` exponent, a `Long` exponent under any base but a
+  `BigInteger` — runs `Math.pow` and then **narrows** the answer: a result a
+  Java `int` round-trips is an `Integer`, one a `long` round-trips is a `Long`,
+  and only what neither holds stays a `Double`. So `2.0d ** 3` is the Integer
+  `8`, `1 ** -1` is the Integer `1`, and `2.0d ** 63` is the *Long*
+  `9223372036854775807` — Java's `(long)` saturates to `Long.MAX_VALUE`, whose
+  own `double` value is the same figure, so the round-trip succeeds. Measured
+  cell by cell against Apache Groovy 5.1.1 / JVM 26.0.2.1.
+
+  One cell is out of reach: `BigDecimal ** Long`, which Groovy runs as a double
+  and groovyrs keeps exact. It needs the exponent's `Integer`-versus-`Long`
+  width, which is the run-time width a `Value::Int` cannot carry (see the `Long`
+  entry below); the compiler passes the *base's* width to `**` but not the
+  exponent's.
 - **Groovy truthiness.** `null`, `0`, a zero `BigDecimal` (`0.0`, `0.00`, `0e0`),
   `""`, an empty list, an empty map, and `false` are false; every other value is
   true, and a class decides its own truth with `asBoolean()`. `!x`, `if`,

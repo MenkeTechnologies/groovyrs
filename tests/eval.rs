@@ -7027,6 +7027,7 @@ fn sum_folds_through_the_same_plus_overload_table() {
 def t(String label, Closure c) {
   try { println(label + " = " + c()) } catch (e) { println(label + " ! " + e.getClass().getSimpleName()) }
 }
+t("booleans", { [true, false].sum() })
 t("lists", { [[1, 2], [3, 4]].sum(0) })
 t("null", { [1, null, 3].sum(0) })
 t("ints", { [1, 2, 3].sum(0) })
@@ -7036,7 +7037,8 @@ t("concat", { [[1, 2], [3]].sum([]) })
     assert!(ok);
     assert_eq!(
         out,
-        "lists ! MissingMethodException\n\
+        "booleans ! MissingMethodException\n\
+         lists ! MissingMethodException\n\
          null ! GroovyRuntimeException\n\
          ints = 6\n\
          concat = [1, 2, 3]\n"

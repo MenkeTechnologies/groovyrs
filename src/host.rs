@@ -8189,8 +8189,14 @@ fn entry_args(clo: &Value, key: &str, value: &Value) -> Vec<Value> {
 /// keeps `BigDecimal` scale, and a `double` operand promotes to a double
 /// (Groovy's numeric-tower `+`).
 fn groovy_sum_add(a: &Value, b: &Value) -> Value {
+    // `as_i64` reads a `Boolean` as 0/1, and `Boolean` has no `plus` at all —
+    // `[true, false].sum()` is a `MissingMethodException`, not `1`. Excluded
+    // here so the pair reaches the overload table below.
+    let boolean = |v: &Value| matches!(v, Value::Bool(_));
     if let (Some(x), Some(y)) = (as_i64(a), as_i64(b)) {
-        return Value::int(x + y);
+        if !boolean(a) && !boolean(b) {
+            return Value::int(x + y);
+        }
     }
     if let Some(Ok(v)) = decimal_operator(NumOp::Add, a, b) {
         return v;

@@ -1076,6 +1076,7 @@ impl Parser {
         let body = self.block()?;
         let mut catches = Vec::new();
         let mut finally_body = Vec::new();
+        let mut saw_finally = false;
         loop {
             let save = self.pos;
             self.skip_newlines();
@@ -1117,6 +1118,12 @@ impl Parser {
                     self.skip_newlines();
                     self.eat(&Tok::LBrace)?;
                     finally_body = self.block()?;
+                    // An EMPTY `finally { }` is still a `finally`, and it is
+                    // what makes a `catch`-less `try` legal. The check below
+                    // read the body's emptiness as its absence, so
+                    // `try { … } finally { }` was refused as a `try` with
+                    // neither clause — a program Groovy runs.
+                    saw_finally = true;
                     break;
                 }
                 _ => {
@@ -1127,7 +1134,7 @@ impl Parser {
                 }
             }
         }
-        if catches.is_empty() && finally_body.is_empty() {
+        if catches.is_empty() && !saw_finally {
             return Err(format!(
                 "groovyrs: `try` needs a `catch` or a `finally` on line {line}"
             ));

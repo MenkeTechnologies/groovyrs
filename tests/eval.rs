@@ -7233,3 +7233,18 @@ t("dec 100000 digits", { ("" + (2.5 ** 100000)).size() })
          dec 100000 digits = 139796\n"
     );
 }
+
+#[test]
+fn an_empty_finally_still_makes_a_catchless_try_legal() {
+    // The clause's presence was read off its BODY, so `try { … } finally { }`
+    // was refused as a `try` with neither clause — a program Groovy runs.
+    let src = r#"
+def f = { try { return 1 } finally { } }
+println f()
+try { println "a" } finally { }
+try { throw new RuntimeException("x") } catch (e) { println "caught" } finally { }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "1\na\ncaught\n");
+}

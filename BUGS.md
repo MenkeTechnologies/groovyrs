@@ -381,6 +381,26 @@ reported as parse or compile errors, never silently mis-run.
   `2.5.mod(1.0d)` is `0.0` and `3G.mod(1.0d)` is `0.0`. A `BigInteger` receiver
   with a `BigDecimal` argument leaves `BigInteger.mod` for the decimal rule, so
   `3G.mod(2.5)` is the `BigDecimal` `0.5` and not a truncated `BigInteger`.
+- **A `BigInteger` narrows to its low bits where Java takes an `int`.** The
+  shift distance is an `int`, so `-7 << 12345678901234567890G` is `-1835008` —
+  that BigInteger's low word is `-350326062`, and the shift masks it to five
+  bits. `java.lang.Math` has no `BigInteger` overload either, so `Math.abs(3G)`
+  is the Integer `3` and `Math.abs(12345678901234567890G)` is `350287150`. And
+  `as Long` / `as Integer` keep the low 64 / 32 bits rather than answering zero:
+  `12345678901234567890G as Long` is `-6101065172474983726`.
+
+  `Math`'s **other** two coercions are not modeled, both for want of a type:
+  a `BigDecimal` argument picks Java's `float` overload (`Math.max(2147483647,
+  2.5)` is the *float* `2.1474836E9`, where groovyrs answers the double
+  `2.147483647E9`), and a `Long` argument picks the `long` one (`Math.abs(100L)`
+  reports `java.lang.Long`, groovyrs `java.lang.Integer`). See the `Float` and
+  `Long` entries.
+- **The mask and shift operators refuse a `double` operand.** `1.0d | 3` is
+  `UnsupportedOperationException: Cannot use or() on this number type:
+  java.lang.Double with value: 1.0`, not the truncated `3` the native lowering
+  answered. A `d`/`f` literal, and a name bound to one, route to the host
+  builtin for that reason — the same static test `&`/`|`/`^`/`>>` use for a
+  decimal operand, with the same residue for one the compiler cannot see.
 - **The shifts read a `BigInteger` on either side.** `3G << 3G` is `24`,
   `7 << 3G` is `56`, and a `BigInteger` receiver keeps its type through `>>`
   (`(3G >> 1).getClass()` is `java.math.BigInteger`). A *fractional* distance is

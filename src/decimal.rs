@@ -501,9 +501,12 @@ fn low_bits(d: &BigDecimal, width: u32) -> i64 {
 }
 
 pub fn truncate_to_i64(d: &BigDecimal) -> i64 {
-    d.with_scale_round(0, RoundingMode::Down)
-        .to_i64()
-        .unwrap_or(0)
+    let truncated = d.with_scale_round(0, RoundingMode::Down);
+    // Past `i64`, Java's narrowing keeps the LOW 64 BITS rather than saturating
+    // or answering zero: `12345678901234567890G as Long` is
+    // `-6101065172474983726`. `to_i64` answers `None` there, and the `0` this
+    // used to fall back to was a value Java never produces.
+    truncated.to_i64().unwrap_or_else(|| low_i64(&truncated))
 }
 
 /// The GDK's `round()`: to the nearest integer, halves away from zero

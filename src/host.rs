@@ -10459,7 +10459,14 @@ fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
     //
     // Without this the exact path declined, the double fallback took over, and
     // both printed `Infinity` — a value where the reference raises.
-    if e > 0 {
+    // …but only for an exponent that FITS AN INT. Past `Integer.MAX_VALUE` the
+    // exponent was written as a `Long`, and Groovy's `power` leaves the exact
+    // path for a `Long` exponent entirely — `0.1 ** 9223372036854775807` is
+    // `Math.pow`'s `0.0`, narrowed to the Integer `0`, not a refusal. groovyrs
+    // cannot see the exponent's declared width (BUGS.md's `Long` entry), so the
+    // magnitude is what stands in for it: an exponent that large cannot have
+    // been an `int` literal.
+    if e > 0 && e <= i64::from(i32::MAX) {
         let integral = matches!(base, Value::Int(_)) || is_bigint_handle(&base);
         let magnitude = as_f64(&base).abs();
         // `BigInteger.pow` builds a value of `e * log2(|base|)` bits and refuses
@@ -10797,7 +10804,13 @@ fn bigint_shift(left: bool, lhs: &Value, rhs: &Value) -> Option<Value> {
 fn shift_count(v: &Value) -> Option<i64> {
     match plain_int(v) {
         Some(n) => Some(n),
-        None => decimal::to_i64(&as_bigint(v)?),
+        // Java's shift takes an `int`, so a `BigInteger` distance arrives
+        // through `intValue()` — its LOW 32 BITS, wrapped. `-7 <<
+        // 12345678901234567890G` is `-1835008`, which is `-7 << 18`: the
+        // BigInteger's low word is `-350326062`, and the shift then masks that
+        // to 5 bits. An exact conversion answered `None` for anything past
+        // `i64`, and the operand-shape raise fired instead.
+        None => Some(i64::from(decimal::low_i32(&as_bigint(v)?))),
     }
 }
 
@@ -11079,6 +11092,26 @@ pub fn jdk_qualified_class(package: &str, name: &str) -> Option<String> {
     known.then(|| format!("{package}.{name}"))
 }
 
+/// The `int` a `Math.abs`/`max`/`min` argument arrives as, if Java's overload
+/// resolution takes one for it.
+///
+/// `java.lang.Math` has no `BigInteger` overload, so Groovy coerces the argument
+/// to the widest primitive one it can — which for a `BigInteger` is `int`, via
+/// `intValue()`'s LOW 32 BITS: `Math.abs(3G)` is the Integer `3` and
+/// `Math.abs(12345678901234567890G)` is `350287150`, the absolute value of that
+/// BigInteger's low word. Reading it as a `double` instead (which `as_i64`
+/// declining left the caller doing) answered `1.2345678901234567E19`.
+///
+/// A `BigDecimal` argument is NOT handled here: Groovy picks the `float`
+/// overload for it, so `Math.max(2147483647, 2.5)` is the *float* `2.1474836E9`
+/// — a type groovyrs does not model. BUGS.md carries that half.
+fn math_int_arg(v: &Value) -> Option<i64> {
+    if is_bigint_handle(v) {
+        return as_bigint(v).map(|d| i64::from(decimal::low_i32(&d)));
+    }
+    as_i64(v)
+}
+
 /// `GCLASSREF`: build a `java.lang.Class` handle for a statically named class.
 fn b_classref(vm: &mut VM, _argc: u8) -> Value {
     let name = vm
@@ -11166,14 +11199,15 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         // `Math.round` is half-up on a double and answers a `long`; every other
         // `Math` entry point is IEEE and answers a `double`.
         ("Math", "round") => Value::int(java_round(f0)),
-        ("Math", "abs") => match as_i64(&arg0) {
+        ("Math", "abs") => match math_int_arg(&arg0) {
             Some(n) => Value::int(abs_at_width(n)),
             None => Value::float(f0.abs()),
         },
         ("Math", "max" | "min") => {
             let f1 = as_f64(args.get(1).unwrap_or(&Value::Undef));
             let pick_max = method == "max";
-            match (as_i64(&arg0), args.get(1).and_then(as_i64)) {
+            let arg1 = args.get(1).cloned().unwrap_or(Value::Undef);
+            match (math_int_arg(&arg0), math_int_arg(&arg1)) {
                 (Some(a), Some(b)) => Value::int(if pick_max { a.max(b) } else { a.min(b) }),
                 _ => Value::float(java_extreme_f64(f0, f1, pick_max)),
             }
@@ -14352,7 +14386,10 @@ fn decimal_operator(op: NumOp, a: &Value, b: &Value) -> Option<Result<Value, Str
     // the double as its full binary expansion and stays a `BigDecimal`
     // (`1.5 % 0.555d` is `0.38999999999999990230…0781250`). The mirrored
     // `Double % BigDecimal`, and every other mixed operation, widens to double.
-    if matches!(op, NumOp::Mod) {
+    // …a `BigDecimal` receiver only. A `BigInteger` one widens like every other
+    // mixed pair: `3G % 3.0f` is the `Double` `0.0` where `1.5 % 0.555d` stays
+    // an exact `BigDecimal`. Measured on Groovy 5.1.1 / JVM 26.0.2.1.
+    if matches!(op, NumOp::Mod) && !is_bigint_handle(a) {
         if let (Some(x), Value::Float(f)) = (as_dec(a), b) {
             if let Some(y) = decimal::from_f64_exact(*f) {
                 return Some(match decimal::remainder(&x, &y) {

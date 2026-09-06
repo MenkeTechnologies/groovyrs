@@ -1038,10 +1038,15 @@ impl Parser {
         }
         // The name position must be an identifier — but not a contextual operator
         // keyword. `o instanceof P` is a type test, not a declaration of a variable
-        // named `instanceof`; likewise `x in xs`.
+        // named `instanceof`; likewise `x in xs`, and `a as Long`, which was read
+        // as declaring a variable named `as` of type `a` and then failed on the
+        // type name behind it (`expected end of statement but found
+        // Ident("Long")`). Parenthesising the receiver, or a non-identifier one
+        // like `1 as Long`, went to the coercion and worked, which is what made
+        // this shape-specific.
         matches!(
             self.toks.get(j).map(|t| &t.kind),
-            Some(Tok::Ident(n)) if n != "instanceof" && n != "in"
+            Some(Tok::Ident(n)) if n != "instanceof" && n != "in" && n != "as"
         )
     }
 

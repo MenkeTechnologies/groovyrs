@@ -3584,6 +3584,12 @@ impl Compiler {
         match e {
             // Every `G` literal and every unsuffixed decimal is a handle.
             Expr::Dec(_) | Expr::BigInt(_) => true,
+            // A `d`/`f`-suffixed literal is not a handle but is just as wrong on
+            // the native lowering, which TRUNCATES it: `1.0d | 2147483647`
+            // answered `2147483647` where Groovy refuses the operands outright
+            // (`UnsupportedOperationException`). Routing it to the builtin is
+            // what lets that refusal happen.
+            Expr::Float(_) => true,
             Expr::Var(name) => self.obj_vars.contains(name),
             Expr::Recorded { inner, .. } => self.bit_operand_is_object(inner),
             Expr::Unary { rhs, .. } => self.bit_operand_is_object(rhs),

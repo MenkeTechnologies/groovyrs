@@ -7296,3 +7296,124 @@ println(m.toString())
         "{a=1}\n{b={a=1}}\n[{a=1}]\n{}\n{a=1}\n{a=1}\n[1, 2]\n1..3\n[a:1]\n[a:1]\n[a:1]\n"
     );
 }
+
+#[test]
+fn the_mask_operators_refuse_a_double_operand() {
+    // The native lowering TRUNCATES a `double` operand and answers a number;
+    // Groovy refuses the operands. Routing a `d`/`f` literal to the host builtin
+    // is what lets the refusal happen.
+    let src = r#"
+def t(String label, Closure c) {
+  try { println(label + " = " + c()) } catch (e) { println(label + " ! " + e.getClass().getSimpleName()) }
+}
+t("d|i", { def a = 1.0d; a | -2147483648 })
+t("i|d", { 2147483647 | 1.0d })
+t("d&i", { def a = 1.0d; a & 3 })
+t("d^i", { def a = 1.0d; a ^ 3 })
+t("~d", { def a = 1.0d; ~a })
+t("d>>i", { def a = 1.0d; a >> 2 })
+t("i|i", { 6 | 3 })
+t("G|G", { 6G | 3G })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "d|i ! UnsupportedOperationException\n\
+         i|d ! UnsupportedOperationException\n\
+         d&i ! UnsupportedOperationException\n\
+         d^i ! UnsupportedOperationException\n\
+         ~d ! UnsupportedOperationException\n\
+         d>>i ! UnsupportedOperationException\n\
+         i|i = 7\n\
+         G|G = 7\n"
+    );
+}
+
+#[test]
+fn a_big_integer_narrows_to_its_low_bits_where_java_takes_an_int() {
+    // Java's shift takes an `int` and `java.lang.Math` has no `BigInteger`
+    // overload, so both arrive through `intValue()` — the low 32 bits, wrapped.
+    // `as Long` keeps the low 64. Each answered `0` (or raised) before.
+    let src = r#"
+def a = 12345678901234567890G
+println(-7 << a)
+println(a as Long)
+println(a as Integer)
+println(Math.abs(a))
+println(Math.abs(3G))
+println(Math.abs(-3G))
+println(Math.max(-7, a))
+println(Math.min(-7, a))
+println(Math.max(1, -3G))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "-1835008\n-6101065172474983726\n-350287150\n350287150\n3\n3\n-7\n-350287150\n1\n"
+    );
+}
+
+#[test]
+fn a_bare_name_followed_by_as_is_a_coercion_not_a_declaration() {
+    // `looks_like_decl` read `a as Long` as declaring a variable named `as` of
+    // type `a`, and then failed on the type name behind it. Parenthesising the
+    // receiver went to the coercion, which is what hid it.
+    let src = r#"
+def a = 3G
+def f = { a as Long }
+println f()
+def g = { a as Integer }
+println g()
+a as Long
+println "ok"
+def instanceofTest = 3 instanceof Integer
+println instanceofTest
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "3\n3\nok\ntrue\n");
+}
+
+#[test]
+fn a_big_integer_receiver_widens_for_a_double_but_a_big_decimal_stays_exact() {
+    let src = r#"
+def t(String label, Closure c) {
+  def r = c()
+  println(label + " = " + r + " " + r.getClass().getName())
+}
+t("bigint % double", { def a = 3G; def b = 1.0d; a % b })
+t("bigdec % double", { def a = 1.5; def b = 0.555d; a % b })
+t("bigint % int", { def a = 3G; a % 2 })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "bigint % double = 0.0 java.lang.Double\n\
+         bigdec % double = 0.38999999999999990230037383298622444272041320800781250 java.math.BigDecimal\n\
+         bigint % int = 1 java.math.BigInteger\n"
+    );
+}
+
+#[test]
+fn an_exponent_past_int_range_leaves_the_exact_path_rather_than_raising() {
+    // An exponent that large was written as a `Long`, and Groovy's `power` runs
+    // a `Long` exponent as a double — so the `BigDecimal.pow` refusal must not
+    // fire there. groovyrs cannot see the declared width, so the magnitude
+    // stands in for it.
+    let src = r#"
+def t(String label, Closure c) {
+  try { println(label + " = " + c()) } catch (e) { println(label + " ! " + e.getClass().getSimpleName()) }
+}
+t("long exponent", { 0.1 ** 9223372036854775807 })
+t("int max exponent", { 2.5 ** 2147483647 })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "long exponent = 0\nint max exponent ! ArithmeticException\n"
+    );
+}

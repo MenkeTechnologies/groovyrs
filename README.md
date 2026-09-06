@@ -693,10 +693,15 @@ now that the `BigDecimal` model is exact. Modes:
 `arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
 `gstring`, `exceptions`, `faults`, `switch`, `asserts`, `modzero`, `gdk`,
 `conversions`, `classes`, `ranges`, `aliasing`, `views`, `switchexpr`, `regex`,
-`numeric`, `mixed`. `--dump` prints the corpus a mode generates and runs
-nothing, which is how "does this fuzzer ever emit X" became a grep rather than a
-reading of the generator; `switchexpr`, `regex` and `numeric` were each added
-because that grep answered *never*.
+`numeric`, `strops`, `listops`, `safenav`, `mixed`. `--dump` prints the corpus a
+mode generates and runs nothing, which is how "does this fuzzer ever emit X"
+became a grep rather than a reading of the generator; `switchexpr`, `regex`,
+`numeric`, `strops`, `listops` and `safenav` were each added because that grep
+answered *never*. The round-3 three cover the string GDK (`substring`, `trim`,
+`padLeft`, `center`, `tokenize`, `String.format`, `printf`), the reshaping list
+GDK plus `times`/`upto`/`downto`/`step` and `withDefault`, and the null-safe
+`?.`/`?:`/`*.` — all at zero occurrences in a 4000-case dump before, and all
+implemented.
 
 The oracle has its own `--oracle-timeout-ms` (default 120000), separate from
 `--timeout-ms` (default 15000, ours). The two sides cost nothing alike: groovyrs

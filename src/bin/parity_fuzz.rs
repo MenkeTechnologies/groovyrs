@@ -119,6 +119,9 @@ enum Mode {
     SwitchExpr,
     Regex,
     Numeric,
+    StrOps,
+    ListOps,
+    SafeNav,
     Mixed,
 }
 
@@ -146,6 +149,9 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::SwitchExpr => "switchexpr",
         Mode::Regex => "regex",
         Mode::Numeric => "numeric",
+        Mode::StrOps => "strops",
+        Mode::ListOps => "listops",
+        Mode::SafeNav => "safenav",
         Mode::Mixed => "mixed",
     }
 }
@@ -174,6 +180,9 @@ fn mode_from(s: &str) -> Option<Mode> {
         "switchexpr" => Mode::SwitchExpr,
         "regex" => Mode::Regex,
         "numeric" => Mode::Numeric,
+        "strops" => Mode::StrOps,
+        "listops" => Mode::ListOps,
+        "safenav" => Mode::SafeNav,
         "mixed" => Mode::Mixed,
         _ => return None,
     })
@@ -697,6 +706,252 @@ const CASE_SUBJECTS: &[&str] = &[
 /// [`CASE_SUBJECTS`] so a value's *type* varies more: an arrow arm's value flows
 /// out of the switch, so a `String` arm next to an `Integer` one is the case
 /// where a wrongly typed result becomes visible in the printed output.
+// ── Modes added in round 3, each for a construct the corpus contained ZERO
+// occurrences of. The counts were taken by dumping 4000 mixed cases and
+// grepping: `substring`, `trim`, `padLeft`, `center`, `tokenize`, `take`,
+// `drop`, `String.format`, `printf`, `flatten`, `collate`, `transpose`,
+// `collectEntries`, `subMap`, `withDefault`, `times`, `upto`, `downto` and the
+// safe-navigation `?.` were all at zero, though every one is implemented.
+
+/// Subjects the string-method mode runs over: an empty string, one with
+/// surrounding blanks, one with repeats, one with separators, and a multi-byte
+/// one (whose `length()` is UTF-16 code units, not characters).
+const STR_SUBJECTS: &[&str] = &[
+    "\"\"",
+    "\"Hello, World\"",
+    "\"  padded  \"",
+    "\"aabbaa\"",
+    "\"a,b,,c\"",
+    "\"MiXeD\"",
+    "\"héllo\"",
+    "\"x\"",
+];
+
+/// String methods, applied to `a`. Indices deliberately run past the end of the
+/// shorter subjects: a `StringIndexOutOfBoundsException` is an observation the
+/// try/catch compares like any other.
+const STR_OPS: &[&str] = &[
+    "a.substring(2)",
+    "a.substring(1, 4)",
+    "a.trim()",
+    "a.strip()",
+    "a.padLeft(8)",
+    "a.padRight(8, \"-\")",
+    "a.center(9, \"*\")",
+    "a.reverse()",
+    "a.replace(\"a\", \"Z\")",
+    "a.tokenize(\",\")",
+    "a.split(\",\")?.toList()",
+    "a.toUpperCase()",
+    "a.toLowerCase()",
+    "a.capitalize()",
+    "a.take(3)",
+    "a.drop(3)",
+    "a * 2",
+    "a - \"a\"",
+    "a.indexOf(\"a\")",
+    "a.lastIndexOf(\"a\")",
+    "a.startsWith(\"a\")",
+    "a.endsWith(\"a\")",
+    "a.contains(\"b\")",
+    "a.compareTo(\"b\")",
+    "a.size()",
+    "a.length()",
+    "a.toList()",
+    "a.stripIndent()",
+    "a.normalize().size()",
+    "a.matches(\"[a-z]+\")",
+    "a.readLines()",
+    "a.bytes.size()",
+    "a.charAt(0)",
+    "a.getAt(0)",
+];
+
+/// The formatting calls, kept apart from the methods above because they take
+/// the subject as an argument rather than a receiver.
+const STR_FORMATS: &[&str] = &[
+    "String.format(\"[%s]\", a)",
+    "String.format(\"[%10s]\", a)",
+    "String.format(\"[%-10s]\", a)",
+    "String.format(\"%d/%05.2f\", 42, 3.14159)",
+    "String.format(\"%,d\", 1234567)",
+    "String.format(\"%x|%o|%e\", 255, 8, 1234.5)",
+    "sprintf(\"%s=%s\", \"k\", a)",
+];
+
+/// Wrap one expression as a self-describing observation: its own source text,
+/// then either its value or the simple name of what it raised. A `$` in the
+/// source is escaped, or the label would interpolate at the call site and the
+/// program would die of a `MissingPropertyException` outside the `try`.
+fn observe(expr: &str) -> String {
+    let esc = expr
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$");
+    format!(
+        "try {{ def r = ({expr}); println(\"{esc} = \" + r) }} \
+         catch (e) {{ println(\"{esc} ! \" + e.getClass().getSimpleName()) }}"
+    )
+}
+
+/// A String-method program.
+fn gen_strops(rng: &mut Rng) -> Vec<String> {
+    let mut out = vec![format!("def a = {}", pick(rng, STR_SUBJECTS))];
+    let n = rng.range_i(3, 6) as usize;
+    for _ in 0..n {
+        let e = if rng.chance(1, 5) {
+            pick(rng, STR_FORMATS)
+        } else {
+            pick(rng, STR_OPS)
+        };
+        out.push(observe(e));
+    }
+    if rng.chance(1, 3) {
+        out.push("printf(\"%s|%s%n\", a, a.size())".to_string());
+    }
+    out
+}
+
+/// List receivers, chosen so the reshaping methods have something to reshape: a
+/// ragged list for `flatten`, an even-length one for `collate`, a list of lists
+/// for `transpose`, a flat one that `transpose` must REFUSE, and an empty one.
+const COLL_SUBJECTS: &[&str] = &[
+    "[]",
+    "[1, 2, 3, 4]",
+    "[3, 1, 2, 1]",
+    "[[1, 2], [3, 4]]",
+    "[1, [2, [3, 4]], 5]",
+    "[\"a\", \"bb\", \"a\"]",
+    "[1, null, 3]",
+];
+
+/// The reshaping half of the list GDK.
+const COLL_OPS: &[&str] = &[
+    "a.flatten()",
+    "a.take(2)",
+    "a.drop(2)",
+    "a.collate(2)",
+    "a.collate(3, true)",
+    "a.transpose()",
+    "a.indexed()",
+    "a.unique()",
+    "a.reverse()",
+    "a.withIndex().collect { v, i -> \"\" + i + \":\" + v }",
+    "a.collectEntries { [it, \"\" + it + \"!\"] }",
+    "a.groupBy { \"\" + it }",
+    "a.countBy { \"\" + it }",
+    "a.sum(0)",
+    "a.inject(0) { s, v -> s + (v == null ? 0 : 1) }",
+    "a.sort(false) { \"\" + it }",
+    "a.min { \"\" + it }",
+    "a.max { \"\" + it }",
+    "a.findAll { it != null }",
+    "a.split { it != null }",
+    "a.head()",
+    "a.tail()",
+    "a.first()",
+    "a.last()",
+    "a.init()",
+    "a.combinations().size()",
+    "a.subsequences().size()",
+    "a.intersect([1, 2])",
+    "a.disjoint([9])",
+    "a.plus([9]).size()",
+    "a.multiply(2)",
+];
+
+/// `n.times`, `upto`, `downto` and `step` — the number-driven loops. Each keeps
+/// its accumulator local, so the whole observation is one string.
+const NUM_ITER: &[&str] = &[
+    "def s = \"\"; 4.times { s += it }; s",
+    "def s = \"\"; 1.upto(4) { s += it }; s",
+    "def s = \"\"; 4.downto(1) { s += it }; s",
+    "def s = \"\"; 0.step(9, 3) { s += it }; s",
+    "def s = \"\"; 2.upto(1) { s += it }; \"[\" + s + \"]\"",
+    "def s = \"\"; (1..3).each { s += it }; s",
+];
+
+/// The map half, including three `withDefault` reads — `m.k`, `m.get(k)` and
+/// `getOrDefault` — which answered `null`, `null` and the caller's fallback
+/// before this round, where Groovy runs the closure and stores its answer.
+const MAP_OPS: &[&str] = &[
+    "m.subMap([\"a\", \"zz\"])",
+    "m.collectEntries { k, v -> [v, k] }",
+    "m.groupBy { k, v -> v > 1 }",
+    "m.findAll { k, v -> v > 1 }",
+    "m.every { k, v -> v > 0 }",
+    "m.any { k, v -> v > 2 }",
+    "m.sort { it.value }.toString()",
+    "m.max { it.value }.toString()",
+    "m.withDefault { it.size() }.zzz",
+    "m.withDefault { it.size() }.get(\"qqq\")",
+    "m.withDefault { it.size() }.getOrDefault(\"qq\", -1)",
+    "def d = m.withDefault { 0 }; d.n += 5; d.toString()",
+    "m.getOrDefault(\"nope\", -1)",
+    "m.get(\"nope\", -1)",
+];
+
+/// A collection-method program. A raise compares like a value: `[].head()`
+/// throws `NoSuchElementException` in both runtimes, and the exception's
+/// identity is the comparison. The multi-statement entries run inside a called
+/// closure so the whole observation stays one expression.
+fn gen_listops(rng: &mut Rng) -> Vec<String> {
+    let mut out = vec![
+        format!("def a = {}", pick(rng, COLL_SUBJECTS)),
+        "def m = [a: 1, b: 2, c: 3]".to_string(),
+    ];
+    let n = rng.range_i(3, 6) as usize;
+    for _ in 0..n {
+        let e = match rng.below(6) {
+            0 => format!("{{ -> {} }}()", pick(rng, NUM_ITER)),
+            1 | 2 => format!("{{ -> {} }}()", pick(rng, MAP_OPS)),
+            _ => (*pick(rng, COLL_OPS)).to_string(),
+        };
+        out.push(observe(&e));
+    }
+    out
+}
+
+/// Receivers for the null-safe mode, one of which is null.
+const SAFE_SUBJECTS: &[&str] = &[
+    "null",
+    "\"str\"",
+    "[1, 2, 3]",
+    "[a: 1]",
+    "[null, \"x\"]",
+    "42",
+];
+
+/// The null-safe operators. `?.` reached the corpus ZERO times, and it is the
+/// one operator whose whole job is what happens on `null`.
+const SAFE_OPS: &[&str] = &[
+    "a?.size()",
+    "a?.toString()",
+    "a?.getClass()?.getSimpleName()",
+    "a?.class?.name",
+    "a ?: \"fallback\"",
+    "a?.size() ?: -1",
+    "a?.foo",
+    "a?.foo?.bar",
+    "a*.toString()",
+    "a?.collect { it }",
+    "(a == null) ? \"n\" : \"v\"",
+    "a?.with { it.toString() }",
+    "a?.equals(a)",
+    "a.toString()",
+    "a.size()",
+];
+
+/// A null-safe navigation program.
+fn gen_safenav(rng: &mut Rng) -> Vec<String> {
+    let mut out = vec![format!("def a = {}", pick(rng, SAFE_SUBJECTS))];
+    let n = rng.range_i(3, 6) as usize;
+    for _ in 0..n {
+        out.push(observe(pick(rng, SAFE_OPS)));
+    }
+    out
+}
+
 const SWITCH_EXPR_ARMS: &[(&str, &str)] = &[
     ("1", "\"one\""),
     ("2", "2 * 10"),
@@ -748,8 +1003,18 @@ fn gen_switch_expr(rng: &mut Rng) -> Vec<String> {
             out.push("  def r = switch (x) {".to_string());
             for (i, (l, v)) in arms.iter().enumerate() {
                 out.push(format!("    case {l}:"));
-                // An empty section falls into the following one's `yield`.
-                if i + 1 == arms.len() || rng.chance(3, 4) {
+                // An empty section falls into the following one's `yield` —
+                // EXCEPT after a comma label list, where Groovy 5.1.1 answers
+                // its own semantics wrongly. `switch (x) { case 1, 2: case 3:
+                // yield "A" }` matches NOTHING there: subject 1, 3 and 9 all
+                // answer `null`, and the arm's body never runs (measured — a
+                // `println` in it prints nothing), while the same switch
+                // written `case 1: case 3:` matches both. An empty section
+                // after a comma list silently kills its own labels and the
+                // following section's, so a case generated there measures the
+                // oracle's defect rather than groovyrs. Kept OUT of the corpus,
+                // and recorded in BUGS.md rather than reproduced.
+                if i + 1 == arms.len() || l.contains(',') || rng.chance(3, 4) {
                     out.push(format!("      yield {v}"));
                 }
             }
@@ -1788,6 +2053,9 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::SwitchExpr,
                 Mode::Regex,
                 Mode::Numeric,
+                Mode::StrOps,
+                Mode::ListOps,
+                Mode::SafeNav,
             ],
         )
     } else {
@@ -1812,6 +2080,9 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
         Mode::Ranges => gen_ranges(&mut rng),
         Mode::Aliasing => gen_aliasing(&mut rng),
         Mode::Views => gen_views(&mut rng),
+        Mode::StrOps => gen_strops(&mut rng),
+        Mode::ListOps => gen_listops(&mut rng),
+        Mode::SafeNav => gen_safenav(&mut rng),
         _ => {
             let n = rng.range_i(1, 5) as usize;
             (0..n)
@@ -1843,6 +2114,9 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         | Mode::SwitchExpr
                         | Mode::Regex
                         | Mode::Numeric
+                        | Mode::StrOps
+                        | Mode::ListOps
+                        | Mode::SafeNav
                         | Mode::Mixed => unreachable!(),
                     };
                     println_of(expr)
@@ -2325,7 +2599,7 @@ fn parse_args() -> Args {
                      options:\n  \
                      -c, --count N        cases to run (default 1000)\n  \
                      -s, --seed N         base seed (default 1)\n  \
-                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|views|switchexpr|\n                       regex|numeric|mixed (default mixed)\n  \
+                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|views|switchexpr|\n                       regex|numeric|strops|listops|safenav|mixed\n                       (default mixed)\n  \
                      -j, --jobs N         parallel workers (default = cores)\n  \
                      --once               replay a single --seed, minimize, dump both sides\n  \
                      --dump               print --count generated programs and exit\n  \

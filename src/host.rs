@@ -14110,6 +14110,26 @@ fn render_value(vm: &mut VM, v: &Value) -> String {
             .collect();
         return format!("[{}]", items.join(", "));
     }
+    // A list or set HANDLE, rendered element by element THROUGH this function —
+    // so an element that is a class instance reaches its `toString()`. Only the
+    // transient `Value::Array` form below did, and `groovy_str`, which the
+    // fallback reached for a handle, has no VM to dispatch with: `println([new
+    // A()])` printed `[(obj:0)]` where Groovy prints `[A(1)]`. A `char[]` is
+    // excluded — it renders its characters run together, which `groovy_str`
+    // already does.
+    if array_elem(v) != Some(ArrayElem::Char) {
+        if let Some(items) = as_list(v) {
+            let shown: Vec<String> = items.iter().map(|e| render_value(vm, e)).collect();
+            return format!("[{}]", shown.join(", "));
+        }
+        if let Some((items, kind)) = as_set(v) {
+            let shown: Vec<String> = set_elements(&items, kind)
+                .iter()
+                .map(|e| render_value(vm, e))
+                .collect();
+            return format!("[{}]", shown.join(", "));
+        }
+    }
     match v {
         Value::Array(a) => {
             let items: Vec<String> = a.iter().map(|e| render_value(vm, e)).collect();

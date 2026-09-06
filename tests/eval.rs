@@ -7248,3 +7248,24 @@ try { throw new RuntimeException("x") } catch (e) { println "caught" } finally {
     assert!(ok);
     assert_eq!(out, "1\na\ncaught\n");
 }
+
+#[test]
+fn a_collection_renders_its_elements_through_their_to_string() {
+    // A list HANDLE fell through to the no-VM renderer, which cannot dispatch a
+    // class's `toString` — so `println([new A()])` printed `[(obj:0)]`.
+    let src = r#"
+class A {
+  def v = 1
+  String toString() { return "A(" + v + ")" }
+}
+println([new A()])
+println([new A()] as Set)
+println([[new A()]])
+println([k: new A()])
+println("" + new A())
+println("abc".toCharArray())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[A(1)]\n[A(1)]\n[[A(1)]]\n[k:A(1)]\nA(1)\nabc\n");
+}

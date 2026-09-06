@@ -1236,6 +1236,16 @@ infinite loop on both sides.
   identity hash: stable within a run and equal exactly when the references are,
   which is the contract, but not the number a JVM prints. A JVM's own identity
   hash varies run to run, so no value could match it.
+- **A collection does not consult a user class's `equals`/`hashCode`.** The
+  operators do — `new A() == new A()` answers the declared `equals` — but the
+  *containers* identify an instance by its heap handle, so
+  `[new A(), new A()] as Set` keeps two elements where Groovy keeps one, and so
+  do `unique()`, `HashSet(…)` and `==` between two such sets. A map goes further:
+  its keys are `String`s (see the `hashCode` entry above), so an instance key is
+  stored under the handle's rendering and prints as `(obj:N)` rather than the
+  instance's `toString`. Rendering a `List` or `Set` element THROUGH the
+  instance's `toString` is modeled — `println([new A()])` prints `[A(1)]` — which
+  is the same question one layer out.
 - **`args` is a `List`, not a `String[]`.** Every script's binding carries
   `args` — the launcher arguments after the script file, empty when there are
   none — but as the `List` groovyrs models rather than the array Groovy binds.

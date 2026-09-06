@@ -4552,6 +4552,36 @@ fn match_value(hit: &crate::regex::Match) -> Value {
     )
 }
 
+/// Call `clo` with one regex match, by Groovy's convention for every
+/// closure-taking `String` regex method (`replaceAll`, `replaceFirst`, `find`,
+/// `findAll`, `eachMatch`).
+///
+/// The match is [`match_value`]: the whole match for a group-less pattern, and
+/// the LIST `[whole, g1, …]` when the pattern has groups. Groovy then *calls*
+/// the closure with that one value, and a `Closure` with more than one declared
+/// parameter spreads a list argument across them — which is what makes
+/// `{ all, d -> … }` see the two halves and `{ it }` see the whole list. Calling
+/// a one-parameter closure with the groups spread instead handed it only the
+/// whole match, so `"aa".replaceAll("(a)(a)") { "X$it" }` answered `Xaa` where
+/// Groovy answers `X[aa, a, a]`.
+fn invoke_closure_on_match(
+    vm: &mut VM,
+    clo: &Value,
+    hit: &crate::regex::Match,
+) -> Result<Value, String> {
+    let value = match_value(hit);
+    let params = closure_meta(clo).map_or(1, |c| c.params);
+    // `match_value` answers the transient `Value::Array` form, not a heap list,
+    // so the spread reads the array directly.
+    match &value {
+        Value::Array(items) if params > 1 => {
+            let items = items.to_vec();
+            invoke_closure(vm, clo, &items)
+        }
+        _ => invoke_closure(vm, clo, std::slice::from_ref(&value)),
+    }
+}
+
 /// The `java.util.regex.Matcher` methods a Groovy script calls. `None` for a
 /// method that is not a matcher's, so the caller reports it missing.
 ///
@@ -6790,22 +6820,13 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         };
         let replacement = args.get(1).cloned().unwrap_or(Value::Undef);
         let result = if closure_meta(&replacement).is_some() {
-            // The closure receives the whole match when the pattern has no
-            // groups, and `(whole, g1, …)` when it has — so
-            // `"a1b2".replaceAll(/(\d)/) { all, d -> "<$d>" }` is `a<1>b<2>`.
+            // The closure sees the whole match for a group-less pattern and the
+            // list `[whole, g1, …]` when the pattern has groups — spread across
+            // its parameters when it declares more than one, so
+            // `"a1b2".replaceAll(/(\d)/) { all, d -> "<$d>" }` is `a<1>b<2>`
+            // while `{ "X$it" }` sees the whole list.
             p.replace_with(s, first_only, |hit| {
-                let args: Vec<Value> = if hit.groups.len() <= 1 {
-                    vec![match_value(hit)]
-                } else {
-                    hit.groups
-                        .iter()
-                        .map(|g| match g {
-                            Some(t) => Value::str(t.clone()),
-                            None => Value::Undef,
-                        })
-                        .collect()
-                };
-                invoke_closure(vm, &replacement, &args).map(|v| groovy_str(&v))
+                invoke_closure_on_match(vm, &replacement, hit).map(|v| groovy_str(&v))
             })
         } else {
             p.replace(s, &groovy_str(&replacement), first_only)
@@ -6835,7 +6856,7 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             }
         };
         for hit in &hits {
-            if let Err(e) = invoke_closure(vm, clo, &[match_value(hit)]) {
+            if let Err(e) = invoke_closure_on_match(vm, clo, hit) {
                 fault(vm, e);
                 return Value::Undef;
             }
@@ -6844,6 +6865,45 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             }
         }
         return recv;
+    }
+    // `s.find(pattern) { … }` / `s.findAll(pattern) { … }` — the closure is a
+    // TRANSFORM here, not a predicate: `find` answers its result on the first
+    // match (or `null` when there is none) and `findAll` the results of them
+    // all. Without this the calls fell through to the character iteration below,
+    // where `findAll` answered `[]` and `find` answered a character.
+    if let (Value::Str(s), "find" | "findAll") = (&recv, method) {
+        if args.len() == 2 && closure_meta(&args[1]).is_some() {
+            let pattern = pattern_source_of(&args[0]);
+            let compiled = crate::regex::compile(&pattern);
+            let hits = match &*compiled {
+                Ok(p) => p.find_all(s).unwrap_or_default(),
+                Err(e) => {
+                    raise(vm, "PatternSyntaxException", e);
+                    return Value::Undef;
+                }
+            };
+            let mut out = Vec::new();
+            for hit in &hits {
+                match invoke_closure_on_match(vm, &args[1], hit) {
+                    Ok(v) => out.push(v),
+                    Err(e) => {
+                        fault(vm, e);
+                        return Value::Undef;
+                    }
+                }
+                if pending_exc() {
+                    return Value::Undef;
+                }
+                if method == "find" {
+                    return out.pop().unwrap_or(Value::Undef);
+                }
+            }
+            return if method == "find" {
+                Value::Undef
+            } else {
+                Value::array(out)
+            };
+        }
     }
     // A `String` iterates over its characters, so the same closure-driven GDK
     // applies. The `each` family answers the receiver itself, not a list.

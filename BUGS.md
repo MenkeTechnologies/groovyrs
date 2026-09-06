@@ -812,6 +812,16 @@ infinite loop on both sides.
   Unicode *blocks* (`\p{InGreek}`), `\p{javaLowerCase}`-style `Character`
   predicates, and the `(?m)`/`(?x)`/`(?d)`/`(?u)`/`(?U)` flags. Each raises
   `java.util.regex.PatternSyntaxException` naming the construct.
+- **The closure-taking `String` regex methods share one call convention.**
+  `replaceAll`, `replaceFirst`, `find`, `findAll` and `eachMatch` all call their
+  closure with ONE value — the whole match for a group-less pattern, and the
+  LIST `[whole, g1, …]` when the pattern has groups — and a closure declaring
+  more than one parameter spreads that list across its parameters. So
+  `"aa".replaceAll("(a)(a)") { "X$it" }` is `X[aa, a, a]` while
+  `{ a, b, c -> … }` sees the three parts, and `"a1b2".replaceFirst(/(\d)/) {
+  it.toString() }` is `a[1, 1]b2`. In `find`/`findAll` the closure is a
+  TRANSFORM, not a predicate: `find` answers its result on the first match (or
+  `null`), `findAll` the results of all of them.
 - **`$/…/$` dollar-slashy strings.** The `/…/` slashy form is implemented (and
   interpolates, and spans lines); the `$/…/$` form, whose only difference is
   that `/` needs no escape and `$$` escapes a dollar, is not lexed.

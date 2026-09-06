@@ -6786,3 +6786,52 @@ try { 7.mod(0.0) } catch (e) { println(e.getClass().simpleName + ": " + e.messag
          ArithmeticException: Division by zero\n"
     );
 }
+
+// ── the closure-taking String regex methods share one call convention ─────
+//
+// Every expectation is the byte output of Apache Groovy 5.1.1 on JVM 26.0.2.1.
+
+#[test]
+fn a_regex_closure_sees_the_group_list_unless_it_declares_the_parts() {
+    // The closure is called with ONE value — the whole match for a group-less
+    // pattern, the list `[whole, g1, …]` when the pattern has groups — and a
+    // closure declaring more than one parameter spreads that list across them.
+    let src = r#"
+println("aa".replaceAll("(a)(a)") { "X$it" })
+println("aa".replaceAll("(a)(a)") { l -> "" + l.getClass().simpleName + l })
+println("aa".replaceAll("(a)(a)") { a, b, c -> "$a|$b|$c" })
+println("aa".replaceAll("aa") { "Y$it" })
+println("a1b2".replaceFirst(/(\d)/) { all, d -> "<$d>" })
+println("a1b2".replaceFirst(/(\d)/) { it.toString() })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "X[aa, a, a]\nArrayList[aa, a, a]\naa|a|a\nYaa\na<1>b2\na[1, 1]b2\n"
+    );
+}
+
+#[test]
+fn find_and_findall_with_a_pattern_and_closure_transform_the_matches() {
+    // The closure is a TRANSFORM here, not a predicate: `find` answers its
+    // result on the first match and `findAll` the results of them all. Without
+    // the pattern form these fell through to the character iteration, where
+    // `findAll` answered `[]` and `find` answered a character.
+    let src = r#"
+println("a1b2".findAll(/(\d)/))
+println("a1b2".findAll(/(\d)/) { all, d -> d })
+println("a1b2".find(/(\d)/))
+println("a1b2".find(/(\d)/) { all, d -> d })
+println("a1b2".find(/(\d)/) { it.toString() })
+println("abc".find(/z/) { it })
+"a1b2".eachMatch(/(\d)/) { all, d -> println("em $all $d") }
+"a1b2".eachMatch(/\d/) { println("bare " + it) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[1, 2]\n[1, 2]\n1\n1\n[1, 1]\nnull\nem 1 1\nem 2 2\nbare 1\nbare 2\n"
+    );
+}

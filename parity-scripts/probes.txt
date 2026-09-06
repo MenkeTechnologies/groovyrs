@@ -2800,3 +2800,13 @@ try { println(9.mod(0.5d)) } catch (e) { println(e.getClass().getSimpleName() + 
 println(7.mod(2.5) + " " + 7.mod(2.5).getClass().name); println((-7).mod(2.5)); println(9.mod(4.0)); println(9.mod(4.00)); println(9.mod(4.5)); println((-9).mod(4.5))
 %%
 try { println(7.mod(0.0)) } catch (e) { println(e.getClass().getSimpleName() + ": " + e.message) }
+%%
+# a regex closure sees the group LIST unless it declares the parts
+println("aa".replaceAll("(a)(a)") { "X$it" }); println("aa".replaceAll("(a)(a)") { l -> "" + l.getClass().simpleName + l }); println("aa".replaceAll("(a)(a)") { a, b, c -> "$a|$b|$c" }); println("aa".replaceAll("aa") { "Y$it" })
+%%
+println("a1b2".replaceFirst(/(\d)/) { all, d -> "<$d>" }); println("a1b2".replaceFirst(/(\d)/) { it.toString() })
+%%
+# `find`/`findAll` with a pattern AND a closure transform the matches
+println("a1b2".findAll(/(\d)/)); println("a1b2".findAll(/(\d)/) { all, d -> d }); println("a1b2".find(/(\d)/)); println("a1b2".find(/(\d)/) { all, d -> d }); println("a1b2".find(/(\d)/) { it.toString() }); println("abc".find(/z/) { it })
+%%
+"a1b2".eachMatch(/(\d)/) { all, d -> println("em $all $d") }; "a1b2".eachMatch(/\d/) { println("bare " + it) }

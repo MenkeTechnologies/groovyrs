@@ -943,7 +943,7 @@ fn raise_missing_method_wide(
 /// `Number`, and `true & 1` raises `MissingMethodException` naming
 /// `java.lang.Boolean`.
 fn is_number(v: &Value) -> bool {
-    matches!(v, Value::Int(_) | Value::Float(_)) || as_dec(v).is_some()
+    matches!(v, Value::Int(_) | Value::Float(_)) || is_dec_handle(v)
 }
 
 /// Is `v` an `Integer`/`Long`/`BigInteger` — a number whose bits Java will
@@ -1150,7 +1150,7 @@ fn java_class_name(v: &Value) -> String {
         _ if array_elem(v).is_some() => return array_elem(v).unwrap().array_class(),
         _ if as_list_raw(v).is_some() => "java.util.ArrayList",
         _ if as_bigint(v).is_some() => "java.math.BigInteger",
-        _ if as_dec(v).is_some() => "java.math.BigDecimal",
+        _ if is_dec_handle(v) => "java.math.BigDecimal",
         // A `withDefault` view names its own wrapper class, not the class of the
         // map it wraps — tested ahead of the map arm, which resolves through it.
         _ if is_map_with_default(v) => "groovy.lang.MapWithDefault",
@@ -2417,6 +2417,32 @@ fn as_dec(v: &Value) -> Option<BigDecimal> {
             _ => None,
         }),
         _ => None,
+    }
+}
+
+/// Is `v` a `BigDecimal` or `BigInteger` handle? The presence question on its
+/// own, without [`as_dec`]'s clone — every `BigDecimal` clone allocates a
+/// `BigInt`, and the arithmetic paths below ask this several times per operator
+/// before they ask for the value.
+fn is_dec_handle(v: &Value) -> bool {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| {
+            matches!(
+                h.borrow().get(*id as usize),
+                Some(HeapObj::Dec(_)) | Some(HeapObj::BigInt(_))
+            )
+        }),
+        _ => false,
+    }
+}
+
+/// Is `v` a `java.math.BigInteger` handle? [`is_dec_handle`]'s narrower sibling.
+fn is_bigint_handle(v: &Value) -> bool {
+    match v {
+        Value::Obj(id) => {
+            HEAP.with(|h| matches!(h.borrow().get(*id as usize), Some(HeapObj::BigInt(_))))
+        }
+        _ => false,
     }
 }
 
@@ -13162,6 +13188,23 @@ fn b_div(vm: &mut VM, _argc: u8) -> Value {
     if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
         return Value::float(as_f64(&a) / as_f64(&b));
     }
+    // An exact machine-integer division, which is most of them in a loop.
+    // Semantically identical to the general path below — the quotient of two
+    // scale-0 decimals whose expansion terminates is that quotient at Java's
+    // preferred scale, `scale(a) - scale(b)` = 0 — but it reaches the answer
+    // without building two `BigDecimal`s to divide and throw away. The result is
+    // still the `BigDecimal` Groovy promotes to, so nothing about the type moved
+    // (see the paragraph above); only the two operand allocations and the
+    // `exact_divide` scale search are skipped.
+    if let (Value::Int(x), Value::Int(y)) = (&a, &b) {
+        // `checked_*` throughout: `i64::MIN / -1` overflows, and so would the
+        // exactness multiplication for operands near the range's edge.
+        if let Some(q) = x.checked_div(*y) {
+            if q.checked_mul(*y) == Some(*x) {
+                return dec_value(decimal::from_i64(q));
+            }
+        }
+    }
     match (as_exact_dec(&a), as_exact_dec(&b)) {
         (Some(x), Some(y)) => match decimal::divide(&x, &y) {
             Some(q) => dec_value(q),
@@ -13401,7 +13444,7 @@ fn java_to_string(vm: &mut VM, v: &Value) -> String {
 /// **code-unit** order. They invert for an astral character against
 /// `U+E000..U+FFFF`, so the fallback encodes before comparing.
 fn natural_order(a: &Value, b: &Value) -> std::cmp::Ordering {
-    match (as_dec(a).is_some() || as_dec(b).is_some()).then(|| (as_exact_dec(a), as_exact_dec(b))) {
+    match (is_dec_handle(a) || is_dec_handle(b)).then(|| (as_exact_dec(a), as_exact_dec(b))) {
         Some((Some(x), Some(y))) => decimal::cmp(&x, &y),
         _ => match (as_num(a), as_num(b)) {
             (Some(x), Some(y)) => java_compare_f64(x, y),
@@ -13800,13 +13843,13 @@ fn decimal_operator(op: NumOp, a: &Value, b: &Value) -> Option<Result<Value, Str
         // `+`/`-`/`*` and `negate()` — `(-255G).getClass()` is
         // `java.math.BigInteger`. Answering a `BigDecimal` here made `-255G`
         // quietly change type, and with it lose `toString(radix)`.
-        return Some(Ok(if as_bigint(a).is_some() {
+        return Some(Ok(if is_bigint_handle(a) {
             bigint_value(negated)
         } else {
             dec_value(negated)
         }));
     }
-    if as_dec(a).is_none() && as_dec(b).is_none() {
+    if !is_dec_handle(a) && !is_dec_handle(b) {
         return None;
     }
     if matches!(a, Value::Str(_)) || matches!(b, Value::Str(_)) {
@@ -13835,8 +13878,7 @@ fn decimal_operator(op: NumOp, a: &Value, b: &Value) -> Option<Result<Value, Str
     // decimal operand widens the result to `BigDecimal`, and `/` always does
     // (`100G / 3` is `33.3333333333`). So the exact result is built once and
     // tagged with whichever of the two types it belongs to.
-    let integral =
-        (as_bigint(a).is_some() || as_bigint(b).is_some()) && is_integral(a) && is_integral(b);
+    let integral = (is_bigint_handle(a) || is_bigint_handle(b)) && is_integral(a) && is_integral(b);
     let exact = |d: BigDecimal| {
         if integral {
             bigint_value(d)
@@ -14292,7 +14334,7 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // decimal path so `"1" == 1.0` answers the same way.
     if matches!(op, NumOp::Eq | NumOp::Ne) {
         let numeric = |v: &Value| {
-            matches!(v, Value::Int(_) | Value::Float(_) | Value::Bool(_)) || as_dec(v).is_some()
+            matches!(v, Value::Int(_) | Value::Float(_) | Value::Bool(_)) || is_dec_handle(v)
         };
         let mismatched = (matches!(a, Value::Str(_)) && numeric(b))
             || (matches!(b, Value::Str(_)) && numeric(a));

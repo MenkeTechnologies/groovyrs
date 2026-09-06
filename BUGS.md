@@ -744,6 +744,12 @@ infinite loop on both sides.
   compares and hashes as 128 bits, not as its text), and answering the string
   instead would get all three wrong. The class *name* resolves, so the call
   raises `MissingMethodException` rather than failing to compile.
+- **`Class.getSuperclass()`.** Not dispatched — `MissingMethodException` where
+  Groovy walks the hierarchy (`new B().getClass().getSuperclass().getName()` is
+  `A` for `class B extends A`, and `42`'s is `java.lang.Number`). A declared
+  class's superclass IS known (`ClassMeta::superclass` drives inheritance and
+  virtual dispatch); what is missing is the JDK half, which would be a table of
+  built-in class parents rather than something groovyrs can derive.
 - **`Closure.trampoline()`.** Not dispatched — `MissingMethodException` where
   Groovy answers a trampolined closure, so a recursion written to be
   stack-flattened runs as an ordinary one until it hits the frame limit. The

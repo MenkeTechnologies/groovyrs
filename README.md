@@ -145,8 +145,12 @@ Implemented and checked against Apache Groovy:
   containment), the `value as Type` coercion, unary `-` and
   `!`, grouping. An unsuffixed decimal literal is a `BigDecimal` whose scale
   propagates (`1.10 + 2.20 == 3.30`), a `d`/`f` suffix makes an IEEE double;
-  integer `/` promotes to a decimal (`7 / 2 == 3.5`); `**` follows the numeric
-  tower (`2 ** 10` is an `Integer`, `2 ** -1` a `BigDecimal`); `+` concatenates
+  integer `/` promotes to a decimal (`7 / 2 == 3.5`); `**` binds tighter than a
+  prefix operator and folds LEFT (`-2 ** 2` is `-4`, `2 ** 3 ** 2` is `64`), and
+  follows Groovy's overload table — exact for `Integer ** Integer` and its three
+  siblings, otherwise `Math.pow` with the answer narrowed back to an
+  `Integer`/`Long` when one round-trips it (`2.0d ** 3` is the Integer `8`,
+  `2 ** -1` the Double `0.5`); `+` concatenates
   when either side is a string, `-` and `*` also work on strings and lists
   (`"abc" * 3`, `[1, 2, 3] - [2]`), `<<` is `leftShift` (a bit shift, a list
   append, a map `putAll`, or a string concatenation) and `>>` is `rightShift` (a bit shift on a
@@ -319,7 +323,10 @@ Implemented and checked against Apache Groovy:
   `containsValue`, `putAt`, `putAll`, `clear`, and `leftShift` (`map << other`, a
   `putAll` that answers the receiver so it chains). Numbers answer `power`, the scaled
   `round(n)` and `trunc([n])`, `intdiv` (integral operands only — a decimal on
-  either side raises `UnsupportedOperationException`), `abs`, `asType`, the
+  either side raises `UnsupportedOperationException`, though a `BigInteger`
+  answers one), `mod` in all four spellings (a `BigInteger` modulus must be
+  positive, a `BigDecimal` one need not be, and a `double` on either side
+  truncates BOTH operands and answers a `Double`), `abs`, `asType`, the
   conversions, and the operator
   method names — `and`/`or`/`xor`/`bitwiseNegate` and
   `leftShift`/`rightShift`/`rightShiftUnsigned`, which fill to the receiver's
@@ -386,7 +393,11 @@ Implemented and checked against Apache Groovy:
   `java.util.regex.Matcher` (`find`/`group`/`start`/`end`/`matches`/
   `groupCount`/`pattern`/`m[i]`, iteration, and `find()` truth so `while (m)`
   walks). `String` carries `matches`, `replaceAll`/`replaceFirst` in both the
-  `$n` and closure forms, `findAll`, `find`, and Java's specified `split` rules.
+  `$n` and closure forms, `findAll`, `find`, `eachMatch`, and Java's specified
+  `split` rules. Every closure-taking one shares Groovy's call convention: the
+  closure sees the whole match for a group-less pattern and the list
+  `[whole, g1, …]` when the pattern has groups, spread across its parameters
+  when it declares more than one.
 - **`BigInteger`** — `123G`, integer literals past `Long`, `new BigInteger(…)`,
   `as BigInteger`, and the overflowing integer `**`, as a type distinct from
   `BigDecimal` with unbounded magnitude.

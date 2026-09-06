@@ -681,7 +681,17 @@ Decimal literals, scales, and exponent forms are generated without restriction
 now that the `BigDecimal` model is exact. Modes:
 `arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
 `gstring`, `exceptions`, `faults`, `switch`, `asserts`, `modzero`, `gdk`,
-`conversions`, `classes`, `ranges`, `aliasing`, `views`, `mixed`.
+`conversions`, `classes`, `ranges`, `aliasing`, `views`, `switchexpr`, `regex`,
+`numeric`, `mixed`. `--dump` prints the corpus a mode generates and runs
+nothing, which is how "does this fuzzer ever emit X" became a grep rather than a
+reading of the generator; `switchexpr`, `regex` and `numeric` were each added
+because that grep answered *never*.
+
+The oracle has its own `--oracle-timeout-ms` (default 120000), separate from
+`--timeout-ms` (default 15000, ours). The two sides cost nothing alike: groovyrs
+runs a case in milliseconds while `groovy` boots a JVM, and one shared budget on
+a loaded machine turned a 3000-case campaign into 2268 comparisons and 715
+timeouts — a quarter of it noise that reads as "no divergence found".
 
 Both fuzzers report a **skipped** count alongside the divergences. A case only
 counts as a comparison when the reference itself ran the program — it neither

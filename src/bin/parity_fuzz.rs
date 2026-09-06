@@ -116,6 +116,9 @@ enum Mode {
     Ranges,
     Aliasing,
     Views,
+    SwitchExpr,
+    Regex,
+    Numeric,
     Mixed,
 }
 
@@ -140,6 +143,9 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Ranges => "ranges",
         Mode::Aliasing => "aliasing",
         Mode::Views => "views",
+        Mode::SwitchExpr => "switchexpr",
+        Mode::Regex => "regex",
+        Mode::Numeric => "numeric",
         Mode::Mixed => "mixed",
     }
 }
@@ -165,6 +171,9 @@ fn mode_from(s: &str) -> Option<Mode> {
         "ranges" => Mode::Ranges,
         "aliasing" => Mode::Aliasing,
         "views" => Mode::Views,
+        "switchexpr" => Mode::SwitchExpr,
+        "regex" => Mode::Regex,
+        "numeric" => Mode::Numeric,
         "mixed" => Mode::Mixed,
         _ => return None,
     })
@@ -683,6 +692,265 @@ const CASE_LABELS: &[&str] = &[
 const CASE_SUBJECTS: &[&str] = &[
     "0", "1", "2", "4", "7", "101", "\"s\"", "\"aab\"", "\"zz\"", "null",
 ];
+
+/// Subjects and labels for the switch-expression mode. Kept apart from
+/// [`CASE_SUBJECTS`] so a value's *type* varies more: an arrow arm's value flows
+/// out of the switch, so a `String` arm next to an `Integer` one is the case
+/// where a wrongly typed result becomes visible in the printed output.
+const SWITCH_EXPR_ARMS: &[(&str, &str)] = &[
+    ("1", "\"one\""),
+    ("2", "2 * 10"),
+    ("3, 4", "\"three-or-four\""),
+    ("String", "it_len(x)"),
+    ("Integer", "x + 1"),
+    ("5..7", "\"mid\""),
+    ("{ it instanceof Integer && it > 100 }", "\"big\""),
+    ("null", "\"nul\""),
+    ("\"s\"", "null"),
+];
+
+/// A `switch` **expression** program — Groovy's arrow and colon value forms.
+///
+/// Zero cases in the corpus reached this before: the generator only ever emitted
+/// the statement switch, so `case L ->`, comma labels, `yield`, a braced arm
+/// body, and a switch in operand position were all untested by the campaign.
+/// Each shape below is one of those.
+fn gen_switch_expr(rng: &mut Rng) -> Vec<String> {
+    let mut out = vec!["def it_len(s) { return \"len\" + s.length() }".to_string()];
+    let n = rng.range_i(2, 4) as usize;
+    let mut arms: Vec<(&str, &str)> = Vec::new();
+    while arms.len() < n {
+        let a = *pick(rng, SWITCH_EXPR_ARMS);
+        if !arms.iter().any(|(l, _)| *l == a.0) {
+            arms.push(a);
+        }
+    }
+    let with_default = rng.chance(3, 4);
+    match rng.below(3) {
+        // The arrow form, as the whole body of a method — which is also the
+        // implicit-return path, since Groovy gives the statement form a value.
+        0 => {
+            out.push("def f(x) {".to_string());
+            out.push("  switch (x) {".to_string());
+            for (l, v) in &arms {
+                out.push(format!("    case {l} -> {v}"));
+            }
+            if with_default {
+                out.push("    default -> \"d\"".to_string());
+            }
+            out.push("  }".to_string());
+            out.push("}".to_string());
+        }
+        // The colon form with `yield`, and deliberate fall-through: a section
+        // with no body of its own runs the next one's.
+        1 => {
+            out.push("def f(x) {".to_string());
+            out.push("  def r = switch (x) {".to_string());
+            for (i, (l, v)) in arms.iter().enumerate() {
+                out.push(format!("    case {l}:"));
+                // An empty section falls into the following one's `yield`.
+                if i + 1 == arms.len() || rng.chance(3, 4) {
+                    out.push(format!("      yield {v}"));
+                }
+            }
+            if with_default {
+                out.push("    default:".to_string());
+                out.push("      yield \"d\"".to_string());
+            }
+            out.push("  }".to_string());
+            out.push("  return \"r=\" + r".to_string());
+            out.push("}".to_string());
+        }
+        // A switch expression as an operand, and with a braced arm body whose
+        // trailing expression is the arm's value.
+        _ => {
+            out.push("def f(x) {".to_string());
+            out.push("  def r = switch (x) {".to_string());
+            for (l, v) in &arms {
+                if rng.chance(1, 2) {
+                    out.push(format!("    case {l} -> {{ def t = {v}; yield t }}"));
+                } else {
+                    out.push(format!("    case {l} -> {{ {v} }}"));
+                }
+            }
+            if with_default {
+                out.push("    default -> { \"d\" }".to_string());
+            }
+            out.push("  }".to_string());
+            out.push("  return [r, \"\" + r].join(\"|\")".to_string());
+            out.push("}".to_string());
+        }
+    }
+    let subjects = rng.range_i(3, 6) as usize;
+    let list: Vec<String> = (0..subjects)
+        .map(|_| pick(rng, CASE_SUBJECTS).to_string())
+        .collect();
+    out.push(format!("def xs = [{}]", list.join(", ")));
+    out.push("for (i in 0..<xs.size()) println(\"\" + xs[i] + \" -> \" + f(xs[i]))".into());
+    out
+}
+
+/// Patterns and subjects for the regex mode. Every pattern is one a Java
+/// `Pattern` accepts, so a divergence is groovyrs's regex engine and not a
+/// syntax the oracle rejects.
+const REGEX_PATTERNS: &[&str] = &[
+    "a+b",
+    "[a-c]{2}",
+    "(\\\\d+)-(\\\\d+)",
+    "^ab",
+    "b$",
+    "a.c",
+    "\\\\w+",
+    "\\\\s*,\\\\s*",
+    "(?i)AB",
+    "a|bc",
+    "(ab)+",
+    "[^a]",
+    "x?y",
+];
+
+const REGEX_SUBJECTS: &[&str] = &[
+    "\"aab\"",
+    "\"abc\"",
+    "\"12-34\"",
+    "\"a, b ,c\"",
+    "\"AB\"",
+    "\"\"",
+    "\"xyz\"",
+    "\"aaa\"",
+    "\"ab ab\"",
+];
+
+/// A regex program: the `=~` find, the `==~` full match, `Matcher` navigation,
+/// and the `String` methods that take a pattern.
+///
+/// The corpus contained ZERO of these — no `=~`, no `==~`, no `replaceAll`, no
+/// `split`, no `tokenize`, no matcher at all — even though the regex engine is
+/// one of the larger surfaces in the interpreter.
+fn gen_regex(rng: &mut Rng) -> Vec<String> {
+    let pat = *pick(rng, REGEX_PATTERNS);
+    let subj = *pick(rng, REGEX_SUBJECTS);
+    let mut out = vec![format!("def s = {subj}"), format!("def p = \"{pat}\"")];
+    match rng.below(4) {
+        // The two operators, and the boolean each coerces to.
+        0 => {
+            out.push("println(\"find=\" + (s =~ p ? \"y\" : \"n\"))".to_string());
+            out.push("println(\"full=\" + (s ==~ p))".to_string());
+            out.push("println((s =~ p).count)".to_string());
+        }
+        // Matcher navigation: `find`, groups, and the cursor they share.
+        1 => {
+            out.push("def m = (s =~ p)".to_string());
+            out.push("while (m.find()) {".to_string());
+            out.push(
+                "  println(\"at \" + m.start() + \"-\" + m.end() + \" \" + m.group())".to_string(),
+            );
+            out.push("}".to_string());
+            out.push("println(\"reset \" + (s =~ p).find())".to_string());
+        }
+        // `matches()` and the group state it must record — a matcher that has
+        // just matched can be asked for its groups.
+        2 => {
+            out.push("def m = (s =~ p)".to_string());
+            out.push(
+                "if (m.matches()) { println(\"m \" + m.group() + \" \" + m.groupCount()) }"
+                    .to_string(),
+            );
+            out.push("else { println(\"no match, groups=\" + m.groupCount()) }".to_string());
+        }
+        // The `String` methods that take a pattern.
+        _ => {
+            out.push("println(s.replaceAll(p, \"<>\"))".to_string());
+            out.push("println(s.replaceFirst(p, \"#\"))".to_string());
+            out.push("println(s.split(p).length + \" \" + s.split(p).toList())".to_string());
+            out.push("println(s.matches(p))".to_string());
+        }
+    }
+    out
+}
+
+/// Numeric operands for the numeric mode: the width boundaries, the promotion
+/// edges, and the two arbitrary-precision types.
+const NUMERIC_OPERANDS: &[&str] = &[
+    "0",
+    "1",
+    "-1",
+    "7",
+    "-7",
+    "2147483647",
+    "-2147483648",
+    "9223372036854775807",
+    "3G",
+    "-3G",
+    "12345678901234567890G",
+    "2.5",
+    "-2.5",
+    "0.1",
+    "1.0d",
+    "3.0f",
+    "100L",
+];
+
+/// A numeric program covering the operators and conversions the corpus never
+/// emitted: `**`, `>>>`, `^`, `intdiv`, the `Math` statics, `BigInteger`
+/// literals, the width constants, and the `as`/`toX` conversions. Each is a
+/// place where a promotion rule or an overflow wrap can differ, and none of them
+/// were reachable by the campaign before.
+fn gen_numeric(rng: &mut Rng) -> Vec<String> {
+    let a = *pick(rng, NUMERIC_OPERANDS);
+    let b = *pick(rng, NUMERIC_OPERANDS);
+    let mut out = vec![format!("def a = {a}"), format!("def b = {b}")];
+    match rng.below(4) {
+        // The operators, each with the class of its result — a promotion that
+        // lands on the wrong type prints the same digits.
+        0 => {
+            for op in ["**", "^", ">>>", ">>", "<<", "&", "|"] {
+                out.push(format!(
+                    "try {{ def r = a {op} b; println(\"{op} \" + r + \" \" + r.getClass().name) }} catch (e) {{ println(\"{op} \" + e.getClass().simpleName) }}"
+                ));
+            }
+        }
+        // Division in its three spellings, whose types differ: `/` promotes to
+        // BigDecimal, `intdiv` truncates, `%` takes the dividend's sign.
+        1 => {
+            for m in ["a / b", "a.intdiv(b)", "a % b", "a.mod(b)"] {
+                out.push(format!(
+                    "try {{ def r = {m}; println(\"{m} = \" + r + \" \" + r.getClass().name) }} catch (e) {{ println(\"{m} ! \" + e.getClass().simpleName) }}"
+                ));
+            }
+        }
+        // The `Math` statics and the width constants.
+        2 => {
+            out.push("println(Math.abs(a))".to_string());
+            out.push("println(Math.max(a, b) + \" \" + Math.min(a, b))".to_string());
+            out.push(
+                "println(Integer.MAX_VALUE + \" \" + Integer.MIN_VALUE + \" \" + Long.MAX_VALUE)"
+                    .to_string(),
+            );
+            out.push(
+                "try { println(Math.sqrt(a)) } catch (e) { println(e.getClass().simpleName) }"
+                    .to_string(),
+            );
+            out.push("println((a as double) + \" \" + (b as double))".to_string());
+        }
+        // The conversions, where a narrowing wrap and a rounding rule both live.
+        _ => {
+            for m in [
+                "a as Integer",
+                "a as Long",
+                "a as BigDecimal",
+                "a as BigInteger",
+                "a.intValue()",
+                "a.toString()",
+            ] {
+                out.push(format!(
+                    "try {{ def r = ({m}); println(\"{m} = \" + r + \" \" + r.getClass().name) }} catch (e) {{ println(\"{m} ! \" + e.getClass().simpleName) }}"
+                ));
+            }
+        }
+    }
+    out
+}
 
 /// A `switch` / `do`-`while` / labeled-jump program. Fall-through is deliberate
 /// (a section only sometimes ends in `break`), and the labeled jumps target both
@@ -1517,6 +1785,9 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::Ranges,
                 Mode::Aliasing,
                 Mode::Views,
+                Mode::SwitchExpr,
+                Mode::Regex,
+                Mode::Numeric,
             ],
         )
     } else {
@@ -1530,6 +1801,9 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
         Mode::Exceptions => gen_exceptions(&mut rng),
         Mode::Faults => gen_faults(&mut rng),
         Mode::Switch => gen_switch(&mut rng),
+        Mode::SwitchExpr => gen_switch_expr(&mut rng),
+        Mode::Regex => gen_regex(&mut rng),
+        Mode::Numeric => gen_numeric(&mut rng),
         Mode::Asserts => gen_asserts(&mut rng),
         Mode::ModZero => gen_mod_zero(&mut rng),
         Mode::Gdk => gen_gdk(&mut rng),
@@ -1566,6 +1840,9 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         | Mode::Ranges
                         | Mode::Aliasing
                         | Mode::Views
+                        | Mode::SwitchExpr
+                        | Mode::Regex
+                        | Mode::Numeric
                         | Mode::Mixed => unreachable!(),
                     };
                     println_of(expr)
@@ -1886,8 +2163,14 @@ fn oracle_ran(o: &RunOut) -> bool {
     !o.timed_out && (o.exit == 0 || !o.stdout.is_empty())
 }
 
-fn diverges(script: &str, bin: &Path, oracle: &str, timeout: Duration) -> bool {
-    let o = run_prog(Path::new(oracle), script, timeout);
+fn diverges(
+    script: &str,
+    bin: &Path,
+    oracle: &str,
+    timeout: Duration,
+    oracle_timeout: Duration,
+) -> bool {
+    let o = run_prog(Path::new(oracle), script, oracle_timeout);
     if !oracle_ran(&o) {
         return false;
     }
@@ -1902,7 +2185,13 @@ fn render(bytes: &[u8]) -> String {
 }
 
 /// Shrink a diverging case to the smallest statement subset that still diverges.
-fn minimize(stmts: Vec<String>, bin: &Path, oracle: &str, timeout: Duration) -> Vec<String> {
+fn minimize(
+    stmts: Vec<String>,
+    bin: &Path,
+    oracle: &str,
+    timeout: Duration,
+    oracle_timeout: Duration,
+) -> Vec<String> {
     let mut cur = stmts;
     let mut changed = true;
     while changed && cur.len() > 1 {
@@ -1913,7 +2202,7 @@ fn minimize(stmts: Vec<String>, bin: &Path, oracle: &str, timeout: Duration) -> 
             if cand.is_empty() {
                 continue;
             }
-            if diverges(&build_program(&cand), bin, oracle, timeout) {
+            if diverges(&build_program(&cand), bin, oracle, timeout, oracle_timeout) {
                 cur = cand;
                 changed = true;
                 break;
@@ -1931,7 +2220,19 @@ struct Args {
     count: u64,
     base_seed: u64,
     once: bool,
+    /// Print the generated corpus and run nothing. What the generator can emit
+    /// is a fact about the campaign's reach, and reading it out of the source by
+    /// eye missed whole constructs; `--dump` makes "does this fuzzer ever
+    /// produce X" a grep.
+    dump: bool,
     timeout_ms: u64,
+    /// The oracle's own timeout, separate from ours because the two sides cost
+    /// nothing alike: groovyrs runs a case in milliseconds, while `groovy`
+    /// boots a JVM, and a loaded machine can push that boot past any budget a
+    /// runaway groovyrs loop should be allowed. One shared 15s budget is what
+    /// turned a 3000-case campaign into 2268 comparisons and 715 timeouts — a
+    /// quarter of it noise, and noise that reads as "no divergence found".
+    oracle_timeout_ms: u64,
     out_path: PathBuf,
     max_report: usize,
     jobs: usize,
@@ -1942,7 +2243,9 @@ fn parse_args() -> Args {
     let mut count = 1000u64;
     let mut base_seed = 1u64;
     let mut once = false;
+    let mut dump = false;
     let mut timeout_ms = 15000u64;
+    let mut oracle_timeout_ms = 120_000u64;
     let mut max_report = 100usize;
     let mut mode = Mode::Mixed;
     let mut jobs = std::thread::available_parallelism()
@@ -1969,12 +2272,20 @@ fn parse_args() -> Args {
                     .unwrap_or(base_seed);
             }
             "--once" => once = true,
+            "--dump" => dump = true,
             "--timeout-ms" => {
                 i += 1;
                 timeout_ms = argv
                     .get(i)
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(timeout_ms);
+            }
+            "--oracle-timeout-ms" => {
+                i += 1;
+                oracle_timeout_ms = argv
+                    .get(i)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(oracle_timeout_ms);
             }
             "--out" | "-o" => {
                 i += 1;
@@ -2003,7 +2314,7 @@ fn parse_args() -> Args {
                     mode = m;
                 } else {
                     eprintln!(
-                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|faults|switch|asserts|modzero|gdk|conversions|classes|ranges|aliasing|views|mixed)"
+                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|faults|switch|asserts|modzero|gdk|conversions|classes|ranges|aliasing|views|switchexpr|regex|numeric|mixed)"
                     );
                     std::process::exit(2);
                 }
@@ -2014,10 +2325,12 @@ fn parse_args() -> Args {
                      options:\n  \
                      -c, --count N        cases to run (default 1000)\n  \
                      -s, --seed N         base seed (default 1)\n  \
-                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|views|mixed (default mixed)\n  \
+                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|views|switchexpr|\n                       regex|numeric|mixed (default mixed)\n  \
                      -j, --jobs N         parallel workers (default = cores)\n  \
                      --once               replay a single --seed, minimize, dump both sides\n  \
-                     --timeout-ms N       per-run timeout (default 15000; groovy boots the JVM)\n  \
+                     --dump               print --count generated programs and exit\n  \
+                     --timeout-ms N       groovyrs run timeout (default 15000)\n  \
+                     --oracle-timeout-ms N  oracle timeout (default 120000; it boots a JVM)\n  \
                      -o, --out FILE       write divergence report here\n  \
                      --max-report N       stop after N divergences (default 100)\n\n\
                      The oracle is `groovy` on PATH (override with GROOVYRS_FUZZ_GROOVY)."
@@ -2035,7 +2348,9 @@ fn parse_args() -> Args {
         count,
         base_seed,
         once,
+        dump,
         timeout_ms,
+        oracle_timeout_ms,
         out_path,
         max_report,
         jobs,
@@ -2045,10 +2360,19 @@ fn parse_args() -> Args {
 
 fn main() {
     let args = parse_args();
+    // The corpus alone — no oracle, no binary, nothing to gate.
+    if args.dump {
+        for idx in 0..args.count {
+            let seed = args.base_seed.wrapping_add(idx);
+            print!("{}", build_program(&gen_case(seed, args.mode)));
+        }
+        return;
+    }
     let bin = ours_bin();
     let oracle = resolve_oracle();
     gate_oracle(&oracle);
     let timeout = Duration::from_millis(args.timeout_ms);
+    let oracle_timeout = Duration::from_millis(args.oracle_timeout_ms);
 
     if !bin.exists() {
         eprintln!(
@@ -2062,15 +2386,15 @@ fn main() {
     if args.once {
         let stmts = gen_case(args.base_seed, args.mode);
         let script = build_program(&stmts);
-        let o = run_prog(Path::new(&oracle), &script, timeout);
+        let o = run_prog(Path::new(&oracle), &script, oracle_timeout);
         let r = run_prog(&bin, &script, timeout);
         let diverged = !o.timed_out && differs(&o, &r);
         println!("seed   : {}", args.base_seed);
         println!("mode   : {}", mode_name(args.mode));
         let (show, o, r) = if diverged && stmts.len() > 1 {
-            let m = minimize(stmts, &bin, &oracle, timeout);
+            let m = minimize(stmts, &bin, &oracle, timeout, oracle_timeout);
             let ms = build_program(&m);
-            let mo = run_prog(Path::new(&oracle), &ms, timeout);
+            let mo = run_prog(Path::new(&oracle), &ms, oracle_timeout);
             let mr = run_prog(&bin, &ms, timeout);
             (ms, mo, mr)
         } else {
@@ -2147,7 +2471,7 @@ fn main() {
                 let seed = args.base_seed.wrapping_add(idx);
                 let stmts = gen_case(seed, args.mode);
                 let script = build_program(&stmts);
-                let o = run_prog(Path::new(&oracle), &script, timeout);
+                let o = run_prog(Path::new(&oracle), &script, oracle_timeout);
                 let r = run_prog(&bin, &script, timeout);
                 checked.fetch_add(1, Ordering::Relaxed);
                 if o.timed_out || r.timed_out {
@@ -2162,12 +2486,12 @@ fn main() {
                 }
                 if differs(&o, &r) {
                     // Re-verify a real gap reproduces before reporting.
-                    if !diverges(&script, &bin, &oracle, timeout) {
+                    if !diverges(&script, &bin, &oracle, timeout, oracle_timeout) {
                         continue;
                     }
-                    let minimal = minimize(stmts, &bin, &oracle, timeout);
+                    let minimal = minimize(stmts, &bin, &oracle, timeout, oracle_timeout);
                     let ms = build_program(&minimal);
-                    let mo = run_prog(Path::new(&oracle), &ms, timeout);
+                    let mo = run_prog(Path::new(&oracle), &ms, oracle_timeout);
                     let mr = run_prog(&bin, &ms, timeout);
                     let rec = format!(
                         "==== seed {seed} ====\n\

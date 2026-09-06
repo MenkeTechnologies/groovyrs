@@ -744,6 +744,10 @@ infinite loop on both sides.
   compares and hashes as 128 bits, not as its text), and answering the string
   instead would get all three wrong. The class *name* resolves, so the call
   raises `MissingMethodException` rather than failing to compile.
+- **`List.withDefault { … }`.** Only the `Map` spelling is modeled. Groovy's
+  `groovy.util.ListWithDefault` answers the closure for an out-of-range read
+  (`[1, 2].withDefault { 0 }[5]` is `0`) and grows the list to reach it;
+  groovyrs raises `MissingMethodException`.
 - **`Class.getSuperclass()`.** Not dispatched — `MissingMethodException` where
   Groovy walks the hierarchy (`new B().getClass().getSuperclass().getName()` is
   `A` for `class B extends A`, and `42`'s is `java.lang.Number`). A declared

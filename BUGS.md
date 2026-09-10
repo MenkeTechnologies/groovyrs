@@ -355,11 +355,15 @@ reported as parse or compile errors, never silently mis-run.
   own `double` value is the same figure, so the round-trip succeeds. Measured
   cell by cell against Apache Groovy 5.1.1 / JVM 26.0.2.1.
 
-  One cell is out of reach: `BigDecimal ** Long`, which Groovy runs as a double
-  and groovyrs keeps exact. It needs the exponent's `Integer`-versus-`Long`
-  width, which is the run-time width a `Value::Int` cannot carry (see the `Long`
-  entry below); the compiler passes the *base's* width to `**` but not the
-  exponent's.
+  The `Long`-exponent row is modeled now: `**` carries a TWO-bit mask, the base's
+  static width in bit 0 and the exponent's in bit 1, so `2 ** 40L` is the `Long`
+  `1099511627776` where `2 ** 40` is a `BigInteger`, `10 ** 100L` is the `Double`
+  `1.0E100` where `10 ** 100` is the exact integer, and `2.5 ** 3L` is the
+  `Double` `15.625` where `2.5 ** 3` is the `BigDecimal`. `2G ** 40L` keeps the
+  `BigInteger` base's own exact path. The residue is the one every `Long` here
+  has: an exponent the compiler cannot see statically (a closure parameter, a
+  field) reads as an `Integer`, and only the magnitude rule — an exponent past
+  `Integer.MAX_VALUE` cannot have been an `int` — stands in for the width.
 
   A `BigInteger` pair with a NEGATIVE exponent stays integral: Groovy computes
   `1 / base^|e|` and truncates it to a `BigInteger`, so `2G ** -1G` and

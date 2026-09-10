@@ -9708,7 +9708,17 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `n.power(e)` is the `**` operator spelled out — on a `double` receiver
         // too, where the narrowing makes `(2.0d).power(3)` the Integer 8.
         (Value::Int(_) | Value::Float(_), "power") => {
-            power_of(vm, recv, args.first().unwrap_or(&Value::Undef), false)
+            // The receiver's width is the call mask's bit 0 and the argument's
+            // bit 1 — `(2).power(40L)` is the `Long` `1099511627776` exactly as
+            // `2 ** 40L` is.
+            let widths = call_widths();
+            power_of(
+                vm,
+                recv,
+                args.first().unwrap_or(&Value::Undef),
+                widths & 1 != 0,
+                widths & 2 != 0,
+            )
         }
         // `255.toString(16)` is `16`, not `ff`: `Integer` has no *instance*
         // `toString(int)`, so Java's overload resolution reaches the static
@@ -10023,7 +10033,13 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                     &d,
                     args.first().and_then(as_i64).unwrap_or(0),
                 )),
-                "power" => power_of(vm, recv, args.first().unwrap_or(&Value::Undef), false),
+                "power" => power_of(
+                    vm,
+                    recv,
+                    args.first().unwrap_or(&Value::Undef),
+                    false,
+                    call_widths() & 2 != 0,
+                ),
                 "doubleValue" | "toDouble" | "floatValue" | "toFloat" => {
                     float_or_double(method, decimal::to_f64(&d))
                 }
@@ -10532,14 +10548,12 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
 /// base yields a `BigDecimal` (whose scale is the base's, times the exponent),
 /// and a `double` base stays IEEE.
 fn b_power(vm: &mut VM, _argc: u8) -> Value {
-    // The compiler's static width of the base, pushed above the operands the
-    // same way `<<` and `>>>` receive it — the magnitude of a `Long` small
-    // enough to be an `Integer` cannot say which it is, and the two narrow
-    // their `**` result to different types.
-    let wide = shift_is_wide(vm);
+    // Two bits, not one: bit 0 is the base's static width, bit 1 the exponent's.
+    // See the `**` arm of `Compiler::binary`.
+    let mask = vm.stack.pop().map(|m| m.to_int()).unwrap_or(0);
     let exp = vm.stack.pop().unwrap_or(Value::Undef);
     let base = vm.stack.pop().unwrap_or(Value::Undef);
-    power_of(vm, &base, &exp, wide)
+    power_of(vm, &base, &exp, mask & 1 != 0, mask & 2 != 0)
 }
 
 /// The `double` half of Groovy's `**`, which is `DefaultGroovyMethods.power`:
@@ -10569,7 +10583,7 @@ fn power_double(base: f64, exp: f64) -> Value {
 /// `base ** exp`, shared by the `**` builtin and the `power(exp)` method Groovy
 /// defines as the same operation. `wide` is the base's statically-known `Long`
 /// width, which decides whether an integer result narrows to `Integer`.
-fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
+fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool, exp_wide: bool) -> Value {
     let (base, exp) = (base.clone(), exp.clone());
     // `**` is `Number.power(Number)`, so a non-`Number` on either side has no
     // overload at all. Asked before the exponent is read as a number: `as_f64`
@@ -10579,6 +10593,22 @@ fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
     // its wording.
     if !is_number(&base) || !is_number(&exp) {
         return raise_operator_operand(vm, "power", &base, &exp);
+    }
+    // A `Long` EXPONENT leaves the exact path entirely — under every base but a
+    // `BigInteger`, which keeps its own. Groovy's `power` has no `(Number, long)`
+    // overload that stays exact, so it runs `Math.pow` and narrows the answer:
+    // `2 ** 40L` is the `Long` `1099511627776` where `2 ** 40` is a
+    // `BigInteger`, `10 ** 100L` is the `Double` `1.0E100` where `10 ** 100` is
+    // the exact integer, and `2.5 ** 3L` is the `Double` `15.625` where
+    // `2.5 ** 3` is the `BigDecimal`. `2G ** 40L` stays a `BigInteger`.
+    // Measured against Groovy 5.1.2 / JVM 26.0.2.1.
+    //
+    // The width is the compiler's: `40L` and `40` are the one `Value::Int`, so
+    // only the call site knows which was written. The magnitude rule below
+    // (an exponent past `Integer.MAX_VALUE` cannot have been an `int`) stays as
+    // the residue for an exponent the compiler cannot see.
+    if exp_wide && !is_bigint_handle(&base) {
+        return power_double(as_f64(&base), as_f64(&exp));
     }
     let e = match as_i64(&exp) {
         Some(e) => e,
@@ -10630,10 +10660,11 @@ fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
     // …but only for an exponent that FITS AN INT. Past `Integer.MAX_VALUE` the
     // exponent was written as a `Long`, and Groovy's `power` leaves the exact
     // path for a `Long` exponent entirely — `0.1 ** 9223372036854775807` is
-    // `Math.pow`'s `0.0`, narrowed to the Integer `0`, not a refusal. groovyrs
-    // cannot see the exponent's declared width (BUGS.md's `Long` entry), so the
-    // magnitude is what stands in for it: an exponent that large cannot have
-    // been an `int` literal.
+    // `Math.pow`'s `0.0`, narrowed to the Integer `0`, not a refusal. The
+    // `exp_wide` gate above catches every `Long` exponent the compiler CAN see;
+    // this magnitude test is what still stands in for one it cannot (a closure
+    // parameter, a field), since an exponent that large cannot have been an
+    // `int` literal.
     if e > 0 && e <= i64::from(i32::MAX) {
         let integral = matches!(base, Value::Int(_)) || is_bigint_handle(&base);
         let magnitude = as_f64(&base).abs();

@@ -7617,3 +7617,47 @@ println("F " + [3.0f, 1.5f, 2.5].sort() + " " + [3.0f, 1.5f, 2.5].max())
          F [1.5, 2.5, 3.0] 3.0\n"
     );
 }
+
+#[test]
+fn a_long_exponent_leaves_the_exact_power_path() {
+    // Groovy's `power` has no overload that stays exact for a `Long` exponent:
+    // it runs `Math.pow` and narrows the answer, so `2 ** 40L` is a `Long` where
+    // `2 ** 40` is a `BigInteger`, and `10 ** 100L` is the *Double* `1.0E100`
+    // where `10 ** 100` is the exact integer. A `BigInteger` base keeps its own
+    // exact path either way. `40L` and `40` are the one runtime value, so the
+    // width travels from the compiler as the second bit of the `**` mask.
+    let src = r#"
+def t(String l, Closure c) {
+  def r = c(); println(l + " = " + r + " " + r.getClass().getName())
+}
+t("2 ** 40L", { 2 ** 40L })
+t("2 ** 40", { 2 ** 40 })
+t("2L ** 40L", { 2L ** 40L })
+t("2L ** 40", { 2L ** 40 })
+t("2G ** 40L", { 2G ** 40L })
+t("10 ** 100L", { 10 ** 100L })
+t("2 ** 3L", { 2 ** 3L })
+t("2.5 ** 3L", { 2.5 ** 3L })
+t("2.5 ** 3", { 2.5 ** 3 })
+t("2 ** -3L", { 2 ** -3L })
+t("(2).power(40L)", { (2).power(40L) })
+t("2G.power(40L)", { 2G.power(40L) })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "2 ** 40L = 1099511627776 java.lang.Long\n\
+         2 ** 40 = 1099511627776 java.math.BigInteger\n\
+         2L ** 40L = 1099511627776 java.lang.Long\n\
+         2L ** 40 = 1099511627776 java.lang.Long\n\
+         2G ** 40L = 1099511627776 java.math.BigInteger\n\
+         10 ** 100L = 1.0E100 java.lang.Double\n\
+         2 ** 3L = 8 java.lang.Integer\n\
+         2.5 ** 3L = 15.625 java.lang.Double\n\
+         2.5 ** 3 = 15.625 java.math.BigDecimal\n\
+         2 ** -3L = 0.125 java.lang.Double\n\
+         (2).power(40L) = 1099511627776 java.lang.Long\n\
+         2G.power(40L) = 1099511627776 java.math.BigInteger\n"
+    );
+}

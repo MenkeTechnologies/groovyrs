@@ -3830,8 +3830,19 @@ impl Compiler {
             // `1L` from `1`, so the statically-known width rides along as a
             // third argument.
             if matches!(op, BinOp::Shl | BinOp::UShr | BinOp::Power) {
-                let wide = self.is_wide(lhs);
-                self.b.emit(Op::LoadInt(i64::from(wide)), self.cur_line);
+                // `**` needs BOTH widths, not just the base's. A `Long`
+                // EXPONENT leaves the exact path entirely — `2 ** 40L` is the
+                // `Long` `1099511627776` where `2 ** 40` is a `BigInteger`, and
+                // `10 ** 100L` is the `Double` `1.0E100` where `10 ** 100` is
+                // the exact integer — so the host has to be able to see it. The
+                // shifts take their width from the shifted value alone (`1 <<
+                // 32L` is `1`), so they keep the one-bit form.
+                let wide = if matches!(op, BinOp::Power) {
+                    i64::from(self.is_wide(lhs)) | (i64::from(self.is_wide(rhs)) << 1)
+                } else {
+                    i64::from(self.is_wide(lhs))
+                };
+                self.b.emit(Op::LoadInt(wide), self.cur_line);
                 self.emit_call_builtin(id, 3, self.cur_line)?;
             } else {
                 self.emit_call_builtin(id, 2, self.cur_line)?;

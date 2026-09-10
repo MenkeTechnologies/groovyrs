@@ -15283,6 +15283,26 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
             return Ok(float_value(-f));
         }
     }
+    // THE EXACT-ARITHMETIC FAST PATH.
+    //
+    // Everything between here and `decimal_operator` below asks whether one of
+    // the operands is a list, a range, a class instance, a `null`, a `String` or
+    // a `Float`. Each of those questions is a thread-local heap borrow and a
+    // `Vec` index (`as_list`, `as_range` and `as_instance` alone were 245 of the
+    // 4 954 samples in an `acc + (i * 4) / 2` loop), and for a pair of
+    // `Integer`s and `BigDecimal`s — which is what a numeric loop delegates on
+    // every single operator — every one of them answers no.
+    //
+    // Two `is_dec_handle` probes replace all of them. The exact path either
+    // answers (`Some`), or declines and the general path below runs unchanged —
+    // so this can only skip work, never decide anything.
+    if matches!(a, Value::Int(_)) || is_dec_handle(a) {
+        if matches!(b, Value::Int(_)) || is_dec_handle(b) {
+            if let Some(res) = decimal_operator(op, a, b) {
+                return res;
+            }
+        }
+    }
     // A range takes part in an operator as the list it enumerates: `(1..3) + [9]`
     // concatenates and `(1..3) == [1, 2, 3]` is true, because Groovy's `Range`
     // is a `java.util.List`. Rewriting the operands here is what gives a range

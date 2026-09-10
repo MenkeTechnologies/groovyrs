@@ -75,7 +75,10 @@ frontend over the shared engine. Highlights:
   `null` the Groovy way; an unsuffixed decimal literal is a real
   `java.math.BigDecimal` (exact scale, `2.5e7` prints `2.5E+7`, `1.25 * 0` is
   `0.00`), and integer `/` promotes to it so `7 / 2` is `3.5` and `1 / 3` is
-  `0.3333333333`.
+  `0.3333333333`. Groovy's two floating types are both here: an `f`-suffixed
+  literal is a `java.lang.Float`, which renders at 24 bits (`Math.max(2147483647,
+  2.5)` prints `2.1474836E9`) and widens to a `Double` in every operator, so
+  `0.1f + 0.1f` is `0.20000000298023224`.
 - **Operator overloading** — a strict numeric hook supplies string concatenation
   (`"x=" + x`) for mixed operands, and dispatches a user-class instance's operator
   method (`plus`/`minus`/`multiply`/`compareTo`/`equals`/…) for `+`/`-`/`*`/`<`/
@@ -413,6 +416,12 @@ Implemented and checked against Apache Groovy:
 - **`BigInteger`** — `123G`, integer literals past `Long`, `new BigInteger(…)`,
   `as BigInteger`, and the overflowing integer `**`, as a type distinct from
   `BigDecimal` with unbounded magnitude.
+- **`Float`** — an `f`-suffixed literal, `as Float`, `floatValue()`/`toFloat()`,
+  `Float.valueOf`/`parseFloat`, `Float`'s constants, and the `float` overload
+  `java.lang.Math` resolves to. A distinct type from `Double`: it renders
+  through `Float.toString`, hashes `floatToIntBits`, and is `instanceof Float`
+  and not `instanceof Double` — but has no arithmetic of its own, since Groovy
+  widens it to a `double` before every operator runs.
 - **Instantiable JDK classes** — `new StringBuilder()` / `StringBuffer` /
   `StringWriter` (mutating through a shared handle, so `sb.append("a").append(1)`
   and `sb << "a" << 1` chain, and an append grows the buffer rather than
@@ -582,8 +591,9 @@ Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm
 | **fusevm-hosted** | No local `vm.rs` / `jit.rs`, no JVM. Groovy lowers to fusevm bytecode and runs on the shared three-tier Cranelift JIT; `jit-disk-cache` persists native code across runs. |
 | **Native arithmetic** | `+ - * %`, comparisons, and logic lower to native fusevm ops; the JIT traces hot integer loops. `%` additionally carries a four-op zero-divisor guard (Java's `%` throws where fusevm's `Op::Mod` answers `0`), elided entirely when the divisor is a non-zero literal — see BUGS.md for what it costs when it is not. A strict numeric hook supplies Groovy's `+` string concatenation for non-numeric operands, and dispatches a user-class instance's operator method (`plus`/`minus`/`compareTo`/…) by re-entering the VM through a published thread-local pointer — a user-class operand is the only thing that routes to a method. The hook also answers a *primitive* pair whenever fusevm declines to natively (an `Integer`-range overflow, or an integral/`double` mix whose integer is past 2^53 and so cannot be widened exactly), with the identical result the native path gives — Groovy promotes to `double`, so the rounded answer is the correct one. |
 | **Groovy division** | `/` lowers to the `GDIV` builtin: two integers divide to a `BigDecimal` whether or not the division is exact (`4/2` is the BigDecimal `2`, `7/2 → 3.5`, `1/3 → 0.3333333333`), following Groovy's `BigDecimalMath` scale policy; a zero divisor raises Groovy's catchable `ArithmeticException`. |
-| **`BigDecimal` value model** | An unsuffixed decimal literal is an exact (unscaled value, scale) pair on the host heap (`src/decimal.rs`), so scale propagates through `+ - * / %` (`1.25 * 0 → 0.00`, `2.5e7 + 1 → 25000001`) and magnitude is unbounded (`1.5e300 * 1.5e300 → 2.25E+600`). Being non-numeric to fusevm, decimals route through the strict numeric hook; `d`/`f`-suffixed literals are IEEE doubles, answered natively except where the other operand is an integer too large to widen exactly, which the hook promotes to `double` the same way. |
+| **`BigDecimal` value model** | An unsuffixed decimal literal is an exact (unscaled value, scale) pair on the host heap (`src/decimal.rs`), so scale propagates through `+ - * / %` (`1.25 * 0 → 0.00`, `2.5e7 + 1 → 25000001`) and magnitude is unbounded (`1.5e300 * 1.5e300 → 2.25E+600`). Being non-numeric to fusevm, decimals route through the strict numeric hook; a `d`-suffixed literal is an IEEE double answered natively, except where the other operand is an integer too large to widen exactly, which the hook promotes to `double` the same way. An `f`-suffixed literal is a `java.lang.Float` — its own handle, interned by its bits — which the hook widens to a `double` before any operator runs, so it costs one allocation per literal rather than one per operation. |
 | **Decimal arithmetic without a clone** | Two scale-0 operands that fit an `i64` — a loop accumulator, and every quotient of an exact integer division, since Groovy promotes `4/2` to `BigDecimal` — take an `i64` path through `+ - *` and the six comparisons. Java's rules make the answer scale 0 as well, so it is the same `BigDecimal` the general path builds, reached without cloning either operand out of the heap (a `BigDecimal` clone allocates a `BigInt`). Measured in *instructions retired* rather than seconds, since the machine was at load 100 throughout: `acc + (i * 4) / 2` over 100k iterations is 3.20G → 2.85G, **-11%**, reproducible within 1.2% across runs, while an all-integer loop with no decimal in it moves 0.02% — the control. |
+| **An exact pair skips the shape probes** | The numeric hook asked six questions before reaching the decimal path — is either operand a list, a range, a class instance, a `null`, a `String`, a `Float` — each a thread-local heap borrow, and all six answer no for the `Integer`/`BigDecimal` pair a numeric loop delegates on every operator (`sample` put `as_list` and `as_instance` alone at 245 of 4 954 samples). Two handle probes now hand an exact pair straight to the decimal path; a decline falls through to the untouched general path, so it skips work and decides nothing. Same instrument: the same `acc + (i * 4) / 2` loop is 2.76G → 2.35G, **-14.9%**, against an A/A control of the one binary against itself that spreads 0.08%, and an all-integer loop that moves +0.1%. |
 | **Groovy print semantics** | `println`/`print` lower to a registered builtin that formats values Groovy-style (`true`/`false`, `3.0`, `null`), rather than the VM's shell-flavoured `PrintLn`. |
 
 ---

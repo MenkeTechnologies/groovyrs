@@ -226,68 +226,74 @@ println(x)   // =&gt; null</code></pre>
         </article>
         <article class="doc-entry" id="doc-literals-and-literal-forms-9">
           <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-9">#</a> <code>1.5d</code></h3>
-          <pre><code class="lang-groovy">&lt;digits&gt;.&lt;digits&gt; d|D|f|F</code></pre>
-          <p>A `d`/`f`-suffixed literal — an IEEE double (`Value::Float`). This is the only literal form that is *not* a `BigDecimal`. The `instanceof` table classifies by value shape rather than by literal form, so groovyrs answers `1.5d instanceof BigDecimal` true and `1.5 instanceof BigDecimal` false — Apache Groovy answers the opposite for both.</p>
+          <pre><code class="lang-groovy">&lt;digits&gt;.&lt;digits&gt; d|D</code></pre>
+          <p>A `d`-suffixed literal — an IEEE double, `java.lang.Double`. With the `f` form below, one of the two literal shapes that is *not* a `BigDecimal`, and the only one that reaches fusevm's native floating ops.</p>
           <pre><code class="lang-groovy">println(1.5d / 0.0d)   // =&gt; Infinity</code></pre>
         </article>
         <article class="doc-entry" id="doc-literals-and-literal-forms-10">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-10">#</a> <code>2.5e7</code></h3>
-          <pre><code class="lang-groovy">&lt;digits&gt;[.&lt;digits&gt;]e[+|-]&lt;digits&gt;</code></pre>
-          <p>An exponent literal. The exponent makes the literal a decimal with or without a fractional part, and the result is a `BigDecimal` unless a `d`/`f` suffix follows.</p>
-          <pre><code class="lang-groovy">println(2.5e7)   // =&gt; 2.5E+7</code></pre>
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-10">#</a> <code>1.5f</code></h3>
+          <pre><code class="lang-groovy">&lt;digits&gt;.&lt;digits&gt; f|F</code></pre>
+          <p>An `f`-suffixed literal — an IEEE single, `java.lang.Float`. A different type from `Double`: it renders through `Float.toString` (24 significant bits) and hashes `floatToIntBits`. It has no arithmetic of its own — Groovy widens a `Float` to a `double` before every operator runs, so `0.1f + 0.1f` is the *Double* `0.20000000298023224` rather than `0.2`.</p>
+          <pre><code class="lang-groovy">println(0.1f + 0.1f)   // =&gt; 0.20000000298023224</code></pre>
         </article>
         <article class="doc-entry" id="doc-literals-and-literal-forms-11">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-11">#</a> <code>'text'</code></h3>
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-11">#</a> <code>2.5e7</code></h3>
+          <pre><code class="lang-groovy">&lt;digits&gt;[.&lt;digits&gt;]e[+|-]&lt;digits&gt;</code></pre>
+          <p>An exponent literal. The exponent makes the literal a decimal with or without a fractional part, and the result is a `BigDecimal` unless a `d` (`Double`) or `f` (`Float`) suffix follows.</p>
+          <pre><code class="lang-groovy">println(2.5e7)   // =&gt; 2.5E+7</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-12">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-12">#</a> <code>'text'</code></h3>
           <pre><code class="lang-groovy">'…'</code></pre>
           <p>A single-quoted String — inert text. Backslash escapes are decoded, but `$` never interpolates.</p>
           <pre><code class="lang-groovy">println('a$b')   // =&gt; a$b</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-12">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-12">#</a> <code>"text"</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-13">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-13">#</a> <code>"text"</code></h3>
           <pre><code class="lang-groovy">"… $name … ${ expr } …"</code></pre>
           <p>A double-quoted String. With no placeholder it lexes as a plain String; with one it becomes a GString whose parts render through `toString()` at runtime (`host::GSTRING`). `$name` takes a dotted *property* path only, so `"$n.toString()"` reads the property `n.toString` and leaves `()` as text.</p>
           <pre><code class="lang-groovy">def n = 5
 println("n=$n and ${n + 1}")   // =&gt; n=5 and 6</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-13">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-13">#</a> <code>~/pattern/</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-14">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-14">#</a> <code>~/pattern/</code></h3>
           <pre><code class="lang-groovy">~/…/</code></pre>
           <p>A regex literal — a pattern handle built by `host::GREGEX`. Only `\/` is special inside the delimiters; every other backslash escape passes through to the pattern. Modeled far enough to drive a `switch` label, whose `isCase` is a *full* match.</p>
           <pre><code class="lang-groovy">switch ("abc") { case ~/a.c/: println("m"); break }   // =&gt; m</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-14">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-14">#</a> <code>[a, b]</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-15">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-15">#</a> <code>[a, b]</code></h3>
           <pre><code class="lang-groovy">[expr, …]</code></pre>
           <p>A list literal. Lists are `Value::Array` and print with Groovy's `[1, 2, 3]` rendering.</p>
           <pre><code class="lang-groovy">println([1, 2, 3])   // =&gt; [1, 2, 3]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-15">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-15">#</a> <code>[]</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-16">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-16">#</a> <code>[]</code></h3>
           <pre><code class="lang-groovy">[]</code></pre>
           <p>The empty list. Falsy under Groovy truth, so `if ([])` does not run.</p>
           <pre><code class="lang-groovy">if (![]) println("empty")   // =&gt; empty</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-16">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-16">#</a> <code>[k: v]</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-17">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-17">#</a> <code>[k: v]</code></h3>
           <pre><code class="lang-groovy">[key: expr, …] | [(expr): expr, …]</code></pre>
           <p>A map literal, built by `host::GMAKE_MAP` into an insertion-ordered map. A bare identifier key is the string of its own name; parenthesise the key to compute it.</p>
           <pre><code class="lang-groovy">println([a: 1, b: 2])   // =&gt; [a:1, b:2]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-17">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-17">#</a> <code>[:]</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-18">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-18">#</a> <code>[:]</code></h3>
           <pre><code class="lang-groovy">[:]</code></pre>
           <p>The empty map — the form that distinguishes an empty map from the empty list `[]`.</p>
           <pre><code class="lang-groovy">println([:].isEmpty())   // =&gt; true</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-18">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-18">#</a> <code>{ a, b -&gt; … }</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-19">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-19">#</a> <code>{ a, b -&gt; … }</code></h3>
           <pre><code class="lang-groovy">{ param, … -&gt; body }</code></pre>
           <p>A closure literal with an explicit parameter list, including the zero-parameter form `{ -&gt; … }`. It lowers to a subroutine region plus a runtime closure handle and captures the enclosing script bindings.</p>
           <pre><code class="lang-groovy">def add = { a, b -&gt; a + b }
 println(add(2, 3))   // =&gt; 5</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-19">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-19">#</a> <code>{ it }</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-20">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-20">#</a> <code>{ it }</code></h3>
           <pre><code class="lang-groovy">{ body }</code></pre>
           <p>A closure literal with no parameter list: Groovy supplies the single implicit parameter `it`.</p>
           <pre><code class="lang-groovy">println([1, 2, 3].collect { it * 2 })   // =&gt; [2, 4, 6]</code></pre>
@@ -1687,14 +1693,14 @@ println(1.5 instanceof BigDecimal)   // =&gt; true then false</code></pre>
         <article class="doc-entry" id="doc-type-names-12">
           <h3><a class="doc-anchor" href="#doc-type-names-12">#</a> <code>Float</code></h3>
           <pre><code class="lang-groovy">value instanceof Float</code></pre>
-          <p>True for an IEEE double value — groovyrs has one IEEE width.</p>
-          <pre><code class="lang-groovy">println(1.5d instanceof Float)   // =&gt; true</code></pre>
+          <p>True for a `java.lang.Float` — an `f`-suffixed literal, `as Float`, `floatValue()`, or the `float` overload `java.lang.Math` resolves to. `Float` and `Double` are siblings, so neither is `instanceof` the other.</p>
+          <pre><code class="lang-groovy">println(1.5f instanceof Float)   // =&gt; true</code></pre>
         </article>
         <article class="doc-entry" id="doc-type-names-13">
           <h3><a class="doc-anchor" href="#doc-type-names-13">#</a> <code>BigInteger</code></h3>
           <pre><code class="lang-groovy">value instanceof BigInteger</code></pre>
-          <p>True for an IEEE double value. groovyrs models no arbitrary-precision integer, so this name resolves with the other floating types rather than with `Integer` — Apache Groovy answers false for a double.</p>
-          <pre><code class="lang-groovy">println(1.5d instanceof BigInteger)   // =&gt; true</code></pre>
+          <p>True for a `java.math.BigInteger` — a `G`-suffixed literal, an integer literal past `Long`, or an overflowing integer `**`. A distinct type from `BigDecimal`, so a decimal answers false.</p>
+          <pre><code class="lang-groovy">println(5G instanceof BigInteger)   // =&gt; true</code></pre>
         </article>
         <article class="doc-entry" id="doc-type-names-14">
           <h3><a class="doc-anchor" href="#doc-type-names-14">#</a> <code>Number</code></h3>

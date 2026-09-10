@@ -14510,7 +14510,15 @@ fn as_num(v: &Value) -> Option<f64> {
         Value::Int(n) => Some(*n as f64),
         Value::Float(f) => Some(*f),
         Value::Bool(b) => Some(*b as i64 as f64),
-        _ => as_dec(v).map(|d| decimal::to_f64(&d)),
+        // A `Float` is a `Number`, so `<=>` orders it against every other one —
+        // through `doubleValue()`, like every Groovy comparison. Without this it
+        // was not a number here at all and `natural_order` fell through to
+        // comparing RENDERED FORMS, which put `-2.5f` above `-0.125` (the string
+        // `"-2.5"` sorts after `"-0.125"`) and `3.0f` below `2147483647`.
+        _ => match as_float_handle(v) {
+            Some(f) => Some(f64::from(f)),
+            None => as_dec(v).map(|d| decimal::to_f64(&d)),
+        },
     }
 }
 

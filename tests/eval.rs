@@ -7588,3 +7588,32 @@ println((0.0f) ? "T" : "F")
          F\n"
     );
 }
+
+#[test]
+fn a_float_orders_against_every_other_number() {
+    // `<=>` reaches `natural_order`, which asks `as_num` first and falls through
+    // to comparing RENDERED FORMS when it declines. A `Float` that was not a
+    // number there put `-2.5f` above `-0.125` (the string `"-2.5"` sorts after
+    // `"-0.125"`) and `3.0f` below `2147483647` — while `>` on the same pair,
+    // which goes through the operator hook instead, answered correctly. Found by
+    // the `floats` fuzz mode on its first run.
+    let src = r#"
+println("A " + (-0.125 <=> -2.5f) + " " + (-0.125 > -2.5f))
+println("B " + (3.0f <=> 2147483647) + " " + (3.0f > 2147483647))
+println("C " + (-7 <=> -2.5f) + " " + (-7 > -2.5f))
+println("D " + (3G <=> 3.0f) + " " + (3G > 3.0f))
+println("E " + (1.5f <=> 1.5d) + " " + (0.1f <=> 0.1d))
+println("F " + [3.0f, 1.5f, 2.5].sort() + " " + [3.0f, 1.5f, 2.5].max())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "A 1 true\n\
+         B -1 false\n\
+         C -1 false\n\
+         D 0 false\n\
+         E 0 1\n\
+         F [1.5, 2.5, 3.0] 3.0\n"
+    );
+}

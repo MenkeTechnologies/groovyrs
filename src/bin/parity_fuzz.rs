@@ -122,6 +122,7 @@ enum Mode {
     StrOps,
     ListOps,
     SafeNav,
+    Floats,
     Mixed,
 }
 
@@ -152,6 +153,7 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::StrOps => "strops",
         Mode::ListOps => "listops",
         Mode::SafeNav => "safenav",
+        Mode::Floats => "floats",
         Mode::Mixed => "mixed",
     }
 }
@@ -183,6 +185,7 @@ fn mode_from(s: &str) -> Option<Mode> {
         "strops" => Mode::StrOps,
         "listops" => Mode::ListOps,
         "safenav" => Mode::SafeNav,
+        "floats" => Mode::Floats,
         "mixed" => Mode::Mixed,
         _ => return None,
     })
@@ -1217,6 +1220,116 @@ fn gen_numeric(rng: &mut Rng) -> Vec<String> {
     out
 }
 
+/// Operands for the `floats` mode: one of every class `java.lang.Math`'s
+/// overload resolution can land on, plus the magnitudes where 24-bit precision
+/// and 53-bit precision give different digits.
+///
+/// `16777217` is the smallest `int` a `float` cannot hold; `2147483647` is
+/// `Integer.MAX_VALUE`, which a `float` rounds up past itself. Both are here
+/// because the whole point of the `float` overload is that it LOSES digits the
+/// double keeps, and an operand that survives the narrowing proves nothing.
+const FLOAT_OPERANDS: &[&str] = &[
+    "1.5f",
+    "-2.5f",
+    "0.1f",
+    "3.0f",
+    "1",
+    "-7",
+    "16777217",
+    "2147483647",
+    "100L",
+    "3G",
+    "2.5",
+    "-0.125",
+    "1.0d",
+    "0.1d",
+];
+
+/// A `java.lang.Float` program. Zero occurrences of `f`-suffixed literals,
+/// `floatValue()`, `as Float` and the `Float` statics in the whole generated
+/// corpus before this mode: the counting sweep over 10 400 dumped programs found
+/// `\.floatValue`, `as Float` and `Float\.` at exactly 0, and `Math.max`/`min`
+/// only ever with the two operands the `numeric` mode picks — never with the
+/// class PAIRS that decide which of Java's four overloads answers.
+///
+/// What that hid is the whole type. Groovy's `Float` is not a `Double`: it
+/// renders through `Float.toString` (`0.1f` and `0.1d` print the same, but
+/// `Math.max(2147483647, 2.5)` prints `2.1474836E9` where the double prints
+/// `2.147483647E9`), it names `java.lang.Float`, it hashes its 32 bits, and it
+/// widens to a `double` in every operator — so `0.1f + 0.1f` is
+/// `0.20000000298023224` and not `0.2`. Each of those is a place two runtimes
+/// can disagree while printing plausible digits.
+fn gen_floats(rng: &mut Rng) -> Vec<String> {
+    let a = *pick(rng, FLOAT_OPERANDS);
+    let b = *pick(rng, FLOAT_OPERANDS);
+    let mut out = vec![format!("def a = {a}"), format!("def b = {b}")];
+    match rng.below(4) {
+        // Overload resolution. Which of `max(int,int)`, `max(long,long)`,
+        // `max(float,float)` and `max(double,double)` answers is decided by BOTH
+        // arguments' classes, so the result's class is printed beside its value —
+        // picking the wrong overload usually prints the right digits.
+        0 => {
+            for m in ["Math.max(a, b)", "Math.min(a, b)", "Math.abs(a)"] {
+                out.push(format!(
+                    "try {{ def r = {m}; println(\"{m} = \" + r + \" \" + r.getClass().name) }} \
+                     catch (e) {{ println(\"{m} ! \" + e.getClass().simpleName) }}"
+                ));
+            }
+        }
+        // Arithmetic. Every operator widens a `Float` to a `double` first, so the
+        // addends' 24-bit rounding is visible in a 53-bit result.
+        1 => {
+            for op in ["+", "-", "*", "/", "%"] {
+                out.push(format!(
+                    "try {{ def r = a {op} b; println(\"{op} \" + r + \" \" + r.getClass().name) }} \
+                     catch (e) {{ println(\"{op} \" + e.getClass().simpleName) }}"
+                ));
+            }
+            out.push(
+                "try { def r = -a; println(\"neg \" + r + \" \" + r.getClass().name) } \
+                 catch (e) { println(\"neg \" + e.getClass().simpleName) }"
+                    .to_string(),
+            );
+        }
+        // The conversions in and out. `as Double` re-reads the rendering where
+        // `doubleValue()` widens the bits, which is two different answers for the
+        // same value.
+        2 => {
+            for m in [
+                "a as Float",
+                "a as Double",
+                "a.floatValue()",
+                "a.doubleValue()",
+                "a.intValue()",
+                "a as BigDecimal",
+                "a.toString()",
+            ] {
+                out.push(format!(
+                    "try {{ def r = ({m}); println(\"{m} = \" + r + \" \" + r.getClass().name) }} \
+                     catch (e) {{ println(\"{m} ! \" + e.getClass().simpleName) }}"
+                ));
+            }
+        }
+        // Identity and ordering: rendering, equality, hashing and the collection
+        // membership all of them decide.
+        _ => {
+            out.push("println(\"str \" + a + \" \" + \"$a\" + \" \" + [a])".to_string());
+            out.push("println(\"eq \" + (a == b) + \" \" + a.equals(b))".to_string());
+            out.push("println(\"cmp \" + (a <=> b) + \" \" + (a > b))".to_string());
+            out.push("println(\"hash \" + (a.hashCode() == b.hashCode()))".to_string());
+            out.push("println(\"set \" + ([a, b] as Set).size())".to_string());
+            out.push(
+                "println(\"is \" + (a instanceof Float) + (a instanceof Double) \
+                 + (a instanceof Number))"
+                    .to_string(),
+            );
+            out.push("println(\"truth \" + (a ? 1 : 0))".to_string());
+            out.push("println(\"cls \" + a.getClass().name)".to_string());
+        }
+    }
+    out
+}
+
 /// A `switch` / `do`-`while` / labeled-jump program. Fall-through is deliberate
 /// (a section only sometimes ends in `break`), and the labeled jumps target both
 /// the inner and the outer loop, since binding a label to the wrong frame is the
@@ -2056,6 +2169,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::StrOps,
                 Mode::ListOps,
                 Mode::SafeNav,
+                Mode::Floats,
             ],
         )
     } else {
@@ -2072,6 +2186,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
         Mode::SwitchExpr => gen_switch_expr(&mut rng),
         Mode::Regex => gen_regex(&mut rng),
         Mode::Numeric => gen_numeric(&mut rng),
+        Mode::Floats => gen_floats(&mut rng),
         Mode::Asserts => gen_asserts(&mut rng),
         Mode::ModZero => gen_mod_zero(&mut rng),
         Mode::Gdk => gen_gdk(&mut rng),
@@ -2117,6 +2232,7 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         | Mode::StrOps
                         | Mode::ListOps
                         | Mode::SafeNav
+                        | Mode::Floats
                         | Mode::Mixed => unreachable!(),
                     };
                     println_of(expr)
@@ -2588,7 +2704,7 @@ fn parse_args() -> Args {
                     mode = m;
                 } else {
                     eprintln!(
-                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|faults|switch|asserts|modzero|gdk|conversions|classes|ranges|aliasing|views|switchexpr|regex|numeric|mixed)"
+                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|faults|switch|asserts|modzero|gdk|conversions|classes|ranges|aliasing|views|switchexpr|regex|numeric|strops|listops|safenav|floats|mixed)"
                     );
                     std::process::exit(2);
                 }
@@ -2599,7 +2715,7 @@ fn parse_args() -> Args {
                      options:\n  \
                      -c, --count N        cases to run (default 1000)\n  \
                      -s, --seed N         base seed (default 1)\n  \
-                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|views|switchexpr|\n                       regex|numeric|strops|listops|safenav|mixed\n                       (default mixed)\n  \
+                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|views|switchexpr|\n                       regex|numeric|strops|listops|safenav|floats|\n                       mixed\n                       (default mixed)\n  \
                      -j, --jobs N         parallel workers (default = cores)\n  \
                      --once               replay a single --seed, minimize, dump both sides\n  \
                      --dump               print --count generated programs and exit\n  \

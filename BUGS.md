@@ -1218,6 +1218,18 @@ infinite loop on both sides.
   reference identity) for the string/number/boolean operands modeled here.
   Cross-type comparisons that Groovy would coerce (`"5" == 5 → false`) are not
   yet distinguished — both sides compare by their printed form.
+- **Collection membership uses `==`'s numeric equality, where Java's is TYPED.**
+  Groovy's `==` on two numbers compares their values across classes (`1.0d ==
+  1.0f` and `1 == 1.0G` are both true), but `Set`/`List` membership runs
+  `Object.equals`, which is false between two different wrapper classes whatever
+  the values. groovyrs decides both with `values_equal`, so the collections take
+  the numeric answer: `[1, 1.0G] as Set` keeps ONE element where Groovy keeps
+  two, `[1.0d, 1.0f] as Set` likewise, and `[1.0d].contains(1.0f)` /
+  `[1.0d].indexOf(1.0f)` / `1.0f in [1.0d]` all answer as though the two were
+  the same element. The `Float` pair is the same divergence as the
+  `Integer`/`BigInteger` pair, which predates it — no numeric type here carries
+  the typed `equals` a collection needs, and the `Set` index entry below depends
+  on `values_equal` being the membership rule.
 - **A `GString` whose expression is a closure is not deferred.** `"${-> x}"` is
   a *lazy* `GString` in Groovy: the closure is called at render time, so
   `def x = 1; def s = "${-> x}"; x = 2; s.toString()` is `2`. groovyrs renders

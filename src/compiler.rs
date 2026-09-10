@@ -2724,6 +2724,15 @@ impl Compiler {
                 let c = self.b.add_constant(Value::float(*f));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
             }
+            // An `f`-suffixed literal is a `java.lang.Float`, which rides a host
+            // handle: fusevm's one floating type is the 64-bit `Value::Float`,
+            // and that is Groovy's `Double`. The bit pattern travels as the
+            // integer constant the builtin re-reads.
+            Expr::Single(f) => {
+                self.b
+                    .emit(Op::LoadInt(i64::from(f.to_bits())), self.cur_line);
+                self.emit_call_builtin(crate::host::GFLOAT, 1, self.cur_line)?;
+            }
             // The sequence a `for-in` walks: the host materialises the value's
             // iteration elements once, before the loop.
             Expr::Iterable(inner) => {
@@ -3440,12 +3449,15 @@ impl Compiler {
             }
             // `Long.valueOf(5)` / `Long.parseLong("5")` name the type outright,
             // so their result is a `Long` however small it is.
-            Expr::MethodCall { recv, method, .. } => {
+            Expr::MethodCall {
+                recv, method, args, ..
+            } => {
                 matches!(
                     method.as_str(),
                     "longValue" | "toLong" | "currentTimeMillis"
                 ) || (matches!(&**recv, Expr::Var(v) if v == "Long")
                     && matches!(method.as_str(), "valueOf" | "parseLong"))
+                    || self.math_yields_long(recv, method, args)
             }
             // A call to a callable whose every return is statically a `Long`.
             Expr::Call { name, .. } => self.wide_returns.contains(name),
@@ -3455,6 +3467,38 @@ impl Compiler {
             Expr::Cast { ty, .. } => matches!(ty.as_str(), "long" | "Long" | "BigInteger"),
             _ => false,
         }
+    }
+
+    /// Does this `Math.max`/`min`/`abs` call resolve to the `long` overload?
+    ///
+    /// `java.lang.Math` declares `max(int,int)`, `max(long,long)`,
+    /// `max(float,float)` and `max(double,double)`; the host picks between them
+    /// from the arguments' runtime classes (see `math_overload`), and the `long`
+    /// one answers a `java.lang.Long`. The host cannot SAY so — `4L` and `4` are
+    /// the one `Value::Int` — so, as everywhere else in this file, the width
+    /// travels statically: a call the compiler can see resolves to `long` makes
+    /// its result wide, and `getClass()` on it emits `GCLASS_LONG`.
+    ///
+    /// The `long` overload is picked exactly when every argument is integral and
+    /// at least one is a `Long`. `bit_operand_is_object` is the existing test for
+    /// "not an integral machine value" — it is true of a `BigDecimal`, a
+    /// `BigInteger` and a `d`/`f` literal, each of which pulls the resolution to
+    /// `float` or `double`. An argument whose class the compiler cannot see (a
+    /// plain `def` name) reads as integral, which is the same conservative
+    /// residue `call_width_mask` documents: `GCLASS_LONG` re-checks the value and
+    /// declines on anything that is not a `Value::Int`.
+    fn math_yields_long(&self, recv: &Expr, method: &str, args: &[Expr]) -> bool {
+        if !matches!(recv, Expr::Var(v) if v == "Math") {
+            return false;
+        }
+        let arity_ok = match method {
+            "abs" => args.len() == 1,
+            "max" | "min" => args.len() == 2,
+            _ => return false,
+        };
+        arity_ok
+            && args.iter().all(|a| !self.bit_operand_is_object(a))
+            && args.iter().any(|a| self.is_wide(a))
     }
 
     /// Sign-extend the low 32 bits of the value on top of the stack — the
@@ -3589,7 +3633,7 @@ impl Compiler {
             // answered `2147483647` where Groovy refuses the operands outright
             // (`UnsupportedOperationException`). Routing it to the builtin is
             // what lets that refusal happen.
-            Expr::Float(_) => true,
+            Expr::Float(_) | Expr::Single(_) => true,
             Expr::Var(name) => self.obj_vars.contains(name),
             Expr::Recorded { inner, .. } => self.bit_operand_is_object(inner),
             Expr::Unary { rhs, .. } => self.bit_operand_is_object(rhs),
@@ -4421,6 +4465,7 @@ fn free_in_expr(e: &Expr, bound: &HashSet<String>, cx: &mut FreeCtx) {
         Expr::InstanceOf { value, .. } => free_in_expr(value, bound, cx),
         Expr::Int(..)
         | Expr::Float(_)
+        | Expr::Single(_)
         | Expr::Dec(_)
         | Expr::BigInt(_)
         | Expr::Str(_)
@@ -4729,6 +4774,7 @@ fn expr_any(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         Expr::Regex(_)
         | Expr::Int(..)
         | Expr::Float(_)
+        | Expr::Single(_)
         | Expr::Dec(_)
         | Expr::BigInt(_)
         | Expr::Str(_)

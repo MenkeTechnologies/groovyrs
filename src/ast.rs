@@ -355,8 +355,13 @@ pub enum IntWidth {
 pub enum Expr {
     /// An integer literal and the Java width it carries (see [`IntWidth`]).
     Int(i64, IntWidth),
-    /// A `d`/`f`-suffixed decimal literal: an IEEE double.
+    /// A `d`/`D`-suffixed decimal literal: an IEEE double.
     Float(f64),
+    /// An `f`/`F`-suffixed decimal literal: an IEEE single — `java.lang.Float`,
+    /// which is a different Groovy type from `Double` (`1.1f.getClass()` names
+    /// it, `1.1f instanceof Double` is false) even though every operator widens
+    /// one to a `double` before running.
+    Single(f32),
     /// An unsuffixed decimal literal — a `java.math.BigDecimal`, held as its
     /// exact source text (see [`crate::decimal`]).
     Dec(String),

@@ -2246,6 +2246,10 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Float(f))
             }
+            Tok::Single(f) => {
+                self.advance();
+                Ok(Expr::Single(f))
+            }
             Tok::Dec(text) => {
                 self.advance();
                 Ok(Expr::Dec(text))
@@ -2966,7 +2970,9 @@ fn unrecorded(e: &Expr) -> &Expr {
 /// [`Parser::for_in`] drop the character branch from the walk.
 fn literal_number(e: &Expr) -> Option<()> {
     match e {
-        Expr::Int(..) | Expr::Float(_) | Expr::Dec(_) | Expr::BigInt(_) => Some(()),
+        Expr::Int(..) | Expr::Float(_) | Expr::Single(_) | Expr::Dec(_) | Expr::BigInt(_) => {
+            Some(())
+        }
         Expr::Unary { op: UnOp::Neg, rhs } => literal_number(rhs),
         _ => None,
     }
@@ -3020,6 +3026,7 @@ fn expr_text(e: &Expr) -> String {
     match unrecorded(e) {
         Expr::Int(n, _) => n.to_string(),
         Expr::Float(f) => crate::decimal::format_double(*f),
+        Expr::Single(f) => crate::decimal::format_float(*f),
         Expr::Dec(text) | Expr::BigInt(text) => text.clone(),
         // A `String` constant renders unquoted here, unlike the power form.
         Expr::Str(s) => s.clone(),

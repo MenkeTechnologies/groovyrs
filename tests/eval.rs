@@ -7449,3 +7449,142 @@ t("2G ** 3G", { 2G ** 3G })
          2G ** 3G = 8 java.math.BigInteger\n"
     );
 }
+
+#[test]
+fn maths_overload_is_chosen_by_both_arguments_classes() {
+    // `java.lang.Math` declares `max(int,int)`, `max(long,long)`,
+    // `max(float,float)` and `max(double,double)` and nothing else, so a
+    // `BigDecimal` or `BigInteger` argument is coerced to whichever of those
+    // Groovy scores closest — over BOTH parameters, which is why no
+    // per-argument rule reproduces the table (`Math.abs(2.5)` is a `Double`
+    // while `Math.max(1, 2.5)` is a `Float`). Every line measured against
+    // Groovy 5.1.1 on JVM 26.0.2.1.
+    //
+    // `getClass()` is written at the call site rather than on a value passed
+    // through a helper, because a `Long` result is a `Long` only by the
+    // compiler's static width — `4L` and `4` are the one runtime value, and the
+    // width does not survive being handed to a closure parameter.
+    let src = r#"
+println("max(Int,Int) " + Math.max(3, 4) + " " + Math.max(3, 4).getClass().getName())
+println("max(Int,Long) " + Math.max(3, 4L) + " " + Math.max(3, 4L).getClass().getName())
+println("max(Long,Long) " + Math.max(3L, 4L) + " " + Math.max(3L, 4L).getClass().getName())
+println("max(Int,BigInt) " + Math.max(3, 4G) + " " + Math.max(3, 4G).getClass().getName())
+println("max(Long,BigInt) " + Math.max(3L, 4G) + " " + Math.max(3L, 4G).getClass().getName())
+println("max(Int,BigDec) " + Math.max(1, 2.5) + " " + Math.max(1, 2.5).getClass().getName())
+println("max(Long,BigDec) " + Math.max(3L, 2.5) + " " + Math.max(3L, 2.5).getClass().getName())
+println("max(BigInt,BigDec) " + Math.max(1G, 2.5) + " " + Math.max(1G, 2.5).getClass().getName())
+println("max(BigDec,BigDec) " + Math.max(2.5, 2.5) + " " + Math.max(2.5, 2.5).getClass().getName())
+println("max(BigDec,Double) " + Math.max(2.5, 2.5d) + " " + Math.max(2.5, 2.5d).getClass().getName())
+println("max(Float,Float) " + Math.max(1.5f, 2.5f) + " " + Math.max(1.5f, 2.5f).getClass().getName())
+println("max(Float,Double) " + Math.max(1.5f, 2.5d) + " " + Math.max(1.5f, 2.5d).getClass().getName())
+println("min(Int,BigDec) " + Math.min(2147483647, 2.5) + " " + Math.min(2147483647, 2.5).getClass().getName())
+println("abs(Int) " + Math.abs(-3) + " " + Math.abs(-3).getClass().getName())
+println("abs(Long) " + Math.abs(-3L) + " " + Math.abs(-3L).getClass().getName())
+println("abs(BigInt) " + Math.abs(-3G) + " " + Math.abs(-3G).getClass().getName())
+println("abs(BigDec) " + Math.abs(-2.5) + " " + Math.abs(-2.5).getClass().getName())
+println("abs(Float) " + Math.abs(-1.5f) + " " + Math.abs(-1.5f).getClass().getName())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "max(Int,Int) 4 java.lang.Integer\n\
+         max(Int,Long) 4 java.lang.Long\n\
+         max(Long,Long) 4 java.lang.Long\n\
+         max(Int,BigInt) 4 java.lang.Integer\n\
+         max(Long,BigInt) 4.0 java.lang.Float\n\
+         max(Int,BigDec) 2.5 java.lang.Float\n\
+         max(Long,BigDec) 3.0 java.lang.Float\n\
+         max(BigInt,BigDec) 2.5 java.lang.Double\n\
+         max(BigDec,BigDec) 2.5 java.lang.Double\n\
+         max(BigDec,Double) 2.5 java.lang.Double\n\
+         max(Float,Float) 2.5 java.lang.Float\n\
+         max(Float,Double) 2.5 java.lang.Double\n\
+         min(Int,BigDec) 2.5 java.lang.Float\n\
+         abs(Int) 3 java.lang.Integer\n\
+         abs(Long) 3 java.lang.Long\n\
+         abs(BigInt) 3 java.lang.Integer\n\
+         abs(BigDec) 2.5 java.lang.Double\n\
+         abs(Float) 1.5 java.lang.Float\n"
+    );
+}
+
+#[test]
+fn a_float_keeps_24_bits_where_the_double_keeps_53() {
+    // The whole reason `java.lang.Float` has to exist as its own type here: the
+    // `float` overload ROUNDS, and the rounded value prints differently. Reading
+    // `Math.max(2147483647, 2.5)` as the double it widens to answers
+    // `2.147483647E9` — plausible digits, wrong ones.
+    let src = r#"
+println(Math.max(2147483647, 2.5))
+println(Math.max(16777217, 2.5))
+println(Math.max(2147483647, 2.5d))
+println(0.1f + 0.1f)
+println(0.1d + 0.1d)
+println(1.1f)
+println(1.1f.doubleValue())
+println(1.1f as Double)
+println(1.1f as BigDecimal)
+println(3.7f as Integer)
+println(Float.MIN_VALUE + " " + Float.MAX_VALUE)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "2.1474836E9\n\
+         1.6777216E7\n\
+         2.147483647E9\n\
+         0.20000000298023224\n\
+         0.2\n\
+         1.1\n\
+         1.100000023841858\n\
+         1.1\n\
+         1.1\n\
+         3\n\
+         1.4E-45 3.4028235E38\n"
+    );
+}
+
+#[test]
+fn a_float_is_its_own_type_but_widens_in_every_operator() {
+    // `Float` and `Double` are siblings — neither `instanceof` the other — and a
+    // `Float` hashes its 32 bits. But Groovy has no float arithmetic: every
+    // operator promotes to `double`, so only unary minus answers a `Float`.
+    let src = r#"
+def t(String label, Closure c) {
+  def r = c(); println(label + " = " + r + " " + r.getClass().getName())
+}
+t("lit", { 1.5f })
+t("neg", { -1.5f })
+t("add", { 1.5f + 1 })
+t("div", { 1.5f / 2 })
+t("concat", { "" + 1.5f })
+println(1.5f instanceof Float)
+println(1.5f instanceof Double)
+println(1.5f instanceof Number)
+println(1.5f == 1.5)
+println((1.5f).equals(1.5f))
+println((1.5f).equals(1.5d))
+println(1.5f.hashCode())
+println((0.0f) ? "T" : "F")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "lit = 1.5 java.lang.Float\n\
+         neg = -1.5 java.lang.Float\n\
+         add = 2.5 java.lang.Double\n\
+         div = 0.75 java.lang.Double\n\
+         concat = 1.5 java.lang.String\n\
+         true\n\
+         false\n\
+         true\n\
+         true\n\
+         true\n\
+         false\n\
+         1069547520\n\
+         F\n"
+    );
+}

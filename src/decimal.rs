@@ -803,7 +803,16 @@ pub fn format_double(f: f64) -> String {
         1 => nearest_two_digits(f).unwrap_or((digits, exponent)),
         _ => java_tie_break(f, &digits, exponent).unwrap_or((digits, exponent)),
     };
-    let body = if (-3..7).contains(&exponent) {
+    format!("{sign}{}", java_fp_layout(&digits, exponent))
+}
+
+/// Lay out already-selected significant digits the way `Double.toString` and
+/// `Float.toString` both do: plain notation while the leading digit's decimal
+/// exponent is in `-3..7`, computerized scientific notation outside it, and
+/// always at least one digit each side of the point. The two renderings differ
+/// only in which digits they select, never in how they are laid out.
+fn java_fp_layout(digits: &str, exponent: i64) -> String {
+    if (-3..7).contains(&exponent) {
         if exponent >= 0 {
             let split = exponent as usize + 1;
             let integral = if digits.len() >= split {
@@ -819,8 +828,7 @@ pub fn format_double(f: f64) -> String {
     } else {
         let fraction = digits.get(1..).filter(|s| !s.is_empty()).unwrap_or("0");
         format!("{}.{fraction}E{exponent}", &digits[..1])
-    };
-    format!("{sign}{body}")
+    }
 }
 
 /// Re-round `f` to the digit count Rust chose, **half to even**, which is how
@@ -876,6 +884,83 @@ fn nearest_two_digits(f: f64) -> Option<(String, i64)> {
     // rounds to `0.10`), so its padded form is the nearest two-digit decimal and
     // substituting would print the padding twice.
     (digits.len() > 1).then(|| (digits.to_string(), exponent))
+}
+
+/// Render an IEEE **single** exactly as `java.lang.Float.toString` — the same
+/// rules [`format_double`] implements, applied at 24-bit precision.
+///
+/// The distinction is not cosmetic: Groovy's `Math.max(2147483647, 2.5)` picks
+/// Java's `float` overload, and the value it answers prints `2.1474836E9`. Read
+/// as the `double` it widens to, the very same number prints `2.147483647E9`.
+///
+/// The digit selection is `{:e}` on the `f32` — Rust's shortest round-tripping
+/// form, which is JDK 19+'s rule (JDK-4511638) — then Java's two-significant-
+/// digit minimum, then the shared [`java_fp_layout`].
+pub fn format_float(f: f32) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f < 0.0 { "-Infinity" } else { "Infinity" }.to_string();
+    }
+    if f == 0.0 {
+        return if f.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
+    }
+    let sci = format!("{f:e}");
+    let (mantissa, exponent) = sci
+        .split_once('e')
+        .expect("`{:e}` always emits an exponent");
+    let exponent: i64 = exponent.parse().unwrap_or(0);
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", mantissa),
+    };
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    // `Float.toString`, like `Double.toString`, wants at least TWO significant
+    // digits. Rust stops at the shortest round-tripping form, which can be one
+    // (`1e0` for `1.0f`), and the padded `10` is the nearest two-digit decimal
+    // only when rounding `f` to two digits lands back on it — the same
+    // qualification [`nearest_two_digits`] makes for the double, restated at
+    // `f32` precision because the round-trip check has to be the `f32` one.
+    let (digits, exponent) = match digits.len() {
+        1 => nearest_two_digits_f32(f).unwrap_or((digits, exponent)),
+        _ => java_tie_break_f32(f, &digits, exponent).unwrap_or((digits, exponent)),
+    };
+    format!("{sign}{}", java_fp_layout(&digits, exponent))
+}
+
+/// [`java_tie_break`] at `f32` precision: re-round to the digit count Rust chose,
+/// **half to even**, which is how `Float.toString` breaks a tie between two
+/// equidistant decimals of that length and how Rust's `{:e}` does not.
+fn java_tie_break_f32(f: f32, digits: &str, exponent: i64) -> Option<(String, i64)> {
+    let scale = digits.len() as i64 - 1 - exponent;
+    let rounded = BigDecimal::from_f32(f)?.with_scale_round(scale, RoundingMode::HalfEven);
+    if to_f32(&rounded) != f {
+        return None;
+    }
+    let (unscaled, scale) = rounded.as_bigint_and_exponent();
+    let out = unscaled.abs().to_string();
+    let exponent = out.len() as i64 - 1 - scale;
+    let out = out.trim_end_matches('0');
+    Some((if out.is_empty() { "0" } else { out }.to_string(), exponent))
+}
+
+/// [`nearest_two_digits`] at `f32` precision.
+fn nearest_two_digits_f32(f: f32) -> Option<(String, i64)> {
+    let rounded = BigDecimal::from_f32(f)?.with_prec(2);
+    if to_f32(&rounded) != f {
+        return None;
+    }
+    let (unscaled, scale) = rounded.as_bigint_and_exponent();
+    let digits = unscaled.abs().to_string();
+    let exponent = digits.len() as i64 - 1 - scale;
+    let digits = digits.trim_end_matches('0');
+    (digits.len() > 1).then(|| (digits.to_string(), exponent))
+}
+
+/// The `f32` a `BigDecimal` names, for the round-trip checks above.
+fn to_f32(d: &BigDecimal) -> f32 {
+    d.to_f32().unwrap_or(f32::NAN)
 }
 
 /// `java.math.BigInteger.hashCode()`: fold the magnitude's 32-bit words

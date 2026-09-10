@@ -412,6 +412,13 @@ pub const GCALL_SPREAD: u16 = 773;
 /// its own.
 pub const GUSE: u16 = 774;
 
+/// Builtin id for an `f`/`F`-suffixed decimal literal. Pops the literal's `f32`
+/// bits (as an integer, the shape a `Chunk` constant can carry) and pushes the
+/// `java.lang.Float` handle for them, interned so a literal inside a loop
+/// allocates once. `1.1f` cannot ride as a `Value::Float` — that is a
+/// `java.lang.Double`, a different Groovy type with a different `toString`.
+pub const GFLOAT: u16 = 775;
+
 /// The call depth at which groovyrs raises `java.lang.StackOverflowError`.
 ///
 /// Groovy's depth is the JVM's: whatever fits in the thread's `-Xss`. Measured
@@ -471,6 +478,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GSUPER_CTOR, b_super_ctor);
     vm.register_builtin(GINSTANCEOF, b_instanceof);
     vm.register_builtin(GDEC, b_dec);
+    vm.register_builtin(GFLOAT, b_float);
     vm.register_builtin(GTRUTH, b_truth);
     vm.register_builtin(GTRUTH_KEEP, b_truth_keep);
     vm.register_builtin(GSTRING, b_gstring);
@@ -943,7 +951,7 @@ fn raise_missing_method_wide(
 /// `Number`, and `true & 1` raises `MissingMethodException` naming
 /// `java.lang.Boolean`.
 fn is_number(v: &Value) -> bool {
-    matches!(v, Value::Int(_) | Value::Float(_)) || is_dec_handle(v)
+    matches!(v, Value::Int(_) | Value::Float(_)) || is_dec_handle(v) || as_float_handle(v).is_some()
 }
 
 /// Is `v` an `Integer`/`Long`/`BigInteger` — a number whose bits Java will
@@ -1190,6 +1198,7 @@ fn java_class_name(v: &Value) -> String {
         // plain-list arm claims it.
         _ if array_elem(v).is_some() => return array_elem(v).unwrap().array_class(),
         _ if as_list_raw(v).is_some() => "java.util.ArrayList",
+        _ if as_float_handle(v).is_some() => "java.lang.Float",
         _ if as_bigint(v).is_some() => "java.math.BigInteger",
         _ if is_dec_handle(v) => "java.math.BigDecimal",
         // A `withDefault` view names its own wrapper class, not the class of the
@@ -1659,6 +1668,17 @@ enum HeapObj {
     /// *type*, which decides `getClass()`, `instanceof`, and whether an
     /// arithmetic result stays a `BigInteger` or widens to a `BigDecimal`.
     BigInt(BigDecimal),
+    /// A `java.lang.Float`. fusevm has one floating type (`Value::Float`, an
+    /// `f64`), and Groovy has two: a `Float` renders through `Float.toString`
+    /// (`Math.max(2147483647, 2.5)` is `2.1474836E9`, not `2.147483647E9`),
+    /// names `java.lang.Float`, and hashes its 32-bit bits. Held as an `f32` so
+    /// the narrowing is the storage rather than a flag beside a wider value.
+    ///
+    /// It is inert in arithmetic: Groovy has no `FloatMath`, so every operator
+    /// widens a `Float` to a `double` before running (`0.1f + 0.1f` is the
+    /// *Double* `0.20000000298023224`). [`numeric_hook`] does that widening once,
+    /// at its head, so no operator arm below has to know the variant exists.
+    Flt(f32),
     /// A `~/…/` pattern — Groovy's `java.util.regex.Pattern`. Held on the heap
     /// because it is a value a `switch` label (and a variable) can carry, and
     /// because its *source* is what `toString` prints. The compiled form lives
@@ -2549,6 +2569,49 @@ fn scale0_i64(v: &Value) -> Option<i64> {
     }
 }
 
+/// Run a GDK method on the `double` a `Float` widens to and NARROW the answer
+/// back to a `Float` — the shape of the operations Groovy answers at the
+/// receiver's own type (`abs`, `trunc`, `round(int)`). Anything the delegate
+/// answers that is not a number is passed through unchanged, so a raise stays a
+/// raise.
+fn narrow_delegate(vm: &mut VM, f: f32, method: &str, args: &[Value]) -> Value {
+    let out = dispatch_method(vm, &Value::float(f64::from(f)), method, args);
+    match out {
+        Value::Float(d) => float_value(d as f32),
+        Value::Int(n) => float_value(n as f32),
+        other => other,
+    }
+}
+
+/// A `Float` or a `Double`, chosen by the `float`/`Float` in a method or type
+/// name. Every conversion entry point comes in both spellings and reads its
+/// source the same way — only the width of the result differs, so the two arms
+/// would otherwise be copied at each of the six sites.
+fn float_or_double(name: &str, f: f64) -> Value {
+    if name.contains("loat") {
+        float_value(f as f32)
+    } else {
+        Value::float(f)
+    }
+}
+
+/// Allocate a `java.lang.Float`. See [`HeapObj::Flt`].
+fn float_value(f: f32) -> Value {
+    heap_push(HeapObj::Flt(f))
+}
+
+/// The `f32` behind a `java.lang.Float` handle, or `None` for anything else —
+/// including a `Value::Float`, which is a `java.lang.Double`.
+fn as_float_handle(v: &Value) -> Option<f32> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Flt(f)) => Some(*f),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 /// Put a `BigDecimal` on the heap and return its handle.
 fn dec_value(d: BigDecimal) -> Value {
     heap_push(HeapObj::Dec(d))
@@ -2571,6 +2634,22 @@ fn b_dec(vm: &mut VM, _argc: u8) -> Value {
     let value = dec_value(decimal::parse(&text).unwrap_or_else(|| decimal::from_i64(0)));
     if let Value::Obj(id) = value {
         DEC_LITERALS.with(|d| d.borrow_mut().insert(text, id));
+    }
+    value
+}
+
+/// `GFLOAT`: pop an `f`-suffixed literal's `f32` bit pattern and return the
+/// `java.lang.Float` handle for it. Interned by those bits, like [`b_dec`], so a
+/// literal in a loop body allocates once rather than per evaluation.
+fn b_float(vm: &mut VM, _argc: u8) -> Value {
+    let bits = vm.stack.pop().unwrap_or(Value::Undef).to_int() as u32;
+    let key = format!("{bits}f");
+    if let Some(id) = DEC_LITERALS.with(|d| d.borrow().get(&key).copied()) {
+        return Value::Obj(id);
+    }
+    let value = float_value(f32::from_bits(bits));
+    if let Value::Obj(id) = value {
+        DEC_LITERALS.with(|d| d.borrow_mut().insert(key, id));
     }
     value
 }
@@ -2621,6 +2700,12 @@ fn groovy_truthy(vm: &mut VM, v: &Value) -> bool {
         Value::Obj(_) => {
             if let Some(d) = as_dec(v) {
                 return !decimal::cmp(&d, &decimal::from_i64(0)).is_eq();
+            }
+            // A `Float` is truthy exactly when it is non-zero, like the double
+            // it widens to. Without this the generic "any handle is true"
+            // fallback below would make `0.0f` truthy.
+            if let Some(f) = as_float_handle(v) {
+                return f != 0.0;
             }
             // A list is a collection: true when it holds anything. This has to
             // come before the generic "any handle is true" fallback, or an empty
@@ -5273,6 +5358,13 @@ fn object_hash_code(v: &Value) -> i32 {
     if let Some(d) = as_dec(v) {
         return decimal::big_decimal_hash(&d);
     }
+    // `Float.hashCode()` is `floatToIntBits` — the 32-bit pattern itself, where
+    // `Double.hashCode` folds a 64-bit one. A canonical NaN and the `-0.0f`/
+    // `0.0f` split come out of the bits for free, exactly as they do for the
+    // double.
+    if let Some(f) = as_float_handle(v) {
+        return (if f.is_nan() { f32::NAN } else { f }).to_bits() as i32;
+    }
     match v {
         Value::Str(s) => string_hash(s),
         Value::Int(n) => integer_hash(*n),
@@ -5358,8 +5450,17 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         // is a separate type and satisfies neither the other's test.
         "BigDecimal" => as_dec(value).is_some() && as_bigint(value).is_none(),
         "BigInteger" => as_bigint(value).is_some(),
-        "Double" | "Float" => matches!(value, Value::Float(_)),
-        "Number" => matches!(value, Value::Int(_) | Value::Float(_)) || as_dec(value).is_some(),
+        // A `Float` and a `Double` are siblings, neither a subtype of the other,
+        // so the test is on the exact type: `Math.max(1, 2.5) instanceof Double`
+        // is false. A `d`/`f`-suffixed *literal* is a `Double` here whichever
+        // suffix it carries — see the `Float` entry in BUGS.md.
+        "Double" => matches!(value, Value::Float(_)),
+        "Float" => as_float_handle(value).is_some(),
+        "Number" => {
+            matches!(value, Value::Int(_) | Value::Float(_))
+                || as_dec(value).is_some()
+                || as_float_handle(value).is_some()
+        }
         "Boolean" => matches!(value, Value::Bool(_)),
         // A Groovy `Range` *is* a `java.util.List`, so it answers both.
         // `instanceof` is a type test, not a read: a stale window is still a
@@ -8435,8 +8536,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 None => raise_number_format(vm, t),
             }
         }
+        // `toFloat` answers a `java.lang.Float`, `toDouble` a `Double`. Both
+        // parse by `Double.parseDouble`'s grammar; only the width of what comes
+        // back differs.
         (Value::Str(s), "toDouble" | "toFloat") => match parse_java_double(s) {
-            Some(f) => Value::float(f),
+            Some(f) => float_or_double(method, f),
             None => raise_number_format(vm, s.trim()),
         },
         // `String.toBigDecimal()` is `new BigDecimal(text.trim())`, whose
@@ -9673,7 +9777,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // is `-1294967296`.
         (Value::Int(n), "toInteger" | "intValue") => Value::int(i64::from(*n as i32)),
         (Value::Int(n), "toDouble" | "doubleValue" | "toFloat" | "floatValue") => {
-            Value::float(*n as f64)
+            float_or_double(method, *n as f64)
         }
         (Value::Int(n), "toBigDecimal") => dec_value(BigDecimal::from(*n)),
         (Value::Int(n), "toBigInteger") => bigint_value(BigDecimal::from(*n)),
@@ -9718,7 +9822,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (Value::Float(f), "toInteger" | "intValue") => Value::int(java_double_to_int(*f)),
         (Value::Float(f), "toLong" | "longValue") => Value::int(*f as i64),
         (Value::Float(f), "toDouble" | "doubleValue" | "toFloat" | "floatValue") => {
-            Value::float(*f)
+            float_or_double(method, *f)
         }
         // `Double.compareTo` is `Double.compare`, so NaN is greater than
         // everything and `-0.0` below `+0.0`.
@@ -9746,6 +9850,49 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         }),
         (Value::Float(f), "isNaN") => Value::bool(f.is_nan()),
         (Value::Float(f), "isInfinite") => Value::bool(f.is_infinite()),
+
+        // ── Float (host heap) ──
+        //
+        // A `Float` answers `java.lang.Number`'s whole surface, and all but a
+        // handful of those answers are the double's: `f.intValue()` narrows the
+        // same value `(int)` would, `f.compareTo(x)` orders the same way. So the
+        // arm resolves the receiver to the double it widens to and re-dispatches,
+        // and lists only the methods where the 32-bit type is the answer.
+        _ if as_float_handle(recv).is_some() => {
+            let f = as_float_handle(recv).unwrap();
+            match method {
+                // `Float.toString`, not `Double.toString` — the whole point of
+                // the type.
+                "toString" if args.is_empty() => Value::str(decimal::format_float(f)),
+                // `Float.hashCode()` is `floatToIntBits`, a 32-bit pattern; the
+                // double's is a fold of its 64-bit one, so they disagree for
+                // every value.
+                "hashCode" => Value::int(i64::from(f.to_bits() as i32)),
+                // Already a `Float`; widening and re-narrowing would be a
+                // round trip through a wider type for no change.
+                "floatValue" | "toFloat" => recv.clone(),
+                // The GDK operations that answer the receiver's OWN type:
+                // `(-5.5f).abs()`, `5.55f.round(1)` and `5.55f.trunc()` are all
+                // `Float`. `round()` with no argument is not one of them — it
+                // answers an `int` for a `Float` where it answers a `long` for a
+                // `Double`, which is what the delegated `Double` arm already
+                // does here.
+                "abs" if args.is_empty() => float_value(f.abs()),
+                "round" if args.len() == 1 => narrow_delegate(vm, f, method, args),
+                "trunc" => narrow_delegate(vm, f, method, args),
+                // `Float.equals(Object)` is typed and compares `floatToIntBits`,
+                // so `NaN` equals itself and `0.0f` does not equal `-0.0f` —
+                // `Double.equals`'s rule at 32 bits. Only another `Float` can be
+                // equal: `f.equals(2.5d)` is false.
+                "equals" => Value::bool(match args.first().and_then(as_float_handle) {
+                    Some(o) => {
+                        (f.is_nan() && o.is_nan()) || (!f.is_nan() && f.to_bits() == o.to_bits())
+                    }
+                    None => false,
+                }),
+                _ => dispatch_method(vm, &Value::float(f64::from(f)), method, args),
+            }
+        }
 
         // ── BigDecimal (host heap) ──
         _ if as_dec(recv).is_some() => {
@@ -9878,7 +10025,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 )),
                 "power" => power_of(vm, recv, args.first().unwrap_or(&Value::Undef), false),
                 "doubleValue" | "toDouble" | "floatValue" | "toFloat" => {
-                    Value::float(decimal::to_f64(&d))
+                    float_or_double(method, decimal::to_f64(&d))
                 }
                 // The mask and shift *methods*: `7G.and(3G)` is `7G & 3G`, and
                 // `1G.shiftLeft(3)` is Java's own name for `1G << 3`. All of
@@ -10502,7 +10649,11 @@ fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
         }
         // `BigDecimal.pow` takes an `int` exponent in 0..999999999 and reports
         // anything else as an invalid operation.
-        if !integral && !matches!(base, Value::Float(_)) && e > 999_999_999 {
+        if !integral
+            && !matches!(base, Value::Float(_))
+            && as_float_handle(&base).is_none()
+            && e > 999_999_999
+        {
             raise(vm, "ArithmeticException", "Invalid operation");
             return Value::Undef;
         }
@@ -10527,7 +10678,11 @@ fn power_of(vm: &mut VM, base: &Value, exp: &Value, wide: bool) -> Value {
         };
     }
     // A `double`/`float` base never takes an exact path — `Number.power` runs it
-    // on IEEE doubles and narrows the answer, so `2.0d ** 3` is the *Integer* 8.
+    // on IEEE doubles and narrows the answer, so `2.0d ** 3` is the *Integer* 8,
+    // and so is `2.0f ** 3`: a `Float` widens to `double` here as everywhere.
+    if let Some(f) = as_float_handle(&base) {
+        return power_double(f64::from(f), e as f64);
+    }
     if let Value::Float(f) = base {
         return power_double(f, e as f64);
     }
@@ -10948,6 +11103,10 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
                 },
                 Value::Float(f) => *f as i64,
                 Value::Int(n) => *n,
+                // A `Float` truncates toward zero at its own width, so
+                // `3.7f as Integer` is `3` — the `as_dec` arm below would have
+                // refused a handle it does not recognise.
+                _ if as_float_handle(&v).is_some() => as_float_handle(&v).unwrap() as i64,
                 _ => match as_dec(&v) {
                     Some(d) => decimal::truncate_to_i64(&d),
                     // Not a number and not a parseable `String`, so there is no
@@ -10961,15 +11120,27 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
             // int` is `-2147483648` and `300 as byte` is `44`.
             Value::int(narrow_to(&ty, n))
         }
+        // `as float` / `as Float` lands on `java.lang.Float`, `as double` /
+        // `as Double` on `Double`; the reading of the source value is the same.
         "double" | "Double" | "float" | "Float" => match &v {
             Value::Str(s) => match parse_java_double(s) {
-                Some(f) => Value::float(f),
+                Some(f) => float_or_double(&ty_simple, f),
                 None => raise_number_format(vm, s.trim()),
             },
-            Value::Int(_) | Value::Float(_) => Value::float(as_f64(&v)),
+            Value::Int(_) | Value::Float(_) => float_or_double(&ty_simple, as_f64(&v)),
             // `as_f64` answers `NaN` for everything it cannot read, so a list or
             // a `Boolean` used to cast to `NaN` rather than raising.
-            _ if as_dec(&v).is_some() => Value::float(as_f64(&v)),
+            // A `Float` widened by `as Double` is re-read from its `toString`,
+            // not from `doubleValue()`: `(1.1 as Float) as Double` is `1.1`,
+            // where `(1.1 as Float).doubleValue()` is `1.100000023841858`.
+            // Groovy's `castToNumber` builds the target from the source's
+            // rendering, so the eight digits `Float.toString` prints are all
+            // that survive. Both measured against Groovy 5.1.1 / JVM 26.0.2.1.
+            _ if as_float_handle(&v).is_some() => {
+                let text = decimal::format_float(as_float_handle(&v).unwrap());
+                float_or_double(&ty_simple, parse_java_double(&text).unwrap_or(f64::NAN))
+            }
+            _ if as_dec(&v).is_some() => float_or_double(&ty_simple, as_f64(&v)),
             _ => raise_cast(vm, &v, &ty_simple),
         },
         "BigDecimal" | "BigInteger" => {
@@ -10998,6 +11169,20 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
                 // A non-finite double renders as `Infinity`/`NaN`, which
                 // `BigDecimal`'s parser rejects character by character — the
                 // same `NumberFormatException` Groovy raises.
+                // A `Float` goes through `Float.toString` for the same reason a
+                // double goes through `Double.toString`: `1.1f as BigDecimal` is
+                // `1.1`, not the exact binary expansion
+                // `1.10000002384185791015625`.
+                _ if as_float_handle(&v).is_some() => {
+                    match decimal::parse_java(&decimal::format_float(as_float_handle(&v).unwrap()))
+                    {
+                        Ok(d) => carry(d),
+                        Err(msg) => {
+                            raise_opt(vm, "NumberFormatException", msg.as_deref());
+                            Value::Undef
+                        }
+                    }
+                }
                 Value::Float(f) if as_dec(&v).is_none() => {
                     match decimal::parse_java(&decimal::format_double(*f)) {
                         Ok(d) => carry(d),
@@ -11133,6 +11318,133 @@ fn math_int_arg(v: &Value) -> Option<i64> {
     as_i64(v)
 }
 
+/// The Groovy *class* of a `java.lang.Math` argument, as far as overload
+/// resolution cares. `wide` is the call site's static width bit — `1L` and `1`
+/// are the one `Value::Int`, and only the compiler knows which was written.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MathArg {
+    Int,
+    Long,
+    BigInt,
+    BigDec,
+    Flt,
+    Dbl,
+}
+
+/// The primitive `java.lang.Math` overload a call resolves to.
+#[derive(Clone, Copy, PartialEq)]
+enum MathPrim {
+    Int,
+    Long,
+    Flt,
+    Dbl,
+}
+
+fn math_arg_kind(v: &Value, wide: bool) -> MathArg {
+    if as_bigint(v).is_some() {
+        return MathArg::BigInt;
+    }
+    if is_dec_handle(v) {
+        return MathArg::BigDec;
+    }
+    if as_float_handle(v).is_some() {
+        return MathArg::Flt;
+    }
+    match v {
+        // Past `int` range the literal cannot have been an `Integer`, so the
+        // magnitude stands in for a width bit the compiler could not supply
+        // (`java_class_name` reads a `Value::Int` the same way).
+        Value::Int(n) => {
+            if wide || i32::try_from(*n).is_err() {
+                MathArg::Long
+            } else {
+                MathArg::Int
+            }
+        }
+        _ => MathArg::Dbl,
+    }
+}
+
+/// Which `Math.max`/`Math.min` overload Groovy's runtime picks for an argument
+/// pair — `max(int,int)`, `max(long,long)`, `max(float,float)`, or
+/// `max(double,double)`.
+///
+/// `java.lang.Math` declares those four and no more, so an argument that is not
+/// already one of them (a `BigInteger`, a `BigDecimal`) is coerced to whichever
+/// primitive Groovy's `MetaClassHelper` scores closest — and the score is a SUM
+/// over both parameters, so neither argument decides alone. That is why the
+/// table has entries no per-argument rule could produce:
+///
+/// * `Math.max(1, 2.5)` is the **float** `2.5`, while `Math.abs(2.5)` — the same
+///   `BigDecimal`, one argument — is the *double* `2.5`;
+/// * `Math.max(2147483647, 2.5)` is `2.1474836E9`, the `int` rounded to 24 bits
+///   of significand, not the exact `2.147483647E9` the double overload gives;
+/// * a `BigInteger` beside an `Integer` picks `int`, but beside a `Long` picks
+///   `float`.
+///
+/// Every one of the 21 unordered pairs below is a MEASURED answer from Groovy
+/// 5.1.1 on JVM 26.0.2.1 (`parity-scripts/probes.txt`), not a re-derivation of
+/// the distance formula: the formula is an implementation detail of a runtime
+/// groovyrs does not share, and the table it produces is the observable.
+fn math_overload(a: MathArg, b: MathArg) -> MathPrim {
+    use MathArg as A;
+    let (x, y) = if a <= b { (a, b) } else { (b, a) };
+    match (x, y) {
+        (A::Int, A::Int) | (A::Int, A::BigInt) | (A::BigInt, A::BigInt) => MathPrim::Int,
+        (A::Int, A::Long) | (A::Long, A::Long) => MathPrim::Long,
+        (A::Int, A::BigDec)
+        | (A::Int, A::Flt)
+        | (A::Long, A::BigInt)
+        | (A::Long, A::BigDec)
+        | (A::Long, A::Flt)
+        | (A::Flt, A::Flt) => MathPrim::Flt,
+        _ => MathPrim::Dbl,
+    }
+}
+
+/// The same question for the one-argument `Math.abs`, where there is no sum to
+/// take and the answer is the nearest overload to the argument's own class.
+/// A `BigDecimal` lands on `double` here — the pair rule's `float` needs a
+/// second argument pulling the sum toward it.
+fn math_abs_overload(a: MathArg) -> MathPrim {
+    match a {
+        MathArg::Int | MathArg::BigInt => MathPrim::Int,
+        MathArg::Long => MathPrim::Long,
+        MathArg::Flt => MathPrim::Flt,
+        MathArg::BigDec | MathArg::Dbl => MathPrim::Dbl,
+    }
+}
+
+/// The `float` a `java.lang.Math` argument arrives as when the resolved
+/// overload takes one. Java narrows through the argument's own `floatValue()`,
+/// which for every class in play is its `double` reading rounded once more to 24
+/// bits — so `Math.max(2147483647, 2.5)` sees `2.1474836E9`.
+fn math_f32_arg(v: &Value) -> f32 {
+    match as_float_handle(v) {
+        Some(f) => f,
+        None => as_f64(v) as f32,
+    }
+}
+
+/// `Math.max`/`Math.min` on two `float`s. IEEE, and Java's tie rules: a NaN
+/// operand wins, and `-0.0f` is below `0.0f`.
+fn java_extreme_f32(a: f32, b: f32, max: bool) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        return f32::NAN;
+    }
+    if a == 0.0 && b == 0.0 {
+        let negative = a.is_sign_negative() || b.is_sign_negative();
+        let both_negative = a.is_sign_negative() && b.is_sign_negative();
+        let pick_negative = if max { both_negative } else { negative };
+        return if pick_negative { -0.0 } else { 0.0 };
+    }
+    if max {
+        a.max(b)
+    } else {
+        a.min(b)
+    }
+}
+
 /// `GCLASSREF`: build a `java.lang.Class` handle for a statically named class.
 fn b_classref(vm: &mut VM, _argc: u8) -> Value {
     let name = vm
@@ -11220,17 +11532,47 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         // `Math.round` is half-up on a double and answers a `long`; every other
         // `Math` entry point is IEEE and answers a `double`.
         ("Math", "round") => Value::int(java_round(f0)),
-        ("Math", "abs") => match math_int_arg(&arg0) {
-            Some(n) => Value::int(abs_at_width(n)),
-            None => Value::float(f0.abs()),
-        },
+        ("Math", "abs") => {
+            let widths = call_widths();
+            match math_abs_overload(math_arg_kind(&arg0, widths & 2 != 0)) {
+                // The `int` and `long` overloads both wrap `Integer.MIN_VALUE`
+                // onto itself, which is what `abs_at_width` encodes.
+                MathPrim::Int | MathPrim::Long => match math_int_arg(&arg0) {
+                    Some(n) => Value::int(abs_at_width(n)),
+                    None => Value::float(f0.abs()),
+                },
+                MathPrim::Flt => float_value(math_f32_arg(&arg0).abs()),
+                MathPrim::Dbl => Value::float(f0.abs()),
+            }
+        }
         ("Math", "max" | "min") => {
-            let f1 = as_f64(args.get(1).unwrap_or(&Value::Undef));
-            let pick_max = method == "max";
             let arg1 = args.get(1).cloned().unwrap_or(Value::Undef);
-            match (math_int_arg(&arg0), math_int_arg(&arg1)) {
-                (Some(a), Some(b)) => Value::int(if pick_max { a.max(b) } else { a.min(b) }),
-                _ => Value::float(java_extreme_f64(f0, f1, pick_max)),
+            let f1 = as_f64(&arg1);
+            let pick_max = method == "max";
+            let widths = call_widths();
+            let kinds = (
+                math_arg_kind(&arg0, widths & 2 != 0),
+                math_arg_kind(&arg1, widths & 4 != 0),
+            );
+            match math_overload(kinds.0, kinds.1) {
+                MathPrim::Int | MathPrim::Long => {
+                    match (math_int_arg(&arg0), math_int_arg(&arg1)) {
+                        (Some(a), Some(b)) => {
+                            Value::int(if pick_max { a.max(b) } else { a.min(b) })
+                        }
+                        // An argument with no integer reading at all (a `null`,
+                        // a `Boolean`) never classified as `Int`/`Long` above,
+                        // so this is unreachable for a well-typed call; the
+                        // double answer keeps it total either way.
+                        _ => Value::float(java_extreme_f64(f0, f1, pick_max)),
+                    }
+                }
+                MathPrim::Flt => float_value(java_extreme_f32(
+                    math_f32_arg(&arg0),
+                    math_f32_arg(&arg1),
+                    pick_max,
+                )),
+                MathPrim::Dbl => Value::float(java_extreme_f64(f0, f1, pick_max)),
             }
         }
         ("Math", "sqrt") => Value::float(f0.sqrt()),
@@ -11422,10 +11764,20 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
                 None => Value::str(n.to_string()),
             }
         }
+        // `Double.valueOf(1.1f)` takes the `valueOf(double)` overload — the
+        // float WIDENS, so it is `1.100000023841858`, not the `1.1` that
+        // re-parsing `Float.toString` would give. Only a `String` argument is
+        // parsed; `parseDouble`/`parseFloat` take nothing else.
+        ("Double" | "Float", "valueOf") if !matches!(arg0, Value::Str(_)) => {
+            float_or_double(class, as_f64(&arg0))
+        }
         ("Double" | "Float", "parseDouble" | "parseFloat" | "valueOf") => {
             let text = groovy_str(&arg0);
             match parse_java_double(&text) {
-                Some(f) => Value::float(f),
+                // `Float.valueOf` and `Float.parseFloat` answer a `Float`; the
+                // `Double` spellings of both answer a `Double`. `Float.valueOf`
+                // is named on the CLASS, so the class decides, not the method.
+                Some(f) => float_or_double(class, f),
                 None => raise_number_format(vm, text.trim()),
             }
         }
@@ -11622,20 +11974,15 @@ fn static_field(class: &str, name: &str) -> Option<Value> {
         ("Short", "MIN_VALUE") => Value::int(i16::MIN as i64),
         ("Byte", "MAX_VALUE") => Value::int(i8::MAX as i64),
         ("Byte", "MIN_VALUE") => Value::int(i8::MIN as i64),
-        // `Float`'s constants are stored as the `double` nearest the text a
-        // `Float` *prints*, not as `f32::MAX as f64`. groovyrs has no
-        // `java.lang.Float` (an `f`-suffixed literal is a `double`, as
-        // `1.0f / 3.0f` being `0.3333333333333333` on both sides shows), so a
-        // widened `f32::MAX` would render `3.4028234663852886E38` where Groovy
-        // renders `3.4028235E38`. The two agree to within `f32` precision —
-        // they round to the same `float` — and only the printed form differs,
-        // so the printed form is what is kept.
-        ("Float", "MAX_VALUE") => Value::float(3.4028235e38),
-        ("Float", "MIN_VALUE") => Value::float(1.4e-45),
-        ("Float", "MIN_NORMAL") => Value::float(1.1754944e-38),
-        ("Float", "POSITIVE_INFINITY") => Value::float(f64::INFINITY),
-        ("Float", "NEGATIVE_INFINITY") => Value::float(f64::NEG_INFINITY),
-        ("Float", "NaN") => Value::float(f64::NAN),
+        // `java.lang.Float`'s constants are `float`s, so they render at 24-bit
+        // precision (`Float.MIN_VALUE` prints `1.4E-45`) and `getClass()` names
+        // `java.lang.Float`.
+        ("Float", "MAX_VALUE") => float_value(f32::MAX),
+        ("Float", "MIN_VALUE") => float_value(f32::from_bits(1)),
+        ("Float", "MIN_NORMAL") => float_value(f32::MIN_POSITIVE),
+        ("Float", "POSITIVE_INFINITY") => float_value(f32::INFINITY),
+        ("Float", "NEGATIVE_INFINITY") => float_value(f32::NEG_INFINITY),
+        ("Float", "NaN") => float_value(f32::NAN),
         ("Float", "SIZE") => Value::int(32),
         ("Float", "BYTES") => Value::int(4),
         ("Float", "MAX_EXPONENT") => Value::int(127),
@@ -11897,6 +12244,15 @@ fn format_one(vm: &mut VM, spec: &crate::format::Spec, arg: &Value) -> Option<St
             // A `double` keeps the IEEE path; every other Groovy decimal is an
             // exact `BigDecimal`. An integral type is refused outright.
             let (value, is_double) = match arg {
+                // A `Float` argument reaches `Formatter` through `doubleValue()`,
+                // so `%.20f` of `0.1f` is `0.10000000149011612000` — the widened
+                // double's digits, not the `0.1` that `%s` prints. Handled by
+                // recursing on that double so the NaN/Infinity wording and the
+                // `is_double` scale rule below are written once.
+                _ if as_float_handle(arg).is_some() => {
+                    let widened = Value::float(f64::from(as_float_handle(arg).unwrap()));
+                    return format_one(vm, spec, &widened);
+                }
                 Value::Float(f) => {
                     if f.is_nan() || f.is_infinite() {
                         let body = if f.is_nan() { "NaN" } else { "Infinity" };
@@ -13659,6 +14015,15 @@ fn print_args(vm: &mut VM, argc: u8, newline: bool) -> Value {
 fn b_div(vm: &mut VM, _argc: u8) -> Value {
     let b = vm.stack.pop().unwrap_or(Value::Undef);
     let a = vm.stack.pop().unwrap_or(Value::Undef);
+    // A `java.lang.Float` operand widens to a `double` before dividing, exactly
+    // as it does for every operator [`numeric_hook`] answers — `/` just reaches
+    // this builtin instead of the hook. Without the widening the handle fell
+    // past the `Value::Float` gate below and the decimal path refused it.
+    let widen = |v: &Value| match as_float_handle(v) {
+        Some(f) => Value::float(f64::from(f)),
+        None => v.clone(),
+    };
+    let (a, b) = (widen(&a), widen(&b));
     // User-class `/` overload: Groovy dispatches `a / b` as `a.div(b)`. `/` lowers
     // to this builtin (not the numeric hook), so a class `div` method is resolved
     // here, with the `&mut VM` this builtin already holds. A non-instance `a` (or
@@ -14164,7 +14529,12 @@ fn as_f64(v: &Value) -> f64 {
         Value::Int(n) => *n as f64,
         Value::Float(f) => *f,
         Value::Bool(b) => *b as i64 as f64,
-        _ => as_dec(v).map(|d| decimal::to_f64(&d)).unwrap_or(f64::NAN),
+        // A `Float` widens to the double it names — the same widening every
+        // Groovy operator applies to one.
+        _ => match as_float_handle(v) {
+            Some(f) => f64::from(f),
+            None => as_dec(v).map(|d| decimal::to_f64(&d)).unwrap_or(f64::NAN),
+        },
     }
 }
 
@@ -14268,6 +14638,12 @@ fn instance_default_str(v: &Value, inst: &Instance) -> String {
 /// fusevm's shell-flavoured `as_str_cow`): booleans as `true`/`false`, whole
 /// decimals with a trailing `.0`, `Undef`/`null` as `null`.
 pub fn groovy_str(v: &Value) -> String {
+    // A `Float` renders through `Float.toString` — 24-bit precision, so
+    // `Math.max(2147483647, 2.5)` prints `2.1474836E9` where the double it
+    // widens to would print `2.147483647E9`.
+    if let Some(f) = as_float_handle(v) {
+        return decimal::format_float(f);
+    }
     // A decimal handle renders through `BigDecimal.toString` — trailing zeros
     // kept, `E+n` form outside the plain-notation window.
     if let Some(d) = as_dec(v) {
@@ -14898,6 +15274,15 @@ fn instance_compare(a: &Value, b: &Value) -> Option<Result<i64, String>> {
 ///
 /// `/` never reaches here — it lowers to the [`GDIV`] builtin instead.
 pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
+    // Unary minus is the one operator that does NOT widen a `java.lang.Float`:
+    // Java's `-float` is a `float`, and Groovy's `NumberMath` follows it, so
+    // `(-1.5f).getClass()` is `java.lang.Float`. Every binary operator widens,
+    // at the gate further down.
+    if matches!(op, NumOp::Neg) {
+        if let Some(f) = as_float_handle(a) {
+            return Ok(float_value(-f));
+        }
+    }
     // A range takes part in an operator as the list it enumerates: `(1..3) + [9]`
     // concatenates and `(1..3) == [1, 2, 3]` is true, because Groovy's `Range`
     // is a `java.util.List`. Rewriting the operands here is what gives a range
@@ -14969,7 +15354,9 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // decimal path so `"1" == 1.0` answers the same way.
     if matches!(op, NumOp::Eq | NumOp::Ne) {
         let numeric = |v: &Value| {
-            matches!(v, Value::Int(_) | Value::Float(_) | Value::Bool(_)) || is_dec_handle(v)
+            matches!(v, Value::Int(_) | Value::Float(_) | Value::Bool(_))
+                || is_dec_handle(v)
+                || as_float_handle(v).is_some()
         };
         let mismatched = (matches!(a, Value::Str(_)) && numeric(b))
             || (matches!(b, Value::Str(_)) && numeric(a));
@@ -15020,6 +15407,32 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
                 return Ok(Value::Undef);
             }
         }
+    }
+    // A `java.lang.Float` operand WIDENS TO A DOUBLE before the arithmetic runs.
+    // Groovy has no float math: `NumberMath.getMath` maps `Float` to
+    // `FloatingPointMath`, whose operands are `doubleValue()`s, so `0.1f + 0.1f`
+    // is the *Double* `0.20000000298023224` and `Math.max(1, 2.5) == 2.5` is
+    // true. Rewriting the operands once here is what keeps every arm below —
+    // and `decimal_operator`, which would otherwise see an unknown handle and
+    // decline — unaware that the variant exists.
+    //
+    // It sits BELOW the refusal gates on purpose. Those gates name the operand's
+    // class in the message Groovy raises, and Groovy names the `Float`:
+    // `1.5f + true` reports `for class: java.lang.Float`, and `1.5f + null` the
+    // ambiguity on `java.lang.Float#plus`. Widening first renamed both.
+    //
+    // A STRING CONCATENATION is excluded for the same reason and one more: it is
+    // not arithmetic at all — it dispatches `toString` on the operand, so
+    // `"" + Math.max(1, 2.5)` is the `2.5` that `Float.toString` writes, and
+    // widening would print the double's digits instead.
+    let float_concat =
+        matches!(op, NumOp::Add) && (matches!(a, Value::Str(_)) || matches!(b, Value::Str(_)));
+    if !float_concat && (as_float_handle(a).is_some() || as_float_handle(b).is_some()) {
+        let widen = |v: &Value| match as_float_handle(v) {
+            Some(f) => Value::float(f64::from(f)),
+            None => v.clone(),
+        };
+        return numeric_hook(op, &widen(a), &widen(b));
     }
     // Decimal arithmetic. A `BigDecimal` is a host-heap handle, so fusevm sees a
     // non-numeric operand and delegates every `+`/`-`/`*`/`%`/`**`/comparison on

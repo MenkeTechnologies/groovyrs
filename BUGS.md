@@ -395,12 +395,19 @@ reported as parse or compile errors, never silently mis-run.
   `as Long` / `as Integer` keep the low 64 / 32 bits rather than answering zero:
   `12345678901234567890G as Long` is `-6101065172474983726`.
 
-  `Math`'s **other** two coercions are not modeled, both for want of a type:
-  a `BigDecimal` argument picks Java's `float` overload (`Math.max(2147483647,
-  2.5)` is the *float* `2.1474836E9`, where groovyrs answers the double
-  `2.147483647E9`), and a `Long` argument picks the `long` one (`Math.abs(100L)`
-  reports `java.lang.Long`, groovyrs `java.lang.Integer`). See the `Float` and
-  `Long` entries.
+  `Math`'s **other** two coercions are modeled now that `java.lang.Float` is.
+  `java.lang.Math` declares `max`/`min` at four widths and `abs` at four, and
+  Groovy's runtime picks between them by a distance summed over BOTH arguments —
+  so no per-argument rule reproduces the table: `Math.abs(2.5)` is a `Double`
+  while `Math.max(1, 2.5)` is a `Float`, and a `BigInteger` beside an `Integer`
+  picks `int` where beside a `Long` it picks `float`. All 21 unordered class
+  pairs are measured (Groovy 5.1.1 / JVM 26.0.2.1) and encoded in
+  `host::math_overload` rather than re-derived from the distance formula.
+
+  The `long` half rides the compiler's static width, like every other `Long` in
+  groovyrs: `Math.max(3L, 4L).getClass()` is `java.lang.Long`, but a value passed
+  through a closure parameter first has lost the width and reads as an
+  `Integer` — the residue the `Long` entry describes.
 - **The mask and shift operators refuse a `double` operand.** `1.0d | 3` is
   `UnsupportedOperationException: Cannot use or() on this number type:
   java.lang.Double with value: 1.0`, not the truncated `3` the native lowering
@@ -790,12 +797,6 @@ infinite loop on both sides.
   answers (`[class java.lang.Object]` for an untyped parameter, the declared
   class for a typed one) cannot be built. `maximumNumberOfParameters` is
   answered, since the count is what is kept.
-- **`Float.MAX_VALUE` / `Float.MIN_VALUE`.** groovyrs has no `java.lang.Float`,
-  so a 32-bit constant could only be answered as the `Double` nearest it —
-  `3.4028234663852886E38` where Groovy prints `3.4028235E38`. Answering the wrong
-  number is worse than not answering, so the read raises. Every `Double`,
-  `Integer`, `Long`, `Short`, `Byte` and `Math` constant *is* answered, including
-  `MIN_NORMAL`, `MAX_EXPONENT`/`MIN_EXPONENT` and `SIZE`/`BYTES`.
 - **A `GString` is a `String`.** An interpolated literal produces a plain
   `java.lang.String`, so `"$s".getClass()` reports `java.lang.String` where
   Groovy reports `org.codehaus.groovy.runtime.GStringImpl`.
@@ -1071,12 +1072,15 @@ infinite loop on both sides.
   A script doing millions of decimal operations in a loop grows memory for the
   length of the run; integer and `double` arithmetic are unaffected (they never
   touch the heap).
-- **`float`/`Float` is modeled as a `double`.** An `f`-suffixed literal parses to
-  an `f64`, so it prints and computes with `double` precision: `0.1f + 0.2f` is
-  `0.30000000000000004` where Groovy's `Float` prints `0.30000000447034836`. The
-  same absence makes `floatValue()` a no-op: `(16777217).floatValue()` keeps
-  every digit and prints `1.6777217E7` where Java rounds through `f32` and
-  prints `1.6777216E7`.
+- **A `Float` is a heap handle, so `float` arithmetic allocates.** `java.lang.Float`
+  is modeled (an `f`-suffixed literal, `as Float`, `floatValue()`, `Float.valueOf`,
+  `"…".toFloat()` and the `Math` `float` overload all produce one), but fusevm's
+  only floating type is the 64-bit `Value::Float`, which is Groovy's `Double` —
+  so a `Float` rides a handle the way a `BigDecimal` does. A literal is interned
+  by its bits, and every operator widens to a `double` before running, so a loop
+  over `f` literals allocates once rather than per iteration; but a loop that
+  *produces* `Float`s (repeated `Math.max` on a `BigDecimal` pair) takes a heap
+  slot per result, with the same absent collector as the decimal entry above.
 - **The transcendental `Math` functions can differ in the last bit.**
   `Math.sin`, `cos`, `tan`, `exp`, `log`, `log10` and `cbrt` call the platform's
   libm; the JVM's are fdlibm-derived (and intrinsified). Java specifies them
@@ -1262,8 +1266,7 @@ infinite loop on both sides.
   scale, `BigInteger`, `AbstractList`, `AbstractMap`, `AbstractSet`, `Map.Entry`,
   `IntRange`'s Cantor pairing and the other ranges' inherited `AbstractList`
   hash). What differs follows from types groovyrs does not model rather than
-  from the hashing: a `Float` literal is a `Double` here, so `(1.0f).hashCode()`
-  answers `Double`'s; a `GString` is a `String`; a map key is always a `String`,
+  from the hashing: a `GString` is a `String`; a map key is always a `String`,
   so `[(1): 'x'].hashCode()` hashes `"1"` rather than `1`; and a `Long` small
   enough to be an `Integer` is indistinguishable from one, so `(-1L).hashCode()`
   answers -1 where Java's `Long` folds the halves to 0. A value with no

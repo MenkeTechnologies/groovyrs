@@ -45,8 +45,13 @@ pub enum Tok {
     /// An integer literal and the Java width it carries — see
     /// [`crate::ast::IntWidth`], which the suffix and the magnitude decide.
     Int(i64, crate::ast::IntWidth),
-    /// A `d`/`f`-suffixed decimal literal: an IEEE double.
+    /// A `d`/`D`-suffixed decimal literal: an IEEE double.
     Float(f64),
+    /// An `f`/`F`-suffixed decimal literal: an IEEE **single**, `java.lang.Float`.
+    /// A separate token because Groovy's `Float` is a separate type from its
+    /// `Double` — it renders through `Float.toString` and `getClass()` names it —
+    /// even though every arithmetic operator widens one to a `double` first.
+    Single(f32),
     /// An unsuffixed (or `g`-suffixed) decimal literal, kept as its exact source
     /// text because it is a `java.math.BigDecimal` — the literal's own scale
     /// (`1.50` has two fraction digits, `2.5e7` a scale of -6) is part of the
@@ -314,6 +319,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             // is Groovy's default and what `1.50` / `2.5e7` mean.
             let num_end = i;
             let mut is_double = false;
+            let mut is_single = false;
             // An `L` suffix makes the literal a `Long` whatever its magnitude,
             // so `2000000000L + 2000000000L` is `4000000000` where the
             // unsuffixed form wraps to `-294967296`. A `G` suffix on an integer
@@ -330,6 +336,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 if matches!(bytes[i], b'f' | b'F' | b'd' | b'D') {
                     is_float = true;
                     is_double = true;
+                    // `f`/`F` is a `java.lang.Float`, a narrower type than the
+                    // `d`/`D` double — `1.1f` is not `1.1d`, and `0.1f + 0.1f`
+                    // is `0.20000000298023224` because the addends were rounded
+                    // to 24 bits first.
+                    is_single = matches!(bytes[i], b'f' | b'F');
                 }
                 if matches!(bytes[i], b'L' | b'l') {
                     width = crate::ast::IntWidth::Long;
@@ -355,7 +366,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     format!("groovyrs: bad decimal literal `{text}` on line {line}")
                 })?;
                 out.push(Token {
-                    kind: Tok::Float(v),
+                    kind: if is_single {
+                        Tok::Single(v as f32)
+                    } else {
+                        Tok::Float(v)
+                    },
                     line,
                     offset: tok_start,
                 });
@@ -727,6 +742,7 @@ fn ends_expression(t: &Tok) -> bool {
         Tok::Ident(_)
             | Tok::Int(..)
             | Tok::Float(_)
+            | Tok::Single(_)
             | Tok::Dec(_)
             | Tok::BigInt(_)
             | Tok::Str(_)

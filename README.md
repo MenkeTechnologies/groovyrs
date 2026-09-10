@@ -64,6 +64,16 @@ frontend over the shared engine. Highlights:
   declines to install a trace that stores a non-numeric value. That decision is
   inside the shared engine, so it is a fusevm-level ceiling on the frontend's
   non-numeric loops rather than something groovyrs lowers its way out of.
+
+  A second measurement of the same ceiling: an untraced loop keeps PAYING for the
+  trace it will never get. `acc + (i * 4) / 2` (`--tiers`:
+  `trace-eligible=false traced=false blacklisted=false`) spends 786 of its 4 211
+  `VM::run` samples in `lookup_trace_for_backward` — 19%, a hashed trace-cache
+  probe on every backward branch — while the all-integer loop beside it reports
+  `traced=true blacklisted=true` and stops probing. So the cost of a decimal
+  loop is not only the interpreter it stays in; it is the interpreter plus a
+  per-iteration lookup that cannot hit. Also fusevm's, and recorded here rather
+  than worked around.
 - **fusevm-hosted, no JVM** — no local `vm.rs` / `jit.rs`, no `.class` files, no
   `libjvm`. The same three-tier Cranelift engine that hosts zshrs, stryke,
   awkrs, elisp, ruby, python, php, node, and java runs Groovy too.

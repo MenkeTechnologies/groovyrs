@@ -7734,3 +7734,60 @@ def rB = b ** 40; println("2L ** 40 " + rB + " " + rB.getClass().getName())
          2L ** 40 1099511627776 java.lang.Long\n"
     );
 }
+
+#[test]
+fn a_map_reads_back_under_the_key_it_was_written_with() {
+    // Storage keys every map entry by the key's RENDERING (BUGS.md, "a map key
+    // is always a `String`), and the write used `groovy_str` while the read used
+    // fusevm's own `as_str_cow` — which renders a heap handle as its slot, not
+    // as its value. So `m[2.5] = 9; m[2.5]` stored under `2.5` and looked up
+    // under the handle's debug form, reading back `null`. Every key that rides a
+    // handle was affected: `BigDecimal`, `BigInteger`, `Boolean`, `null`, a list,
+    // and — the one that surfaced it — a `Float`.
+    let src = r#"
+def t(String l, Closure c) { def r = c(); println(l + " = " + r) }
+t("str", { def m = [:]; m["a"] = 1; m["a"] })
+t("int", { def m = [:]; m[7] = 2; m[7] })
+t("long", { def m = [:]; m[7L] = 3; m[7L] })
+t("double", { def m = [:]; m[2.5d] = 4; m[2.5d] })
+t("float", { def m = [:]; m[2.5f] = 5; m[2.5f] })
+t("bigdec", { def m = [:]; m[2.5] = 6; m[2.5] })
+t("bigint", { def m = [:]; m[3G] = 7; m[3G] })
+t("bool", { def m = [:]; m[true] = 8; m[true] })
+t("null", { def m = [:]; m[null] = 9; m[null] })
+t("list", { def m = [:]; m[[1, 2]] = 10; m[[1, 2]] })
+t("missing", { def m = [a: 1]; m["zz"] })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "str = 1\nint = 2\nlong = 3\ndouble = 4\nfloat = 5\n\
+         bigdec = 6\nbigint = 7\nbool = 8\nnull = 9\nlist = 10\nmissing = null\n"
+    );
+}
+
+#[test]
+fn a_with_default_closure_sees_the_key_as_written() {
+    // `[:].withDefault { it * 2 }[5]` is `10`. The closure was handed the `"5"`
+    // the entry is STORED under rather than the `5` the caller wrote, so `it * 2`
+    // repeated the string and answered `"55"`. Storage stays keyed by the
+    // rendering; only what the default sees changed.
+    let src = r#"
+def t(String l, Closure c) { def r = c(); println(l + " = " + r) }
+t("int key", { def m = [:].withDefault { it * 2 }; m[5] })
+t("str key", { def m = [:].withDefault { it * 2 }; m["a"] })
+t("get()", { def m = [:].withDefault { it * 2 }; m.get(5) })
+t("property", { def m = [:].withDefault { "d:" + it }; m.foo })
+t("stored", { def m = [:].withDefault { it * 2 }; m[5]; m.toString() })
+t("list key", { def m = [:].withDefault { it.getClass().getSimpleName() }; m[[1, 2]] })
+t("size", { def m = [:].withDefault { it * 2 }; m[5]; m.size() })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "int key = 10\nstr key = aa\nget() = 10\nproperty = d:foo\n\
+         stored = [5:10]\nlist key = ArrayList\nsize = 1\n"
+    );
+}

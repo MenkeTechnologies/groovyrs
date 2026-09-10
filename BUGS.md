@@ -1353,6 +1353,16 @@ infinite loop on both sides.
   its rendered form through every map construction site, not a change to the
   ordering itself. The same stringification is why `[1:'a']` and `['1':'a']` are
   one map here and two in Groovy.
+
+  What the stringification no longer costs is the READ. The subscript read used
+  fusevm's own `as_str_cow` where the write used `groovy_str`, and those two
+  disagree for every key that rides a heap handle — `as_str_cow` renders a slot,
+  not a value. So `m[2.5] = 9; m[2.5]` stored under `2.5`, looked it up under
+  the handle's debug form and answered `null`, and the same for a `BigInteger`,
+  `Boolean`, `null` and list key. Both spellings derive the key the same way
+  now. A `withDefault` closure is handed the key AS WRITTEN rather than the
+  string it is stored under, so `[:].withDefault { it * 2 }[5]` is `10` and not
+  the string `55`.
 - **A map's `keySet()`/`entrySet()`/`values()` answer a plain `List`, and a
   `TreeMap`'s range views a plain map.** The *contents* and their order are
   right; the view type is not modeled, so `getClass()` names

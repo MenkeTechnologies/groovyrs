@@ -5765,14 +5765,19 @@ fn b_index(vm: &mut VM, _argc: u8) -> Value {
 /// A missing-key read on a map built by `withDefault { … }`: run the stored
 /// closure with the key, store the result under it, and answer it. `null` for
 /// an ordinary map, which is what a missing key reads as.
-fn map_default(vm: &mut VM, map: &Value, key: &str) -> Value {
+fn map_default(vm: &mut VM, map: &Value, key: &str, subject: &Value) -> Value {
     let Value::Obj(id) = map else {
         return Value::Undef;
     };
     let Some(clo) = MAP_DEFAULTS.with(|m| m.borrow().get(id).cloned()) else {
         return Value::Undef;
     };
-    match invoke_closure(vm, &clo, &[Value::str(key.to_string())]) {
+    // The closure receives the KEY AS WRITTEN, not the string it is stored
+    // under: `[:].withDefault { it * 2 }[5]` is `10`, and passing the `"5"` that
+    // is the storage key made it the string `"55"`. Storage stays keyed by the
+    // rendering (BUGS.md's "a map key is always a `String`"); only what the
+    // default sees is the caller's own value.
+    match invoke_closure(vm, &clo, &[subject.clone()]) {
         Ok(v) => {
             omap_set(map, key.to_string(), v.clone());
             v
@@ -5831,10 +5836,16 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
         };
     }
     if is_omap(&recv) {
-        let k = index.as_str_cow().into_owned();
+        // The SAME key derivation the write uses (`groovy_str`, at the `putAt`
+        // arm below). fusevm's own `as_str_cow` renders a heap handle as its
+        // slot, not as its value, so `m[2.5] = 9; m[2.5]` stored under `2.5` and
+        // then looked up under the handle's debug form and read back `null`.
+        // Every map key here is a `String` (BUGS.md), so the two spellings have
+        // to agree on what that string is.
+        let k = groovy_str(&index);
         return match omap_get(&recv, &k).flatten() {
             Some(v) => v,
-            None => map_default(vm, &recv, &k),
+            None => map_default(vm, &recv, &k, &index),
         };
     }
     // Subscripting by a *collection* of indices — which is what a range
@@ -10300,7 +10311,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // stores it, on `get(k)` exactly as on `m[k]` — Groovy's
                 // `MapWithDefault` overrides `get`, and the subscript IS that
                 // `get`. Only the subscript reached the default here before.
-                None => map_default(vm, recv, &k),
+                None => map_default(vm, recv, &k, args.first().unwrap_or(&Value::Undef)),
             }
         }
         (_, "containsKey") if args.len() == 1 && is_omap(recv) => {
@@ -10481,7 +10492,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         // `[x:1].withDefault { 7 }.getOrDefault("nope", 99)` is
                         // `7` and leaves `[x:1, nope:7]` (measured). The
                         // supplied default only answers for an ordinary map.
-                        None if is_map_with_default(recv) => map_default(vm, recv, &k),
+                        None if is_map_with_default(recv) => {
+                            map_default(vm, recv, &k, &Value::str(k.clone()))
+                        }
                         None => args.get(1).cloned().unwrap_or(Value::Undef),
                     }
                 }
@@ -13866,7 +13879,7 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
         // `[x:1, y:7]`, because Groovy's property read on a map IS `get(key)`.
         return match found {
             Some(v) => v,
-            None => map_default(vm, recv, name),
+            None => map_default(vm, recv, name, &Value::str(name.to_string())),
         };
     }
     if let Value::Hash(h) = recv {

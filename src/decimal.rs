@@ -425,6 +425,11 @@ pub fn shift(left: bool, a: &BigDecimal, n: i64) -> Option<BigDecimal> {
     let x = integer_part(a)?;
     let left = if n < 0 { !left } else { left };
     let n = n.unsigned_abs();
+    // Zero never grows, whatever the distance: `0G >> -2147483648` is `0` where
+    // the same shift of a non-zero value overflows what a `BigInteger` can hold.
+    if x.is_zero() {
+        return Some(BigDecimal::from(x));
+    }
     // A shift wider than the value is zero (or -1 for a negative), and building
     // the intermediate for an absurd count would exhaust memory first.
     if left && n > MAX_SHIFT_BITS {

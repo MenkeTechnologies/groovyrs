@@ -10082,7 +10082,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 }
                 "leftShift" | "rightShift" | "shiftLeft" | "shiftRight" => {
                     let left = matches!(method, "leftShift" | "shiftLeft");
-                    match bigint_shift(left, recv, args.first().unwrap_or(&Value::Undef)) {
+                    match bigint_shift(vm, left, recv, args.first().unwrap_or(&Value::Undef)) {
                         Some(v) => v,
                         None => raise_operator_operand(
                             vm,
@@ -10841,7 +10841,7 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
             class: "java.lang.StringBuffer",
             text: format!("{s}{}", groovy_str(&rhs)),
         }),
-        _ => match bigint_shift(true, &lhs, &rhs) {
+        _ => match bigint_shift(vm, true, &lhs, &rhs) {
             Some(v) => v,
             None => match (plain_int(&lhs), shift_count(&rhs)) {
                 (Some(a), Some(b)) => java_shift("leftShift", wide, a, b),
@@ -11004,7 +11004,7 @@ fn b_shr(vm: &mut VM, _argc: u8) -> Value {
     if let Some(v) = shift_overload(vm, &lhs, &rhs, "rightShift") {
         return v;
     }
-    if let Some(v) = bigint_shift(false, &lhs, &rhs) {
+    if let Some(v) = bigint_shift(vm, false, &lhs, &rhs) {
         return v;
     }
     match (plain_int(&lhs), shift_count(&rhs)) {
@@ -11018,7 +11018,7 @@ fn b_shr(vm: &mut VM, _argc: u8) -> Value {
 /// 31-digit power of two and `12345678901234567890G << 2` keeps all 20 digits.
 /// `None` when the left operand is not a `BigInteger` (so the caller's own
 /// `Integer`/`Long` rules apply) or when the count is not an integer.
-fn bigint_shift(left: bool, lhs: &Value, rhs: &Value) -> Option<Value> {
+fn bigint_shift(vm: &mut VM, left: bool, lhs: &Value, rhs: &Value) -> Option<Value> {
     as_bigint(lhs)?;
     // The COUNT may itself be a `BigInteger`: `3G << 3G` is `24` and `7 << 3G`
     // is `56`. Reading only a machine integer here left both raising the
@@ -11028,7 +11028,26 @@ fn bigint_shift(left: bool, lhs: &Value, rhs: &Value) -> Option<Value> {
         Some(n) => n,
         None => decimal::to_i64(&as_bigint(rhs)?)?,
     };
-    decimal::shift(left, &as_exact_dec(lhs)?, n).map(bigint_value)
+    match decimal::shift(left, &as_exact_dec(lhs)?, n) {
+        Some(d) => Some(bigint_value(d)),
+        // The distance is fine; the RESULT is not. A `BigInteger` holds at most
+        // `Integer.MAX_VALUE` bits, and Java reports a shift past that as
+        // `ArithmeticException: BigInteger would overflow supported range` — the
+        // same wording `**` already raises for the same reason. Falling through
+        // to the caller's operand-shape raise reported
+        // `UnsupportedOperationException: Shift distance must be an integral
+        // type`, which is untrue of `-2147483648`. (groovyrs's own cap is lower
+        // than Java's, so a distance between the two refuses where Java would
+        // allocate gigabytes; the refusal it gives is now Java's.)
+        None => {
+            raise(
+                vm,
+                "ArithmeticException",
+                "BigInteger would overflow supported range",
+            );
+            Some(Value::Undef)
+        }
+    }
 }
 
 /// The shift COUNT as an `i64` when it is an integral value — a machine integer

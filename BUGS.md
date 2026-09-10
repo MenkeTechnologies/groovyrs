@@ -421,9 +421,17 @@ reported as parse or compile errors, never silently mis-run.
 - **The shifts read a `BigInteger` on either side.** `3G << 3G` is `24`,
   `7 << 3G` is `56`, and a `BigInteger` receiver keeps its type through `>>`
   (`(3G >> 1).getClass()` is `java.math.BigInteger`). A *fractional* distance is
-  still the `UnsupportedOperationException` Groovy raises. `>>` reaches the host
-  builtin through the same static test `&`/`|`/`^` use, with the same residue —
-  see the bitwise entry below.
+  still the `UnsupportedOperationException` Groovy raises. A shift whose RESULT
+  would exceed the `Integer.MAX_VALUE` bits a `BigInteger` holds is a different
+  refusal — `ArithmeticException: BigInteger would overflow supported range`, the
+  same wording `**` gives for the same reason — so `12345678901234567890G >>
+  -2147483648` and `1G << 2147483647` raise that and not the distance error,
+  which was untrue of an integral `-2147483648`. Zero never grows, so
+  `0G >> -2147483648` is `0`. groovyrs's own size cap is lower than Java's, so a
+  distance between the two refuses where Java would allocate gigabytes; the
+  refusal it gives is Java's. `>>` reaches the host builtin through the same
+  static test `&`/`|`/`^` use, with the same residue — see the bitwise entry
+  below.
 - **`mod` shifts a negative *remainder*, which is the floored modulus only for a
   positive modulus.** Groovy computes `remainder` and adds the modulus back when
   that result is negative. With a positive modulus this is the floored rule

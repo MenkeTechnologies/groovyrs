@@ -7791,3 +7791,41 @@ t("size", { def m = [:].withDefault { it * 2 }; m[5]; m.size() })
          stored = [5:10]\nlist key = ArrayList\nsize = 1\n"
     );
 }
+
+#[test]
+fn an_overflowing_bigint_shift_raises_javas_own_exception() {
+    // A `BigInteger` holds at most `Integer.MAX_VALUE` bits, and a shift past
+    // that is `ArithmeticException: BigInteger would overflow supported range` —
+    // the same wording `**` already raises for the same reason. groovyrs fell
+    // through to the operand-shape raise instead and reported
+    // `UnsupportedOperationException: Shift distance must be an integral type`,
+    // which is untrue of `-2147483648`. Zero never grows, so it still answers.
+    let src = r#"
+def t(String l, Closure c) {
+  try { def r = c(); println(l + " = " + r + " " + r.getClass().getName()) }
+  catch (e) { println(l + " ! " + e.getClass().getName() + ": " + e.getMessage()) }
+}
+def big = 12345678901234567890G
+t("big >> minInt", { big >> -2147483648 })
+t("big << minInt", { big << -2147483648 })
+t("big >> -1", { big >> -1 })
+t("3G >> minInt", { 3G >> -2147483648 })
+t("0G >> minInt", { 0G >> -2147483648 })
+t("big >> maxInt", { big >> 2147483647 })
+t("1G << maxInt", { 1G << 2147483647 })
+t("3G << 3G", { 3G << 3G })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "big >> minInt ! java.lang.ArithmeticException: BigInteger would overflow supported range\n\
+         big << minInt = 0 java.math.BigInteger\n\
+         big >> -1 = 24691357802469135780 java.math.BigInteger\n\
+         3G >> minInt ! java.lang.ArithmeticException: BigInteger would overflow supported range\n\
+         0G >> minInt = 0 java.math.BigInteger\n\
+         big >> maxInt = 0 java.math.BigInteger\n\
+         1G << maxInt ! java.lang.ArithmeticException: BigInteger would overflow supported range\n\
+         3G << 3G = 24 java.math.BigInteger\n"
+    );
+}

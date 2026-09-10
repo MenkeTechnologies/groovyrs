@@ -7661,3 +7661,76 @@ t("2G.power(40L)", { 2G.power(40L) })
          2G.power(40L) = 1099511627776 java.math.BigInteger\n"
     );
 }
+
+#[test]
+fn a_float_operand_still_counts_as_a_double_everywhere() {
+    // `java.lang.Float` arriving as its own type broke every rule keyed on
+    // `matches!(v, Value::Float(_))` — which is how Groovy asks "did a `double`
+    // take part". `mod` was the one the `numeric` campaign caught:
+    // `(2147483647).mod(3.0f)` is `1.0`, and it started reporting
+    // `MissingMethodException`. `is_ieee` is the single predicate those rules
+    // ask now.
+    let src = r#"
+def t(String l, Closure c) {
+  try { def r = c(); println(l + " = " + r + " " + r.getClass().getName()) }
+  catch (e) { println(l + " ! " + e.getClass().getSimpleName()) }
+}
+t("int.mod(3.0f)", { (2147483647).mod(3.0f) })
+t("3.0f.mod(3.0f)", { (3.0f).mod(3.0f) })
+t("2.5.mod(3.0f)", { (2.5).mod(3.0f) })
+t("3G.mod(1.0f)", { 3G.mod(1.0f) })
+t("[1, 2.5f].sum()", { [1, 2.5f].sum() })
+t("7 % 2.0f", { 7 % 2.0f })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "int.mod(3.0f) = 1.0 java.lang.Double\n\
+         3.0f.mod(3.0f) = 0.0 java.lang.Double\n\
+         2.5.mod(3.0f) = 2.0 java.lang.Double\n\
+         3G.mod(1.0f) = 0.0 java.lang.Double\n\
+         [1, 2.5f].sum() = 3.5 java.lang.Double\n\
+         7 % 2.0f = 1.0 java.lang.Double\n"
+    );
+}
+
+#[test]
+fn the_arithmetic_gdk_methods_answer_at_the_wider_operand() {
+    // `7L.mod(3)` and `7.mod(3L)` are both the `Long` `1`, and a `**` that
+    // LEAVES the exact path narrows by the value alone — so `2L ** 3` is a
+    // `Long` while `2L ** 3L` and `100L ** 2.5` are `Integer`s. `4L` and `4` are
+    // the one runtime value, so both rules live in the compiler's static width.
+    let src = r#"
+def a = 7L
+def r1 = a.mod(3); println("7L.mod(3) " + r1 + " " + r1.getClass().getName())
+def r2 = (7).mod(3L); println("7.mod(3L) " + r2 + " " + r2.getClass().getName())
+def r3 = (7).mod(3); println("7.mod(3) " + r3 + " " + r3.getClass().getName())
+def r4 = a.intdiv(3); println("7L.intdiv(3) " + r4 + " " + r4.getClass().getName())
+def r5 = a.abs(); println("7L.abs() " + r5 + " " + r5.getClass().getName())
+def r6 = a.next(); println("7L.next() " + r6 + " " + r6.getClass().getName())
+def b = 2L
+def r7 = b ** 3; println("2L ** 3 " + r7 + " " + r7.getClass().getName())
+def r8 = b ** 3L; println("2L ** 3L " + r8 + " " + r8.getClass().getName())
+def c = 100L
+def r9 = c ** 2.5; println("100L ** 2.5 " + r9 + " " + r9.getClass().getName())
+def rA = c ** 3G; println("100L ** 3G " + rA + " " + rA.getClass().getName())
+def rB = b ** 40; println("2L ** 40 " + rB + " " + rB.getClass().getName())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "7L.mod(3) 1 java.lang.Long\n\
+         7.mod(3L) 1 java.lang.Long\n\
+         7.mod(3) 1 java.lang.Integer\n\
+         7L.intdiv(3) 2 java.lang.Long\n\
+         7L.abs() 7 java.lang.Long\n\
+         7L.next() 8 java.lang.Long\n\
+         2L ** 3 8 java.lang.Long\n\
+         2L ** 3L 8 java.lang.Integer\n\
+         100L ** 2.5 100000 java.lang.Integer\n\
+         100L ** 3G 1000000 java.lang.Integer\n\
+         2L ** 40 1099511627776 java.lang.Long\n"
+    );
+}

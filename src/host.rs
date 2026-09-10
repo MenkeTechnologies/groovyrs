@@ -2524,9 +2524,22 @@ fn as_bigint(v: &Value) -> Option<BigDecimal> {
 fn truncated_dec(v: &Value) -> Option<BigDecimal> {
     let d = match v {
         Value::Float(f) => decimal::from_f64_exact(*f)?,
+        // A `Float` reads as the double it widens to, exactly as it does in
+        // every operator.
+        _ if is_ieee(v) => decimal::from_f64_exact(as_f64(v))?,
         _ => as_exact_dec(v)?,
     };
     Some(decimal::truncate_to_scale(&d, 0))
+}
+
+/// Is `v` an IEEE floating value — a `java.lang.Double` or a `java.lang.Float`?
+///
+/// The two are one case wherever Groovy asks "did a `double` take part": every
+/// operator widens a `Float` to a `double` before running, so a rule keyed on
+/// `Value::Float` alone silently stopped applying to `Float` operands the moment
+/// the type existed (`(2147483647).mod(3.0f)`, which is `1.0`, started missing).
+fn is_ieee(v: &Value) -> bool {
+    matches!(v, Value::Float(_)) || as_float_handle(v).is_some()
 }
 
 /// Allocate a `java.math.BigInteger`, truncating any fractional part the way
@@ -8302,7 +8315,7 @@ fn groovy_sum_add(a: &Value, b: &Value) -> Value {
     if let Some(Ok(v)) = decimal_operator(NumOp::Add, a, b) {
         return v;
     }
-    if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
+    if is_ieee(a) || is_ieee(b) {
         return Value::float(as_f64(a) + as_f64(b));
     }
     // A non-numeric element sums with Groovy's `plus` — strings concatenate,
@@ -9628,9 +9641,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // type, so `2.5.mod(3.0f)` is `2.0` and `3G.mod(1.0d)` is `0.0`.
                 // Restricting the receiver to the machine types left both of
                 // those raising `MissingMethodException`.
-                && (matches!(recv, Value::Int(_) | Value::Float(_)) || is_dec_handle(recv))
+                && (matches!(recv, Value::Int(_)) || is_ieee(recv) || is_dec_handle(recv))
                 && is_number(&args[0])
-                && (matches!(recv, Value::Float(_)) || matches!(args[0], Value::Float(_))) =>
+                && (is_ieee(recv) || is_ieee(&args[0])) =>
         {
             match (truncated_dec(recv), truncated_dec(&args[0])) {
                 (Some(x), Some(y)) if y.is_positive() => match decimal::floored_mod(&x, &y) {
@@ -14247,7 +14260,7 @@ fn b_mod(vm: &mut VM, _argc: u8) -> Value {
         None => {}
     }
     // A `double` with no decimal operand: IEEE `%`, where `x % 0.0` is NaN.
-    if matches!(a, Value::Float(_)) || matches!(b, Value::Float(_)) {
+    if is_ieee(&a) || is_ieee(&b) {
         return Value::float(as_f64(&a) % as_f64(&b));
     }
     match numeric_hook(NumOp::Mod, &a, &b) {

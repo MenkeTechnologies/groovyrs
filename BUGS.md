@@ -1190,6 +1190,15 @@ infinite loop on both sides.
   and a call to a callable whose every `return` is statically `Long` carries
   that width to the call site (`def f = { -> 5L }; f() * 1000000000`).
 
+  The width also travels through the arithmetic GDK methods, which answer at the
+  WIDER of receiver and argument the way the operators they spell out do:
+  `7L.mod(3)` and `7.mod(3L)` are both the `Long` `1`, `7L.intdiv(3)` is a
+  `Long`, and `7L.abs()` / `7L.next()` are `Long` where `7.abs()` is an
+  `Integer`. `**` is the exception, and takes the *narrower* reading: a `Long`
+  result comes only out of its EXACT path, so `2L ** 3` is a `Long` while
+  `2L ** 3L`, `100L ** 2.5` and `100L ** 3G` are `Integer`s — anything that
+  leaves the exact path runs `Math.pow` and narrows by the value alone.
+
   What is left is a `Long` the compiler could not see *and* whose value fits an
   `Integer`: one stored in a list (`[5L][0] * 1000000000`), passed through a
   closure *parameter* (`{ x -> x * 1000000000 }(5L)`), or narrowed by an

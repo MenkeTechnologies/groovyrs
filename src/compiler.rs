@@ -3422,6 +3422,21 @@ impl Compiler {
                 lhs,
                 ..
             } => self.is_wide(lhs),
+            // `**` is the one binary whose result width is NOT "either operand
+            // is wide". A `Long` result comes only out of the EXACT path, which
+            // needs a `Long` base and an `Integer` exponent: `2L ** 3` is the
+            // `Long` `8`, while `2L ** 3L`, `2 ** 3L`, `100L ** 2.5` and
+            // `100L ** 3G` are all the `Integer` `8`/`100000`/… — anything that
+            // leaves the exact path runs `Math.pow` and narrows by the VALUE
+            // alone, so a result that fits an `int` is an `Integer` however the
+            // base was declared. A wide result too large for an `int` still
+            // reads as a `Long` from its magnitude. Measured against Groovy
+            // 5.1.2 / JVM 26.0.2.1.
+            Expr::Binary {
+                op: BinOp::Power,
+                lhs,
+                rhs,
+            } => self.is_wide(lhs) && !self.is_wide(rhs) && !self.bit_operand_is_object(rhs),
             Expr::Binary { lhs, rhs, .. } => self.is_wide(lhs) || self.is_wide(rhs),
             // `-2147483648` is `Integer.MIN_VALUE`, an `Integer`, even though
             // `2147483648` on its own is a `Long`: the minimum of a
@@ -3458,6 +3473,19 @@ impl Compiler {
                 ) || (matches!(&**recv, Expr::Var(v) if v == "Long")
                     && matches!(method.as_str(), "valueOf" | "parseLong"))
                     || self.math_yields_long(recv, method, args)
+                    // The arithmetic GDK methods answer at the WIDER of the
+                    // receiver and the argument, exactly as the operators they
+                    // spell out do: `7L.mod(3)` and `7.mod(3L)` are both the
+                    // `Long` `1`, and `7L.abs()` / `7L.next()` are `Long` where
+                    // `7.abs()` is an `Integer`. Only a `Value::Int` result
+                    // takes the width — a `BigInteger` argument makes the answer
+                    // a handle, which names its own class, and `GCLASS_LONG`
+                    // declines on anything that is not a `Value::Int`.
+                    || (matches!(method.as_str(), "mod" | "intdiv")
+                        && (self.is_wide(recv) || args.iter().any(|a| self.is_wide(a))))
+                    || (matches!(method.as_str(), "abs" | "next" | "previous")
+                        && args.is_empty()
+                        && self.is_wide(recv))
             }
             // A call to a callable whose every return is statically a `Long`.
             Expr::Call { name, .. } => self.wide_returns.contains(name),

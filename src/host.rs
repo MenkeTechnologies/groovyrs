@@ -5777,7 +5777,7 @@ fn map_default(vm: &mut VM, map: &Value, key: &str, subject: &Value) -> Value {
     // is the storage key made it the string `"55"`. Storage stays keyed by the
     // rendering (BUGS.md's "a map key is always a `String`"); only what the
     // default sees is the caller's own value.
-    match invoke_closure(vm, &clo, &[subject.clone()]) {
+    match invoke_closure(vm, &clo, std::slice::from_ref(subject)) {
         Ok(v) => {
             omap_set(map, key.to_string(), v.clone());
             v
@@ -7209,11 +7209,10 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // of the list GDK are NOT on `Object` and must keep raising. The receiver
     // test is narrowed to numbers and booleans: a class instance can define its
     // own `each`, and routing one here would shadow it.
-    if matches!(recv, Value::Int(_) | Value::Float(_) | Value::Bool(_))
+    if (matches!(recv, Value::Int(_) | Value::Float(_) | Value::Bool(_))
         || is_dec_handle(&recv)
-        || as_bigint(&recv).is_some()
-    {
-        if matches!(
+        || as_bigint(&recv).is_some())
+        && matches!(
             method,
             "each"
                 | "eachWithIndex"
@@ -7225,24 +7224,24 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
                 | "every"
                 | "inject"
                 | "split"
-        ) {
-            if let Some(res) = dispatch_iteration(vm, std::slice::from_ref(&recv), method, &args) {
-                return match res {
-                    Ok(v) => {
-                        // `each` answers its RECEIVER, and the list dispatcher
-                        // answers the list it walked.
-                        if method == "each" || method == "eachWithIndex" {
-                            recv.clone()
-                        } else {
-                            v
-                        }
+        )
+    {
+        if let Some(res) = dispatch_iteration(vm, std::slice::from_ref(&recv), method, &args) {
+            return match res {
+                Ok(v) => {
+                    // `each` answers its RECEIVER, and the list dispatcher
+                    // answers the list it walked.
+                    if method == "each" || method == "eachWithIndex" {
+                        recv.clone()
+                    } else {
+                        v
                     }
-                    Err(e) => {
-                        fault(vm, e);
-                        Value::Undef
-                    }
-                };
-            }
+                }
+                Err(e) => {
+                    fault(vm, e);
+                    Value::Undef
+                }
+            };
         }
     }
     // Pure GDK dispatch — no closure, no VM re-entrancy.
@@ -15380,11 +15379,11 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // Two `is_dec_handle` probes replace all of them. The exact path either
     // answers (`Some`), or declines and the general path below runs unchanged —
     // so this can only skip work, never decide anything.
-    if matches!(a, Value::Int(_)) || is_dec_handle(a) {
-        if matches!(b, Value::Int(_)) || is_dec_handle(b) {
-            if let Some(res) = decimal_operator(op, a, b) {
-                return res;
-            }
+    if (matches!(a, Value::Int(_)) || is_dec_handle(a))
+        && (matches!(b, Value::Int(_)) || is_dec_handle(b))
+    {
+        if let Some(res) = decimal_operator(op, a, b) {
+            return res;
         }
     }
     // A range takes part in an operator as the list it enumerates: `(1..3) + [9]`

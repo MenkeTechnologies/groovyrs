@@ -900,7 +900,7 @@ fn nearest_two_digits(f: f64) -> Option<(String, i64)> {
 ///
 /// The digit selection is `{:e}` on the `f32` — Rust's shortest round-tripping
 /// form, which is JDK 19+'s rule (JDK-4511638) — then Java's two-significant-
-/// digit minimum, then the shared [`java_fp_layout`].
+/// digit minimum, then the shared `java_fp_layout`.
 pub fn format_float(f: f32) -> String {
     if f.is_nan() {
         return "NaN".to_string();

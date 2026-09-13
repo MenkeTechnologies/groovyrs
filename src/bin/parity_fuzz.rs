@@ -705,10 +705,6 @@ const CASE_SUBJECTS: &[&str] = &[
     "0", "1", "2", "4", "7", "101", "\"s\"", "\"aab\"", "\"zz\"", "null",
 ];
 
-/// Subjects and labels for the switch-expression mode. Kept apart from
-/// [`CASE_SUBJECTS`] so a value's *type* varies more: an arrow arm's value flows
-/// out of the switch, so a `String` arm next to an `Integer` one is the case
-/// where a wrongly typed result becomes visible in the printed output.
 // ── Modes added in round 3, each for a construct the corpus contained ZERO
 // occurrences of. The counts were taken by dumping 4000 mixed cases and
 // grepping: `substring`, `trim`, `padLeft`, `center`, `tokenize`, `take`,
@@ -955,6 +951,10 @@ fn gen_safenav(rng: &mut Rng) -> Vec<String> {
     out
 }
 
+/// Subjects and labels for the switch-expression mode. Kept apart from
+/// [`CASE_SUBJECTS`] so a value's *type* varies more: an arrow arm's value flows
+/// out of the switch, so a `String` arm next to an `Integer` one is the case
+/// where a wrongly typed result becomes visible in the printed output.
 const SWITCH_EXPR_ARMS: &[(&str, &str)] = &[
     ("1", "\"one\""),
     ("2", "2 * 10"),

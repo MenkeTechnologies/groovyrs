@@ -8349,3 +8349,21 @@ println($/ends with dollar $$/$)
          tail /$)\nprintln(/$ alone\nx $1 y\nends with dollar $\n"
     );
 }
+
+#[test]
+fn in_on_a_list_is_contains_with_java_equals() {
+    // `x in list` is `list.isCase(x)`, which is `contains` — `Object.equals`,
+    // so no numeric coercion and no string/number match.
+    let src = r#"
+println(1 in [1.0])
+println("1" in [1])
+println(1.0f in [1.0d])
+println(null in ["null"])
+println([1] in [[1]])
+println([1] in [[1.0]])
+println(2 in [1, 2])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "false\nfalse\nfalse\nfalse\ntrue\nfalse\ntrue\n");
+}

@@ -11524,14 +11524,19 @@ fn b_ushr(vm: &mut VM, _argc: u8) -> Value {
 fn b_in(vm: &mut VM, _argc: u8) -> Value {
     // `x in 1..5` asks the range's `contains`, which is its element list's. A
     // list handle reads through its transient array form.
-    let coll = deref_list(&range_as_list(&vm.stack.pop().unwrap_or(Value::Undef)));
+    let raw = vm.stack.pop().unwrap_or(Value::Undef);
+    let is_range = as_range(&raw).is_some();
+    let coll = deref_list(&range_as_list(&raw));
     let needle = vm.stack.pop().unwrap_or(Value::Undef);
-    let _ = vm;
     if let Some(found) = omap_get(&coll, &groovy_str(&needle)) {
         return Value::bool(found.is_some());
     }
     Value::bool(match &coll {
-        Value::Array(a) => a.iter().any(|v| values_equal(v, &needle)),
+        // A range keeps its own numeric membership rule.
+        Value::Array(a) if is_range => a.iter().any(|v| values_equal(v, &needle)),
+        // A list's `isCase` is `contains`, which is `Object.equals`: `1 in [1.0]`
+        // and `"1" in [1]` are false.
+        Value::Array(a) => checked_equal(vm, || a.iter().any(|v| java_equals(v, &needle))),
         // `x in str` is `str.isCase(x)`, and `String.isCase` is *equality*, not
         // containment: `'a' in 'abc'` is `false` in Groovy. (`'a' in 'abc'`
         // reading as a substring test is the natural guess, and the wrong one —

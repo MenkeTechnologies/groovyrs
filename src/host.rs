@@ -9658,6 +9658,28 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
             Value::array(out)
         }
+        // `Iterable.chop(int... sizes)`: consecutive runs of the given sizes,
+        // a negative size taking everything left. Stops as soon as the
+        // elements run out, so `[1, 2].chop(3, 2)` is `[[1, 2]]` — but a
+        // zero-size run while elements remain still yields `[]`.
+        (Value::Array(a), "chop") => {
+            let mut out = Vec::new();
+            let mut i = 0;
+            for size in args {
+                if i >= a.len() {
+                    break;
+                }
+                let n = as_i64(size).unwrap_or(0);
+                let end = if n < 0 {
+                    a.len()
+                } else {
+                    (i + n as usize).min(a.len())
+                };
+                out.push(Value::array(a[i..end].to_vec()));
+                i = end;
+            }
+            Value::array(out)
+        }
         // The cartesian product of the receiver's sub-collections. A non-list
         // element counts as a one-element collection, so `[1, 2, 3]` has exactly
         // one combination.

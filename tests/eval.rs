@@ -8300,3 +8300,24 @@ nested { inner -> println inner() }
     assert!(ok);
     assert_eq!(out, "1\n10\n6\ntt\n7\n");
 }
+
+#[test]
+fn chop_splits_into_runs_of_the_given_sizes() {
+    // `Iterable.chop`: a negative size takes the rest, the result stops when
+    // the elements run out, and a zero-size run while elements remain is `[]`.
+    let src = r#"
+println([1, 2, 3, 4].chop(1, 2, -1))
+println([1, 2].chop(3, 2))
+println([1, 2, 3].chop())
+println([1, 2, 3].chop(0, 1))
+println((1..10).chop(3, 3))
+println(([1, 2, 3] as Set).chop(1))
+println([].chop(1))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[[1], [2, 3], [4]]\n[[1, 2]]\n[]\n[[], [1]]\n[[1, 2, 3], [4, 5, 6]]\n[[1]]\n[]\n"
+    );
+}

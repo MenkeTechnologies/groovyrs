@@ -8187,6 +8187,98 @@ println(c == [1, [c]])
 }
 
 #[test]
+fn java_style_cast_converts_by_cast_to_type() {
+    // `(Type) value` is `castToType`, not `asType`: a one-character string is
+    // its character code, a double narrows by Java's saturating rule and a
+    // decimal by its low bits, and `null` reads per primitive.
+    let src = r#"
+println((Integer) "7")
+println("7" as Integer)
+println((int) "a" + 1)
+println((char) 97.9)
+println((int) 3000000000L)
+println((int) 1e10d)
+println((int) 1e10)
+println((short) -40000)
+println((byte) 1.9e3)
+println((long) 1.5G)
+println((double) 0.1f)
+println(((float) 1).getClass())
+println((int) 2.5 ** 2)
+println((float) 1/3)
+println((int)(char)"a" + 1)
+println(!(boolean) 0)
+println((Boolean) "false")
+println((double) null)
+println((Integer) null)
+println((String) [1])
+println((Set) [1, 1])
+println((List<Integer>) [1])
+println((int[]) [1, 2])
+println((Integer) -5)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "55\n7\n98\na\n-1294967296\n2147483647\n1410065408\n25536\n108\n1\n\
+         0.10000000149011612\nclass java.lang.Float\n4\n0.3333333333333333\n98\ntrue\n\
+         true\nNaN\nnull\n[1]\n[1]\n[1]\n[1, 2]\n-5\n"
+    );
+}
+
+#[test]
+fn java_style_cast_refusals_raise_groovy_cast_exception() {
+    // What the cast cannot convert raises, with Groovy's wording: a primitive
+    // target named as the primitive, a `null` primitive with its `Try` hint,
+    // and a collection source with the constructor Groovy looked for.
+    let src = r#"
+def show = { c -> try { println c() } catch (e) { println "${e.getClass().getSimpleName()}: ${e.getMessage()}" } }
+show { (int) "ab" }
+show { (Integer) true }
+show { (int) null }
+show { (char) true }
+show { (Number) "a" }
+show { (List) ([1] as Set) }
+show { (Map) [1] }
+show { (Closure) 1 }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "GroovyCastException: Cannot cast object 'ab' with class 'java.lang.String' to class 'int'\n\
+         GroovyCastException: Cannot cast object 'true' with class 'java.lang.Boolean' to class 'java.lang.Integer'\n\
+         GroovyCastException: Cannot cast 'null' to class 'int'. Try 'java.lang.Integer' instead\n\
+         GroovyCastException: Cannot cast object 'true' with class 'java.lang.String' to class 'char'\n\
+         GroovyCastException: Cannot cast object 'a' with class 'java.lang.String' to class 'java.lang.Number'\n\
+         GroovyCastException: Cannot cast object '[1]' with class 'java.util.LinkedHashSet' to class 'java.util.List' due to: groovy.lang.GroovyRuntimeException: Could not find matching constructor for: java.util.List(Integer)\n\
+         GroovyCastException: Cannot cast object '[1]' with class 'java.util.ArrayList' to class 'java.util.Map' due to: groovy.lang.GroovyRuntimeException: Could not find matching constructor for: java.util.Map(Integer)\n\
+         GroovyCastException: Cannot cast object '1' with class 'java.lang.Integer' to class 'groovy.lang.Closure'\n"
+    );
+}
+
+#[test]
+fn a_parenthesised_name_is_a_cast_only_when_it_names_a_type() {
+    // `(x) - 1` with a lower-case variable is subtraction; a capitalised name or
+    // a primitive followed by an operand is a cast; `(X) * 2` is still a
+    // product because `*` cannot begin an operand.
+    let src = r#"
+def x = 5
+println((x) - 1)
+println((x) + 1)
+def X = 7
+println((X) * 2)
+println((Integer) - 5)
+println([(int) 2.5, (long) 3.5])
+println(true ? (int) 1.5 : 0)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "4\n6\n14\n-5\n[2, 3]\n1\n");
+}
+
+#[test]
 fn a_bare_name_followed_by_a_closure_is_a_call() {
     // `f { … }` is `f({ … })` — Groovy's paren-less call with a closure as its
     // only argument — whether `f` is a declared function or a closure held in

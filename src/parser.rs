@@ -1968,6 +1968,7 @@ impl Parser {
                 lhs = Expr::Cast {
                     value: Box::new(lhs),
                     ty,
+                    java: false,
                 };
                 continue;
             }
@@ -2049,8 +2050,142 @@ impl Parser {
         r
     }
 
+    /// Is the `(` under the cursor the start of a Java-style cast `(Type) value`
+    /// rather than a parenthesised expression? Groovy decides it from the
+    /// shape: a type name in the parentheses — a primitive, or a name whose
+    /// last segment is capitalised, or an array or generic type — followed by
+    /// something that can begin an operand. So `(int) x`, `(Integer) -5` and
+    /// `(List<Integer>) [1]` are casts, while `(x) - 1` and `(X) * 2` are
+    /// arithmetic on a parenthesised name (measured on Groovy 6.0.0).
+    fn java_cast_ahead(&self) -> bool {
+        let mut i = 1;
+        let Tok::Ident(first) = self.peek_at(i) else {
+            return false;
+        };
+        let mut last = first.as_str();
+        i += 1;
+        while matches!(self.peek_at(i), Tok::Dot) {
+            let Tok::Ident(seg) = self.peek_at(i + 1) else {
+                return false;
+            };
+            last = seg.as_str();
+            i += 2;
+        }
+        let mut shaped = false;
+        if matches!(self.peek_at(i), Tok::Lt) {
+            let Some(end) = self.generic_args_end(i) else {
+                return false;
+            };
+            i = end;
+            shaped = true;
+        }
+        while matches!(self.peek_at(i), Tok::LBracket)
+            && matches!(self.peek_at(i + 1), Tok::RBracket)
+        {
+            i += 2;
+            shaped = true;
+        }
+        if !matches!(self.peek_at(i), Tok::RParen) {
+            return false;
+        }
+        let typed = shaped
+            || is_primitive_type(last)
+            || last.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+        typed
+            && match self.peek_at(i + 1) {
+                Tok::Ident(w) => !matches!(w.as_str(), "as" | "instanceof"),
+                Tok::Int(..)
+                | Tok::Float(_)
+                | Tok::Single(_)
+                | Tok::Dec(_)
+                | Tok::BigInt(_)
+                | Tok::Str(_)
+                | Tok::GStr(_)
+                | Tok::True
+                | Tok::False
+                | Tok::Null
+                | Tok::New
+                | Tok::LParen
+                | Tok::LBracket
+                | Tok::LBrace
+                | Tok::Not
+                | Tok::Tilde
+                | Tok::PlusPlus
+                | Tok::MinusMinus
+                | Tok::Plus
+                | Tok::Minus => true,
+                _ => false,
+            }
+    }
+
+    /// The token index just past the generic argument list whose `<` is at
+    /// `open`, counting a `>>`/`>>>` as the two or three closers it lexes from.
+    fn generic_args_end(&self, open: usize) -> Option<usize> {
+        let mut depth = 0i32;
+        let mut i = open;
+        loop {
+            match self.peek_at(i) {
+                Tok::Lt => depth += 1,
+                Tok::Gt => depth -= 1,
+                Tok::Shr => depth -= 2,
+                Tok::UShr => depth -= 3,
+                Tok::Ident(_)
+                | Tok::Comma
+                | Tok::Dot
+                | Tok::Question
+                | Tok::LBracket
+                | Tok::RBracket => {}
+                _ => return None,
+            }
+            i += 1;
+            if depth <= 0 {
+                return (depth == 0).then_some(i);
+            }
+        }
+    }
+
+    /// `(Type) value`, with the cursor on the `(`. The generic arguments are
+    /// read past and dropped — a cast checks the erased type.
+    fn java_cast(&mut self) -> Result<Expr, String> {
+        self.advance();
+        let mut ty = self.ident()?;
+        while matches!(self.peek(), Tok::Dot) {
+            self.advance();
+            ty.push('.');
+            ty.push_str(&self.ident()?);
+        }
+        if matches!(self.peek(), Tok::Lt) {
+            let end = self.generic_args_end(0).ok_or_else(|| {
+                format!(
+                    "groovyrs: malformed generic type in a cast on line {}",
+                    self.line()
+                )
+            })?;
+            for _ in 0..end {
+                self.advance();
+            }
+        }
+        while self.is(&Tok::LBracket) && matches!(self.peek_at(1), Tok::RBracket) {
+            self.advance();
+            self.advance();
+            ty.push_str("[]");
+        }
+        self.eat(&Tok::RParen)?;
+        // A unary `+` on the operand is the identity on the number it casts.
+        if self.is(&Tok::Plus) {
+            self.advance();
+        }
+        let value = self.unary()?;
+        Ok(Expr::Cast {
+            value: Box::new(value),
+            ty,
+            java: true,
+        })
+    }
+
     fn unary_inner(&mut self) -> Result<Expr, String> {
         match self.peek() {
+            Tok::LParen if self.java_cast_ahead() => self.java_cast(),
             Tok::Minus | Tok::Not | Tok::Tilde => {
                 let op = match self.peek() {
                     Tok::Minus => UnOp::Neg,
@@ -3220,4 +3355,12 @@ fn parse_interpolation(src: &str) -> Result<Expr, String> {
         ));
     }
     Ok(e)
+}
+
+/// Java's eight primitive type names.
+fn is_primitive_type(name: &str) -> bool {
+    matches!(
+        name,
+        "int" | "long" | "short" | "byte" | "char" | "double" | "float" | "boolean"
+    )
 }

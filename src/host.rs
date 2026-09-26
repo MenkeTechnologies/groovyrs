@@ -433,6 +433,11 @@ pub const GFIELD_GET: u16 = 776;
 /// value written.
 pub const GFIELD_SET: u16 = 777;
 
+/// Builtin id for the Java-style cast `(Type) value` — `castToType`, a
+/// different operator from `as` (see `b_java_cast`). Stack: the value, then the
+/// type name.
+pub const GJCAST: u16 = 778;
+
 /// The call depth at which groovyrs raises `java.lang.StackOverflowError`.
 ///
 /// Groovy's depth is the JVM's: whatever fits in the thread's `-Xss`. Measured
@@ -529,6 +534,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GUSE, b_use);
     vm.register_builtin(GIN, b_in);
     vm.register_builtin(GCAST, b_cast);
+    vm.register_builtin(GJCAST, b_java_cast);
     vm.register_builtin(GCLASSREF, b_classref);
     vm.register_builtin(GSETINDEX, b_setindex);
     vm.register_builtin(GRANGE, b_range);
@@ -11524,9 +11530,16 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
+    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    as_type(vm, v, &ty)
+}
+
+/// The coercion `value as ty` itself, shared with the Java-style cast
+/// ([`java_cast`]) for the targets where the two agree.
+fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
     // A list handle casts through its transient array form (`as Set`, `as List`).
-    let v = deref_list(&vm.stack.pop().unwrap_or(Value::Undef));
-    let ty_simple = simple_name_of(&ty);
+    let v = deref_list(&v);
+    let ty_simple = simple_name_of(ty);
     // `null as T` is decided by whether `T` is a *primitive*: Groovy casts the
     // null to the wrapper and then unboxes it, so `null as int` is the JVM's
     // unboxing `NullPointerException` while `null as Integer` is just `null`.
@@ -11743,6 +11756,276 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
         },
         _ => v,
     }
+}
+
+/// `GJCAST`: the Java-style cast `(Type) value` — Groovy's
+/// `DefaultTypeTransformation.castToType`, which is a different operator from
+/// `value as Type` ([`b_cast`]). The two disagree wherever the cast reads a
+/// value the coercion would convert: a one-character `String` cast to a number
+/// is its *character code* (`(Integer) "7"` is `55`, `"7" as Integer` is `7`), a
+/// longer one is a `GroovyCastException` rather than a parse, and a collection
+/// is never re-shaped into a type it is not (`(List) someSet` raises). Every
+/// arm here was measured against Groovy 6.0.0 / JVM 17.
+fn b_java_cast(vm: &mut VM, _argc: u8) -> Value {
+    let ty = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    java_cast(vm, v, &ty)
+}
+
+fn java_cast(vm: &mut VM, v: Value, ty: &str) -> Value {
+    // An array target converts element by element exactly as `as` does:
+    // `(int[]) [1, 2]` and `[1, 2] as int[]` are the same array.
+    if ty.ends_with("[]") {
+        return as_type(vm, deref_list(&v), ty);
+    }
+    let simple = simple_name_of(ty);
+    if matches!(v, Value::Undef) {
+        return match simple.as_str() {
+            // A primitive has no null, and each of these reads the null its
+            // own way: `boolean` truth-tests it, the floating types unbox it to
+            // `NaN`, `char` to the NUL character.
+            "boolean" => Value::bool(false),
+            "double" => Value::float(f64::NAN),
+            "float" => float_value(f32::NAN),
+            "char" => Value::str("\0"),
+            "int" | "long" | "short" | "byte" => {
+                let wrapper = cast_target_class(&simple);
+                raise(
+                    vm,
+                    "GroovyCastException",
+                    &format!("Cannot cast 'null' to class '{simple}'. Try '{wrapper}' instead"),
+                );
+                Value::Undef
+            }
+            // Every reference type keeps the null.
+            _ => Value::Undef,
+        };
+    }
+    match simple.as_str() {
+        // Both spellings are Groovy truth: `(Boolean) "false"` is `true`.
+        "boolean" | "Boolean" => Value::bool(groovy_truthy(vm, &v)),
+        "String" => Value::str(render_value(vm, &v)),
+        "Object" => v,
+        "char" | "Character" => {
+            // A `Boolean` reaches the `char` conversion as its `String`, which
+            // is what the message names.
+            if let Value::Bool(b) = v {
+                return raise_java_cast(vm, &Value::str(b.to_string()), "char");
+            }
+            match java_cast_number(&v) {
+                Some(n) => Value::str(java_char(n.int_value() as u16)),
+                None => raise_java_cast(vm, &v, "char"),
+            }
+        }
+        "int" | "Integer" | "long" | "Long" | "short" | "Short" | "byte" | "Byte" => {
+            let target = cast_class_name(&simple);
+            let Some(n) = java_cast_number(&v) else {
+                return raise_java_cast(vm, &v, &target);
+            };
+            Value::int(match simple.as_str() {
+                "int" | "Integer" => i64::from(n.int_value()),
+                "short" | "Short" => i64::from(n.int_value() as i16),
+                "byte" | "Byte" => i64::from(n.int_value() as i8),
+                _ => n.long_value(),
+            })
+        }
+        "double" | "Double" | "float" | "Float" => {
+            let target = cast_class_name(&simple);
+            let Some(n) = java_cast_number(&v) else {
+                return raise_java_cast(vm, &v, &target);
+            };
+            let d = n.double_value();
+            if simple.contains("loat") {
+                float_value(d as f32)
+            } else {
+                Value::float(d)
+            }
+        }
+        "BigDecimal" | "BigInteger" | "Number" => {
+            let target = cast_class_name(&simple);
+            match java_cast_number(&v) {
+                // `Number` is a type test, so a string is not one — but the two
+                // concrete classes read a one-character string as its code.
+                Some(CastNumber::Code(_)) if simple == "Number" => raise_java_cast(vm, &v, &target),
+                Some(CastNumber::Code(c)) => as_type(vm, Value::int(i64::from(c)), &simple),
+                Some(_) if simple == "Number" => v,
+                Some(_) => as_type(vm, v, &simple),
+                None => raise_java_cast(vm, &v, &target),
+            }
+        }
+        // A collection target accepts a value that already is one; a `Set`
+        // target also re-homes a list's elements (`(Set) [1, 1]` is `[1]`),
+        // and a concrete list class copies a set, because each has the
+        // constructor Groovy falls back to. The `List` *interface* has none,
+        // so `(List) someSet` raises.
+        "List" | "Collection" | "Iterable" | "ArrayList" | "LinkedList" => {
+            let is_list = as_list_raw(&v).is_some() || as_range(&v).is_some();
+            let is_set = as_set(&v).is_some();
+            if is_list || (is_set && simple != "List") {
+                if is_set && matches!(simple.as_str(), "ArrayList" | "LinkedList") {
+                    as_type(vm, v, "List")
+                } else {
+                    v
+                }
+            } else {
+                raise_java_cast(vm, &v, &cast_class_name(&simple))
+            }
+        }
+        "Set" | "LinkedHashSet" | "HashSet" | "TreeSet" | "SortedSet" => {
+            if as_list_raw(&v).is_some() || as_range(&v).is_some() || as_set(&v).is_some() {
+                as_type(vm, deref_list(&v), &simple)
+            } else {
+                raise_java_cast(vm, &v, &cast_class_name(&simple))
+            }
+        }
+        "Map" | "HashMap" | "LinkedHashMap" | "TreeMap" => {
+            if as_omap(&v).is_some() {
+                as_type(vm, v, &simple)
+            } else {
+                raise_java_cast(vm, &v, &cast_class_name(&simple))
+            }
+        }
+        "Closure" => {
+            if closure_meta(&v).is_some() {
+                v
+            } else {
+                raise_java_cast(vm, &v, "groovy.lang.Closure")
+            }
+        }
+        // Any other name — a script class, an interface, a JDK type — is a
+        // type test: the value passes through unchanged when it already is one.
+        _ => {
+            if value_is_a(&v, ty) {
+                v
+            } else {
+                raise_java_cast(vm, &v, &cast_class_name(&simple))
+            }
+        }
+    }
+}
+
+/// The number a Java-style cast reads out of `v`, before narrowing it to the
+/// target: the value itself for a number, the character code for a
+/// one-character `String` (`(int) "a"` is `97`). `None` for anything else — a
+/// longer string, a `Boolean`, a collection — which the cast refuses.
+enum CastNumber {
+    Int(i64),
+    Double(f64),
+    Code(u16),
+    Dec(BigDecimal),
+}
+
+impl CastNumber {
+    /// `Number.intValue()`: a `double` saturates (NaN is 0), an integral value
+    /// or a decimal keeps its low 32 bits.
+    fn int_value(&self) -> i32 {
+        match self {
+            CastNumber::Int(n) => *n as i32,
+            CastNumber::Double(d) => *d as i32,
+            CastNumber::Code(c) => i32::from(*c),
+            CastNumber::Dec(d) => decimal::truncate_to_i64(d) as i32,
+        }
+    }
+
+    /// `Number.longValue()`, by the same rules at 64 bits.
+    fn long_value(&self) -> i64 {
+        match self {
+            CastNumber::Int(n) => *n,
+            CastNumber::Double(d) => *d as i64,
+            CastNumber::Code(c) => i64::from(*c),
+            CastNumber::Dec(d) => decimal::truncate_to_i64(d),
+        }
+    }
+
+    /// `Number.doubleValue()`.
+    fn double_value(&self) -> f64 {
+        match self {
+            CastNumber::Int(n) => *n as f64,
+            CastNumber::Double(d) => *d,
+            CastNumber::Code(c) => f64::from(*c),
+            CastNumber::Dec(d) => decimal::to_f64(d),
+        }
+    }
+}
+
+fn java_cast_number(v: &Value) -> Option<CastNumber> {
+    if let Some(f) = as_float_handle(v) {
+        // A `Float` widens exactly: `(double) 0.1f` is `0.10000000149011612`.
+        return Some(CastNumber::Double(f64::from(f)));
+    }
+    if let Some(d) = as_dec(v) {
+        return Some(CastNumber::Dec(d));
+    }
+    match v {
+        Value::Int(n) => Some(CastNumber::Int(*n)),
+        Value::Float(d) => Some(CastNumber::Double(*d)),
+        Value::Str(s) => {
+            let mut units = s.encode_utf16();
+            match (units.next(), units.next()) {
+                (Some(c), None) => Some(CastNumber::Code(c)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The one-character `String` groovyrs models a `char` as, for UTF-16 unit
+/// `unit`. A lone surrogate has no `char` of its own and becomes U+FFFD.
+fn java_char(unit: u16) -> String {
+    char::from_u32(u32::from(unit))
+        .unwrap_or(char::REPLACEMENT_CHARACTER)
+        .to_string()
+}
+
+/// The class a Java-style cast names in its `GroovyCastException`: a primitive
+/// target is named as the primitive (`to class 'int'`), not as its wrapper the
+/// way `as` names it; a reference type by its qualified name.
+fn cast_class_name(simple: &str) -> String {
+    match simple {
+        "int" | "long" | "short" | "byte" | "double" | "float" | "char" | "boolean" => {
+            simple.to_string()
+        }
+        "Number" | "Comparable" | "Object" => format!("java.lang.{simple}"),
+        "Iterable" => "java.lang.Iterable".to_string(),
+        "Collection" | "ArrayList" | "LinkedList" | "LinkedHashSet" | "HashSet" | "TreeSet"
+        | "SortedSet" | "HashMap" | "LinkedHashMap" | "TreeMap" => format!("java.util.{simple}"),
+        other => cast_target_class(other),
+    }
+}
+
+/// Raise a Java-style cast's `GroovyCastException`. A collection source gets
+/// Groovy's longer wording: the cast tried the target's constructors — first
+/// with the elements spread as arguments, then with the collection itself —
+/// and reports the first failure, naming the elements' simple classes.
+fn raise_java_cast(vm: &mut VM, v: &Value, target: &str) -> Value {
+    let base = format!(
+        "Cannot cast object '{}' with class '{}' to class '{target}'",
+        render_value(vm, v),
+        java_class_name(v)
+    );
+    let elements =
+        as_list_raw(v).or_else(|| as_set(v).map(|(items, kind)| set_elements(&items, kind)));
+    let message = match elements {
+        Some(items) => {
+            let args: Vec<String> = items
+                .iter()
+                .map(|e| simple_name_of(&java_class_name(e)))
+                .collect();
+            format!(
+                "{base} due to: groovy.lang.GroovyRuntimeException: Could not find matching constructor for: {target}({})",
+                args.join(", ")
+            )
+        }
+        None => base,
+    };
+    raise(vm, "GroovyCastException", &message);
+    Value::Undef
 }
 
 /// The JDK classes a script names statically (`Math.max`, `Integer.parseInt`),

@@ -2978,12 +2978,18 @@ impl Compiler {
                 }
             },
             Expr::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs)?,
-            // `value as Type`: evaluate the value, push the type name, coerce.
-            Expr::Cast { value, ty } => {
+            // `value as Type` / `(Type) value`: evaluate the value, push the
+            // type name, convert.
+            Expr::Cast { value, ty, java } => {
                 self.expr(value)?;
                 let tidx = self.b.add_constant(Value::str(ty.clone()));
                 self.b.emit(Op::LoadConst(tidx), self.cur_line);
-                self.emit_call_builtin(crate::host::GCAST, 0, self.cur_line)?;
+                let id = if *java {
+                    crate::host::GJCAST
+                } else {
+                    crate::host::GCAST
+                };
+                self.emit_call_builtin(id, 0, self.cur_line)?;
             }
             // Println/PostIncDec in value position: the print builtin leaves its
             // `null` return value on the stack.

@@ -570,11 +570,14 @@ pub enum Expr {
         index: Box<Expr>,
         line: u32,
     },
-    /// A coercion `value as Type` — Groovy's `asType`. The right side is a type
-    /// *name*, not an expression, so it is held as text.
+    /// A coercion `value as Type` — Groovy's `asType` — or, with `java` set, the
+    /// Java-style cast `(Type) value`, which is Groovy's `castToType` and
+    /// converts differently (`(Integer) "7"` is `55`, `"7" as Integer` is `7`).
+    /// The type is a *name*, not an expression, so it is held as text.
     Cast {
         value: Box<Expr>,
         ty: String,
+        java: bool,
     },
 }
 

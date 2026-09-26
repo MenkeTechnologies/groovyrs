@@ -8367,3 +8367,21 @@ println(2 in [1, 2])
     assert!(ok);
     assert_eq!(out, "false\nfalse\nfalse\nfalse\ntrue\nfalse\ntrue\n");
 }
+
+#[test]
+fn inspect_of_a_collection_reaching_itself_through_another_raises() {
+    // `inspect()` stops at the element that is the collection itself, as
+    // `toString` does; a longer cycle raises `StackOverflowError` instead of
+    // overflowing the Rust stack.
+    let src = r#"
+def a = []; def b = [a]; a << b
+try { println a.inspect() } catch (StackOverflowError e) { println "list" }
+def m = [:]; m.k = [m]
+try { println m.inspect() } catch (StackOverflowError e) { println "map" }
+def c = [1]; c << c
+println c.inspect()
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "list\nmap\n[1, (this Collection)]\n");
+}

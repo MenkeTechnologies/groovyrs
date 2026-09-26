@@ -5193,7 +5193,47 @@ fn self_or(
     }
 }
 
+/// `inspect()` of `v`, with a cycle through another collection raising the
+/// `StackOverflowError` Groovy throws (see [`render_value`] for why only such
+/// a cycle, and not a collection holding itself directly, overflows).
+fn checked_inspect(vm: &mut VM, v: &Value) -> String {
+    INSPECT_CYCLE.with(|c| c.set(false));
+    let s = inspect_value(v);
+    if INSPECT_CYCLE.with(|c| c.replace(false)) {
+        raise_stack_overflow(vm);
+        return String::new();
+    }
+    s
+}
+
+thread_local! {
+    /// The heap handles [`inspect_value`] is currently rendering the members
+    /// of, outermost first.
+    static INSPECT_PATH: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    /// Set when an `inspect` walk met a handle already on [`INSPECT_PATH`].
+    static INSPECT_CYCLE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Groovy's `inspect()` rendering, tracking the handles it is inside so a
+/// cycle stops (flagging [`INSPECT_CYCLE`]) instead of recursing forever.
 fn inspect_value(v: &Value) -> String {
+    let Value::Obj(id) = v else {
+        return inspect_shape(v);
+    };
+    let id = *id;
+    if INSPECT_PATH.with(|p| p.borrow().contains(&id)) {
+        INSPECT_CYCLE.with(|c| c.set(true));
+        return String::new();
+    }
+    INSPECT_PATH.with(|p| p.borrow_mut().push(id));
+    let s = inspect_shape(v);
+    INSPECT_PATH.with(|p| p.borrow_mut().pop());
+    s
+}
+
+/// [`inspect_value`] for one value, its members rendered through the
+/// cycle-tracking entry point.
+fn inspect_shape(v: &Value) -> String {
     if let Some(entries) = as_omap(v) {
         if entries.is_empty() {
             return "[:]".to_string();
@@ -6980,7 +7020,7 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             && check_comodification(&recv)
         {
             return Value::str(if method == "inspect" {
-                inspect_value(&recv)
+                checked_inspect(vm, &recv)
             } else {
                 render_value(vm, &recv)
             });
@@ -8817,7 +8857,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
     // because `groovy.lang.Range` declares its own `inspect` and answers
     // `1..5` / `'a'..'c'` rather than the elements it enumerates.
     if method == "inspect" && args.is_empty() && as_range(recv).is_none() {
-        return Value::str(inspect_value(recv));
+        return Value::str(checked_inspect(vm, recv));
     }
     // `toListString()` / `toMapString()` are *not* `inspect`: they are
     // `FormatHelper.toString(coll, false)`, the same rendering `println` uses,

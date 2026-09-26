@@ -14903,7 +14903,37 @@ fn as_f64(v: &Value) -> f64 {
 /// elements the same way. Everything else defers to [`groovy_str`] (which has no
 /// VM and so cannot dispatch a method). `default_instance_str` covers an instance
 /// whose class defines no `toString`.
+///
+/// A collection that reaches itself through *another* one (`a << [a]`) has no
+/// finite rendering: Java's `AbstractCollection.toString` only stops at the
+/// element that is the collection itself (`(this Collection)`, handled by
+/// [`self_or`]), so anything longer recurses until `StackOverflowError`. The walk
+/// remembers the handles it is inside ([`RENDER_PATH`]) and raises that
+/// catchable error on meeting one again instead of overflowing the Rust stack.
 fn render_value(vm: &mut VM, v: &Value) -> String {
+    let Value::Obj(id) = v else {
+        return render_shape(vm, v);
+    };
+    let id = *id;
+    if RENDER_PATH.with(|p| p.borrow().contains(&id)) {
+        raise_stack_overflow(vm);
+        return String::new();
+    }
+    RENDER_PATH.with(|p| p.borrow_mut().push(id));
+    let s = render_shape(vm, v);
+    RENDER_PATH.with(|p| p.borrow_mut().pop());
+    s
+}
+
+thread_local! {
+    /// The heap handles [`render_value`] is currently rendering the members of,
+    /// outermost first.
+    static RENDER_PATH: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// [`render_value`] for one value, its members rendered through the
+/// cycle-tracking entry point.
+fn render_shape(vm: &mut VM, v: &Value) -> String {
     if let Some(inst) = as_instance(v) {
         return instance_to_string(vm, v).unwrap_or_else(|| instance_default_str(v, &inst));
     }

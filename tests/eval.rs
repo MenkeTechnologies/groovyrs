@@ -8079,3 +8079,23 @@ println res
          bb\n"
     );
 }
+
+#[test]
+fn a_collection_reaching_itself_through_another_raises_on_render() {
+    // Java stops only at the element that is the collection itself; a longer
+    // cycle recurses until `StackOverflowError`. println, a GString, toString
+    // and `+` all reach it. A list holding one list twice is not a cycle.
+    let src = r#"
+def a = []; def b = [a]; a << b
+try { println a } catch (StackOverflowError e) { println "println" }
+try { println "x${a}" } catch (StackOverflowError e) { println "gstring" }
+try { a.toString() } catch (StackOverflowError e) { println "toString" }
+def m = [:]; m.k = [m]
+try { println m } catch (StackOverflowError e) { println "map" }
+def c = [1]
+println([c, [c]])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "println\ngstring\ntoString\nmap\n[[1], [[1]]]\n");
+}

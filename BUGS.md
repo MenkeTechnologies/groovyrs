@@ -53,6 +53,31 @@ reported as parse or compile errors, never silently mis-run.
   `equals()` on a collection agrees with `==`, including the two cross-type
   answers: a list never equals a `Set`, and a list does equal the `Range`
   enumerating the same elements.
+- **`==` and `Object.equals` are two different questions, answered apart.**
+  Groovy's `==` (and `unique()`, a `switch` label) coerces: numbers compare by
+  value across types, and two lists compare element by element under the same
+  rule, so `[1] == [1.0]` is true while `[1] == ["1"]` and `[null] == ["null"]`
+  are false; `null` equals only `null`. `List.contains` / `indexOf` /
+  `lastIndexOf` and `x in list` are Java's `Object.equals`, which never
+  coerces: `[1, 2].contains(1.0)`, `"1" in [1]` and `[2.0].contains(2.00)` are
+  all false.
+- **The Java-style cast `(Type) value`.** Groovy's `castToType`, a different
+  operator from `as`: a one-character `String` is its character code
+  (`(Integer) "7"` is `55`, `"7" as Integer` is `7`), a `double` narrows by
+  Java's saturating rule and a decimal by its low bits (`(int) 1e10d` is
+  `2147483647`, `(int) 1e10` is `1410065408`), a `null` primitive reads per type
+  (`NaN`, the NUL `char`, `false`, or `GroovyCastException: Cannot cast 'null'
+  to class 'int'. Try 'java.lang.Integer' instead`), `Boolean` is Groovy truth,
+  and a collection is never reshaped into a type it is not (`(List) someSet`
+  raises with Groovy's "Could not find matching constructor" wording). The
+  parse follows Groovy 6: a primitive, capitalised, array or generic name in
+  parentheses followed by an operand is a cast, so `(x) - 1` is subtraction
+  and `(Integer) - 5` a cast.
+- **Paren-less closure calls.** `f { … }` is `f({ … })` for a declared
+  function and for a closure held in a variable.
+- **Dollar-slashy strings `$/…/$`.** `$` is the escape (`$$` is `$`, `$/` is
+  `/`, scanned left to right), backslashes are literal except `\uXXXX`, and
+  `$name` / `${…}` interpolate.
 - **`Object.hashCode()`.** Java's specified rule for each type, not an
   approximation: `String` folds UTF-16 code units (so an astral character counts
   as its surrogate pair), `Integer` is the value while `Long` folds its halves,
@@ -663,24 +688,20 @@ they describe and hang. (The `Long`-count forms — `"abc".multiply(Long.MAX_VAL
 `padLeft`/`padRight`/`center(Long.MAX_VALUE)`, `l[Long.MAX_VALUE] = v` — read
 their count through `intValue()` as Groovy does and no longer reach it.)
 
-**An indirectly self-referential collection has no cycle detection.** A
-collection that holds *itself* is modeled: it renders the element as
-`(this Collection)` / `(this Map)` through `toString`, `inspect`, `join` and a
-GString, and compares equal to itself (`a == a`, `a.contains(a)`), because a
-handle is checked for identity before its elements are read — which is also
-where Groovy stops. What remains are the paths Groovy itself does not stop, and
-the ones that reach them through a second collection: (`hashCode()` and `%h` are covered: the hash walk tracks the handles it is inside and raises the catchable `StackOverflowError` on meeting one again, directly or through another collection)
-
-| program | Groovy | groovyrs |
-|---|---|---|
-| `def a=[]; def b=[a]; a<<b; println a` | `StackOverflowError` (catchable) | rc=134, stack overflow |
-| `def a=[]; a<<a; def b=[]; b<<b; println(a==b)` | `StackOverflowError` (catchable) | `true` |
-
-`MAX_CALL_DEPTH` does not bound these, because the recursion is a plain Rust
-function walking the heap rather than a VM frame — raising the catchable error
-needs a depth guard of its own on those walks. A map *key* that is the map itself
-is also not modeled: map keys are stored as their rendered strings, so
-`m[m] = 1` keys the entry by the text the map had at that moment.
+**Self-referential collections: the walks that still answer where Groovy
+throws.** A collection that holds itself renders the element as
+`(this Collection)` / `(this Map)` and compares equal to itself, as Groovy does.
+Every walk Groovy does not stop — `hashCode()`/`%h`, `toString`/`println`/a
+GString/`inspect()` through a second collection, `==`/`equals`/`contains`/
+`indexOf`/`unique()` between two self-holding collections — tracks the handles
+(or handle pairs) it is inside and raises the catchable `StackOverflowError`.
+What still answers where Groovy throws is the hash-built sets: `a.toSet()` and
+`a as Set` on `def a = []; a << a` answer `[[(this Collection)]]` because the
+set index does not hash a collection element. `a.toListString()` on the same
+list prints `[[(this Collection)]]` where Groovy prints `[(this Collection)]`.
+A map *key* that is the map itself is not modeled: map keys are stored as their
+rendered strings, so `m[m] = 1` keys the entry by the text the map had at that
+moment.
 
 **Non-terminating where Groovy terminates.** `class A extends A {}` and a mutual
 `extends` cycle hang in class resolution (Groovy: a compile error). A `for (x in
@@ -715,21 +736,14 @@ infinite loop on both sides.
 - **`MissingMethodException` carries no "Possible solutions:" line.** Groovy's
   message has a second line listing candidate methods; groovyrs's stops after
   the signature line. Only a program that prints `e.getMessage()` sees it.
-- **The Java-style cast `(Type) expr`.** `expr as Type` is supported and is the
-  spelling this frontend reads; the parenthesised form is a parse error
-  (`expected RParen but found …`). The two are NOT the same operator, which is
-  why the missing one cannot be lowered to the one that works: measured against
-  Groovy 5.1.1 on a JDK 26, `"7" as Integer` is `7` while `(Integer) "7"` is
-  `55` — the cast takes the character's value where the coercion parses the
-  string. Reading the parenthesised form as `asType` would answer 7 there, a
-  wrong value in place of a visible parse error, so it is left refused until the
-  cast's own conversion table is written.
-
-  Its grammar is also not the obvious one. `(a) - b` is a cast to the class `a`
-  in Groovy — it fails with "unable to resolve class a", not with 7 — so the
-  disambiguation is not "upper case means a type"; `(a) * b` IS multiplication,
-  because `*` cannot begin a cast's operand. Any implementation has to
-  reproduce that split rather than guess from the name.
+- **What a Java-style cast parses differently.** A *lower-case* name that is
+  not a primitive (`(x) "a"`, `(l)[0]`) followed by an operand is a cast to the
+  class `x` in Groovy — a compile error, or a `GroovyCastException` — while
+  groovyrs reads the parentheses as grouping. `(Boolean) 0` with an integer
+  *literal* throws `WrongMethodTypeException` from Groovy's call-site linking
+  (a variable holding `0` casts to `false`, which is what groovyrs answers for
+  both). `((char) null) as int` is `0` in Groovy; groovyrs's `char` is a
+  one-character `String`, which `as int` parses.
 - **A *script-declared* class name is not a value.** `Foo.class` and `Foo.name`
   for a class the script declares do not resolve — such a name is only meaningful
   in `new`, `instanceof`, a `catch` clause, and a `switch` `case` label;
@@ -947,9 +961,6 @@ infinite loop on both sides.
   it.toString() }` is `a[1, 1]b2`. In `find`/`findAll` the closure is a
   TRANSFORM, not a predicate: `find` answers its result on the first match (or
   `null`), `findAll` the results of all of them.
-- **`$/…/$` dollar-slashy strings.** The `/…/` slashy form is implemented (and
-  interpolates, and spans lines); the `$/…/$` form, whose only difference is
-  that `/` needs no escape and `$$` escapes a dollar, is not lexed.
 - **A `MissingMethodException` message omits Groovy's `Possible solutions:`
   line.** Groovy appends a fuzzy suggestion list built from the receiver's real
   JDK/GDK method table (`Possible solutions: grep(), next(), size(), …`), which
@@ -1220,22 +1231,16 @@ infinite loop on both sides.
 - **Types are not checked.** Declared types (`int`, `String`, `def`) are kept
   for diagnostics but do not gate execution — the runtime is dynamically typed on
   the fusevm value model.
-- **`==` compares by value.** This matches Groovy (`==` is `.equals`, not
-  reference identity) for the string/number/boolean operands modeled here.
-  Cross-type comparisons that Groovy would coerce (`"5" == 5 → false`) are not
-  yet distinguished — both sides compare by their printed form.
-- **Collection membership uses `==`'s numeric equality, where Java's is TYPED.**
+- **`Set` membership uses `==`'s numeric equality, where Java's is TYPED.**
   Groovy's `==` on two numbers compares their values across classes (`1.0d ==
-  1.0f` and `1 == 1.0G` are both true), but `Set`/`List` membership runs
+  1.0f` and `1 == 1.0G` are both true), but `Set` membership runs
   `Object.equals`, which is false between two different wrapper classes whatever
-  the values. groovyrs decides both with `values_equal`, so the collections take
+  the values. groovyrs's set index decides it with `values_equal`, so a set takes
   the numeric answer: `[1, 1.0G] as Set` keeps ONE element where Groovy keeps
-  two, `[1.0d, 1.0f] as Set` likewise, and `[1.0d].contains(1.0f)` /
-  `[1.0d].indexOf(1.0f)` / `1.0f in [1.0d]` all answer as though the two were
-  the same element. The `Float` pair is the same divergence as the
-  `Integer`/`BigInteger` pair, which predates it — no numeric type here carries
-  the typed `equals` a collection needs, and the `Set` index entry below depends
-  on `values_equal` being the membership rule.
+  two, and `[1.0d, 1.0f] as Set` likewise. (A *list*'s `contains`, `indexOf`
+  and `in` use the typed `Object.equals`, so `[1.0d].contains(1.0f)` is false as
+  in Groovy; only a `Long` small enough to be an `Integer` still matches one,
+  because the width is not carried on the value.)
 - **A `GString` whose expression is a closure is not deferred.** `"${-> x}"` is
   a *lazy* `GString` in Groovy: the closure is called at render time, so
   `def x = 1; def s = "${-> x}"; x = 2; s.toString()` is `2`. groovyrs renders

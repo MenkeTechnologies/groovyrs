@@ -256,44 +256,51 @@ println(x)   // =&gt; null</code></pre>
 println("n=$n and ${n + 1}")   // =&gt; n=5 and 6</code></pre>
         </article>
         <article class="doc-entry" id="doc-literals-and-literal-forms-14">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-14">#</a> <code>~/pattern/</code></h3>
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-14">#</a> <code>$/text/$</code></h3>
+          <pre><code class="lang-groovy">$/…/$</code></pre>
+          <p>A dollar-slashy String: like a slashy string it keeps backslashes literal (only `\uXXXX` is decoded) and may span lines, and it can also hold a bare `/`. `$` is its escape — `$$` is `$` and `$/` is `/` — and `$name` / `${ expr }` interpolate.</p>
+          <pre><code class="lang-groovy">def n = 2
+println($/a\d $n $$ x/y/$)   // =&gt; a\d 2 $ x/y</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-15">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-15">#</a> <code>~/pattern/</code></h3>
           <pre><code class="lang-groovy">~/…/</code></pre>
           <p>A regex literal — a pattern handle built by `host::GREGEX`. Only `\/` is special inside the delimiters; every other backslash escape passes through to the pattern. Modeled far enough to drive a `switch` label, whose `isCase` is a *full* match.</p>
           <pre><code class="lang-groovy">switch ("abc") { case ~/a.c/: println("m"); break }   // =&gt; m</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-15">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-15">#</a> <code>[a, b]</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-16">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-16">#</a> <code>[a, b]</code></h3>
           <pre><code class="lang-groovy">[expr, …]</code></pre>
           <p>A list literal. Lists are `Value::Array` and print with Groovy's `[1, 2, 3]` rendering.</p>
           <pre><code class="lang-groovy">println([1, 2, 3])   // =&gt; [1, 2, 3]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-16">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-16">#</a> <code>[]</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-17">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-17">#</a> <code>[]</code></h3>
           <pre><code class="lang-groovy">[]</code></pre>
           <p>The empty list. Falsy under Groovy truth, so `if ([])` does not run.</p>
           <pre><code class="lang-groovy">if (![]) println("empty")   // =&gt; empty</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-17">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-17">#</a> <code>[k: v]</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-18">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-18">#</a> <code>[k: v]</code></h3>
           <pre><code class="lang-groovy">[key: expr, …] | [(expr): expr, …]</code></pre>
           <p>A map literal, built by `host::GMAKE_MAP` into an insertion-ordered map. A bare identifier key is the string of its own name; parenthesise the key to compute it.</p>
           <pre><code class="lang-groovy">println([a: 1, b: 2])   // =&gt; [a:1, b:2]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-18">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-18">#</a> <code>[:]</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-19">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-19">#</a> <code>[:]</code></h3>
           <pre><code class="lang-groovy">[:]</code></pre>
           <p>The empty map — the form that distinguishes an empty map from the empty list `[]`.</p>
           <pre><code class="lang-groovy">println([:].isEmpty())   // =&gt; true</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-19">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-19">#</a> <code>{ a, b -&gt; … }</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-20">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-20">#</a> <code>{ a, b -&gt; … }</code></h3>
           <pre><code class="lang-groovy">{ param, … -&gt; body }</code></pre>
           <p>A closure literal with an explicit parameter list, including the zero-parameter form `{ -&gt; … }`. It lowers to a subroutine region plus a runtime closure handle and captures the enclosing script bindings.</p>
           <pre><code class="lang-groovy">def add = { a, b -&gt; a + b }
 println(add(2, 3))   // =&gt; 5</code></pre>
         </article>
-        <article class="doc-entry" id="doc-literals-and-literal-forms-20">
-          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-20">#</a> <code>{ it }</code></h3>
+        <article class="doc-entry" id="doc-literals-and-literal-forms-21">
+          <h3><a class="doc-anchor" href="#doc-literals-and-literal-forms-21">#</a> <code>{ it }</code></h3>
           <pre><code class="lang-groovy">{ body }</code></pre>
           <p>A closure literal with no parameter list: Groovy supplies the single implicit parameter `it`.</p>
           <pre><code class="lang-groovy">println([1, 2, 3].collect { it * 2 })   // =&gt; [2, 4, 6]</code></pre>
@@ -498,214 +505,221 @@ println(4 / 2)   // =&gt; 3.5 then 2</code></pre>
           <pre><code class="lang-groovy">println(5 % 3)   // =&gt; 2</code></pre>
         </article>
         <article class="doc-entry" id="doc-operators-6">
-          <h3><a class="doc-anchor" href="#doc-operators-6">#</a> <code>- (unary)</code></h3>
+          <h3><a class="doc-anchor" href="#doc-operators-6">#</a> <code>(Type)</code></h3>
+          <pre><code class="lang-groovy">(Type) value</code></pre>
+          <p>The Java-style cast — Groovy's `castToType`, a different operator from `as`: a one-character String is its character code (`(Integer) "7"` is 55 where `"7" as Integer` is 7), a `double` narrows by Java's saturating rule and a decimal by its low bits, and a value the target cannot hold raises `GroovyCastException`. It is a cast only when the parenthesised name is a primitive, capitalised, array or generic type followed by an operand, so `(x) - 1` stays subtraction.</p>
+          <pre><code class="lang-groovy">println((int) 3.9)
+println((Integer) "7")   // =&gt; 3 then 55</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-7">
+          <h3><a class="doc-anchor" href="#doc-operators-7">#</a> <code>- (unary)</code></h3>
           <pre><code class="lang-groovy">-a</code></pre>
           <p>Arithmetic negation. On a class instance it dispatches `negative`.</p>
           <pre><code class="lang-groovy">println(-(-3))   // =&gt; 3</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-7">
-          <h3><a class="doc-anchor" href="#doc-operators-7">#</a> <code>!</code></h3>
+        <article class="doc-entry" id="doc-operators-8">
+          <h3><a class="doc-anchor" href="#doc-operators-8">#</a> <code>!</code></h3>
           <pre><code class="lang-groovy">!a</code></pre>
           <p>Logical negation of the operand's Groovy truth, so `![]`, `!""`, `!0`, and `!null` are all true.</p>
           <pre><code class="lang-groovy">println(!false)   // =&gt; true</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-8">
-          <h3><a class="doc-anchor" href="#doc-operators-8">#</a> <code>==</code></h3>
+        <article class="doc-entry" id="doc-operators-9">
+          <h3><a class="doc-anchor" href="#doc-operators-9">#</a> <code>==</code></h3>
           <pre><code class="lang-groovy">a == b</code></pre>
-          <p>Equality. Groovy's `==` is value equality, not identity, and it is null-safe. On a class instance it uses `compareTo(…) == 0` when the class defines `compareTo`, a user `equals` otherwise, and heap identity with neither.</p>
+          <p>Equality. Groovy's `==` is value equality, not identity, and it is null-safe: `null` equals only `null`. Numbers compare by value across types (`1 == 1.0`), a number never equals a String, and two lists compare element by element under this same rule (`[1] == [1.0]` is true, `[1] == ["1"]` false); two collections that each hold themselves raise `StackOverflowError`. On a class instance it uses `compareTo(…) == 0` when the class defines `compareTo`, a user `equals` otherwise, and heap identity with neither.</p>
           <pre><code class="lang-groovy">println([1, 2] == [1, 2])   // =&gt; true</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-9">
-          <h3><a class="doc-anchor" href="#doc-operators-9">#</a> <code>!=</code></h3>
+        <article class="doc-entry" id="doc-operators-10">
+          <h3><a class="doc-anchor" href="#doc-operators-10">#</a> <code>!=</code></h3>
           <pre><code class="lang-groovy">a != b</code></pre>
           <p>The negation of `==`, resolved through the same instance rules.</p>
           <pre><code class="lang-groovy">println(1 != 2)   // =&gt; true</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-10">
-          <h3><a class="doc-anchor" href="#doc-operators-10">#</a> <code>&lt;</code></h3>
+        <article class="doc-entry" id="doc-operators-11">
+          <h3><a class="doc-anchor" href="#doc-operators-11">#</a> <code>&lt;</code></h3>
           <pre><code class="lang-groovy">a &lt; b</code></pre>
           <p>Less-than. On a class instance it dispatches `compareTo`; a class without one falls back to comparing the rendered strings.</p>
           <pre><code class="lang-groovy">println(1 &lt; 2)   // =&gt; true</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-11">
-          <h3><a class="doc-anchor" href="#doc-operators-11">#</a> <code>&gt;</code></h3>
+        <article class="doc-entry" id="doc-operators-12">
+          <h3><a class="doc-anchor" href="#doc-operators-12">#</a> <code>&gt;</code></h3>
           <pre><code class="lang-groovy">a &gt; b</code></pre>
           <p>Greater-than, resolved like `&lt;`.</p>
           <pre><code class="lang-groovy">println(3 &gt; 2)   // =&gt; true</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-12">
-          <h3><a class="doc-anchor" href="#doc-operators-12">#</a> <code>&lt;=</code></h3>
+        <article class="doc-entry" id="doc-operators-13">
+          <h3><a class="doc-anchor" href="#doc-operators-13">#</a> <code>&lt;=</code></h3>
           <pre><code class="lang-groovy">a &lt;= b</code></pre>
           <p>Less-than-or-equal, resolved like `&lt;`.</p>
           <pre><code class="lang-groovy">println(2 &lt;= 2)   // =&gt; true</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-13">
-          <h3><a class="doc-anchor" href="#doc-operators-13">#</a> <code>&gt;=</code></h3>
+        <article class="doc-entry" id="doc-operators-14">
+          <h3><a class="doc-anchor" href="#doc-operators-14">#</a> <code>&gt;=</code></h3>
           <pre><code class="lang-groovy">a &gt;= b</code></pre>
           <p>Greater-than-or-equal, resolved like `&lt;`.</p>
           <pre><code class="lang-groovy">println(2 &gt;= 3)   // =&gt; false</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-14">
-          <h3><a class="doc-anchor" href="#doc-operators-14">#</a> <code>&lt;=&gt;</code></h3>
+        <article class="doc-entry" id="doc-operators-15">
+          <h3><a class="doc-anchor" href="#doc-operators-15">#</a> <code>&lt;=&gt;</code></h3>
           <pre><code class="lang-groovy">a &lt;=&gt; b</code></pre>
           <p>The spaceship operator — `compareTo`, lowered to the `GCMP` builtin. Yields a negative number, zero, or a positive number.</p>
           <pre><code class="lang-groovy">println(5 &lt;=&gt; 3)   // =&gt; 1</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-15">
-          <h3><a class="doc-anchor" href="#doc-operators-15">#</a> <code>&amp;&amp;</code></h3>
+        <article class="doc-entry" id="doc-operators-16">
+          <h3><a class="doc-anchor" href="#doc-operators-16">#</a> <code>&amp;&amp;</code></h3>
           <pre><code class="lang-groovy">a &amp;&amp; b</code></pre>
           <p>Short-circuiting logical and. Both operands go through Groovy truth; the result is a `Boolean`, not the operand.</p>
           <pre><code class="lang-groovy">println(1 &amp;&amp; "x")   // =&gt; true</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-16">
-          <h3><a class="doc-anchor" href="#doc-operators-16">#</a> <code>||</code></h3>
+        <article class="doc-entry" id="doc-operators-17">
+          <h3><a class="doc-anchor" href="#doc-operators-17">#</a> <code>||</code></h3>
           <pre><code class="lang-groovy">a || b</code></pre>
           <p>Short-circuiting logical or, with the same truth rules as `&amp;&amp;`.</p>
           <pre><code class="lang-groovy">println(0 || 3)   // =&gt; true</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-17">
-          <h3><a class="doc-anchor" href="#doc-operators-17">#</a> <code>?:</code></h3>
+        <article class="doc-entry" id="doc-operators-18">
+          <h3><a class="doc-anchor" href="#doc-operators-18">#</a> <code>?:</code></h3>
           <pre><code class="lang-groovy">a ?: b</code></pre>
           <p>The Elvis operator. Evaluates the left side once and yields it when Groovy-truthy, otherwise the right side. Unlike `||` it yields the *operand*, not a `Boolean`.</p>
           <pre><code class="lang-groovy">println(null ?: "d")
 println("" ?: "d")   // =&gt; d then d</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-18">
-          <h3><a class="doc-anchor" href="#doc-operators-18">#</a> <code>? :</code></h3>
+        <article class="doc-entry" id="doc-operators-19">
+          <h3><a class="doc-anchor" href="#doc-operators-19">#</a> <code>? :</code></h3>
           <pre><code class="lang-groovy">cond ? a : b</code></pre>
           <p>The ternary conditional. The condition goes through Groovy truth.</p>
           <pre><code class="lang-groovy">println(true ? 1 : 2)   // =&gt; 1</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-19">
-          <h3><a class="doc-anchor" href="#doc-operators-19">#</a> <code>?.</code></h3>
+        <article class="doc-entry" id="doc-operators-20">
+          <h3><a class="doc-anchor" href="#doc-operators-20">#</a> <code>?.</code></h3>
           <pre><code class="lang-groovy">recv?.member | recv?.method(args)</code></pre>
           <p>Safe navigation. Yields `null` without dispatching when the receiver is `null`, so a chain of `?.` never raises `NullPointerException`.</p>
           <pre><code class="lang-groovy">def x
 println(x?.size())   // =&gt; null</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-20">
-          <h3><a class="doc-anchor" href="#doc-operators-20">#</a> <code>*.</code></h3>
+        <article class="doc-entry" id="doc-operators-21">
+          <h3><a class="doc-anchor" href="#doc-operators-21">#</a> <code>*.</code></h3>
           <pre><code class="lang-groovy">recv*.member | recv*.method(args)</code></pre>
           <p>The spread-dot operator. Desugars to `recv.collect { it?.member }` — including the safe navigation, which is why a `null` element spreads to `null` rather than raising.</p>
           <pre><code class="lang-groovy">println([1, 2, 3]*.toString())   // =&gt; [1, 2, 3]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-21">
-          <h3><a class="doc-anchor" href="#doc-operators-21">#</a> <code>[ ]</code></h3>
+        <article class="doc-entry" id="doc-operators-22">
+          <h3><a class="doc-anchor" href="#doc-operators-22">#</a> <code>[ ]</code></h3>
           <pre><code class="lang-groovy">recv[index]</code></pre>
           <p>Subscript, lowered to the `GINDEX` builtin. A list index past the end yields `null` and a negative index counts from the end; a String subscript yields a one-character String and raises past the end; a map subscript is a key read. On a class instance it dispatches `getAt`.</p>
           <pre><code class="lang-groovy">println([1, 2, 3][-1])
 println("hello"[1])   // =&gt; 3 then e</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-22">
-          <h3><a class="doc-anchor" href="#doc-operators-22">#</a> <code>..</code></h3>
+        <article class="doc-entry" id="doc-operators-23">
+          <h3><a class="doc-anchor" href="#doc-operators-23">#</a> <code>..</code></h3>
           <pre><code class="lang-groovy">a..b</code></pre>
           <p>An inclusive range — a `groovy.lang.Range` object, so `(0..3).class.simpleName` is `IntRange` and printing one shows `0..3`. Being a `java.util.List` in Groovy, every list method and operator applies to it as well.</p>
           <pre><code class="lang-groovy">println(0..3)   // =&gt; [0, 1, 2, 3]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-23">
-          <h3><a class="doc-anchor" href="#doc-operators-23">#</a> <code>..&lt;</code></h3>
+        <article class="doc-entry" id="doc-operators-24">
+          <h3><a class="doc-anchor" href="#doc-operators-24">#</a> <code>..&lt;</code></h3>
           <pre><code class="lang-groovy">a..&lt;b</code></pre>
           <p>A half-open range: the endpoint is excluded, so `(0..&lt;3)` enumerates `0, 1, 2` and prints `0..&lt;3`.</p>
           <pre><code class="lang-groovy">println(0..&lt;3)   // =&gt; [0, 1, 2]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-24">
-          <h3><a class="doc-anchor" href="#doc-operators-24">#</a> <code>++</code></h3>
+        <article class="doc-entry" id="doc-operators-25">
+          <h3><a class="doc-anchor" href="#doc-operators-25">#</a> <code>++</code></h3>
           <pre><code class="lang-groovy">x++ | ++x</code></pre>
           <p>Increment. Postfix yields the value before the update, prefix the value after. On a class instance it dispatches `plus` — not Groovy's `next`, which is a deliberate divergence.</p>
           <pre><code class="lang-groovy">def i = 0
 println(i++)
 println(i)   // =&gt; 0 then 1</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-25">
-          <h3><a class="doc-anchor" href="#doc-operators-25">#</a> <code>--</code></h3>
+        <article class="doc-entry" id="doc-operators-26">
+          <h3><a class="doc-anchor" href="#doc-operators-26">#</a> <code>--</code></h3>
           <pre><code class="lang-groovy">x-- | --x</code></pre>
           <p>Decrement, mirroring `++`; on a class instance it dispatches `minus` rather than Groovy's `previous`.</p>
           <pre><code class="lang-groovy">def i = 2
 println(--i)   // =&gt; 1</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-26">
-          <h3><a class="doc-anchor" href="#doc-operators-26">#</a> <code>=</code></h3>
+        <article class="doc-entry" id="doc-operators-27">
+          <h3><a class="doc-anchor" href="#doc-operators-27">#</a> <code>=</code></h3>
           <pre><code class="lang-groovy">target = expr</code></pre>
           <p>Assignment to a local, a script binding, a field, a property (`GSETPROP`), or a subscript. A property write to a name the class chain never declared raises `MissingPropertyException` rather than growing the object.</p>
           <pre><code class="lang-groovy">def x = 1
 x = 2
 println(x)   // =&gt; 2</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-27">
-          <h3><a class="doc-anchor" href="#doc-operators-27">#</a> <code>+=</code></h3>
+        <article class="doc-entry" id="doc-operators-28">
+          <h3><a class="doc-anchor" href="#doc-operators-28">#</a> <code>+=</code></h3>
           <pre><code class="lang-groovy">target += expr</code></pre>
           <p>Compound addition — the `+` lowering with a load before and a store after. Inside a class body a bare field target routes through the property builtins.</p>
           <pre><code class="lang-groovy">def x = 1
 x += 2
 println(x)   // =&gt; 3</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-28">
-          <h3><a class="doc-anchor" href="#doc-operators-28">#</a> <code>-=</code></h3>
+        <article class="doc-entry" id="doc-operators-29">
+          <h3><a class="doc-anchor" href="#doc-operators-29">#</a> <code>-=</code></h3>
           <pre><code class="lang-groovy">target -= expr</code></pre>
           <p>Compound subtraction.</p>
           <pre><code class="lang-groovy">def x = 5
 x -= 2
 println(x)   // =&gt; 3</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-29">
-          <h3><a class="doc-anchor" href="#doc-operators-29">#</a> <code>*=</code></h3>
+        <article class="doc-entry" id="doc-operators-30">
+          <h3><a class="doc-anchor" href="#doc-operators-30">#</a> <code>*=</code></h3>
           <pre><code class="lang-groovy">target *= expr</code></pre>
           <p>Compound multiplication.</p>
           <pre><code class="lang-groovy">def x = 3
 x *= 4
 println(x)   // =&gt; 12</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-30">
-          <h3><a class="doc-anchor" href="#doc-operators-30">#</a> <code>/=</code></h3>
+        <article class="doc-entry" id="doc-operators-31">
+          <h3><a class="doc-anchor" href="#doc-operators-31">#</a> <code>/=</code></h3>
           <pre><code class="lang-groovy">target /= expr</code></pre>
           <p>Compound division. Reuses the `GDIV` builtin, so `7 /= 2` yields a `BigDecimal`.</p>
           <pre><code class="lang-groovy">def x = 7
 x /= 2
 println(x)   // =&gt; 3.5</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-31">
-          <h3><a class="doc-anchor" href="#doc-operators-31">#</a> <code>%=</code></h3>
+        <article class="doc-entry" id="doc-operators-32">
+          <h3><a class="doc-anchor" href="#doc-operators-32">#</a> <code>%=</code></h3>
           <pre><code class="lang-groovy">target %= expr</code></pre>
           <p>Compound remainder, reusing the guarded `%` lowering.</p>
           <pre><code class="lang-groovy">def x = 7
 x %= 3
 println(x)   // =&gt; 1</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-32">
-          <h3><a class="doc-anchor" href="#doc-operators-32">#</a> <code>.</code></h3>
+        <article class="doc-entry" id="doc-operators-33">
+          <h3><a class="doc-anchor" href="#doc-operators-33">#</a> <code>.</code></h3>
           <pre><code class="lang-groovy">recv.member | recv.method(args)</code></pre>
           <p>Member access. A call routes through the `GMETHOD` builtin and a read through `GPROP`; on a class instance a read prefers a user `getX()` getter over the raw field. Inside a method or constructor of the class that declares the field, a bare `x` and `this.x` read and write the field directly instead, as Groovy compiles them.</p>
           <pre><code class="lang-groovy">println("abc".size())   // =&gt; 3</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-33">
-          <h3><a class="doc-anchor" href="#doc-operators-33">#</a> <code>.@</code></h3>
+        <article class="doc-entry" id="doc-operators-34">
+          <h3><a class="doc-anchor" href="#doc-operators-34">#</a> <code>.@</code></h3>
           <pre><code class="lang-groovy">recv.@field</code></pre>
           <p>Direct field access: reads or writes the field itself through `GFIELD_GET` / `GFIELD_SET`, never a `getX()`/`setX()` accessor. A receiver with no such field raises `MissingFieldException`.</p>
           <pre><code class="lang-groovy">class P { def x = 1; def getX() { 99 } }
 def p = new P()
 println([p.x, p.@x])   // =&gt; [99, 1]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-34">
-          <h3><a class="doc-anchor" href="#doc-operators-34">#</a> <code>-&gt;</code></h3>
+        <article class="doc-entry" id="doc-operators-35">
+          <h3><a class="doc-anchor" href="#doc-operators-35">#</a> <code>-&gt;</code></h3>
           <pre><code class="lang-groovy">{ params -&gt; body }</code></pre>
           <p>The closure parameter separator. Its presence — even with an empty list — is what makes the parameter list explicit and suppresses the implicit `it`.</p>
           <pre><code class="lang-groovy">println([1, 2].collect { n -&gt; n * 10 })   // =&gt; [10, 20]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-35">
-          <h3><a class="doc-anchor" href="#doc-operators-35">#</a> <code>|</code></h3>
+        <article class="doc-entry" id="doc-operators-36">
+          <h3><a class="doc-anchor" href="#doc-operators-36">#</a> <code>|</code></h3>
           <pre><code class="lang-groovy">catch (A | B name)</code></pre>
           <p>The multi-catch alternative separator. This is its only meaning: groovyrs has no bitwise-or operator.</p>
           <pre><code class="lang-groovy">try { 1 / 0 } catch (IOException | ArithmeticException e) { println("caught") }   // =&gt; caught</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-36">
-          <h3><a class="doc-anchor" href="#doc-operators-36">#</a> <code>@</code></h3>
+        <article class="doc-entry" id="doc-operators-37">
+          <h3><a class="doc-anchor" href="#doc-operators-37">#</a> <code>@</code></h3>
           <pre><code class="lang-groovy">@Name</code></pre>
           <p>The annotation marker. Annotations are lexed and skipped before a class or member declaration; groovyrs attaches no meaning to any of them.</p>
           <pre><code class="lang-groovy">class A { @Override def toString() { "A" } }
 println(new A())   // =&gt; A</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-37">
-          <h3><a class="doc-anchor" href="#doc-operators-37">#</a> <code>label:</code></h3>
+        <article class="doc-entry" id="doc-operators-38">
+          <h3><a class="doc-anchor" href="#doc-operators-38">#</a> <code>label:</code></h3>
           <pre><code class="lang-groovy">name: loop</code></pre>
           <p>A statement label. Only a loop is a useful target, and only `break label` / `continue label` read it; naming a label no enclosing loop carries is a compile error.</p>
           <pre><code class="lang-groovy">outer: for (i in 0..3) { if (i == 1) break outer; print(i) }   // =&gt; 0</code></pre>
@@ -853,35 +867,41 @@ println(f.call(4))   // =&gt; 8</code></pre>
         <article class="doc-entry" id="doc-gdk-list-2">
           <h3><a class="doc-anchor" href="#doc-gdk-list-2">#</a> <code>contains</code></h3>
           <pre><code class="lang-groovy">list.contains(value) -&gt; Boolean</code></pre>
-          <p>True when some element matches. groovyrs compares the *rendered* forms, so `[1, 2].contains("1")` is true where Groovy's `equals`-based test is false.</p>
+          <p>True when some element is `equals` to `value` — Java's `Object.equals`, which never coerces: `[1, 2].contains("1")` and `[1, 2].contains(1.0)` are false, and `null` matches only `null`. `indexOf`/`lastIndexOf` use the same test.</p>
           <pre><code class="lang-groovy">println([1, 2, 3].contains(2))   // =&gt; true</code></pre>
         </article>
         <article class="doc-entry" id="doc-gdk-list-3">
-          <h3><a class="doc-anchor" href="#doc-gdk-list-3">#</a> <code>get</code></h3>
+          <h3><a class="doc-anchor" href="#doc-gdk-list-3">#</a> <code>chop</code></h3>
+          <pre><code class="lang-groovy">list.chop(int... sizes) -&gt; List</code></pre>
+          <p>Consecutive runs of the given sizes; a negative size takes everything left. The result stops once the elements run out, so `[1, 2].chop(3, 2)` is `[[1, 2]]`.</p>
+          <pre><code class="lang-groovy">println([1, 2, 3, 4].chop(1, 2, -1))   // =&gt; [[1], [2, 3], [4]]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-gdk-list-4">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-4">#</a> <code>get</code></h3>
           <pre><code class="lang-groovy">list.get(index) -&gt; Object</code></pre>
           <p>The element at `index`. Unlike the `[i]` subscript this is the raw JDK call: any out-of-range index raises `IndexOutOfBoundsException` instead of yielding `null`, and a negative index does not wrap.</p>
           <pre><code class="lang-groovy">println([10, 20].get(1))   // =&gt; 20</code></pre>
         </article>
-        <article class="doc-entry" id="doc-gdk-list-4">
-          <h3><a class="doc-anchor" href="#doc-gdk-list-4">#</a> <code>reverse</code></h3>
+        <article class="doc-entry" id="doc-gdk-list-5">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-5">#</a> <code>reverse</code></h3>
           <pre><code class="lang-groovy">list.reverse() -&gt; List</code></pre>
           <p>A new list with the elements in reverse order. The receiver is not mutated.</p>
           <pre><code class="lang-groovy">println([1, 2, 3].reverse())   // =&gt; [3, 2, 1]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-gdk-list-5">
-          <h3><a class="doc-anchor" href="#doc-gdk-list-5">#</a> <code>join</code></h3>
+        <article class="doc-entry" id="doc-gdk-list-6">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-6">#</a> <code>join</code></h3>
           <pre><code class="lang-groovy">list.join([separator]) -&gt; String</code></pre>
           <p>Render each element the way `println` does and join them with the separator, which defaults to the empty string.</p>
           <pre><code class="lang-groovy">println([1, 2, 3].join("-"))   // =&gt; 1-2-3</code></pre>
         </article>
-        <article class="doc-entry" id="doc-gdk-list-6">
-          <h3><a class="doc-anchor" href="#doc-gdk-list-6">#</a> <code>subList</code></h3>
+        <article class="doc-entry" id="doc-gdk-list-7">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-7">#</a> <code>subList</code></h3>
           <pre><code class="lang-groovy">list.subList(from, to) -&gt; List</code></pre>
           <p>A live `java.util.ArrayList$SubList` window over `[from, to)` — a second reference to part of the backing list, not a copy. Writes travel both ways, and a structural write through the window splices the backing list and resizes the window. A structural change made to the backing list through any *other* reference invalidates the window: every later use raises `ConcurrentModificationException`. Bounds are the JDK's, checked in the JDK's order. On a `Range` the answer is another `Range`.</p>
           <pre><code class="lang-groovy">def a = [1, 2, 3, 4]; def s = a.subList(1, 3); s.set(0, 99); println(a)   // =&gt; [1, 99, 3, 4]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-gdk-list-7">
-          <h3><a class="doc-anchor" href="#doc-gdk-list-7">#</a> <code>addAll</code></h3>
+        <article class="doc-entry" id="doc-gdk-list-8">
+          <h3><a class="doc-anchor" href="#doc-gdk-list-8">#</a> <code>addAll</code></h3>
           <pre><code class="lang-groovy">list.addAll(collection) | list.addAll(index, collection) -&gt; Boolean</code></pre>
           <p>Append the collection's elements, or insert them at `index`. Answers whether the list changed, so an empty argument is `false`.</p>
           <pre><code class="lang-groovy">def a = [1, 2]; a.addAll(1, [8, 9]); println([a, a.addAll([])])   // =&gt; [[1, 8, 9, 2], false]</code></pre>

@@ -167,8 +167,13 @@ Implemented and checked against Apache Groovy:
   (single-, double- and triple-quoted) / boolean / `null` literals; `+ - * / % **`,
   `== != < > <= >=`, `&& ||` (short-circuiting), the bitwise `& | ^ ~` and the
   shifts `<< >> >>>`, `x in coll` (which is `coll.isCase(x)`, so on a String it is equality, not
-  containment), the `value as Type` coercion, unary `-` and
-  `!`, grouping. An unsuffixed decimal literal is a `BigDecimal` whose scale
+  containment; on a list it is `contains`, Java's uncoerced `Object.equals`),
+  the `value as Type` coercion and the Java-style `(Type) value` cast — which
+  is Groovy's `castToType`, so `(Integer) "7"` is `55` where `"7" as Integer`
+  is `7` — unary `-` and `!`, grouping. `==` coerces as Groovy's does: numbers
+  compare by value across types and lists element by element (`[1] == [1.0]`,
+  but not `[1] == ["1"]`), and `null` equals only `null`. An unsuffixed decimal literal is a
+  `BigDecimal` whose scale
   propagates (`1.10 + 2.20 == 3.30`), a `d`/`f` suffix makes an IEEE double;
   integer `/` promotes to a decimal (`7 / 2 == 3.5`); `**` binds tighter than a
   prefix operator and folds LEFT (`-2 ** 2` is `-4`, `2 ** 3 ** 2` is `64`), and
@@ -271,7 +276,8 @@ Implemented and checked against Apache Groovy:
   `String` over UTF-16 code units, `Integer` versus `Long`, `Double` over
   `doubleToLongBits`, `BigDecimal` carrying its scale, `BigInteger` over its
   magnitude words, `AbstractList` / `AbstractMap` / `AbstractSet`, and
-  `IntRange`'s own Cantor pairing. A user `hashCode` overrides it.
+  `IntRange`'s own Cantor pairing. A user `hashCode` overrides it. A collection
+  that reaches itself has no hash, and raises `StackOverflowError` as Java's does.
 - **`args`** — every script's binding carries the launcher arguments after the
   file (empty when there are none), as a `List`.
 - **Closures** — `{ a, b -> … }`, defaulted parameters (`{ a, b = 5 -> … }`),
@@ -413,8 +419,9 @@ Implemented and checked against Apache Groovy:
   and so keeps the element type (`1.5..4.0` is `[1.5, 2.5, 3.5]`). Being a
   `java.util.List` in Groovy, every `List` method and operator applies too
   (`.each`, `.collect`, `+`, `== [1, 2, 3]`, `in`, `r[1..2]`).
-- **Regex** — `~/…/` patterns, `/…/` slashy strings (backslashes literal,
-  interpolating, multi-line), the `=~` and `==~` operators, and a stateful
+- **Regex** — `~/…/` patterns, `/…/` slashy and `$/…/$` dollar-slashy strings
+  (backslashes literal, interpolating, multi-line; `$` escapes the latter), the
+  `=~` and `==~` operators, and a stateful
   `java.util.regex.Matcher` (`find`/`group`/`start`/`end`/`matches`/
   `groupCount`/`pattern`/`m[i]`, iteration, and `find()` truth so `while (m)`
   walks). `String` carries `matches`, `replaceAll`/`replaceFirst` in both the
@@ -448,7 +455,7 @@ Implemented and checked against Apache Groovy:
   duration of the block, and only where the receiver has no such method of its
   own. Several may be active at once, innermost first. A trailing closure after a
   *function* call's parenthesised arguments (`f(3) { it * 2 }`) parses too, which
-  is the shape `use` is written in.
+  is the shape `use` is written in, and so does the paren-less `f { … }`.
 - **Closure `delegate` / `resolveStrategy`** — both read and write, with the
   `Closure.OWNER_FIRST` / `DELEGATE_FIRST` / `OWNER_ONLY` / `DELEGATE_ONLY`
   constants. A user-set delegate joins the resolution chain `with`/`tap` use, so

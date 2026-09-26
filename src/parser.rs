@@ -2386,6 +2386,13 @@ impl Parser {
                     }
                     return Ok(self.record(col, Expr::Call { name, args, line }));
                 }
+                // The paren-less call whose only argument is a closure:
+                // `f { 1 }` is `f({ 1 })`, for a declared function and for a
+                // closure held in a variable alike.
+                if self.is(&Tok::LBrace) {
+                    let args = vec![self.closure_literal()?];
+                    return Ok(self.record(col, Expr::Call { name, args, line }));
+                }
                 // Postfix `i++` / `i--` in expression position: yields the value
                 // before the update.
                 if matches!(self.peek(), Tok::PlusPlus | Tok::MinusMinus) {

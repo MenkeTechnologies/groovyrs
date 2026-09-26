@@ -8185,3 +8185,26 @@ println(c == [1, [c]])
     assert!(ok);
     assert_eq!(out, "eq\nne\nequals\ncontains\nindexOf\ntrue\ntrue\n");
 }
+
+#[test]
+fn a_bare_name_followed_by_a_closure_is_a_call() {
+    // `f { … }` is `f({ … })` — Groovy's paren-less call with a closure as its
+    // only argument — whether `f` is a declared function or a closure held in
+    // a variable. It was a parse error.
+    let src = r#"
+def f = { c -> println c() }
+f { 1 }
+def g(c) { c(5) }
+println(g { it * 2 })
+def r = g { x -> x + 1 }
+println r
+def twice(c) { c(); c() }
+twice { print "t" }
+println()
+def nested(c) { c { 7 } }
+nested { inner -> println inner() }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "1\n10\n6\ntt\n7\n");
+}

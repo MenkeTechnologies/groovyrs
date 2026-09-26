@@ -5307,11 +5307,35 @@ fn values_equal(a: &Value, b: &Value) -> bool {
             _ => false,
         };
     }
+    // `List.equals` pairs the elements up and asks each pair this same question
+    // — `DefaultTypeTransformation.compareEqual`, so `[1] == [1.0]` is true and
+    // `[1] == ["1"]` is false. A list is never equal to a non-list.
+    match (a, b) {
+        (Value::Array(p), Value::Array(q)) => {
+            return p.len() == q.len() && p.iter().zip(q.iter()).all(|(i, j)| values_equal(i, j));
+        }
+        (Value::Array(_), _) | (_, Value::Array(_)) => return false,
+        // `null` equals only `null` — never the string `"null"` it renders as.
+        (Value::Undef, _) | (_, Value::Undef) => {
+            return matches!((a, b), (Value::Undef, Value::Undef))
+        }
+        _ => {}
+    }
     if let Some(Ok(v)) = decimal_operator(NumOp::Eq, a, b) {
         return matches!(v, Value::Bool(true));
     }
-    if let (Some(x), Some(y)) = (as_i64(a), as_i64(b)) {
-        return x == y;
+    // Two numbers compare by value after binary promotion — a `double` (or a
+    // `Float` widened to one) on either side makes it a `double` comparison,
+    // so `1 == 1.0` holds and `0.1f == 0.1d` does not. A number is never equal
+    // to a non-number (`1 == "1"`, `true == "true"` are false).
+    if is_number(a) && is_number(b) {
+        if let (Value::Int(x), Value::Int(y)) = (a, b) {
+            return x == y;
+        }
+        return as_f64(a) == as_f64(b);
+    }
+    if is_number(a) || is_number(b) || matches!(a, Value::Bool(_)) != matches!(b, Value::Bool(_)) {
+        return false;
     }
     groovy_str(a) == groovy_str(b)
 }
@@ -7748,6 +7772,18 @@ fn dispatch_iteration(
             for it in items {
                 let mut dup = false;
                 for kept in &out {
+                    // With no closure, Groovy's `NumberAwareComparator` finds
+                    // two elements the same exactly when `==` does: `1` and
+                    // `1.0` collapse, `1` and `"1"` (or `null` and `"null"`)
+                    // do not, and two lists compare element by element. An
+                    // instance keeps its own `compareTo`.
+                    if matches!(order, OrderBy::Natural)
+                        && as_instance(it).is_none()
+                        && as_instance(kept).is_none()
+                    {
+                        dup |= values_equal(it, kept);
+                        continue;
+                    }
                     match order.apply(vm, it, kept) {
                         Ok(o) => dup |= o.is_eq(),
                         Err(e) => return Some(Err(e)),
@@ -15890,9 +15926,19 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
         // fallback below makes `'ab' == ('a' << 'b')` true, and a `StringBuffer`
         // is not comparable to a `String`. So does an instance whose class has a
         // generated `equals`, which compares by field and not by rendering.
+        //
+        // A list on either side (already the transient array form here — the
+        // handle rewrite above runs first) compares element by element, and `null` only
+        // equals `null` — both through `values_equal`, since the rendered forms
+        // agree for `[1] == ["1"]` and `null == "null"`, which Groovy answers
+        // false.
         NumOp::Eq | NumOp::Ne
             if as_set(a).is_some()
                 || as_set(b).is_some()
+                || matches!(a, Value::Array(_))
+                || matches!(b, Value::Array(_))
+                || matches!(a, Value::Undef)
+                || matches!(b, Value::Undef)
                 || as_omap(a).is_some()
                 || as_omap(b).is_some()
                 || as_buffer(a).is_some()

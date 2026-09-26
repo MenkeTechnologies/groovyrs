@@ -8099,3 +8099,47 @@ println([c, [c]])
     assert!(ok);
     assert_eq!(out, "println\ngstring\ntoString\nmap\n[[1], [[1]]]\n");
 }
+
+#[test]
+fn list_equality_compares_elements_with_groovy_equality() {
+    // `List == List` pairs the elements and asks `==` of each pair: numbers
+    // compare by value across types, a number never equals a string, and
+    // `null` equals only `null`. The rendered forms agree on every false line.
+    let src = r#"
+println([1] == ["1"])
+println([1] == [1.0])
+println([null] == ["null"])
+println([true] == ["true"])
+println([[1]] == [["1"]])
+println([[1]] == [[1.0]])
+println([1, [2]] == [1, "[2]"])
+println([1..2] == [[1, 2]])
+println([2.0] == [2.00])
+println([0.1f] == [0.1d])
+println(null == "null")
+println([1] == "[1]")
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "false\ntrue\nfalse\nfalse\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\nfalse\nfalse\n"
+    );
+}
+
+#[test]
+fn unique_collapses_what_groovy_equality_calls_equal() {
+    // With no closure, `unique` keeps one of each `==` class: `1` and `1.0`
+    // collapse, `1` and `"1"` do not, nor `null` and `"null"`, and lists
+    // compare by elements.
+    let src = r#"
+println([1, "1", 1.0].unique())
+println([[1], [1.0]].unique())
+println([null, "null", null].unique())
+println([true, "true"].unique())
+def l = [3, 1, 3.0]; l.unique(); println l
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[1, 1]\n[[1]]\n[null, null]\n[true, true]\n[3, 1]\n");
+}

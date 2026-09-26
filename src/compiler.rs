@@ -302,6 +302,10 @@ struct ClassInfo {
     /// through this, exactly as it reaches a superclass's.
     interfaces: Vec<String>,
     fields: Vec<String>,
+    /// A trait's fields are remapped by Groovy's trait machinery and are always
+    /// reached through their accessors, so none of them count as the class's
+    /// own for direct field access (see [`Compiler::cur_class_own_fields`]).
+    is_trait: bool,
     /// Method names declared here — including an interface's *abstract*
     /// declarations, which bind no body but still make a bare call inside a
     /// sibling `default` method mean `this.m()`.
@@ -434,6 +438,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             fields,
             methods,
             abstract_methods,
+            is_trait,
             ..
         } = &stmt.kind
         {
@@ -443,6 +448,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
                     superclass: superclass.clone(),
                     interfaces: interfaces.clone(),
                     fields: fields.iter().map(|f| f.name.clone()).collect(),
+                    is_trait: *is_trait,
                     methods: methods
                         .iter()
                         .map(|m| m.name.clone())
@@ -593,14 +599,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
                 (true, None) => interfaces.first().map(String::as_str),
                 (_, s) => s,
             };
-            // A trait's fields are remapped by Groovy's trait machinery and are
-            // always reached through their accessors, so none count as own.
-            let own_fields: HashSet<String> = if *is_trait {
-                HashSet::new()
-            } else {
-                fields.iter().map(|f| f.name.clone()).collect()
-            };
-            c.class_bodies(stmt.line, name, parent, fields, &own_fields, ctors, methods)?;
+            c.class_bodies(stmt.line, name, parent, fields, ctors, methods)?;
         }
     }
     // Emit queued closure bodies as subroutine regions. Draining may enqueue
@@ -1257,7 +1256,6 @@ impl Compiler {
         name: &str,
         superclass: Option<&str>,
         fields: &[Field],
-        own_fields: &HashSet<String>,
         ctors: &[Ctor],
         methods: &[Method],
     ) -> Result<(), String> {
@@ -1278,7 +1276,11 @@ impl Compiler {
                 self.emit_field_init(line, name, &f.name, init)?;
             }
         }
-        self.cur_class_own_fields = Some(own_fields.clone());
+        let own_fields = match self.class_index.get(name) {
+            Some(info) if !info.is_trait => info.fields.iter().cloned().collect(),
+            _ => HashSet::new(),
+        };
+        self.cur_class_own_fields = Some(own_fields);
         for ctor in ctors {
             let sub = Self::ctor_sub_name(name, ctor.params.len());
             self.emit_member(

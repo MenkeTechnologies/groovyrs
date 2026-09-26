@@ -2103,9 +2103,7 @@ impl Parser {
                 // `@` (no identifier can), and the compiler strips it.
                 if self.is(&Tok::At) {
                     if safe {
-                        return Err(format!(
-                            "groovyrs: `?.@` is not supported on line {line}"
-                        ));
+                        return Err(format!("groovyrs: `?.@` is not supported on line {line}"));
                     }
                     self.advance();
                     let field = self.ident()?;

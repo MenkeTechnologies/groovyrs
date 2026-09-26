@@ -5175,7 +5175,12 @@ const THIS_MAP: &str = "(this Map)";
 
 /// Render `elem` with `render`, unless it is the very handle `owner` — then
 /// `label` ([`THIS_COLLECTION`] / [`THIS_MAP`]), as Java's collections do.
-fn self_or(owner: &Value, elem: &Value, label: &str, render: impl FnOnce(&Value) -> String) -> String {
+fn self_or(
+    owner: &Value,
+    elem: &Value,
+    label: &str,
+    render: impl FnOnce(&Value) -> String,
+) -> String {
     match (owner, elem) {
         (Value::Obj(a), Value::Obj(b)) if a == b => label.to_string(),
         _ => render(elem),
@@ -5733,7 +5738,12 @@ fn raise_missing_field(vm: &mut VM, recv: &Value, name: &str) -> Value {
 
 /// `GFIELD_GET`: read `recv.@name` — the field itself, no getter.
 fn b_field_get(vm: &mut VM, _argc: u8) -> Value {
-    let name = vm.stack.pop().unwrap_or(Value::Undef).as_str_cow().into_owned();
+    let name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
     match as_instance(&recv) {
         Some(inst) if inst.fields.contains_key(&name) => {
@@ -5745,7 +5755,12 @@ fn b_field_get(vm: &mut VM, _argc: u8) -> Value {
 
 /// `GFIELD_SET`: write `recv.@name = value` — the field itself, no setter.
 fn b_field_set(vm: &mut VM, _argc: u8) -> Value {
-    let name = vm.stack.pop().unwrap_or(Value::Undef).as_str_cow().into_owned();
+    let name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
     let value = vm.stack.pop().unwrap_or(Value::Undef);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
     if as_instance(&recv).is_some_and(|i| i.fields.contains_key(&name)) {
@@ -6775,7 +6790,10 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         // The renderings, too, need the handle: a list that holds itself prints
         // that element as `(this Collection)`, which only identity can tell —
         // the detached copy below is a different value from the element.
-        if args.is_empty() && matches!(method, "toString" | "inspect") && check_comodification(&recv) {
+        if args.is_empty()
+            && matches!(method, "toString" | "inspect")
+            && check_comodification(&recv)
+        {
             return Value::str(if method == "inspect" {
                 inspect_value(&recv)
             } else {
@@ -8903,7 +8921,8 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // and a negative one is refused rather than read as zero.
         (Value::Str(s), "multiply") => match args.first().map(count_int_value).unwrap_or(0) {
             n if n < 0 => {
-                let msg = format!("multiply() should be called with a number of 0 or greater not: {n}");
+                let msg =
+                    format!("multiply() should be called with a number of 0 or greater not: {n}");
                 raise(vm, "IllegalArgumentException", &msg);
                 Value::Undef
             }
@@ -9373,10 +9392,19 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // whose refusal is the error Groovy reports.
         (Value::Array(a), "multiply") => match args.first().map(count_int_value).unwrap_or(0) {
             n if n < 0 => {
-                raise(vm, "IllegalArgumentException", &format!("Illegal Capacity: {n}"));
+                raise(
+                    vm,
+                    "IllegalArgumentException",
+                    &format!("Illegal Capacity: {n}"),
+                );
                 Value::Undef
             }
-            n => Value::array(std::iter::repeat(a.to_vec()).take(n as usize).flatten().collect()),
+            n => Value::array(
+                std::iter::repeat(a.to_vec())
+                    .take(n as usize)
+                    .flatten()
+                    .collect(),
+            ),
         },
         // `[[1, 2], [3, 4]].transpose()` == `[[1, 3], [2, 4]]`; the result is as
         // long as the *shortest* row, which is what Groovy's does.

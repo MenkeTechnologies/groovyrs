@@ -5217,10 +5217,57 @@ fn inspect_value(v: &Value) -> String {
     }
 }
 
-/// Groovy's value equality for a `switch` label: numeric operands compare
-/// numerically across types (`case 1:` matches the subject `1.00`), and
-/// everything else compares by its rendered form — the same rule `==` uses.
+/// Groovy's value equality — what `==`, a `switch` label and `unique` ask:
+/// numeric operands compare numerically across types (`case 1:` matches the
+/// subject `1.00`), collections by their elements, and strings by text.
+///
+/// Two collections that each reach themselves (`a << a; b << b; a == b`) have
+/// no answer: Java recurses until `StackOverflowError`. The walk remembers the
+/// handle pairs it is comparing ([`EQ_PATH`]); meeting a pair again flags
+/// [`EQ_CYCLE`], which [`checked_equal`] turns into that catchable error.
 fn values_equal(a: &Value, b: &Value) -> bool {
+    guarded_equal(a, b, values_equal_shape)
+}
+
+thread_local! {
+    /// The `(left, right)` handle pairs an equality walk is inside.
+    static EQ_PATH: RefCell<Vec<(u32, u32)>> = const { RefCell::new(Vec::new()) };
+    /// Set when an equality walk met a pair already on [`EQ_PATH`].
+    static EQ_CYCLE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Run `shape` on `a`/`b` unless the pair of handles is already being compared
+/// further up — then flag [`EQ_CYCLE`] and answer `false`.
+fn guarded_equal(a: &Value, b: &Value, shape: fn(&Value, &Value) -> bool) -> bool {
+    let (Value::Obj(x), Value::Obj(y)) = (a, b) else {
+        return shape(a, b);
+    };
+    let pair = (*x, *y);
+    if EQ_PATH.with(|p| p.borrow().contains(&pair)) {
+        EQ_CYCLE.with(|c| c.set(true));
+        return false;
+    }
+    EQ_PATH.with(|p| p.borrow_mut().push(pair));
+    let eq = shape(a, b);
+    EQ_PATH.with(|p| p.borrow_mut().pop());
+    eq
+}
+
+/// Answer `eq` as a script sees it: `StackOverflowError` raised (and `false`)
+/// when the walk met a cycle.
+fn checked_equal(vm: &mut VM, eq: impl FnOnce() -> bool) -> bool {
+    EQ_CYCLE.with(|c| c.set(false));
+    let answer = eq();
+    if EQ_CYCLE.with(|c| c.replace(false)) {
+        raise_stack_overflow(vm);
+        return false;
+    }
+    answer
+}
+
+/// [`values_equal`] for one pair, its members compared through the guarded
+/// entry point.
+fn values_equal_shape(a: &Value, b: &Value) -> bool {
     // One handle is equal to itself before any element is read, as
     // `DefaultTypeTransformation.compareEqual` and `AbstractMap.equals` both
     // check first — which is what lets a map holding itself compare equal to
@@ -5347,6 +5394,12 @@ fn values_equal(a: &Value, b: &Value) -> bool {
 /// element under this same rule (`AbstractList.equals`); a set, map, range,
 /// buffer or instance keeps the comparison [`values_equal`] makes for it.
 fn java_equals(a: &Value, b: &Value) -> bool {
+    guarded_equal(a, b, java_equals_shape)
+}
+
+/// [`java_equals`] for one pair, its members compared through the guarded
+/// entry point.
+fn java_equals_shape(a: &Value, b: &Value) -> bool {
     if let (Value::Obj(x), Value::Obj(y)) = (a, b) {
         if x == y {
             return true;
@@ -5360,7 +5413,9 @@ fn java_equals(a: &Value, b: &Value) -> bool {
             || as_instance(v).is_some()
     };
     if structured(a) || structured(b) {
-        return values_equal(a, b);
+        // The pair is already on `EQ_PATH` (this is its guarded walk), so the
+        // shape is asked directly rather than re-entering the guard.
+        return values_equal_shape(a, b);
     }
     match (
         as_list(a).or_else(|| array_items(a)),
@@ -6878,7 +6933,7 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             || as_set(&recv).is_some()
             || as_range(&recv).is_some())
     {
-        return Value::bool(values_equal(&recv, &args[0]));
+        return Value::bool(checked_equal(vm, || values_equal(&recv, &args[0])));
     }
     // `Object.hashCode()`. Above the per-type branches for the same reason
     // `equals` is: the `Set` and `Range` branches hand a method they do not
@@ -9368,7 +9423,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (Value::Array(a), "isEmpty") => Value::bool(a.is_empty()),
         (Value::Array(a), "contains") => {
             let want = args.first().cloned().unwrap_or(Value::Undef);
-            Value::bool(a.iter().any(|v| java_equals(v, &want)))
+            Value::bool(checked_equal(vm, || {
+                a.iter().any(|v| java_equals(v, &want))
+            }))
         }
         // Unlike the `[i]` subscript (which yields `null` past the end),
         // `List.get` is the raw JDK call and raises on any out-of-range index.
@@ -9464,9 +9521,19 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (Value::Array(a), "indexOf" | "lastIndexOf") => {
             let want = args.first().cloned().unwrap_or(Value::Undef);
             let hit = if method == "indexOf" {
-                a.iter().position(|v| java_equals(v, &want))
+                let mut at = None;
+                checked_equal(vm, || {
+                    at = a.iter().position(|v| java_equals(v, &want));
+                    at.is_some()
+                });
+                at
             } else {
-                a.iter().rposition(|v| java_equals(v, &want))
+                let mut at = None;
+                checked_equal(vm, || {
+                    at = a.iter().rposition(|v| java_equals(v, &want));
+                    at.is_some()
+                });
+                at
             };
             Value::int(hit.map(|i| i as i64).unwrap_or(-1))
         }
@@ -15992,7 +16059,8 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
                 || as_instance(a).is_some_and(|i| class_generates(i.class, GEN_EQUALS_HASH))
                 || as_instance(b).is_some_and(|i| class_generates(i.class, GEN_EQUALS_HASH)) =>
         {
-            let eq = values_equal(a, b);
+            let eq = with_vm(|vm| checked_equal(vm, || values_equal(a, b)))
+                .unwrap_or_else(|| values_equal(a, b));
             Ok(Value::bool(if matches!(op, NumOp::Eq) { eq } else { !eq }))
         }
         // Groovy `==`/`!=` are value equality (`.equals`), not reference

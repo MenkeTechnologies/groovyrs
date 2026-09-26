@@ -4000,7 +4000,27 @@ impl Compiler {
         // which re-enters the VM to run an operator-overload method — the one
         // native op that can leave an exception in flight. Only a program that
         // both uses exceptions and declares a class pays the check.
-        if self.exc_after_arith {
+        //
+        // `==`/`!=` between two collections can raise too: two lists that each
+        // hold themselves have no answer, and Groovy throws `StackOverflowError`.
+        // Checked right here — not at the end of the statement — so
+        // `println(a == b)` does not print before the throw. An operand that is
+        // a scalar literal cannot be a collection, so `x == 3` pays nothing.
+        let scalar = |e: &Expr| {
+            matches!(
+                e,
+                Expr::Int(..)
+                    | Expr::Float(_)
+                    | Expr::Single(_)
+                    | Expr::Dec(_)
+                    | Expr::BigInt(_)
+                    | Expr::Str(_)
+                    | Expr::Bool(_)
+                    | Expr::Null
+            )
+        };
+        let collection_eq = matches!(op, BinOp::Eq | BinOp::Ne) && !scalar(lhs) && !scalar(rhs);
+        if self.exc_after_arith || (self.has_exceptions && collection_eq) {
             self.emit_exc_check(self.cur_line)?;
         }
         Ok(())

@@ -8164,3 +8164,24 @@ println([[1, 2]].contains(1..2))
     assert!(ok);
     assert_eq!(out, "false\nfalse\nfalse\ntrue\nfalse\n1\n0\nfalse\ntrue\n");
 }
+
+#[test]
+fn equality_between_self_holding_collections_raises_stack_overflow() {
+    // Two lists that each hold themselves have no `==` answer — Java recurses
+    // until `StackOverflowError` — and the throw comes before `println`
+    // prints. A list compared with itself is still true by identity.
+    let src = r#"
+def a = []; a << a; def b = []; b << b
+try { println(a == b) } catch (StackOverflowError e) { println "eq" }
+try { println(a != b) } catch (StackOverflowError e) { println "ne" }
+try { println(a.equals(b)) } catch (StackOverflowError e) { println "equals" }
+try { println([a].contains([b])) } catch (StackOverflowError e) { println "contains" }
+try { println([a].indexOf([b])) } catch (StackOverflowError e) { println "indexOf" }
+println(a == a)
+def c = [1]; def d = [c]; c << d
+println(c == [1, [c]])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "eq\nne\nequals\ncontains\nindexOf\ntrue\ntrue\n");
+}

@@ -7928,7 +7928,10 @@ fn dispatch_iteration(
                         && as_instance(it).is_none()
                         && as_instance(kept).is_none()
                     {
-                        dup |= values_equal(it, kept);
+                        dup |= checked_equal(vm, || values_equal(it, kept));
+                        if pending_exc() || faulted() {
+                            return Some(Ok(Value::Undef));
+                        }
                         continue;
                     }
                     match order.apply(vm, it, kept) {

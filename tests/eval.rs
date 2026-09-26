@@ -8385,3 +8385,17 @@ println c.inspect()
     assert!(ok);
     assert_eq!(out, "list\nmap\n[1, (this Collection)]\n");
 }
+
+#[test]
+fn unique_over_self_holding_lists_raises_stack_overflow() {
+    // `unique` compares by `==`, which has no answer for two lists that each
+    // hold themselves; Groovy throws `StackOverflowError` there too.
+    let src = r#"
+def a = []; a << a; def b = []; b << b
+try { println([a, b].unique()) } catch (StackOverflowError e) { println "SOE" }
+println([[1], [1.0], [2]].unique())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "SOE\n[[1], [2]]\n");
+}

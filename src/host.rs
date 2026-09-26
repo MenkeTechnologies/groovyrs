@@ -5382,7 +5382,49 @@ fn range_hash(r: &RangeVal) -> i32 {
 /// handle is groovyrs's identity: stable for the life of the object, equal
 /// exactly when the references are equal. It is not the number a JVM would
 /// print, but a JVM's own identity hash varies run to run, so no value could be.
+///
+/// A collection that reaches itself (`a << a`, or `b` holding a list that
+/// holds `b`) has no finite hash: Java recurses until `StackOverflowError`. The
+/// walk here remembers the handles it is inside ([`HASH_PATH`]); meeting one
+/// again flags [`HASH_CYCLE`] and stops, and [`checked_hash_code`] turns the
+/// flag into the error a script can catch rather than overflowing the Rust
+/// stack.
 fn object_hash_code(v: &Value) -> i32 {
+    let Value::Obj(id) = v else {
+        return shape_hash_code(v);
+    };
+    let id = *id;
+    if HASH_PATH.with(|p| p.borrow().contains(&id)) {
+        HASH_CYCLE.with(|c| c.set(true));
+        return 0;
+    }
+    HASH_PATH.with(|p| p.borrow_mut().push(id));
+    let h = shape_hash_code(v);
+    HASH_PATH.with(|p| p.borrow_mut().pop());
+    h
+}
+
+thread_local! {
+    /// The heap handles [`object_hash_code`] is currently hashing the members
+    /// of, outermost first.
+    static HASH_PATH: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    /// Set when a hash walk met a handle already on [`HASH_PATH`].
+    static HASH_CYCLE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `hashCode()` as a script asks for it: `None` when the value reaches itself,
+/// where Java throws `StackOverflowError` (verified on Groovy 6.0.0 / JVM 17:
+/// `def a = [1, 2]; a << a; a.hashCode()` and `m.x = m; m.hashCode()` both
+/// throw it, and a `catch (StackOverflowError e)` sees it).
+fn checked_hash_code(hash: impl FnOnce() -> i32) -> Option<i32> {
+    HASH_CYCLE.with(|c| c.set(false));
+    let h = hash();
+    (!HASH_CYCLE.with(|c| c.replace(false))).then_some(h)
+}
+
+/// [`object_hash_code`] for one value, its members hashed through the
+/// cycle-tracking entry point.
+fn shape_hash_code(v: &Value) -> i32 {
     // The heap-backed shapes first: they all wear a `Value::Obj` tag, so the
     // variant alone cannot tell them apart.
     if let Some(items) = as_list_raw(v) {
@@ -5596,7 +5638,13 @@ fn dispatch_instance_method(
     }
     if class_generates(inst.class, GEN_EQUALS_HASH) {
         if method == "hashCode" && args.is_empty() {
-            return Some(Ok(Value::int(i64::from(generated_hash_code(&inst)))));
+            return Some(Ok(match checked_hash_code(|| generated_hash_code(&inst)) {
+                Some(h) => Value::int(i64::from(h)),
+                None => {
+                    raise_stack_overflow(vm);
+                    Value::Undef
+                }
+            }));
         }
         if method == "equals" && args.len() == 1 {
             return Some(Ok(Value::bool(generated_equals(&inst, &args[0]))));
@@ -6771,7 +6819,13 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // excludes an instance that declares one and the instance branch below
     // dispatches it.
     if method == "hashCode" && args.is_empty() && !has_user_hash_code(&recv) {
-        return Value::int(object_hash_code(&recv) as i64);
+        return match checked_hash_code(|| object_hash_code(&recv)) {
+            Some(h) => Value::int(i64::from(h)),
+            None => {
+                raise_stack_overflow(vm);
+                Value::Undef
+            }
+        };
     }
     // `with`/`tap` install the receiver as the closure's *delegate*, and a bare
     // mutator call inside the body (`[1, 2].tap { add(3) }`) has to reach this
@@ -12435,7 +12489,11 @@ fn format_one(vm: &mut VM, spec: &crate::format::Spec, arg: &Value) -> Option<St
             ))
         }
         'h' | 'H' => {
-            let text = format!("{:x}", object_hash_code(arg) as u32);
+            let Some(h) = checked_hash_code(|| object_hash_code(arg)) else {
+                raise_stack_overflow(vm);
+                return None;
+            };
+            let text = format!("{:x}", h as u32);
             Some(pad_conversion(
                 spec,
                 &cased(&text, spec.conv, spec.precision),

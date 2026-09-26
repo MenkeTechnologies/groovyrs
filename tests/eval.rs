@@ -8021,6 +8021,30 @@ println b.inspect()
 }
 
 #[test]
+fn a_self_reaching_collection_hash_raises_stack_overflow() {
+    // Java has no finite hash for a collection that reaches itself, directly
+    // or through another: `hashCode()` (and `%h`) recurse until a catchable
+    // `StackOverflowError`. Each of these aborted the process before. A list
+    // holding one list twice is not a cycle and still hashes.
+    let src = r#"
+def a = [1, 2]; a << a
+try { a.hashCode() } catch (StackOverflowError e) { println "list ${e.message}" }
+def m = [:]; m.x = m
+try { m.hashCode() } catch (StackOverflowError e) { println "map" }
+def b = [1]; def c = [b]; b << c
+try { b.hashCode() } catch (StackOverflowError e) { println "indirect" }
+def s = [1] as Set; s << [s]
+try { s.hashCode() } catch (StackOverflowError e) { println "set" }
+try { String.format("%h", a) } catch (StackOverflowError e) { println "format" }
+def d = [3]
+println([d, d].hashCode())
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "list null\nmap\nindirect\nset\nformat\n2049\n");
+}
+
+#[test]
 fn string_each_line_numbers_and_answers_the_last_result() {
     // `eachLine` walks `readLines` (\n, \r\n, no trailing empty line), hands a
     // two-parameter closure the line number from the optional start, and

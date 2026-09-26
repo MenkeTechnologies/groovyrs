@@ -669,11 +669,10 @@ collection that holds *itself* is modeled: it renders the element as
 GString, and compares equal to itself (`a == a`, `a.contains(a)`), because a
 handle is checked for identity before its elements are read — which is also
 where Groovy stops. What remains are the paths Groovy itself does not stop, and
-the ones that reach them through a second collection:
+the ones that reach them through a second collection: (`hashCode()` and `%h` are covered: the hash walk tracks the handles it is inside and raises the catchable `StackOverflowError` on meeting one again, directly or through another collection)
 
 | program | Groovy | groovyrs |
 |---|---|---|
-| `def a=[]; a<<a; println a.hashCode()` | `StackOverflowError` (catchable) | rc=134, stack overflow |
 | `def a=[]; def b=[a]; a<<b; println a` | `StackOverflowError` (catchable) | rc=134, stack overflow |
 | `def a=[]; a<<a; def b=[]; b<<b; println(a==b)` | `StackOverflowError` (catchable) | `true` |
 

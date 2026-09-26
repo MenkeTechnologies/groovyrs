@@ -144,6 +144,11 @@ const THROWABLES: &[(&str, &str, &str)] = &[
         "groovy.lang",
     ),
     (
+        "MissingFieldException",
+        "GroovyRuntimeException",
+        "groovy.lang",
+    ),
+    (
         "PowerAssertionError",
         "AssertionError",
         "org.codehaus.groovy.runtime.powerassert",

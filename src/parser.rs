@@ -2098,6 +2098,28 @@ impl Parser {
                 // Groovy records a member access under the *member name's*
                 // column, not the receiver's.
                 let col = self.col_at(0);
+                // `recv.@field` — Groovy's direct field access, which skips the
+                // getter/setter. It rides as a `Property` whose name carries the
+                // `@` (no identifier can), and the compiler strips it.
+                if self.is(&Tok::At) {
+                    if safe {
+                        return Err(format!(
+                            "groovyrs: `?.@` is not supported on line {line}"
+                        ));
+                    }
+                    self.advance();
+                    let field = self.ident()?;
+                    e = self.record(
+                        col,
+                        Expr::Property {
+                            recv: Box::new(e),
+                            name: format!("@{field}"),
+                            line,
+                            safe,
+                        },
+                    );
+                    continue;
+                }
                 let member = self.ident()?;
                 if self.is(&Tok::LParen) {
                     let mut args = self.call_args()?;

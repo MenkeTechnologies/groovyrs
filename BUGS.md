@@ -23,6 +23,13 @@ reported as parse or compile errors, never silently mis-run.
   properties on every other value, so `[a:1].size` and `[a:1].class` are `null`
   in Groovy while `[size: 9].size` is `9`. An unknown method/property faults
   rather than mis-running.
+- **Direct field access.** `recv.@f` reads and writes the field itself, never
+  `getF()`/`setF()`, and raises `MissingFieldException` for a receiver with no
+  such field (`null.@f` names `NullObject`, as Groovy's does). Inside a method or
+  constructor of the class that *declares* the field, a bare `f` and `this.f`
+  are the same direct access, so `def getX() { x }` reads the field instead of
+  recursing; a subclass, a closure and another receiver still go through the
+  accessors. `f++`/`--f` on a field update it in place.
 - **List and map literals.** `[1, 2, 3]`, `[]`, `[a: 1]`, `[:]` build a host-heap
   `java.util.ArrayList` and an insertion-ordered map, and print Groovy-style
   (`[1, 2, 3]`, `[a:1]`, `[:]`).
@@ -684,11 +691,6 @@ the `break` is never reached. A `BigDecimal` with an extreme scale
 (`new BigDecimal("1E+2147483647") + 1`) expands to its full digit string. A
 40,000-entry map literal takes quadratic time to parse (10k entries 2.4 s, 20k
 8.3 s, 40k past 20 s).
-
-**One semantic divergence found in the same sweep.** `class A { def x; def
-getX() { x } }; println new A().x` prints `null` in Groovy — a bare field name
-inside the declaring class reads the field and must not route back through the
-getter — where groovyrs recurses and now raises `StackOverflowError`.
 
 **Not a divergence**, recorded so a later sweep does not re-report them:
 `Long.MAX_VALUE.times {}`, `(1..Long.MAX_VALUE).each {}` and

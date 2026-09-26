@@ -7910,3 +7910,69 @@ t("put wrap", { def l = [1, 2]; l[4294967296] = 9; l })
          put wrap = [9, 2]\n"
     );
 }
+
+#[test]
+fn own_class_field_access_bypasses_accessors() {
+    // Inside a method or constructor of the class that declares it, a bare
+    // field name and `this.f` are a direct field access — no getter, no
+    // setter — while a closure, a subclass and another receiver go through the
+    // accessors. `recv.@f` is the explicit direct form everywhere. A getter
+    // written as `def getX() { x }` used to recurse into StackOverflowError,
+    // and `n++` on a field answered `null + 1`.
+    let src = r#"
+class A {
+  def x = 1
+  def getX() { 99 }
+  void setX(v) { println "setter $v" }
+  A() { this.x = 3 }
+  def f() { [x, this.x, getX()] }
+  def g() { x = 5; this.x = 6; x }
+  def inc() { x++; this.x += 10; this.@x }
+  def c() { def k = { [x, this.x] }; k() }
+  def other() { def o = new A(); [o.x, o.@x] }
+}
+class B extends A {
+  def k() { [x, this.x] }
+}
+class C { def y; def getY() { y } }
+def a = new A()
+println a.f()
+println a.g()
+println a.inc()
+println a.c()
+println a.other()
+println([a.x, a.@x])
+a.@x = 42
+println a.@x
+println new B().k()
+println new C().y
+println new C(y: 3).y
+def t(String l, Closure c) {
+  try { println(l + " = " + c()) } catch (e) { println(l + " ! " + e.getClass().getName() + ": " + e.getMessage()) }
+}
+t("missing", { new C().@z })
+t("map", { [k: 1].@k })
+t("null", { def n = null; n.@k })
+class D { def n = 0; def bump() { n++; ++n; def r = n++; [r, n] } }
+println new D().bump()
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[3, 3, 99]\n\
+         6\n\
+         17\n\
+         [99, 99]\n\
+         [99, 3]\n\
+         [99, 17]\n\
+         42\n\
+         [99, 99]\n\
+         null\n\
+         3\n\
+         missing ! groovy.lang.MissingFieldException: No such field: z for class: C\n\
+         map ! groovy.lang.MissingFieldException: No such field: k for class: java.util.LinkedHashMap\n\
+         null ! groovy.lang.MissingFieldException: No such field: k for class: org.codehaus.groovy.runtime.NullObject\n\
+         [2, 3]\n"
+    );
+}

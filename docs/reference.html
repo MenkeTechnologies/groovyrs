@@ -674,30 +674,38 @@ println(x)   // =&gt; 1</code></pre>
         <article class="doc-entry" id="doc-operators-32">
           <h3><a class="doc-anchor" href="#doc-operators-32">#</a> <code>.</code></h3>
           <pre><code class="lang-groovy">recv.member | recv.method(args)</code></pre>
-          <p>Member access. A call routes through the `GMETHOD` builtin and a read through `GPROP`; on a class instance a read prefers a user `getX()` getter over the raw field.</p>
+          <p>Member access. A call routes through the `GMETHOD` builtin and a read through `GPROP`; on a class instance a read prefers a user `getX()` getter over the raw field. Inside a method or constructor of the class that declares the field, a bare `x` and `this.x` read and write the field directly instead, as Groovy compiles them.</p>
           <pre><code class="lang-groovy">println("abc".size())   // =&gt; 3</code></pre>
         </article>
         <article class="doc-entry" id="doc-operators-33">
-          <h3><a class="doc-anchor" href="#doc-operators-33">#</a> <code>-&gt;</code></h3>
+          <h3><a class="doc-anchor" href="#doc-operators-33">#</a> <code>.@</code></h3>
+          <pre><code class="lang-groovy">recv.@field</code></pre>
+          <p>Direct field access: reads or writes the field itself through `GFIELD_GET` / `GFIELD_SET`, never a `getX()`/`setX()` accessor. A receiver with no such field raises `MissingFieldException`.</p>
+          <pre><code class="lang-groovy">class P { def x = 1; def getX() { 99 } }
+def p = new P()
+println([p.x, p.@x])   // =&gt; [99, 1]</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-operators-34">
+          <h3><a class="doc-anchor" href="#doc-operators-34">#</a> <code>-&gt;</code></h3>
           <pre><code class="lang-groovy">{ params -&gt; body }</code></pre>
           <p>The closure parameter separator. Its presence — even with an empty list — is what makes the parameter list explicit and suppresses the implicit `it`.</p>
           <pre><code class="lang-groovy">println([1, 2].collect { n -&gt; n * 10 })   // =&gt; [10, 20]</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-34">
-          <h3><a class="doc-anchor" href="#doc-operators-34">#</a> <code>|</code></h3>
+        <article class="doc-entry" id="doc-operators-35">
+          <h3><a class="doc-anchor" href="#doc-operators-35">#</a> <code>|</code></h3>
           <pre><code class="lang-groovy">catch (A | B name)</code></pre>
           <p>The multi-catch alternative separator. This is its only meaning: groovyrs has no bitwise-or operator.</p>
           <pre><code class="lang-groovy">try { 1 / 0 } catch (IOException | ArithmeticException e) { println("caught") }   // =&gt; caught</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-35">
-          <h3><a class="doc-anchor" href="#doc-operators-35">#</a> <code>@</code></h3>
+        <article class="doc-entry" id="doc-operators-36">
+          <h3><a class="doc-anchor" href="#doc-operators-36">#</a> <code>@</code></h3>
           <pre><code class="lang-groovy">@Name</code></pre>
           <p>The annotation marker. Annotations are lexed and skipped before a class or member declaration; groovyrs attaches no meaning to any of them.</p>
           <pre><code class="lang-groovy">class A { @Override def toString() { "A" } }
 println(new A())   // =&gt; A</code></pre>
         </article>
-        <article class="doc-entry" id="doc-operators-36">
-          <h3><a class="doc-anchor" href="#doc-operators-36">#</a> <code>label:</code></h3>
+        <article class="doc-entry" id="doc-operators-37">
+          <h3><a class="doc-anchor" href="#doc-operators-37">#</a> <code>label:</code></h3>
           <pre><code class="lang-groovy">name: loop</code></pre>
           <p>A statement label. Only a loop is a useful target, and only `break label` / `continue label` read it; naming a label no enclosing loop carries is a compile error.</p>
           <pre><code class="lang-groovy">outer: for (i in 0..3) { if (i == 1) break outer; print(i) }   // =&gt; 0</code></pre>
@@ -1451,18 +1459,18 @@ println(new P().power(3))   // =&gt; 8</code></pre>
         <article class="doc-entry" id="doc-class-member-hooks-13">
           <h3><a class="doc-anchor" href="#doc-class-member-hooks-13">#</a> <code>get&lt;Name&gt;</code></h3>
           <pre><code class="lang-groovy">def getName() { … }</code></pre>
-          <p>A getter. Reading the property `obj.name` prefers this method over the raw field, and calling `obj.getName()` falls back to the field when no such method exists. Note that a getter which reads its own backing field re-enters itself in the current build, so the body must not name the field it fronts.</p>
-          <pre><code class="lang-groovy">class P { def x = 1; def getX() { 99 } }
-println(new P().x)   // =&gt; 99</code></pre>
+          <p>A getter. Reading the property `obj.name` prefers this method over the raw field, and calling `obj.getName()` falls back to the field when no such method exists. Inside the declaring class a bare `x` is the field itself, so a getter may read the field it fronts.</p>
+          <pre><code class="lang-groovy">class P { def x = 1; def getX() { x * 10 } }
+println(new P().x)   // =&gt; 10</code></pre>
         </article>
         <article class="doc-entry" id="doc-class-member-hooks-14">
           <h3><a class="doc-anchor" href="#doc-class-member-hooks-14">#</a> <code>set&lt;Name&gt;</code></h3>
           <pre><code class="lang-groovy">def setName(value) { … }</code></pre>
-          <p>A setter. Writing `obj.name = v` prefers this method over the raw field write. As with the getter, assigning to the backing field of the same name re-enters the setter in the current build, so write through a differently-named field.</p>
-          <pre><code class="lang-groovy">class P { def y = 0; def setX(v) { y = v * 2 } }
+          <p>A setter. Writing `obj.name = v` prefers this method over the raw field write. Inside the declaring class an assignment to the bare field writes it directly, so a setter may store into the field it fronts.</p>
+          <pre><code class="lang-groovy">class P { def x = 0; void setX(v) { x = v * 2 } }
 def p = new P()
 p.x = 5
-println(p.y)   // =&gt; 10</code></pre>
+println(p.@x)   // =&gt; 10</code></pre>
         </article>
       </section>
 
@@ -1613,7 +1621,14 @@ println(p.y)   // =&gt; 10</code></pre>
           <pre><code class="lang-groovy">try { 5.zz } catch (MissingPropertyException e) { println(e.message) }   // =&gt; No such property: zz for class: java.lang.Integer</code></pre>
         </article>
         <article class="doc-entry" id="doc-throwables-25">
-          <h3><a class="doc-anchor" href="#doc-throwables-25">#</a> <code>PowerAssertionError</code></h3>
+          <h3><a class="doc-anchor" href="#doc-throwables-25">#</a> <code>MissingFieldException</code></h3>
+          <pre><code class="lang-groovy">new MissingFieldException([String message]) — groovy.lang</code></pre>
+          <p>Raised by a direct field access `recv.@name` on a receiver whose class declares no such field.</p>
+          <pre><code class="lang-groovy">class P { def x }
+try { new P().@y } catch (MissingFieldException e) { println(e.message) }   // =&gt; No such field: y for class: P</code></pre>
+        </article>
+        <article class="doc-entry" id="doc-throwables-26">
+          <h3><a class="doc-anchor" href="#doc-throwables-26">#</a> <code>PowerAssertionError</code></h3>
           <pre><code class="lang-groovy">new PowerAssertionError([String message]) — org.codehaus.groovy.runtime.powerassert</code></pre>
           <p>What a bare `assert` raises. It overrides `toString` to print `Assertion failed:` followed by the source text with each recorded sub-expression's value laid out under the column it occupied.</p>
           <pre><code class="lang-groovy">try { assert 1 == 2 } catch (AssertionError e) { println(e.getClass().simpleName) }   // =&gt; PowerAssertionError</code></pre>

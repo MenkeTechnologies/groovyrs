@@ -419,6 +419,20 @@ pub const GUSE: u16 = 774;
 /// `java.lang.Double`, a different Groovy type with a different `toString`.
 pub const GFLOAT: u16 = 775;
 
+/// Builtin id for a **direct field read** — `obj.@name`, and a bare field name
+/// (or `this.name`) inside a method of the class that declares it. Stack: the
+/// receiver, then the field name on top. Unlike [`GPROP`] it never runs a
+/// getter: Groovy compiles a field its own class names as a field access, so
+/// `class A { def x; def getX() { x } }` reads the field rather than recursing.
+/// A receiver with no such field raises `MissingFieldException`.
+pub const GFIELD_GET: u16 = 776;
+
+/// Builtin id for a **direct field write** — `obj.@name = v`, and an
+/// assignment to a field its own class's method names. Stack: the receiver,
+/// the value, then the field name on top. Never runs a setter. Answers the
+/// value written.
+pub const GFIELD_SET: u16 = 777;
+
 /// The call depth at which groovyrs raises `java.lang.StackOverflowError`.
 ///
 /// Groovy's depth is the JVM's: whatever fits in the thread's `-Xss`. Measured
@@ -479,6 +493,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GINSTANCEOF, b_instanceof);
     vm.register_builtin(GDEC, b_dec);
     vm.register_builtin(GFLOAT, b_float);
+    vm.register_builtin(GFIELD_GET, b_field_get);
+    vm.register_builtin(GFIELD_SET, b_field_set);
     vm.register_builtin(GTRUTH, b_truth);
     vm.register_builtin(GTRUTH_KEEP, b_truth_keep);
     vm.register_builtin(GSTRING, b_gstring);
@@ -5670,6 +5686,46 @@ fn dispatch_instance_prop_get(
         ));
     }
     Some(Ok(raise_missing_property(vm, recv, name)))
+}
+
+/// Raise `groovy.lang.MissingFieldException` for a direct field access on a
+/// receiver whose class declares no such field. `null.@x` is the same error,
+/// naming the `NullObject` Groovy routes the access through.
+fn raise_missing_field(vm: &mut VM, recv: &Value, name: &str) -> Value {
+    let class = match recv {
+        Value::Undef => "org.codehaus.groovy.runtime.NullObject".to_string(),
+        _ => java_class_name(recv),
+    };
+    raise(
+        vm,
+        "MissingFieldException",
+        &format!("No such field: {name} for class: {class}"),
+    );
+    Value::Undef
+}
+
+/// `GFIELD_GET`: read `recv.@name` — the field itself, no getter.
+fn b_field_get(vm: &mut VM, _argc: u8) -> Value {
+    let name = vm.stack.pop().unwrap_or(Value::Undef).as_str_cow().into_owned();
+    let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    match as_instance(&recv) {
+        Some(inst) if inst.fields.contains_key(&name) => {
+            inst.fields.get(&name).cloned().unwrap_or(Value::Undef)
+        }
+        _ => raise_missing_field(vm, &recv, &name),
+    }
+}
+
+/// `GFIELD_SET`: write `recv.@name = value` — the field itself, no setter.
+fn b_field_set(vm: &mut VM, _argc: u8) -> Value {
+    let name = vm.stack.pop().unwrap_or(Value::Undef).as_str_cow().into_owned();
+    let value = vm.stack.pop().unwrap_or(Value::Undef);
+    let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    if as_instance(&recv).is_some_and(|i| i.fields.contains_key(&name)) {
+        set_instance_field(&recv, &name, value.clone());
+        return value;
+    }
+    raise_missing_field(vm, &recv, &name)
 }
 
 /// `GSETPROP`: assign `recv.name = value`. Stack: receiver (deepest), value,

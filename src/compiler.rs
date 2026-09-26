@@ -148,6 +148,13 @@ struct Compiler {
     /// being lowered; `None` outside a class member. A bare name that is a field
     /// (and not shadowed by a parameter/local) resolves to `this.field`.
     cur_class_fields: Option<HashSet<String>>,
+    /// The fields the class being lowered **declares itself** (not inherited),
+    /// while lowering one of its method or constructor bodies directly — `None`
+    /// inside a closure, a field initializer, a trait, and outside a class.
+    /// Groovy compiles a bare `x` or `this.x` naming one of these as a direct
+    /// field access, bypassing `getX()`/`setX()`; everywhere else (a subclass,
+    /// a closure, another receiver) the property goes through the accessors.
+    cur_class_own_fields: Option<HashSet<String>>,
     /// The method names of the class whose member body is currently being
     /// lowered. A bare call to one of these (not shadowed by a local) is an
     /// implicit `this.method(args)`.
@@ -459,6 +466,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         recursive_fns: recursive,
         scope: None,
         cur_class_fields: None,
+        cur_class_own_fields: None,
         cur_class_methods: None,
         cur_class_super: None,
         class_index,
@@ -585,7 +593,14 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
                 (true, None) => interfaces.first().map(String::as_str),
                 (_, s) => s,
             };
-            c.class_bodies(stmt.line, name, parent, fields, ctors, methods)?;
+            // A trait's fields are remapped by Groovy's trait machinery and are
+            // always reached through their accessors, so none count as own.
+            let own_fields: HashSet<String> = if *is_trait {
+                HashSet::new()
+            } else {
+                fields.iter().map(|f| f.name.clone()).collect()
+            };
+            c.class_bodies(stmt.line, name, parent, fields, &own_fields, ctors, methods)?;
         }
     }
     // Emit queued closure bodies as subroutine regions. Draining may enqueue
@@ -1043,6 +1058,8 @@ impl Compiler {
             next_slot: total as u16,
         });
         let prev_fields = std::mem::replace(&mut self.cur_class_fields, pc.class_fields);
+        // A closure reads even its own class's fields through the accessors.
+        let prev_own = self.cur_class_own_fields.take();
         let prev_methods = std::mem::replace(&mut self.cur_class_methods, pc.class_methods);
         let prev_tries = std::mem::take(&mut self.tries);
         let prev_finallys = std::mem::take(&mut self.finallys);
@@ -1071,6 +1088,7 @@ impl Compiler {
 
         self.scope = prev;
         self.cur_class_fields = prev_fields;
+        self.cur_class_own_fields = prev_own;
         self.cur_class_methods = prev_methods;
         self.tries = prev_tries;
         self.finallys = prev_finallys;
@@ -1239,6 +1257,7 @@ impl Compiler {
         name: &str,
         superclass: Option<&str>,
         fields: &[Field],
+        own_fields: &HashSet<String>,
         ctors: &[Ctor],
         methods: &[Method],
     ) -> Result<(), String> {
@@ -1250,12 +1269,16 @@ impl Compiler {
         // bodies resolve to it; restored after emitting the members.
         let prev_super =
             std::mem::replace(&mut self.cur_class_super, superclass.map(str::to_string));
+        // Published for the constructor and method bodies only; the field
+        // initializers below run with it cleared.
+        let prev_own = self.cur_class_own_fields.take();
         // Field-initializer thunks (0-arg subs that compute the initial value).
         for f in fields {
             if let Some(init) = &f.init {
                 self.emit_field_init(line, name, &f.name, init)?;
             }
         }
+        self.cur_class_own_fields = Some(own_fields.clone());
         for ctor in ctors {
             let sub = Self::ctor_sub_name(name, ctor.params.len());
             self.emit_member(
@@ -1272,6 +1295,7 @@ impl Compiler {
             self.emit_member(line, &sub, &m.params, &m.body, &field_set, &method_set)?;
         }
         self.cur_class_super = prev_super;
+        self.cur_class_own_fields = prev_own;
         Ok(())
     }
 
@@ -1405,6 +1429,28 @@ impl Compiler {
             && !self.is_local(name)
     }
 
+    /// The field a property access reads or writes *directly*, bypassing the
+    /// getter/setter: `recv.@f` always (the parser spells it as the name `@f`),
+    /// and `this.f` for a field the enclosing class declares, while lowering
+    /// that class's own method or constructor body. `None` is an ordinary
+    /// property access.
+    fn direct_field<'n>(&self, recv: &Expr, name: &'n str) -> Option<&'n str> {
+        if let Some(field) = name.strip_prefix('@') {
+            return Some(field);
+        }
+        let own = self.cur_class_own_fields.as_ref()?;
+        (matches!(recv, Expr::This) && own.contains(name)).then_some(name)
+    }
+
+    /// True when the bare name `name` is a field the enclosing class declares
+    /// itself (see [`Compiler::cur_class_own_fields`]) and no local shadows it.
+    fn is_own_field(&self, name: &str) -> bool {
+        self.cur_class_own_fields
+            .as_ref()
+            .is_some_and(|f| f.contains(name))
+            && !self.is_local(name)
+    }
+
     /// True when `name` is a statically named JDK class (`Math`, `Integer`, …)
     /// rather than a variable — so it lowers to a `java.lang.Class` reference.
     /// A script-declared class of the same name, a local, or a field all win,
@@ -1492,12 +1538,18 @@ impl Compiler {
     }
 
     /// Emit a read of the current instance's field `name` (`this.field`):
-    /// `this` through the property builtin.
+    /// `this` through the property builtin, or straight from the field when the
+    /// enclosing class declares it (see [`Compiler::cur_class_own_fields`]).
     fn emit_field_get(&mut self, name: &str) -> Result<(), String> {
         self.emit_this();
         let c = self.b.add_constant(Value::str(name.to_string()));
         self.b.emit(Op::LoadConst(c), self.cur_line);
-        self.emit_call_builtin(crate::host::GPROP, 0, self.cur_line)
+        let id = if self.is_own_field(name) {
+            crate::host::GFIELD_GET
+        } else {
+            crate::host::GPROP
+        };
+        self.emit_call_builtin(id, 0, self.cur_line)
     }
 
     /// Emit `binary`'s left operand, unless a compound assignment already
@@ -1601,7 +1653,12 @@ impl Compiler {
         }
         let c = self.b.add_constant(Value::str(name.to_string()));
         self.b.emit(Op::LoadConst(c), self.cur_line);
-        self.emit_call_builtin(crate::host::GSETPROP, 0, self.cur_line)?;
+        let id = if self.is_own_field(name) {
+            crate::host::GFIELD_SET
+        } else {
+            crate::host::GSETPROP
+        };
+        self.emit_call_builtin(id, 0, self.cur_line)?;
         self.b.emit(Op::Pop, self.cur_line);
         Ok(())
     }
@@ -1760,6 +1817,15 @@ impl Compiler {
                 value,
             } => {
                 // `recv.name = value` — stack: recv (deepest), value, name.
+                // A direct field write (`recv.@f`, or `this.f` for an own field)
+                // reads and writes the field under its bare name.
+                let direct = self.direct_field(recv, name).map(str::to_string);
+                let name = direct.as_ref().unwrap_or(name);
+                let (get_id, set_id) = if direct.is_some() {
+                    (crate::host::GFIELD_GET, crate::host::GFIELD_SET)
+                } else {
+                    (crate::host::GPROP, crate::host::GSETPROP)
+                };
                 self.expr(recv)?;
                 if !matches!(op, AssignOp::Assign) {
                     // `recv.name <op>= value`. The receiver is already on the
@@ -1769,7 +1835,7 @@ impl Compiler {
                     self.b.emit(Op::Dup, self.cur_line);
                     let c = self.b.add_constant(Value::str(name.clone()));
                     self.b.emit(Op::LoadConst(c), self.cur_line);
-                    self.emit_call_builtin(crate::host::GPROP, 0, self.cur_line)?;
+                    self.emit_call_builtin(get_id, 0, self.cur_line)?;
                 }
                 // The target expression, for the operand analyses `binary` runs
                 // (its Java width, whether it may be a `BigInteger`). It is
@@ -1783,7 +1849,7 @@ impl Compiler {
                 self.emit_compound_value(*op, &target, value)?;
                 let c = self.b.add_constant(Value::str(name.clone()));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
-                self.emit_call_builtin(crate::host::GSETPROP, 0, self.cur_line)?;
+                self.emit_call_builtin(set_id, 0, self.cur_line)?;
                 self.b.emit(Op::Pop, self.cur_line);
                 Ok(())
             }
@@ -2689,6 +2755,13 @@ impl Compiler {
     /// Used by both `++`/`--` in statement position and as the update step of the
     /// value-position pre/post forms.
     fn inc_dec_update(&mut self, name: &str, inc: bool) -> Result<(), String> {
+        // A bare field inside a method is `this.field`, so `n++` is the field
+        // compound assignment `n += 1` — reading it as a script name found
+        // nothing and answered `null + 1`.
+        if self.is_field(name) {
+            let op = if inc { AssignOp::Add } else { AssignOp::Sub };
+            return self.assign_field(name, op, &Expr::Int(1, IntWidth::Int));
+        }
         self.emit_name_load(name, self.cur_line)?;
         self.b.emit(Op::LoadInt(1), self.cur_line);
         self.b
@@ -2916,14 +2989,15 @@ impl Compiler {
                 self.println(*newline, arg.as_deref())?;
             }
             Expr::PostIncDec { name, inc } => {
-                // Post: yield the value before the update, then update.
-                self.emit_name_load(name, self.cur_line)?;
+                // Post: yield the value before the update, then update. The
+                // read goes through `Var` so a bare field reads `this.field`.
+                self.expr(&Expr::Var(name.clone()))?;
                 self.inc_dec_update(name, *inc)?;
             }
             Expr::PreIncDec { name, inc } => {
                 // Pre: update, then yield the new value.
                 self.inc_dec_update(name, *inc)?;
-                self.emit_name_load(name, self.cur_line)?;
+                self.expr(&Expr::Var(name.clone()))?;
             }
             Expr::Call { name, args, line } => self.call(name, args, *line)?,
             Expr::List(elems) => {
@@ -3037,6 +3111,11 @@ impl Compiler {
                 }
                 // Stack: [recv, propname]; the property builtin pops both.
                 self.expr(recv)?;
+                if let Some(field) = self.direct_field(recv, name) {
+                    let nidx = self.b.add_constant(Value::str(field.to_string()));
+                    self.b.emit(Op::LoadConst(nidx), *line);
+                    return self.emit_call_builtin(crate::host::GFIELD_GET, 0, *line);
+                }
                 let nidx = self.b.add_constant(Value::str(name.clone()));
                 self.b.emit(Op::LoadConst(nidx), *line);
                 let id = if *safe {

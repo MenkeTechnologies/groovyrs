@@ -7869,3 +7869,44 @@ println([1, 2][4294967297])
          2\n"
     );
 }
+
+#[test]
+fn gdk_counts_and_widths_read_int_value() {
+    // `String.multiply`, `List.multiply`, `padLeft`/`padRight`/`center` and
+    // `List.putAt` take their count through `Number.intValue()`: a `Long`
+    // keeps its low 32 bits, a decimal truncates, and a negative count is an
+    // `IllegalArgumentException` for the two `multiply`s. Several of these
+    // aborted with `capacity overflow` / a failed allocation before.
+    let src = r#"
+def t(String l, Closure c) {
+  try { println(l + " = " + c()) } catch (e) { println(l + " ! " + e.getClass().getName() + ": " + e.getMessage()) }
+}
+t("s*MAX", { "abc".multiply(Long.MAX_VALUE) })
+t("s*-1", { "abc" * -1 })
+t("s*wrap", { "abc" * 4294967298 })
+t("s*2.9", { "ab" * 2.9 })
+t("l*-1", { [1] * -1 })
+t("l*2.9", { [1] * 2.9 })
+t("padLeft", { "abc".padLeft(Long.MAX_VALUE) + "|" })
+t("padLeft 4.7", { "ab".padLeft(4.7) + "|" })
+t("center", { "abc".center(4294967301, "*") + "|" })
+t("put MAX", { def l = [1, 2]; l[Long.MAX_VALUE] = 9; l })
+t("put wrap", { def l = [1, 2]; l[4294967296] = 9; l })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "s*MAX ! java.lang.IllegalArgumentException: multiply() should be called with a number of 0 or greater not: -1\n\
+         s*-1 ! java.lang.IllegalArgumentException: multiply() should be called with a number of 0 or greater not: -1\n\
+         s*wrap = abcabc\n\
+         s*2.9 = abab\n\
+         l*-1 ! java.lang.IllegalArgumentException: Illegal Capacity: -1\n\
+         l*2.9 = [1, 1]\n\
+         padLeft = abc|\n\
+         padLeft 4.7 =   ab|\n\
+         center = *abc*|\n\
+         put MAX = [1, 9]\n\
+         put wrap = [9, 2]\n"
+    );
+}

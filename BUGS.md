@@ -650,14 +650,11 @@ sides: Apache Groovy 5.0.8 / JVM 21.0.12, and the groovyrs build at
 `294aa8b4e9`. A panic or an abort is a parity divergence even where the happy
 path agrees, because no `catch` can see one.
 
-**An unbounded length reaches the allocator.** `println "abc".multiply(Long.MAX_VALUE)`
-is `IllegalArgumentException: multiply() should be called with a number ≥ 0` in
-Groovy and `capacity overflow` (rc=101) here; `def l=[1,2]; l[Long.MAX_VALUE]=1`
-is accepted by Groovy and is `capacity overflow` here; `"abc".padLeft(Long.MAX_VALUE)`
-answers `abc` in Groovy and aborts here with
-`memory allocation of 9223372036854775804 bytes failed` (rc=134). `padRight`,
-`center`, `[1]*2147483647`, `String.format("%2147483647d", 1)` and
-`1.0.round(2147483647)` are the same shape and hang rather than abort.
+**A huge but legal length reaches the allocator.** `[1]*2147483647`,
+`String.format("%2147483647d", 1)` and `1.0.round(2147483647)` build the value
+they describe and hang. (The `Long`-count forms — `"abc".multiply(Long.MAX_VALUE)`,
+`padLeft`/`padRight`/`center(Long.MAX_VALUE)`, `l[Long.MAX_VALUE] = v` — read
+their count through `intValue()` as Groovy does and no longer reach it.)
 
 **A self-referential collection has no cycle detection.** Groovy renders the
 back-edge as `[(this Collection)]` / `[k:(this Map)]`; every groovyrs path that

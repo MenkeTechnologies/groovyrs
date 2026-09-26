@@ -6016,13 +6016,15 @@ fn b_setindex(vm: &mut VM, _argc: u8) -> Value {
 
 /// `list[i] = v`. A negative index counts from the end; an index past the end
 /// grows the list, padding with `null`, the way Groovy's `List.putAt` does.
-/// `Err((index, len))` is the negative-index-too-large case.
+/// `Err((index, len))` is the negative-index-too-large case. The index is read
+/// through `intValue()`, as the read side is: `l[Long.MAX_VALUE] = v` writes
+/// the last element (index -1), and `l[4294967296] = v` the first.
 fn list_put(
     mut items: Vec<Value>,
     index: &Value,
     value: Value,
 ) -> Result<Vec<Value>, (i64, usize)> {
-    let i = index.to_int();
+    let i = i64::from(index.to_int() as i32);
     let idx = if i < 0 { items.len() as i64 + i } else { i };
     if idx < 0 {
         return Err((i, items.len()));
@@ -8771,15 +8773,23 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
             Value::str(utf16_slice(s, from as usize, to as usize))
         }
-        // `String.multiply(n)` is the `"x" * n` operator.
-        (Value::Str(s), "multiply") => {
-            let n = args.first().and_then(as_i64).unwrap_or(0).max(0) as usize;
-            Value::str(s.repeat(n))
-        }
+        // `String.multiply(n)` is the `"x" * n` operator. The count is the
+        // argument's `intValue()` (`"ab" * 2.9` is `abab`, and a `Long` wraps),
+        // and a negative one is refused rather than read as zero.
+        (Value::Str(s), "multiply") => match args.first().map(count_int_value).unwrap_or(0) {
+            n if n < 0 => {
+                let msg = format!("multiply() should be called with a number of 0 or greater not: {n}");
+                raise(vm, "IllegalArgumentException", &msg);
+                Value::Undef
+            }
+            n => Value::str(s.repeat(n as usize)),
+        },
         // Groovy's padding/centring DGM. The pad text repeats and is cut to
         // length; `center` puts the odd character on the right.
         (Value::Str(s), "padLeft" | "padRight" | "center") => {
-            let width = args.first().and_then(as_i64).unwrap_or(0).max(0) as usize;
+            // The width is the argument's `intValue()`: `padLeft(4.7)` pads to
+            // 4, and `padLeft(Long.MAX_VALUE)` narrows to -1 and pads nothing.
+            let width = args.first().map(count_int_value).unwrap_or(0).max(0) as usize;
             let pad = args.get(1).map(groovy_str).unwrap_or_else(|| " ".into());
             let len = s.chars().count();
             if width <= len || pad.is_empty() {
@@ -9233,11 +9243,16 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 _ => a.iter().cloned().chain(other).collect(),
             })
         }
-        // `list * n` — the receiver repeated `n` times.
-        (Value::Array(a), "multiply") => {
-            let n = args.first().and_then(as_i64).unwrap_or(0).max(0) as usize;
-            Value::array(std::iter::repeat(a.to_vec()).take(n).flatten().collect())
-        }
+        // `list * n` — the receiver repeated `n` times, `n` read through
+        // `intValue()`. A negative count reaches `new ArrayList(size * n)`,
+        // whose refusal is the error Groovy reports.
+        (Value::Array(a), "multiply") => match args.first().map(count_int_value).unwrap_or(0) {
+            n if n < 0 => {
+                raise(vm, "IllegalArgumentException", &format!("Illegal Capacity: {n}"));
+                Value::Undef
+            }
+            n => Value::array(std::iter::repeat(a.to_vec()).take(n as usize).flatten().collect()),
+        },
         // `[[1, 2], [3, 4]].transpose()` == `[[1, 3], [2, 4]]`; the result is as
         // long as the *shortest* row, which is what Groovy's does.
         (Value::Array(a), "transpose") => {
@@ -13762,6 +13777,21 @@ fn java_get_exponent(f: f64) -> i32 {
     }
 }
 
+/// The `int` a GDK count/width parameter declared as `Number` reads: its
+/// `intValue()`. A `Long` keeps its low 32 bits, a `double` saturates, and a
+/// `BigDecimal`/`BigInteger` truncates then keeps its low 32 bits. Anything
+/// else falls back to the value's integer reading (a `Boolean` is 0/1).
+fn count_int_value(v: &Value) -> i32 {
+    match v {
+        Value::Int(n) => *n as i32,
+        Value::Float(f) => *f as i32,
+        _ => match as_dec(v) {
+            Some(d) => decimal::low_i32(&d),
+            None => as_i64(v).unwrap_or(0) as i32,
+        },
+    }
+}
+
 /// Java's `(int)` cast applied to a `double` — what `Double.intValue()` does.
 ///
 /// The cast saturates at the `int` bounds (it does **not** wrap), and NaN
@@ -15243,17 +15273,6 @@ fn groovy_sub(a: &Value, b: &Value) -> Value {
     }
 }
 
-/// Groovy's `*` on a `String` or a list: the receiver repeated `n` times.
-fn groovy_mul(a: &Value, b: &Value) -> Value {
-    let n = as_i64(b).unwrap_or(0).max(0) as usize;
-    match a {
-        Value::Array(xs) => {
-            Value::array(std::iter::repeat(xs.to_vec()).take(n).flatten().collect())
-        }
-        other => Value::str(groovy_str(other).repeat(n)),
-    }
-}
-
 /// The Groovy method a binary/unary arithmetic operator dispatches to on a
 /// user-class instance (byte-verified against Apache Groovy 5.0.7: `%` maps to
 /// `remainder`, `**` to `power`, unary `-` to `negative`). `/` is handled in
@@ -15661,7 +15680,13 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
             with_vm(|vm| dispatch_method(vm, &x, "minus", std::slice::from_ref(&y)))
                 .ok_or_else(|| "groovyrs: map `-` dispatched with no active VM".to_string())
         }
-        NumOp::Mul if matches!(a, Value::Str(_) | Value::Array(_)) => Ok(groovy_mul(a, b)),
+        // `String * n` / `list * n` are the `multiply` GDK methods, so the
+        // operator takes the method's count reading and its errors.
+        NumOp::Mul if matches!(a, Value::Str(_) | Value::Array(_)) => {
+            let (x, y) = (a.clone(), b.clone());
+            with_vm(|vm| dispatch_method(vm, &x, "multiply", std::slice::from_ref(&y)))
+                .ok_or_else(|| "groovyrs: `*` dispatched with no active VM".to_string())
+        }
         // Arithmetic other than `+` on a non-numeric operand has no slice-1
         // meaning (`String.minus`/`multiply` GDK overloads are not modeled yet).
         NumOp::Sub | NumOp::Mul | NumOp::Div | NumOp::Mod | NumOp::Pow => Err(format!(

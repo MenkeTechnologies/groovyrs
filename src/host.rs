@@ -5167,6 +5167,21 @@ fn place(line: &mut Vec<char>, s: &str, column: usize) {
 /// the power-assert layout uses and `println` does not: a `String` is quoted,
 /// and a collection's elements — including a map's keys — are rendered the same
 /// way recursively. Everything else prints as it always does.
+/// What `AbstractCollection.toString` / `AbstractMap.toString` print in place
+/// of an element that is the collection itself, so a self-holding collection
+/// renders (`[1, (this Collection)]`) instead of recursing without end.
+const THIS_COLLECTION: &str = "(this Collection)";
+const THIS_MAP: &str = "(this Map)";
+
+/// Render `elem` with `render`, unless it is the very handle `owner` — then
+/// `label` ([`THIS_COLLECTION`] / [`THIS_MAP`]), as Java's collections do.
+fn self_or(owner: &Value, elem: &Value, label: &str, render: impl FnOnce(&Value) -> String) -> String {
+    match (owner, elem) {
+        (Value::Obj(a), Value::Obj(b)) if a == b => label.to_string(),
+        _ => render(elem),
+    }
+}
+
 fn inspect_value(v: &Value) -> String {
     if let Some(entries) = as_omap(v) {
         if entries.is_empty() {
@@ -5174,14 +5189,17 @@ fn inspect_value(v: &Value) -> String {
         }
         let items: Vec<String> = entries
             .iter()
-            .map(|(k, val)| format!("'{k}':{}", inspect_value(val)))
+            .map(|(k, val)| format!("'{k}':{}", self_or(v, val, THIS_MAP, inspect_value)))
             .collect();
         return format!("[{}]", items.join(", "));
     }
     // A list renders its elements with the same quoting rules, recursively —
     // through the handle form as well as the transient array form.
     if let Some(items) = as_list(v) {
-        let shown: Vec<String> = items.iter().map(inspect_value).collect();
+        let shown: Vec<String> = items
+            .iter()
+            .map(|e| self_or(v, e, THIS_COLLECTION, inspect_value))
+            .collect();
         return format!("[{}]", shown.join(", "));
     }
     match v {
@@ -5198,6 +5216,15 @@ fn inspect_value(v: &Value) -> String {
 /// numerically across types (`case 1:` matches the subject `1.00`), and
 /// everything else compares by its rendered form — the same rule `==` uses.
 fn values_equal(a: &Value, b: &Value) -> bool {
+    // One handle is equal to itself before any element is read, as
+    // `DefaultTypeTransformation.compareEqual` and `AbstractMap.equals` both
+    // check first — which is what lets a map holding itself compare equal to
+    // itself rather than walking into its own entry forever.
+    if let (Value::Obj(x), Value::Obj(y)) = (a, b) {
+        if x == y {
+            return true;
+        }
+    }
     // A list rides a heap handle, but `List.equals` is by *elements* — two
     // separately built lists holding the same values are equal, and the same
     // list under two names is not equal by virtue of being one handle. Deref to
@@ -6744,6 +6771,16 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         // (`java.util.ArrayList` for what is an `ArrayList$SubList`).
         if method == "getClass" && args.is_empty() {
             return class_ref_of(&recv);
+        }
+        // The renderings, too, need the handle: a list that holds itself prints
+        // that element as `(this Collection)`, which only identity can tell —
+        // the detached copy below is a different value from the element.
+        if args.is_empty() && matches!(method, "toString" | "inspect") && check_comodification(&recv) {
+            return Value::str(if method == "inspect" {
+                inspect_value(&recv)
+            } else {
+                render_value(vm, &recv)
+            });
         }
         // Every other call through a window is a fail-fast read: if the backing
         // list moved on, it throws before doing anything.
@@ -14758,7 +14795,7 @@ fn render_value(vm: &mut VM, v: &Value) -> String {
         }
         let items: Vec<String> = entries
             .iter()
-            .map(|(k, val)| format!("{k}:{}", render_value(vm, val)))
+            .map(|(k, val)| format!("{k}:{}", self_or(v, val, THIS_MAP, |e| render_value(vm, e))))
             .collect();
         return format!("[{}]", items.join(", "));
     }
@@ -14771,13 +14808,16 @@ fn render_value(vm: &mut VM, v: &Value) -> String {
     // already does.
     if array_elem(v) != Some(ArrayElem::Char) {
         if let Some(items) = as_list(v) {
-            let shown: Vec<String> = items.iter().map(|e| render_value(vm, e)).collect();
+            let shown: Vec<String> = items
+                .iter()
+                .map(|e| self_or(v, e, THIS_COLLECTION, |e| render_value(vm, e)))
+                .collect();
             return format!("[{}]", shown.join(", "));
         }
         if let Some((items, kind)) = as_set(v) {
             let shown: Vec<String> = set_elements(&items, kind)
                 .iter()
-                .map(|e| render_value(vm, e))
+                .map(|e| self_or(v, e, THIS_COLLECTION, |e| render_value(vm, e)))
                 .collect();
             return format!("[{}]", shown.join(", "));
         }
@@ -14897,14 +14937,20 @@ pub fn groovy_str(v: &Value) -> String {
     // A list handle renders `[a, b, c]` (`[]` when empty), exactly as the
     // transient `Value::Array` form below does.
     if let Some(items) = as_list(v) {
-        let shown: Vec<String> = items.iter().map(groovy_str).collect();
+        let shown: Vec<String> = items
+            .iter()
+            .map(|e| self_or(v, e, THIS_COLLECTION, groovy_str))
+            .collect();
         return format!("[{}]", shown.join(", "));
     }
     // A set renders like a list — `[a, b]`, `[]` when empty — but in the order
     // its implementation presents, which for a `HashSet`/`TreeSet` is not the
     // order elements went in.
     if let Some((items, kind)) = as_set(v) {
-        let shown: Vec<String> = set_elements(&items, kind).iter().map(groovy_str).collect();
+        let shown: Vec<String> = set_elements(&items, kind)
+            .iter()
+            .map(|e| self_or(v, e, THIS_COLLECTION, groovy_str))
+            .collect();
         return format!("[{}]", shown.join(", "));
     }
     // An ordered-map handle renders `[k:v, …]` in insertion order (`[:]` empty).
@@ -14914,7 +14960,7 @@ pub fn groovy_str(v: &Value) -> String {
         }
         let items: Vec<String> = entries
             .iter()
-            .map(|(k, val)| format!("{k}:{}", groovy_str(val)))
+            .map(|(k, val)| format!("{k}:{}", self_or(v, val, THIS_MAP, groovy_str)))
             .collect();
         return format!("[{}]", items.join(", "));
     }

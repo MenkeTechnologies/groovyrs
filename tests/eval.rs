@@ -7976,3 +7976,46 @@ println new D().bump()
          [2, 3]\n"
     );
 }
+
+#[test]
+fn a_collection_holding_itself_renders_and_compares() {
+    // Java's collections print a self-reference as `(this Collection)` /
+    // `(this Map)` and compare a handle equal to itself before reading an
+    // element. Every line here overflowed the Rust stack (an uncatchable
+    // abort) before.
+    let src = r#"
+def a = [1]; a << a
+println a
+println a.toString()
+println "$a"
+println a.join("-")
+println a.inspect()
+println(a == a)
+println a.contains(a)
+def m = [x: 1]; m.k = m
+println m
+println m.inspect()
+println(m == m)
+def s = [1] as Set; s << s
+println s
+def b = [1]; b.add(0, b)
+println b.inspect()
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[1, (this Collection)]\n\
+         [1, (this Collection)]\n\
+         [1, (this Collection)]\n\
+         1-[1, (this Collection)]\n\
+         [1, (this Collection)]\n\
+         true\n\
+         true\n\
+         [x:1, k:(this Map)]\n\
+         ['x':1, 'k':(this Map)]\n\
+         true\n\
+         [1, (this Collection)]\n\
+         [(this Collection), 1]\n"
+    );
+}

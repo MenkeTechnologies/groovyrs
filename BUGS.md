@@ -663,26 +663,25 @@ they describe and hang. (The `Long`-count forms — `"abc".multiply(Long.MAX_VAL
 `padLeft`/`padRight`/`center(Long.MAX_VALUE)`, `l[Long.MAX_VALUE] = v` — read
 their count through `intValue()` as Groovy does and no longer reach it.)
 
-**A self-referential collection has no cycle detection.** Groovy renders the
-back-edge as `[(this Collection)]` / `[k:(this Map)]`; every groovyrs path that
-walks the elements recurses until the Rust stack is gone:
+**An indirectly self-referential collection has no cycle detection.** A
+collection that holds *itself* is modeled: it renders the element as
+`(this Collection)` / `(this Map)` through `toString`, `inspect`, `join` and a
+GString, and compares equal to itself (`a == a`, `a.contains(a)`), because a
+handle is checked for identity before its elements are read — which is also
+where Groovy stops. What remains are the paths Groovy itself does not stop, and
+the ones that reach them through a second collection:
 
 | program | Groovy | groovyrs |
 |---|---|---|
-| `def a=[]; a<<a; println a` | `[(this Collection)]` | rc=134, stack overflow |
-| `def m=[:]; m.k=m; println m` | `[k:(this Map)]` | rc=134, stack overflow |
-| `def a=[]; a<<a; println (a==a)` | `true` | rc=134, stack overflow |
 | `def a=[]; a<<a; println a.hashCode()` | `StackOverflowError` (catchable) | rc=134, stack overflow |
 | `def a=[]; def b=[a]; a<<b; println a` | `StackOverflowError` (catchable) | rc=134, stack overflow |
+| `def a=[]; a<<a; def b=[]; b<<b; println(a==b)` | `StackOverflowError` (catchable) | `true` |
 
-37 reproducers dedup to this one cause, across four paths: rendering
-(`toString`, `join`, `inspect`, `dump`, a GString), hashing (`hashCode`,
-`toSet`, a list used as a map key), equality (`==`, `equals`, `contains`,
-`indexOf`), and structural walks (`flatten`, `clone`, `reverse`, `sort`,
-`unique`, `sum`, `max`, `groupBy`, `find`). Note the two rows where Groovy
-raises: `MAX_CALL_DEPTH` does not bound this one, because the recursion is a
-plain Rust function walking the heap rather than a VM frame — it needs its own
-visited-set, which is also what produces `(this Collection)`.
+`MAX_CALL_DEPTH` does not bound these, because the recursion is a plain Rust
+function walking the heap rather than a VM frame — raising the catchable error
+needs a depth guard of its own on those walks. A map *key* that is the map itself
+is also not modeled: map keys are stored as their rendered strings, so
+`m[m] = 1` keys the entry by the text the map had at that moment.
 
 **Non-terminating where Groovy terminates.** `class A extends A {}` and a mutual
 `extends` cycle hang in class resolution (Groovy: a compile error). A `for (x in

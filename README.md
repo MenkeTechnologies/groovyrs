@@ -522,7 +522,7 @@ Implemented and checked against Apache Groovy:
 - **Catchable runtime faults** — an unknown method or property, a call on
   `null`, an out-of-range index, and an unparsable numeric conversion raise the
   Groovy throwable Groovy raises (`MissingMethodException`,
-  `MissingPropertyException`, `NullPointerException`,
+  `MissingPropertyException`, `MissingFieldException`, `NullPointerException`,
   `IndexOutOfBoundsException`, `NumberFormatException`) with Groovy's own message
   text, so `try`/`catch` reaches its handler. Runaway recursion is one of them:
   it raises `java.lang.StackOverflowError`, which sits under
@@ -619,7 +619,8 @@ combinators (`curry` / `rcurry` / `ncurry` / `memoize` / `andThen` / `compose`),
 delegating `with` / `tap`, and the spread operator
 and nested-closure upvalue capture (curried `{ x -> { y -> x + y } }`, chained
 `f(a)(b)`), classes (fields, constructors, methods, `this`, property get/set with
-auto getter/setter, `new`, `toString`, `getAt` subscript) on a host object heap,
+auto getter/setter, direct field access `obj.@f` and the declaring class's own
+bare-field reads, `new`, `toString`, `getAt` subscript) on a host object heap,
 single-inheritance `extends` (virtual dispatch, `super`, `instanceof`), operator
 overloading (`plus`/`minus`/`multiply`/`div`/`remainder`/`power`/`negative`/
 `compareTo`/`equals` driving `+`/`-`/`*`/`/`/`%`/`**`/unary `-`/`<`/`>`/`<=>`/`==`),

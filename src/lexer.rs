@@ -246,7 +246,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         }
 
         // identifiers & keywords
-        if c.is_ascii_alphabetic() || c == '_' || c == '$' {
+        // (`$/` opens a dollar-slashy string, lexed further down, not a name.)
+        if c.is_ascii_alphabetic() || c == '_' || (c == '$' && bytes.get(i + 1) != Some(&b'/')) {
             let start = i;
             while i < bytes.len() {
                 let ch = bytes[i] as char;
@@ -523,6 +524,26 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             out.push(Token {
                 kind: Tok::Regex(source),
                 line,
+                offset: tok_start,
+            });
+            i = next;
+            continue;
+        }
+
+        // A dollar-slashy string `$/…/$` — a slashy string that can hold a
+        // bare `/`, with `$` as its escape character.
+        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'/') {
+            let (parts, next, lines) = scan_dollar_slashy(src, i + 2, line)?;
+            let start_line = line;
+            line += lines;
+            let kind = match parts.as_slice() {
+                [] => Tok::Str(String::new()),
+                [GPart::Text(t)] => Tok::Str(t.clone()),
+                _ => Tok::GStr(parts),
+            };
+            out.push(Token {
+                kind,
+                line: start_line,
                 offset: tok_start,
             });
             i = next;
@@ -836,6 +857,82 @@ fn scan_slashy(src: &str, start: usize, line: u32) -> Result<(Vec<GPart>, usize,
         parts.push(GPart::Text(text));
     }
     Ok((parts, i + 1, lines))
+}
+
+/// Scan a dollar-slashy literal's body `$/ … /$`, starting just past the
+/// opening `$/`. Returns its parts, the index just past the closing `/$`, and
+/// how many newlines it spanned.
+///
+/// The scan is left to right, and `$` is the escape character: `$$` is a `$`
+/// and `$/` a `/` — so `$/a $/$` does not end at the `/$`, it reads `$/` as a
+/// slash and runs on. A backslash is literal except in `\uXXXX`, which is
+/// decoded as in a slashy string. `$name` and `${ … }` interpolate, and any
+/// other `$` is itself (measured on Groovy 6.0.0).
+fn scan_dollar_slashy(
+    src: &str,
+    start: usize,
+    line: u32,
+) -> Result<(Vec<GPart>, usize, u32), String> {
+    let bytes = src.as_bytes();
+    let mut i = start;
+    let mut lines = 0u32;
+    let mut text = String::new();
+    let mut parts: Vec<GPart> = Vec::new();
+    while i < bytes.len() {
+        match (bytes[i], bytes.get(i + 1).copied()) {
+            (b'/', Some(b'$')) => {
+                if !text.is_empty() {
+                    parts.push(GPart::Text(text));
+                }
+                return Ok((parts, i + 2, lines));
+            }
+            (b'$', Some(b'$')) => {
+                text.push('$');
+                i += 2;
+            }
+            (b'$', Some(b'/')) => {
+                text.push('/');
+                i += 2;
+            }
+            (b'$', Some(b'{')) => {
+                let (inner, next) = scan_braced(src, i + 2, line + lines)?;
+                lines += src[i..next].matches('\n').count() as u32;
+                if !text.is_empty() {
+                    parts.push(GPart::Text(std::mem::take(&mut text)));
+                }
+                parts.push(GPart::Expr(inner));
+                i = next;
+            }
+            (b'$', Some(b)) if is_ident_start(b) => {
+                let (path, next) = scan_dotted_path(src, i + 1);
+                if !text.is_empty() {
+                    parts.push(GPart::Text(std::mem::take(&mut text)));
+                }
+                parts.push(GPart::Expr(path));
+                i = next;
+            }
+            (b'\\', Some(b'u')) => {
+                let (decoded, next) = scan_escape(bytes, i + 1);
+                if next == i + 2 {
+                    text.push_str("\\u");
+                } else {
+                    text.push_str(&decoded);
+                }
+                i = next;
+            }
+            _ => {
+                let ch = src[i..].chars().next().unwrap();
+                if ch == '\n' {
+                    lines += 1;
+                }
+                text.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    Err(format!(
+        "groovyrs: unterminated dollar-slashy string on line {line}"
+    ))
 }
 
 /// Can this byte begin an interpolation placeholder's identifier? `$` is a legal

@@ -8321,3 +8321,31 @@ println([].chop(1))
         "[[1], [2, 3], [4]]\n[[1, 2]]\n[]\n[[], [1]]\n[[1, 2, 3], [4, 5, 6]]\n[[1]]\n[]\n"
     );
 }
+
+#[test]
+fn dollar_slashy_strings_lex_with_dollar_escapes() {
+    // `$/ … /$`: `$$` is `$`, `$/` is `/` (so `$/$` does not close it), a
+    // backslash is literal except `\uXXXX`, and `$name`/`${…}` interpolate.
+    let src = r#"
+def name = "W"
+def n = 3
+println($/plain/$)
+println($/a\nb\d+ A/$)
+println($/dollar $$ slash $/ end/$)
+println($/hi $name and ${n + 1}/$)
+println($/multi
+line/$)
+println($/a/b/c/$)
+println($/tail $/$)
+println($/$ alone/$)
+println($/x $1 y/$)
+println($/ends with dollar $$/$)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "plain\na\\nb\\d+ A\ndollar $ slash / end\nhi W and 4\nmulti\nline\na/b/c\n\
+         tail /$)\nprintln(/$ alone\nx $1 y\nends with dollar $\n"
+    );
+}

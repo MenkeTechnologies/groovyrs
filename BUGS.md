@@ -650,20 +650,6 @@ sides: Apache Groovy 5.0.8 / JVM 21.0.12, and the groovyrs build at
 `294aa8b4e9`. A panic or an abort is a parity divergence even where the happy
 path agrees, because no `catch` can see one.
 
-**Integer overflow in a host builtin panics** (debug-build overflow checks; a
-release build would wrap silently, which is the worse of the two). All seven
-sites are `src/host.rs`:
-
-| program | Groovy | groovyrs |
-|---|---|---|
-| `println Long.MIN_VALUE / -1` | `9223372036854775808` | rc=101, `attempt to calculate the remainder with overflow` |
-| `println([Long.MAX_VALUE, 1].sum())` | `-9223372036854775808` | rc=101, `attempt to add with overflow` |
-| `Long.MAX_VALUE.upto(Long.MAX_VALUE) { println it }` | prints, then loops | rc=101, `attempt to add with overflow` |
-| `Long.MIN_VALUE.times { }` | prints nothing, exits 0 | rc=101, `attempt to subtract with overflow` |
-| `println "abc".getAt(9223372036854775807)` | `MissingMethodException` | rc=101, `attempt to add with overflow` |
-| `println([1,2].withIndex(9223372036854775807))` | `MissingMethodException` | rc=101, `attempt to add with overflow` |
-| `println([1,2].indexed(9223372036854775807))` | `MissingMethodException` | rc=101, `attempt to add with overflow` |
-
 **An unbounded length reaches the allocator.** `println "abc".multiply(Long.MAX_VALUE)`
 is `IllegalArgumentException: multiply() should be called with a number ≥ 0` in
 Groovy and `capacity overflow` (rc=101) here; `def l=[1,2]; l[Long.MAX_VALUE]=1`
@@ -708,8 +694,9 @@ inside the declaring class reads the field and must not route back through the
 getter — where groovyrs recurses and now raises `StackOverflowError`.
 
 **Not a divergence**, recorded so a later sweep does not re-report them:
-`Long.MAX_VALUE.times {}` and `(1..Long.MAX_VALUE).each {}` loop forever in
-Groovy too, and `while (true) { try { return 1 } finally { continue } }` is an
+`Long.MAX_VALUE.times {}`, `(1..Long.MAX_VALUE).each {}` and
+`Long.MAX_VALUE.upto(Long.MAX_VALUE) {}` (its `long` counter wraps) loop forever
+in Groovy too, and `while (true) { try { return 1 } finally { continue } }` is an
 infinite loop on both sides.
 
 ## Not implemented (errors today)

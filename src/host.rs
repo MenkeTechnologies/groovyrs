@@ -5912,9 +5912,12 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
     match &recv {
         // A list index past the end yields `null`; only a negative index that
         // stays negative after wrapping is an error, and Groovy reports it with
-        // the array-subscript message its `getAt` uses.
+        // the array-subscript message its `getAt` uses. The index is read
+        // through `Number.intValue()`, so a `Long` past 32 bits wraps first:
+        // `[1, 2][4294967297]` is element 1, and `[1, 2][3000000000]` is the
+        // negative index -1294967296.
         Value::Array(a) => {
-            let i = index.to_int();
+            let i = i64::from(index.to_int() as i32);
             let idx = if i < 0 { a.len() as i64 + i } else { i };
             if idx < 0 {
                 raise_negative_index(vm, i, a.len())
@@ -5928,6 +5931,11 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
             .unwrap_or(Value::Undef),
         // A String subscript is a one-character substring, so an index past the
         // end is a `StringIndexOutOfBoundsException` naming the `[i, i+1)` range.
+        // `String.getAt` has only the `int` overload, so an index only a `Long`
+        // can hold matches nothing: a `MissingMethodException`, not a bounds error.
+        Value::Str(_) if matches!(index, Value::Int(n) if i32::try_from(n).is_err()) => {
+            raise_missing_method(vm, &recv, "getAt", std::slice::from_ref(&index))
+        }
         Value::Str(s) => {
             let i = index.to_int();
             let len = utf16_len(s);
@@ -7898,7 +7906,10 @@ fn dispatch_number_iteration(
     closure_meta(clo)?;
     // `times` counts 0 .. n-1; the others run from the receiver to the bound.
     let (mut i, to, by) = match method {
-        "times" => (0, from - 1, 1),
+        // `times` reads its count through `intValue()`, so a `Long` receiver
+        // narrows first: `4294967297.times` runs once and `Long.MIN_VALUE.times`
+        // not at all.
+        "times" => (0, i64::from(from as i32) - 1, 1),
         // `upto` may not count DOWN and `downto` may not count up: Groovy
         // refuses the call outright rather than running the closure zero times,
         // which is what groovyrs did (answering an empty accumulation).
@@ -7933,7 +7944,12 @@ fn dispatch_number_iteration(
             if by == 0 {
                 return Some(Err("groovyrs: step size cannot be zero".to_string()));
             }
-            (from, to - by.signum(), by)
+            // A bound one step short of which lies outside `long` admits no
+            // index at all (`i < Long.MIN_VALUE` is never true).
+            match to.checked_sub(by.signum()) {
+                Some(last) => (from, last, by),
+                None => return Some(Ok(Value::Undef)),
+            }
         }
     };
     while if by > 0 { i <= to } else { i >= to } {
@@ -7943,7 +7959,9 @@ fn dispatch_number_iteration(
         if pending_exc() {
             return Some(Ok(Value::Undef));
         }
-        i += by;
+        // Java's `long` counter wraps, so `Long.MAX_VALUE.upto(Long.MAX_VALUE)`
+        // runs on past the bound exactly as Groovy's does, rather than panicking.
+        i = i.wrapping_add(by);
     }
     Some(Ok(Value::Undef))
 }
@@ -8319,7 +8337,11 @@ fn groovy_sum_add(a: &Value, b: &Value) -> Value {
     let boolean = |v: &Value| matches!(v, Value::Bool(_));
     if let (Some(x), Some(y)) = (as_i64(a), as_i64(b)) {
         if !boolean(a) && !boolean(b) {
-            return Value::int(x + y);
+            // Wrapped at the operands' width, as `+` is: two `Integer`s
+            // overflow at 32 bits (`[Integer.MAX_VALUE, 1].sum()` is
+            // `Integer.MIN_VALUE`), a `Long` at 64.
+            let wide = i32::try_from(x).is_err() || i32::try_from(y).is_err();
+            return wrap_to_width(x.wrapping_add(y), wide);
         }
     }
     if let Some(Ok(v)) = decimal_operator(NumOp::Add, a, b) {
@@ -9315,23 +9337,37 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 req: DEFAULT_HASH_REQ,
             },
         ),
+        // Both take an `int` offset only: a `Long` one (a wide argument, or one
+        // past 32 bits) matches no overload and is a `MissingMethodException`.
+        (Value::Array(_), "withIndex" | "indexed")
+            if args.first().is_some_and(|o| {
+                call_widths() & 0b10 != 0
+                    || matches!(o, Value::Int(n) if i32::try_from(*n).is_err())
+            }) =>
+        {
+            raise_missing_method_wide(vm, recv, method, args, call_widths())
+        }
         // `list.withIndex([offset])` pairs each element with its position…
+        // The position is an `int`, so it wraps past `Integer.MAX_VALUE`.
         (Value::Array(a), "withIndex") => {
-            let base = args.first().and_then(as_i64).unwrap_or(0);
+            let base = args.first().and_then(as_i64).unwrap_or(0) as i32;
             Value::array(
                 a.iter()
                     .enumerate()
-                    .map(|(i, v)| Value::array(vec![v.clone(), Value::int(base + i as i64)]))
+                    .map(|(i, v)| {
+                        let at = base.wrapping_add(i as i32);
+                        Value::array(vec![v.clone(), Value::int(i64::from(at))])
+                    })
                     .collect(),
             )
         }
         // …while `indexed([offset])` answers a *map* from position to element.
         (Value::Array(a), "indexed") => {
-            let base = args.first().and_then(as_i64).unwrap_or(0);
+            let base = args.first().and_then(as_i64).unwrap_or(0) as i32;
             gmap(
                 a.iter()
                     .enumerate()
-                    .map(|(i, v)| ((base + i as i64).to_string(), v.clone()))
+                    .map(|(i, v)| (base.wrapping_add(i as i32).to_string(), v.clone()))
                     .collect(),
             )
         }

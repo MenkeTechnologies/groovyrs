@@ -7829,3 +7829,43 @@ t("3G << 3G", { 3G << 3G })
          3G << 3G = 24 java.math.BigInteger\n"
     );
 }
+
+#[test]
+fn host_integer_overflow_wraps_or_raises_as_groovy_does() {
+    // Each line panicked the host (debug overflow check) before; the answers
+    // are Groovy 5's: `sum` wraps at the operands' width, `times` reads its
+    // count through `intValue()`, and the `int`-only overloads refuse a `Long`.
+    let src = r#"
+println([Long.MAX_VALUE, 1].sum())
+println([2147483647, 1].sum())
+4294967297.times { println "t$it" }
+Long.MIN_VALUE.times { println "never" }
+println([1, 2].withIndex(2147483647))
+println([1, 2].indexed(2147483647))
+def t(String l, Closure c) {
+  try { println(l + " = " + c()) } catch (e) { println(l + " ! " + e.getClass().getName()) }
+}
+t("withIndex(1L)", { [1, 2].withIndex(1L) })
+t("indexed(big)", { [1, 2].indexed(9223372036854775807) })
+t("getAt(big)", { "abc".getAt(9223372036854775807) })
+t("str[big]", { "abc"[3000000000] })
+t("list[big]", { [1, 2][3000000000] })
+println([1, 2][4294967297])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "-9223372036854775808\n\
+         -2147483648\n\
+         t0\n\
+         [[1, 2147483647], [2, -2147483648]]\n\
+         [2147483647:1, -2147483648:2]\n\
+         withIndex(1L) ! groovy.lang.MissingMethodException\n\
+         indexed(big) ! groovy.lang.MissingMethodException\n\
+         getAt(big) ! groovy.lang.MissingMethodException\n\
+         str[big] ! groovy.lang.MissingMethodException\n\
+         list[big] ! java.lang.ArrayIndexOutOfBoundsException\n\
+         2\n"
+    );
+}

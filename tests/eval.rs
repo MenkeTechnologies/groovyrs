@@ -8019,3 +8019,39 @@ println b.inspect()
          [(this Collection), 1]\n"
     );
 }
+
+#[test]
+fn string_each_line_numbers_and_answers_the_last_result() {
+    // `eachLine` walks `readLines` (\n, \r\n, no trailing empty line), hands a
+    // two-parameter closure the line number from the optional start, and
+    // answers the last closure result (`null` for no lines).
+    let src = r#"
+def r = "a\nb\r\nc\n".eachLine { println "[$it]"; it.size() }
+println r
+"x\ny".eachLine { line, n -> println "$n:$line" }
+"x\ny".eachLine(1) { line, n -> println "$n:$line" }
+println "".eachLine { println "never" }
+println "q\n\nw".eachLine { println "<$it>" }
+def res = "a\nb".eachLine { it -> it * 2 }
+println res
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[a]\n\
+         [b]\n\
+         [c]\n\
+         1\n\
+         0:x\n\
+         1:y\n\
+         1:x\n\
+         2:y\n\
+         null\n\
+         <q>\n\
+         <>\n\
+         <w>\n\
+         null\n\
+         bb\n"
+    );
+}

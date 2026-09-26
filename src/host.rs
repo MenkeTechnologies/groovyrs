@@ -7151,6 +7151,38 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         }
         return recv;
     }
+    // `s.eachLine { line -> … }` / `s.eachLine(first) { line, n -> … }` — the
+    // lines `readLines` answers, each handed to the closure with its number
+    // (counted from `first`, default 0) when the closure takes two parameters.
+    // Answers the last closure result, `null` for a string with no lines.
+    if let (Value::Str(s), "eachLine") = (&recv, method) {
+        let (first, clo) = match args.as_slice() {
+            [c] => (0, c),
+            [n, c] if as_i64(n).is_some() => (as_i64(n).unwrap_or(0), c),
+            _ => return raise_missing_method(vm, &recv, method, &args),
+        };
+        let Some(meta) = closure_meta(clo) else {
+            return raise_missing_method(vm, &recv, method, &args);
+        };
+        let mut last = Value::Undef;
+        for (i, line) in read_lines(s).into_iter().enumerate() {
+            let mut call_args = vec![Value::str(line)];
+            if meta.params >= 2 {
+                call_args.push(Value::int(first + i as i64));
+            }
+            match invoke_closure(vm, clo, &call_args) {
+                Ok(v) => last = v,
+                Err(e) => {
+                    fault(vm, e);
+                    return Value::Undef;
+                }
+            }
+            if pending_exc() {
+                return Value::Undef;
+            }
+        }
+        return last;
+    }
     // `s.find(pattern) { … }` / `s.findAll(pattern) { … }` — the closure is a
     // TRANSFORM here, not a predicate: `find` answers its result on the first
     // match (or `null` when there is none) and `findAll` the results of them

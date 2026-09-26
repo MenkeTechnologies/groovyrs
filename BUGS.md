@@ -706,9 +706,10 @@ infinite loop on both sides.
   the whole `Character` row of the `+` matrix concatenates where Groovy either
   adds or raises. The rest of the `plus` table is modeled (see above); this one
   row waits on the type.
-- **`String.eachLine`, `String.collectReplacements`, `String.chars`.** Not
-  dispatched — `MissingMethodException` / `MissingPropertyException` where
-  Groovy answers. Found by a differential sweep of the string GDK in round 3.
+- **`String.collectReplacements`, `String.chars`.** Not dispatched —
+  `MissingMethodException` / `MissingPropertyException` where Groovy answers.
+  Found by a differential sweep of the string GDK in round 3 (`eachLine`, from
+  the same sweep, is now dispatched).
 - **`42.iterator()`.** Groovy's `Object.iterator()` walks a non-collection as a
   one-element sequence; the rest of that `Object`-level GDK is modeled (see
   above) but the iterator itself is not.

@@ -11652,7 +11652,7 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
     // element, and the coercion that matters here (a `String` element into an
     // `int`) is the one the table below performs, so it is applied per element.
     if ty.ends_with("[]") {
-        let Some(elem) = ArrayElem::from_name(&ty) else {
+        let Some(elem) = ArrayElem::from_name(ty) else {
             return raise_cast(vm, &v, &ty_simple);
         };
         let items = iteration_elements(&v);
@@ -11683,7 +11683,7 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
             };
             // A narrowing cast keeps the target's low bits, so `2147483648L as
             // int` is `-2147483648` and `300 as byte` is `44`.
-            Value::int(narrow_to(&ty, n))
+            Value::int(narrow_to(ty, n))
         }
         // `as float` / `as Float` lands on `java.lang.Float`, `as double` /
         // `as Double` on `Double`; the reading of the source value is the same.

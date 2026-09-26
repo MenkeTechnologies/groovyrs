@@ -5340,6 +5340,52 @@ fn values_equal(a: &Value, b: &Value) -> bool {
     groovy_str(a) == groovy_str(b)
 }
 
+/// `Object.equals` as a JDK collection asks it — what `List.contains` and
+/// `indexOf` use. Unlike Groovy's `==` ([`values_equal`]) it never coerces:
+/// `[1, 2].contains(1.0)`, `[1].contains("1")` and `[2.0].contains(2.00)` are
+/// all false, and `null` is found only as `null`. Two lists compare element by
+/// element under this same rule (`AbstractList.equals`); a set, map, range,
+/// buffer or instance keeps the comparison [`values_equal`] makes for it.
+fn java_equals(a: &Value, b: &Value) -> bool {
+    if let (Value::Obj(x), Value::Obj(y)) = (a, b) {
+        if x == y {
+            return true;
+        }
+    }
+    let structured = |v: &Value| {
+        as_set(v).is_some()
+            || as_omap(v).is_some()
+            || as_range(v).is_some()
+            || as_buffer(v).is_some()
+            || as_instance(v).is_some()
+    };
+    if structured(a) || structured(b) {
+        return values_equal(a, b);
+    }
+    match (
+        as_list(a).or_else(|| array_items(a)),
+        as_list(b).or_else(|| array_items(b)),
+    ) {
+        (Some(p), Some(q)) => {
+            p.len() == q.len() && p.iter().zip(q.iter()).all(|(i, j)| java_equals(i, j))
+        }
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => match (a, b) {
+            (Value::Undef, Value::Undef) => true,
+            (Value::Undef, _) | (_, Value::Undef) => false,
+            _ => java_class_name(a) == java_class_name(b) && groovy_str(a) == groovy_str(b),
+        },
+    }
+}
+
+/// The elements of a transient `Value::Array`.
+fn array_items(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::Array(a) => Some(a.to_vec()),
+        _ => None,
+    }
+}
+
 /// `java.lang.String.hashCode()`: `s[0]*31^(n-1) + … + s[n-1]` in wrapping
 /// 32-bit arithmetic, over **UTF-16 code units** — an astral character counts as
 /// its two surrogates, which is why `"a😀b".length()` is 4 in Java and the fold
@@ -9322,7 +9368,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (Value::Array(a), "isEmpty") => Value::bool(a.is_empty()),
         (Value::Array(a), "contains") => {
             let want = args.first().cloned().unwrap_or(Value::Undef);
-            Value::bool(a.iter().any(|v| groovy_str(v) == groovy_str(&want)))
+            Value::bool(a.iter().any(|v| java_equals(v, &want)))
         }
         // Unlike the `[i]` subscript (which yields `null` past the end),
         // `List.get` is the raw JDK call and raises on any out-of-range index.
@@ -9416,11 +9462,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
         }
         (Value::Array(a), "indexOf" | "lastIndexOf") => {
-            let want = args.first().map(groovy_str).unwrap_or_default();
+            let want = args.first().cloned().unwrap_or(Value::Undef);
             let hit = if method == "indexOf" {
-                a.iter().position(|v| groovy_str(v) == want)
+                a.iter().position(|v| java_equals(v, &want))
             } else {
-                a.iter().rposition(|v| groovy_str(v) == want)
+                a.iter().rposition(|v| java_equals(v, &want))
             };
             Value::int(hit.map(|i| i as i64).unwrap_or(-1))
         }

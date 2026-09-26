@@ -8143,3 +8143,24 @@ def l = [3, 1, 3.0]; l.unique(); println l
     assert!(ok);
     assert_eq!(out, "[1, 1]\n[[1]]\n[null, null]\n[true, true]\n[3, 1]\n");
 }
+
+#[test]
+fn list_contains_and_index_of_use_java_equals() {
+    // `contains`/`indexOf` are `Object.equals`, which never coerces: an
+    // `Integer` is not the `BigDecimal` `1.0` or the string `"1"`, `2.0` is
+    // not `2.00`, and `null` is found only as `null`.
+    let src = r#"
+println([1, 2].contains("1"))
+println([1, 2].contains(1.0))
+println([2.0].contains(2.00))
+println([2.0].contains(2.0))
+println([true].contains("true"))
+println([null, "null"].indexOf("null"))
+println([null, "null"].lastIndexOf(null))
+println([[1]].contains([1.0]))
+println([[1, 2]].contains(1..2))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "false\nfalse\nfalse\ntrue\nfalse\n1\n0\nfalse\ntrue\n");
+}

@@ -9687,6 +9687,8 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         }
         // `list.collate(n[, step])` — fixed-size windows, keeping the short
         // trailing one unless `keepRemainder` is false.
+        // Each window is its own `ArrayList` (a handle, as `chop`'s runs are), so
+        // `c[0] << 9` mutates the window the outer list holds.
         (Value::Array(a), "collate") => {
             let size = args.first().and_then(as_i64).unwrap_or(1).max(1) as usize;
             let step = args
@@ -9701,7 +9703,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             while i < a.len() {
                 let end = (i + size).min(a.len());
                 if end - i == size || keep {
-                    out.push(Value::array(a[i..end].to_vec()));
+                    out.push(glist(a[i..end].to_vec()));
                 }
                 i += step;
             }
@@ -9711,6 +9713,8 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // a negative size taking everything left. Stops as soon as the
         // elements run out, so `[1, 2].chop(3, 2)` is `[[1, 2]]` — but a
         // zero-size run while elements remain still yields `[]`.
+        // Each run is its own `ArrayList` handle, so `ch[0] << 9` mutates it in
+        // place, as it does in Groovy.
         (Value::Array(a), "chop") => {
             let mut out = Vec::new();
             let mut i = 0;
@@ -9724,7 +9728,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 } else {
                     (i + n as usize).min(a.len())
                 };
-                out.push(Value::array(a[i..end].to_vec()));
+                out.push(glist(a[i..end].to_vec()));
                 i = end;
             }
             Value::array(out)

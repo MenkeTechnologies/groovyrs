@@ -8426,3 +8426,26 @@ println([(1L..5L).getClass().simpleName, (1..5L).class.simpleName, 2.0 in (1L..5
          [NumberRange, NumberRange, true, 5]\n"
     );
 }
+
+#[test]
+fn collate_and_chop_windows_are_mutable_lists() {
+    // Each window is its own `ArrayList`, so a mutation reached through the
+    // outer list lands in it — and never in the receiver.
+    let src = r#"
+def a = [1, 2, 3, 4, 5]
+def c = a.collate(2)
+c[0] << 9
+c[0][0] = 7
+def ch = a.chop(2, 2)
+ch[1].add(0, 6)
+def w = a.collate(3, 1, false)
+w[1].clear()
+println([c, ch, w, a])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[[[7, 2, 9], [3, 4], [5]], [[1, 2], [6, 3, 4]], [[1, 2, 3], [], [3, 4, 5]], [1, 2, 3, 4, 5]]\n"
+    );
+}

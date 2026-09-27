@@ -1263,11 +1263,14 @@ infinite loop on both sides.
   raises `MissingMethodException` (it needs a handle). And a *nested* list inside
   a returned one cannot be mutated through the outer: `[[1,2],[3,4]].transpose()`
   then `t[0] << 9` is dropped, where Groovy answers `[[1, 3, 9], [2, 4]]` — the
-  same for `collate`, `withIndex`, `combinations`, `permutations`,
+  same for `withIndex`, `combinations`, `permutations`,
   `subsequences`, `groupBy` and `split`. Allocating a handle per GDK result would
   fix all three and cost a heap entry per call, on a heap cleared only per run —
   a loop calling `collect` would grow it without bound, so the fix is a heap with
-  a reclamation story, not a one-line change at the return site.
+  a reclamation story, not a one-line change at the return site. `collate` and
+  `chop` are the exception: each window they answer is its own list handle, so
+  after `def c = a.collate(2)`, `c[0] << 9` and `c[0][0] = 7` land in the window
+  as in Groovy.
 - **`[[1, 2], [3, 4]].sum()` concatenates as strings.** Groovy's `sum()` folds
   with `plus`, so a list of lists answers the concatenated list `[1, 2, 3, 4]`;
   groovyrs renders each element and joins, answering the string `[1, 2][3, 4]`.

@@ -700,9 +700,9 @@ Every walk Groovy does not stop — `hashCode()`/`%h`, `toString`/`println`/a
 GString/`inspect()` through a second collection, `==`/`equals`/`contains`/
 `indexOf`/`unique()` between two self-holding collections — tracks the handles
 (or handle pairs) it is inside and raises the catchable `StackOverflowError`.
-What still answers where Groovy throws is the hash-built sets: `a.toSet()` and
-`a as Set` on `def a = []; a << a` answer `[[(this Collection)]]` because the
-set index does not hash a collection element.
+A hash set (`HashSet`, `LinkedHashSet`) hashes each element it is built from
+(`toSet()`, `as Set`, `new HashSet(a)`) and each one `add`/`<<`/`contains`/
+`remove` is asked about, so a self-holding element raises it there too.
 A map *key* that is the map itself is not modeled: map keys are stored as their
 rendered strings, so `m[m] = 1` keys the entry by the text the map had at that
 moment.

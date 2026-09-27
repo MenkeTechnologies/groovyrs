@@ -13934,6 +13934,17 @@ impl SetIndex {
 /// makes `[1, 2, 2, 3] as Set` three elements and, applied to every operator
 /// result, what makes the set operators re-de-duplicate.
 fn make_set(items: Vec<Value>, kind: SetKind) -> Value {
+    // A hash-built set hashes every element, and a collection that reaches
+    // itself has no finite hash: `def a = []; a << a; a.toSet()` (and `as Set`,
+    // `new HashSet(a)`) is a `StackOverflowError` in Groovy.
+    if !matches!(kind, SetKind::Tree)
+        && items.iter().any(|v| {
+            matches!(v, Value::Obj(_)) && checked_hash_code(|| object_hash_code(v)).is_none()
+        })
+    {
+        with_vm(raise_stack_overflow);
+        return Value::Undef;
+    }
     let items = dedup_values(items);
     let index = SetIndex::build(&items);
     heap_push(HeapObj::SetVal { items, kind, index })
@@ -14036,10 +14047,23 @@ fn set_membership_fast(recv: &Value, probe: &Value) -> Option<bool> {
 /// `None` hands the call back to the general path, so a set the index cannot
 /// cover behaves exactly as it did.
 fn dispatch_set_fast(recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
-    if args.len() != 1 || !matches!(method, "add" | "leftShift" | "contains") {
+    if args.len() != 1 || !matches!(method, "add" | "leftShift" | "contains" | "remove") {
         return None;
     }
     let probe = &args[0];
+    // A hash set hashes the probe first, and a collection that reaches itself
+    // has no finite hash: `s << a` / `s.contains(a)` / `s.remove(a)` on
+    // `def a = []; a << a` are a `StackOverflowError` in Groovy.
+    if matches!(probe, Value::Obj(_))
+        && set_is_hashed(recv)
+        && checked_hash_code(|| object_hash_code(probe)).is_none()
+    {
+        with_vm(raise_stack_overflow);
+        return Some(Value::Undef);
+    }
+    if method == "remove" {
+        return None;
+    }
     let present = set_membership_fast(recv, probe)?;
     if method == "contains" {
         return Some(Value::bool(present));
@@ -14051,6 +14075,18 @@ fn dispatch_set_fast(recv: &Value, method: &str, args: &[Value]) -> Option<Value
         recv.clone()
     } else {
         Value::bool(!present)
+    })
+}
+
+/// Whether `v` is a set that hashes its elements — a `HashSet` or a
+/// `LinkedHashSet`, not a `TreeSet`.
+fn set_is_hashed(v: &Value) -> bool {
+    let Value::Obj(id) = v else { return false };
+    HEAP.with(|h| {
+        matches!(
+            h.borrow().get(*id as usize),
+            Some(HeapObj::SetVal { kind, .. }) if !matches!(kind, SetKind::Tree)
+        )
     })
 }
 

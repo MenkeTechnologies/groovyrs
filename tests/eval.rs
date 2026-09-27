@@ -8475,3 +8475,23 @@ println(['é', 'ü', 'ab'].toListString(4))
          [a:1, bb:[...], ...]\n[a:1, ...]\n[é, ü, ...]\n"
     );
 }
+
+#[test]
+fn hash_sets_refuse_a_self_holding_element() {
+    // A `HashSet`/`LinkedHashSet` hashes its elements, and a list holding itself
+    // has no finite hash, so Groovy throws `StackOverflowError` on building one
+    // from it and on asking one about it.
+    let src = r#"
+def a = [1]; a << a
+def s = [5] as Set
+for (op in [{ a.toSet() }, { a as Set }, { new HashSet(a) }, { s << a }, { s.contains(a) }, { s.remove(a) }]) {
+    try { op(); println "no" } catch (StackOverflowError e) { print "SOE " }
+}
+println ""
+def t = [[1], [2]] as Set
+println([t.remove([1]), t.contains([2]), [[1], [1], [2]].toSet()])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "SOE SOE SOE SOE SOE SOE \n[true, true, [[1], [2]]]\n");
+}

@@ -333,7 +333,12 @@ reported as parse or compile errors, never silently mis-run.
   `[1.5, 2.5, 3.5]`, not `[1, 2, 3]`. `from`/`to` report the bounds of what is
   actually enumerated — `(4..0).from` is 0 and `(0..<4).to` is 3 — except on a
   `NumberRange`, which keeps its endpoints as written. An exclusive range with
-  equal endpoints is a `groovy.lang.EmptyRange`.
+  equal endpoints is a `groovy.lang.EmptyRange`, and a `Long` endpoint
+  (`1L..5L`, `1..5L`) makes a `NumberRange`. Membership — `contains`,
+  `containsAll`, `in` and a `case` label — is the range class's own: an
+  `IntRange` holds only integral values between its bounds, so `1.0 in (1..5)`
+  and `(1..5).contains(2.5)` are `false` while `2G in (1..5)` is `true`; any
+  other range compares its elements with `==`, so `2 in (1.0..3.0)` is `true`.
 - **`next()` / `previous()`** on `Integer`, `BigInteger`, `BigDecimal` and
   `String`: the successor and predecessor a range walks with. A `String` moves
   its *last* character by one code point, so `'a'.next()` is `'b'` and

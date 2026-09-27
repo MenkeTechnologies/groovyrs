@@ -8399,3 +8399,30 @@ println([[1], [1.0], [2]].unique())
     assert!(ok);
     assert_eq!(out, "SOE\n[[1], [2]]\n");
 }
+
+#[test]
+fn int_range_membership_is_integral_only() {
+    // `IntRange.contains` answers only for an `Integer`/`BigInteger` needle, so a
+    // decimal equal to a member is still not in it — for `contains`, `in`,
+    // `case` and `containsAll` alike. A `NumberRange` compares with `==`, and a
+    // `Long` endpoint makes one.
+    let src = r#"
+def r = 1..5
+def c(v, l) { switch (v) { case l: return true; default: return false } }
+println([1.0 in r, 2.5 in r, 2 in r, 2G in r, 4.0 in (1..<5), 5 in (1..<5)])
+println([r.contains(2.0), r.contains(2), r.contains(2G), c(2.0, r), c(2, r), c('2', r)])
+println([r.containsAll([1.0]), r.containsAll([1, 2G]), 3 in (5..1)])
+println([2 in (1.0..3.0), c(2, 1.0..3.0), 2.5 in (1.0..3.0)])
+println([(1L..5L).getClass().simpleName, (1..5L).class.simpleName, 2.0 in (1L..5L), (1L..<5L).to])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[false, false, true, true, false, false]\n\
+         [false, true, true, false, true, false]\n\
+         [false, true, true]\n\
+         [true, true, false]\n\
+         [NumberRange, NumberRange, true, 5]\n"
+    );
+}

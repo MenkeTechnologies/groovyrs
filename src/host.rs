@@ -1890,6 +1890,11 @@ pub struct RangeVal {
     from: Value,
     to: Value,
     inclusive: bool,
+    /// An integer endpoint was a `Long` (`1L..5L`, `1..5L`). The value model
+    /// cannot tell a small `Long` from an `Integer`, so the compiler records it:
+    /// Groovy builds an `IntRange` only from two `Integer`s, and a `Long` range
+    /// is a `NumberRange`, with that class's membership and bounds.
+    long: bool,
 }
 
 /// A registered closure: the body's name-pool index, its parameter count, and
@@ -4967,7 +4972,10 @@ fn is_case(vm: &mut VM, label: &Value, subject: &Value) -> Value {
         return Value::bool(value_is_a(subject, &class));
     }
     // A `Range` label contains — `case 1..5:` and `x in 1..5` both ask that.
-    let label = range_as_list(label);
+    if let Some(r) = as_range(label) {
+        return Value::bool(range_contains(&r, subject));
+    }
+    let label = label.clone();
     let subject = subject.clone();
     // A null subject never matches a pattern; Groovy matches the rest against
     // their `toString`, which is exactly what `println` renders.
@@ -4983,10 +4991,8 @@ fn is_case(vm: &mut VM, label: &Value, subject: &Value) -> Value {
             }
         };
     }
-    // `case [a, b]:` is a membership test. The label reaches here in *both*
-    // representations — a list literal is a handle, and a `Range` label was just
-    // rewritten to the transient array form above — so the shape test has to
-    // admit either.
+    // `case [a, b]:` is a membership test. The label may be a list handle or a
+    // transient array, so the shape test has to admit either.
     if is_list(&label) {
         let want = groovy_str(&subject);
         return Value::bool(
@@ -11568,15 +11574,16 @@ fn b_in(vm: &mut VM, _argc: u8) -> Value {
     // `x in 1..5` asks the range's `contains`, which is its element list's. A
     // list handle reads through its transient array form.
     let raw = vm.stack.pop().unwrap_or(Value::Undef);
-    let is_range = as_range(&raw).is_some();
-    let coll = deref_list(&range_as_list(&raw));
     let needle = vm.stack.pop().unwrap_or(Value::Undef);
+    // A range keeps its own membership rule.
+    if let Some(r) = as_range(&raw) {
+        return Value::bool(range_contains(&r, &needle));
+    }
+    let coll = deref_list(&raw);
     if let Some(found) = omap_get(&coll, &groovy_str(&needle)) {
         return Value::bool(found.is_some());
     }
     Value::bool(match &coll {
-        // A range keeps its own numeric membership rule.
-        Value::Array(a) if is_range => a.iter().any(|v| values_equal(v, &needle)),
         // A list's `isCase` is `contains`, which is `Object.equals`: `1 in [1.0]`
         // and `"1" in [1]` are false.
         Value::Array(a) => checked_equal(vm, || a.iter().any(|v| java_equals(v, &needle))),
@@ -13323,8 +13330,10 @@ fn group_integer_digits(text: &str) -> String {
     format!("{sign}{grouped}{tail}")
 }
 
-/// `GRANGE`: build a range literal's `groovy.lang.Range` object.
+/// `GRANGE`: build a range literal's `groovy.lang.Range` object. Stack: from,
+/// to, inclusive, then whether the compiler saw a `Long` endpoint.
 fn b_range(vm: &mut VM, _argc: u8) -> Value {
+    let long = matches!(vm.stack.pop(), Some(Value::Bool(true)));
     let inclusive = matches!(vm.stack.pop(), Some(Value::Bool(true)));
     let to = vm.stack.pop().unwrap_or(Value::Undef);
     let from = vm.stack.pop().unwrap_or(Value::Undef);
@@ -13332,6 +13341,7 @@ fn b_range(vm: &mut VM, _argc: u8) -> Value {
         from,
         to,
         inclusive,
+        long,
     }))
 }
 
@@ -13536,7 +13546,6 @@ fn range_elements(r: &RangeVal) -> Vec<Value> {
 /// `step` and `reverse` answer a `java.util.ArrayList`, not another range, which
 /// is what Groovy's own `Range.step` / `DefaultGroovyMethods.reverse` return.
 fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]) -> Option<Value> {
-    let elems = || range_elements(r);
     Some(match method {
         // `Range.subList` answers another **range**, not the list a range
         // usually delegates to: `(1..5).subList(1, 3)` is `2..3`, and the empty
@@ -13562,12 +13571,40 @@ fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]
             let n = args.first().and_then(as_i64).unwrap_or(1);
             Value::array(range_step(r, n))
         }
-        "contains" => {
-            let needle = args.first().cloned().unwrap_or(Value::Undef);
-            Value::bool(elems().iter().any(|e| values_equal(e, &needle)))
+        "contains" => Value::bool(range_contains(
+            r,
+            &args.first().cloned().unwrap_or(Value::Undef),
+        )),
+        // `AbstractCollection.containsAll` asks the range's own `contains` for
+        // each item, so an `IntRange` refuses `1.0` here too.
+        "containsAll" => {
+            let items = args.first().map(iteration_elements).unwrap_or_default();
+            Value::bool(items.iter().all(|v| range_contains(r, v)))
         }
         _ => return None,
     })
+}
+
+/// A range's `contains` — which `x in r` and `case r:` both ask, since a
+/// range's `isCase` is its `contains`.
+///
+/// An `IntRange` answers from its bounds and only for an integral needle:
+/// `IntRange.contains` tests `instanceof Integer` / `BigInteger` and answers
+/// `false` for anything else, so `1.0 in (1..5)` and `(1..5).contains(2.5)` are
+/// both false even though `1.0 == 1`. Every other range (`NumberRange`,
+/// `ObjectRange`) compares its elements with Groovy's coercing equality, so
+/// `2 in (1.0..3.0)` is true.
+fn range_contains(r: &RangeVal, needle: &Value) -> bool {
+    if range_class(r) == "groovy.lang.IntRange" {
+        return match (needle, range_lower(r), range_upper(r)) {
+            (Value::Int(n), Value::Int(lo), Value::Int(hi)) => lo <= *n && *n <= hi,
+            _ if as_bigint(needle).is_some() => {
+                range_elements(r).iter().any(|e| values_equal(e, needle))
+            }
+            _ => false,
+        };
+    }
+    range_elements(r).iter().any(|e| values_equal(e, needle))
 }
 
 /// `Range.subList(from, to)` — the half-open window, answered as another
@@ -13618,6 +13655,7 @@ fn range_sublist(vm: &mut VM, r: &RangeVal, args: &[Value]) -> Option<Value> {
             from: lower.clone(),
             to: lower,
             inclusive: false,
+            long: r.long,
         })));
     }
     let mut asc = range_elements(r);
@@ -13636,6 +13674,7 @@ fn range_sublist(vm: &mut VM, r: &RangeVal, args: &[Value]) -> Option<Value> {
         from: a,
         to: b,
         inclusive: true,
+        long: r.long,
     })))
 }
 
@@ -14283,7 +14322,7 @@ fn range_rendered(r: &RangeVal, render: impl Fn(&Value) -> String) -> String {
 
 /// The `groovy.lang.Range` subclass a range's endpoints put it in: integer
 /// endpoints make an `IntRange`, single-character ones an `ObjectRange`, and a
-/// decimal one a `NumberRange`.
+/// decimal or `Long` one a `NumberRange`.
 fn range_class(r: &RangeVal) -> &'static str {
     // A range that enumerates nothing — an exclusive one with equal endpoints —
     // is its own class in Groovy, whatever the endpoints' type.
@@ -14294,7 +14333,7 @@ fn range_class(r: &RangeVal) -> &'static str {
         return "groovy.lang.ObjectRange";
     }
     match (&r.from, &r.to) {
-        (Value::Int(_), Value::Int(_)) => "groovy.lang.IntRange",
+        (Value::Int(_), Value::Int(_)) if !r.long => "groovy.lang.IntRange",
         _ => "groovy.lang.NumberRange",
     }
 }

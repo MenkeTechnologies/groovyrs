@@ -303,7 +303,7 @@ const CORPUS: &[(&str, &str, &str, &str, &str)] = &[
      "Subscript, lowered to the `GINDEX` builtin. A list index past the end yields `null` and a negative index counts from the end; a String subscript yields a one-character String and raises past the end; a map subscript is a key read. On a class instance it dispatches `getAt`.",
      "println([1, 2, 3][-1])\nprintln(\"hello\"[1])   // => 3 then e"),
     ("..", "Operators", "a..b",
-     "An inclusive range — a `groovy.lang.Range` object, so `(0..3).class.simpleName` is `IntRange` and printing one shows `0..3`. Being a `java.util.List` in Groovy, every list method and operator applies to it as well.",
+     "An inclusive range — a `groovy.lang.Range` object, so `(0..3).class.simpleName` is `IntRange` and printing one shows `0..3`. Being a `java.util.List` in Groovy, every list method and operator applies to it as well. Membership is `IntRange.contains`, which holds only integral values: `1.0 in (1..5)` is `false`. A `Long` endpoint (`1L..5L`) makes a `NumberRange`, whose membership compares with `==`.",
      "println(0..3)   // => [0, 1, 2, 3]"),
     ("..<", "Operators", "a..<b",
      "A half-open range: the endpoint is excluded, so `(0..<3)` enumerates `0, 1, 2` and prints `0..<3`.",

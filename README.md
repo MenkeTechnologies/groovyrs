@@ -416,7 +416,10 @@ Implemented and checked against Apache Groovy:
   `from`/`to`/`step(n)`/`reverse()`/`size()`/`contains(x)`/`isReverse()` are its
   own members — with `from`/`to` reporting the bounds of what is enumerated, so
   `(4..0).from` is 0 and `(0..<4).to` is 3. The walk steps with `next`/`previous`
-  and so keeps the element type (`1.5..4.0` is `[1.5, 2.5, 3.5]`). Being a
+  and so keeps the element type (`1.5..4.0` is `[1.5, 2.5, 3.5]`). A `Long`
+  endpoint makes a `NumberRange`, and membership (`contains`, `in`, `case`) is
+  the class's own: an `IntRange` holds only integral values, so `1.0 in (1..5)`
+  is `false`, while `2 in (1.0..3.0)` is `true`. Being a
   `java.util.List` in Groovy, every `List` method and operator applies too
   (`.each`, `.collect`, `+`, `== [1, 2, 3]`, `in`, `r[1..2]`).
 - **Regex** — `~/…/` patterns, `/…/` slashy and `$/…/$` dollar-slashy strings

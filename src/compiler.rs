@@ -3161,6 +3161,13 @@ impl Compiler {
                     },
                     self.cur_line,
                 );
+                // A `Long` endpoint makes a `NumberRange`, which the runtime
+                // value cannot show for a small `Long`.
+                let long = self.is_wide(start) || self.is_wide(end);
+                self.b.emit(
+                    if long { Op::LoadTrue } else { Op::LoadFalse },
+                    self.cur_line,
+                );
                 self.emit_call_builtin(crate::host::GRANGE, 0, self.cur_line)?;
             }
             Expr::Ternary { cond, then, els } => {

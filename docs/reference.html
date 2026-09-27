@@ -613,7 +613,7 @@ println("hello"[1])   // =&gt; 3 then e</code></pre>
         <article class="doc-entry" id="doc-operators-23">
           <h3><a class="doc-anchor" href="#doc-operators-23">#</a> <code>..</code></h3>
           <pre><code class="lang-groovy">a..b</code></pre>
-          <p>An inclusive range — a `groovy.lang.Range` object, so `(0..3).class.simpleName` is `IntRange` and printing one shows `0..3`. Being a `java.util.List` in Groovy, every list method and operator applies to it as well.</p>
+          <p>An inclusive range — a `groovy.lang.Range` object, so `(0..3).class.simpleName` is `IntRange` and printing one shows `0..3`. Being a `java.util.List` in Groovy, every list method and operator applies to it as well. Membership is `IntRange.contains`, which holds only integral values: `1.0 in (1..5)` is `false`. A `Long` endpoint (`1L..5L`) makes a `NumberRange`, whose membership compares with `==`.</p>
           <pre><code class="lang-groovy">println(0..3)   // =&gt; [0, 1, 2, 3]</code></pre>
         </article>
         <article class="doc-entry" id="doc-operators-24">

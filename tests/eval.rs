@@ -8495,3 +8495,20 @@ println([t.remove([1]), t.contains([2]), [[1], [1], [2]].toSet()])
     assert!(ok);
     assert_eq!(out, "SOE SOE SOE SOE SOE SOE \n[true, true, [[1], [2]]]\n");
 }
+
+#[test]
+fn a_list_case_label_and_contains_all_use_object_equals() {
+    // `Collection.isCase` and `containsAll` are `contains`, which never
+    // coerces: no string-for-number, no `1G` for `1`, no `1.0` for `1`.
+    let src = r#"
+def f(v, l) { switch (v) { case l: return true; default: return false } }
+println([f('2', [2]), f(2, ['2']), f(1G, [1]), f(null, [null]), f([1], [[1]]), f('a', ['a', 'b'])])
+println([[1, 2].containsAll([1.0]), [1, 2].containsAll([1]), [[1]].containsAll([[1.0]]), [1, 2].containsAll([1.0] as Object[])])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[false, false, false, true, true, true]\n[false, true, false, false]\n"
+    );
+}

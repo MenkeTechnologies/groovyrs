@@ -4991,15 +4991,15 @@ fn is_case(vm: &mut VM, label: &Value, subject: &Value) -> Value {
             }
         };
     }
-    // `case [a, b]:` is a membership test. The label may be a list handle or a
+    // `case [a, b]:` is a membership test — `Collection.isCase` is `contains`,
+    // Java's uncoerced `Object.equals`, so `case [2]:` does not match `'2'` and
+    // `case [1]:` does not match `1G`. The label may be a list handle or a
     // transient array, so the shape test has to admit either.
     if is_list(&label) {
-        let want = groovy_str(&subject);
-        return Value::bool(
-            iteration_elements(&label)
-                .iter()
-                .any(|v| groovy_str(v) == want),
-        );
+        let items = iteration_elements(&label);
+        return Value::bool(checked_equal(vm, || {
+            items.iter().any(|v| java_equals(v, &subject))
+        }));
     }
     // `case null:` matches only null; otherwise Groovy's `equals`.
     if matches!(label, Value::Undef) || matches!(subject, Value::Undef) {
@@ -9623,9 +9623,13 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
             Value::array(out)
         }
+        // `Collection.containsAll` asks `contains` per item, so it is
+        // `Object.equals` too: `[1, 2].containsAll([1.0])` is false.
         (Value::Array(a), "containsAll") => {
             let other = args.first().map(iteration_elements).unwrap_or_default();
-            Value::bool(other.iter().all(|w| a.iter().any(|v| values_equal(v, w))))
+            Value::bool(checked_equal(vm, || {
+                other.iter().all(|w| a.iter().any(|v| java_equals(v, w)))
+            }))
         }
         (Value::Array(a), "disjoint") => {
             let other = args.first().map(iteration_elements).unwrap_or_default();

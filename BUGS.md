@@ -605,7 +605,8 @@ reported as parse or compile errors, never silently mis-run.
 
 - **`switch`.** Groovy's, with its full `isCase` semantics rather than `==`: a
   constant label compares equal (numerically across `Integer`/`BigDecimal`), a
-  range or list label *contains* the subject, a bare type name
+  range or list label *contains* the subject (a list by Java's uncoerced
+  `Object.equals`, so `case [2]:` matches neither `'2'` nor `2G`), a bare type name
   (`case String:`, `case MyClass:`, `case IOException:`) is an `instanceof`, a
   `~/…/` pattern label matches the subject's string form *entirely*
   (`Matcher.matches`, not `find`), a closure label is called with the subject and

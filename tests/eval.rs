@@ -8449,3 +8449,29 @@ println([c, ch, w, a])
         "[[[7, 2, 9], [3, 4], [5]], [[1, 2], [6, 3, 4]], [[1, 2, 3], [], [3, 4, 5]], [1, 2, 3, 4, 5]]\n"
     );
 }
+
+#[test]
+fn to_list_string_takes_a_max_size_and_sees_the_receiver() {
+    // `FormatHelper.formatCollection`: once the buffer is longer than
+    // `maxSize`, the next element is `...`; a nested collection gets what is
+    // left of the budget. The receiver held by itself is `(this Collection)`.
+    let src = r#"
+def s = [1, 2]; s << s
+println(s.toListString())
+println([1, 2, 3].toListString(5))
+println([1, 2, 3].toListString(9))
+println([1, 2, 3].toListString(0))
+println([1, [2, 3]].toListString(4))
+def m = [a: 1, bb: [1, 2, 3], c: 'xyz']
+println(m.toMapString(6))
+println(m.toMapString(3))
+println(['é', 'ü', 'ab'].toListString(4))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[1, 2, (this Collection)]\n[1, 2, ...]\n[1, 2, 3]\n[...]\n[1, [...]]\n\
+         [a:1, bb:[...], ...]\n[a:1, ...]\n[é, ü, ...]\n"
+    );
+}

@@ -336,7 +336,9 @@ Implemented and checked against Apache Groovy:
   `toList`, `containsAll`, `putAt`, `removeAt`/`removeElement` and the mutators,
   and every value answers `inspect()` (the *verbose* rendering, so
   `[1, 'a'].inspect()` is `[1, 'a']` where `toString()` is `[1, a]`) with
-  `toListString`/`toMapString` as the plain-rendering aliases;
+  `toListString`/`toMapString` as the plain-rendering aliases (their `(int
+  maxSize)` overloads stop at `...` once the rendering passes `maxSize`, so
+  `[1, 2, 3].toListString(5)` is `[1, 2, ...]`);
   strings answer `indexOf`/`lastIndexOf` (with the
   `fromIndex` and code-point overloads), `replace`, `split` (including the
   no-argument whitespace-tokenizing form), `getBytes`/`bytes`, `tokenize`,

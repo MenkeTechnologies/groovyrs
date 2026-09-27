@@ -7031,6 +7031,12 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
                 render_value(vm, &recv)
             });
         }
+        if let Some(max_size) = to_coll_string_budget(method, &recv, &args) {
+            if !check_comodification(&recv) {
+                return Value::Undef;
+            }
+            return Value::str(render_value_max(vm, &recv, max_size));
+        }
         // Every other call through a window is a fail-fast read: if the backing
         // list moved on, it throws before doing anything.
         if !check_comodification(&recv) {
@@ -8871,12 +8877,10 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
     // `toListString()` / `toMapString()` are *not* `inspect`: they are
     // `FormatHelper.toString(coll, false)`, the same rendering `println` uses,
     // under a receiver-specific name — `[1, 'a'].toListString()` is `[1, a]`
-    // where `inspect()` is `[1, 'a']`.
-    if args.is_empty()
-        && ((method == "toListString" && (is_list(recv) || as_set(recv).is_some()))
-            || (method == "toMapString" && as_omap(recv).is_some()))
-    {
-        return Value::str(groovy_str(recv));
+    // where `inspect()` is `[1, 'a']`. The `(int maxSize)` overloads cut the
+    // rendering short with `...` — see [`render_value_max`].
+    if let Some(max_size) = to_coll_string_budget(method, recv, args) {
+        return Value::str(render_value_max(vm, recv, max_size));
     }
     // A `Range` answers its own members and hands everything else to the list it
     // enumerates — which is faithful, because Groovy's `Range` is a `List`.
@@ -15468,6 +15472,79 @@ fn render_value(vm: &mut VM, v: &Value) -> String {
     let s = render_shape(vm, v);
     RENDER_PATH.with(|p| p.borrow_mut().pop());
     s
+}
+
+/// `toListString(maxSize)` / `toMapString(maxSize)`: Groovy's
+/// `FormatHelper.toString(value, false, maxSize)`, which is [`render_value`]
+/// with a length budget. `-1` is no budget at all.
+///
+/// Ported from `FormatHelper.formatCollection` / `formatMap`: before each
+/// element after the separator, a buffer already *longer* than `max_size` gets
+/// `...` and stops; otherwise the element is formatted with what is left of the
+/// budget (never below zero), so a nested collection past the budget renders
+/// `[...]`. A `Range` element renders its `toString` untruncated, as Groovy's
+/// `format` checks for one before `Collection`. The buffer is measured in UTF-16
+/// units, as `StringBuilder.length()` counts.
+fn render_value_max(vm: &mut VM, v: &Value, max_size: i64) -> String {
+    if max_size == -1 || as_range(v).is_some() {
+        return render_value(vm, v);
+    }
+    let len = |s: &str| s.encode_utf16().count() as i64;
+    let entries: Vec<(Option<String>, Value)> = if let Some(entries) = as_omap(v) {
+        entries.into_iter().map(|(k, e)| (Some(k), e)).collect()
+    } else if let Some(items) = as_list(v).filter(|_| array_elem(v) != Some(ArrayElem::Char)) {
+        items.into_iter().map(|e| (None, e)).collect()
+    } else if let Some((items, kind)) = as_set(v) {
+        set_elements(&items, kind)
+            .into_iter()
+            .map(|e| (None, e))
+            .collect()
+    } else if let Value::Array(items) = v {
+        items.iter().map(|e| (None, e.clone())).collect()
+    } else {
+        return render_value(vm, v);
+    };
+    let is_map = as_omap(v).is_some();
+    if is_map && entries.is_empty() {
+        return "[:]".to_string();
+    }
+    let this = if is_map { THIS_MAP } else { THIS_COLLECTION };
+    let mut buf = String::from("[");
+    for (i, (key, elem)) in entries.iter().enumerate() {
+        if i > 0 {
+            buf.push_str(", ");
+        }
+        if len(&buf) > max_size {
+            buf.push_str("...");
+            break;
+        }
+        if let Some(k) = key {
+            buf.push_str(k);
+            buf.push(':');
+        }
+        let left = (max_size - len(&buf)).max(0);
+        let shown = self_or(v, elem, this, |e| render_value_max(vm, e, left));
+        buf.push_str(&shown);
+    }
+    buf.push(']');
+    buf
+}
+
+/// The `maxSize` a `toListString` on a collection or a `toMapString` on a map
+/// asks for: `-1` (no limit) for the no-argument form, the argument for the
+/// `(int)` overload, and `None` for any other call.
+fn to_coll_string_budget(method: &str, recv: &Value, args: &[Value]) -> Option<i64> {
+    let applies = match method {
+        "toListString" => is_list(recv) || as_set(recv).is_some(),
+        "toMapString" => as_omap(recv).is_some(),
+        _ => false,
+    };
+    match args {
+        _ if !applies => None,
+        [] => Some(-1),
+        [Value::Int(n)] => Some(*n),
+        _ => None,
+    }
 }
 
 thread_local! {

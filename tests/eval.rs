@@ -4086,10 +4086,10 @@ println([[1,'a'].toListString(), [a:1,b:'x'].toMapString()])
 }
 
 #[test]
-fn put_at_is_the_subscript_assignment_and_answers_null() {
+fn put_at_is_the_subscript_assignment() {
     // `putAt` is `[i] =` spelled out — same negative-index and grow-past-the-end
-    // rules — and is `void`, where `List.set` and `Map.put` answer what they
-    // displaced. The list form writes through the handle, so a second name sees
+    // rules. The list form is `void` and the map form answers the value it
+    // stored, where `List.set` and `Map.put` answer what they displaced. The list form writes through the handle, so a second name sees
     // it.
     let src = r#"
 def l = [1,2,3]
@@ -4114,7 +4114,7 @@ println([m.put('a', 9), m])
          [y, x, 3]\n\
          [y, x, z]\n\
          [1, 2, null, null, q]\n\
-         [null, [a:1, b:2]]\n\
+         [2, [a:1, b:2]]\n\
          [1, [a:9, b:2]]\n"
     );
 }
@@ -4979,16 +4979,13 @@ println(n.collect{it()})"#,
     assert_eq!(out, "[0, 1, 2]\n[0, 2, 4]\n[00, 01, 10, 11]\n");
 }
 
-/// The `for` variable itself is the opposite case: Groovy binds it **once** for
-/// the whole loop, so every closure built in the body shares it and they all
-/// read the value it was left at. Both `for (x in …)` forms and the C-style
-/// loop agree, and so does a `while` over a variable declared outside it.
-///
-/// This is the rule the per-iteration cell above must not overrun — desugaring
-/// the loop variable to a declaration inside the body would give each iteration
-/// its own binding and print `[0, 1, 2]`, which Groovy does not.
+/// The `for (x in …)` variable is a fresh binding per iteration too (Apache
+/// Groovy 6.0.0): a closure built in the body keeps its own iteration's value,
+/// and a write later in that iteration shows through it (`[10, 11, 12]`). The
+/// C-style `for (;;)` variable and a `while` over an outer variable are one
+/// binding for the whole loop, so their closures all read the final value.
 #[test]
-fn the_for_variable_is_one_binding_for_the_whole_loop() {
+fn the_for_in_variable_is_fresh_per_iteration_the_c_style_one_is_shared() {
     let (out, ok) = run(r#"def a=[]; for (x in 0..2) a << { x }
 println(a.collect{it()})
 def b=[]; for (x in ['p','q','r']) b << { x }
@@ -5002,7 +4999,7 @@ println(r.collect{it()})"#);
     assert!(ok);
     assert_eq!(
         out,
-        "[2, 2, 2]\n[r, r, r]\n[3, 3, 3]\n[3, 3, 3]\n[12, 12, 12]\n"
+        "[0, 1, 2]\n[p, q, r]\n[3, 3, 3]\n[3, 3, 3]\n[10, 11, 12]\n"
     );
 }
 
@@ -5023,7 +5020,7 @@ println(g.collect{it()})
 def h=[]; 3.times { t -> h << { t } }
 println(h.collect{it()})"#);
     assert!(ok);
-    assert_eq!(out, "2\n6\n[102, 102, 102]\n[1, 2]\n[0, 1, 2]\n[0, 1, 2]\n");
+    assert_eq!(out, "2\n3\n[100, 101, 102]\n[1, 2]\n[0, 1, 2]\n[0, 1, 2]\n");
 }
 
 /// The membership index is an accelerator, never the answer: it must not change
@@ -6436,16 +6433,37 @@ println(switch (7) { case { it > 5 } -> "big"; default -> "small" })
 }
 
 #[test]
-fn a_switch_expression_that_matches_nothing_is_null() {
-    // Groovy does not demand exhaustiveness of a switch expression the way Java
-    // does: an unmatched subject with no `default` is `null`, not an error.
+fn an_uncovered_switch_expression_raises_only_when_its_value_is_consumed() {
+    // A consumed switch expression with no matching label and no `default`
+    // raises `IllegalStateException` (Apache Groovy 6.0.0), in arrow and colon
+    // form, through a `return`, and as an argument. An arrow switch written as a
+    // statement — including the trailing one a method or closure body returns —
+    // answers `null` instead.
     let src = r#"
-def c = switch (7) { case 2 -> "two" }
-println("unmatched=$c")
+try { def c = switch (7) { case 2 -> "two" }; println(c) } catch (e) { println(e) }
+try { def c = switch ('s') { case 2: yield "two" }; println(c) } catch (e) { println(e) }
+def g(x) { return switch (x) { case 1 -> 'one' } }
+try { println(g(2)) } catch (e) { println(e.getClass().getName()) }
+try { println(switch ([1]) { case 1 -> 'one' }) } catch (e) { println(e.message) }
+def f(x) { switch (x) { case 1 -> 'one' } }
+println(f(2))
+def k = { x -> switch (x) { case 1 -> 'one' } }
+println(k(2))
+switch (5) { case 1 -> println('one') }
+println(switch (3) { case 1 -> 'one'; default -> 'd' })
 "#;
     let (out, ok) = run(src);
     assert!(ok);
-    assert_eq!(out, "unmatched=null\n");
+    assert_eq!(
+        out,
+        "java.lang.IllegalStateException: the switch expression does not cover the value 7\n\
+         java.lang.IllegalStateException: the switch expression does not cover the value s\n\
+         java.lang.IllegalStateException\n\
+         the switch expression does not cover the value [1]\n\
+         null\n\
+         null\n\
+         d\n"
+    );
 }
 
 #[test]
@@ -8511,4 +8529,74 @@ println([[1, 2].containsAll([1.0]), [1, 2].containsAll([1]), [[1]].containsAll([
         out,
         "[false, false, false, true, true, true]\n[false, true, false, false]\n"
     );
+}
+
+#[test]
+fn a_store_to_a_typed_variable_converts_to_its_type() {
+    // Groovy runs every store to a typed local through `castToType`, the same
+    // conversion as a Java-style cast: on the declaration, on a later `=`, and
+    // on a compound assignment. A primitive declared without an initializer
+    // starts at its zero; `int n = null` refuses. Byte-verified against Apache
+    // Groovy 6.0.0.
+    let src = r#"
+int i = 3.7; long l = 2.9; double d = 3; float f = 2; String s = 5
+println([i, l, d, f, s + 1])
+Integer m = 4.5; BigDecimal b = 3; short sh = 70000; int big = 2**40
+println([m, b, sh, big])
+int c = 'a' as char; boolean t = 'x'; boolean z = 0
+println([c, t, z])
+int x = 1; x = 2.8; x += 0.9; double y = 1; y = 7; y += 1
+println([x, y])
+Integer w = 2L; println(w.getClass().getName())
+int u; double v; boolean q; long r
+println([u, v, q, r])
+try { int n = null } catch (e) { println(e.getClass().getName()) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[3, 2, 3.0, 2.0, 51]\n\
+         [4, 3, 4464, 0]\n\
+         [97, true, false]\n\
+         [2, 8.0]\n\
+         java.lang.Integer\n\
+         [0, 0.0, false, 0]\n\
+         org.codehaus.groovy.runtime.typehandling.GroovyCastException\n"
+    );
+}
+
+#[test]
+fn a_numeric_hook_throw_inside_println_is_raised_before_printing() {
+    // `null + 1` raises from fusevm's numeric hook, which answers a placeholder
+    // `null`; the handler must run before `println` prints that placeholder. A
+    // `finally` an unwind runs still prints, its exception legitimately pending.
+    let src = r#"
+try { println(null + 1) } catch (e) { println(e.getClass().getName()) }
+try { println(null * 2) } catch (e) { println(e.getClass().getName()) }
+println(null + 'a')
+try {
+    try { throw new Exception("inner") }
+    finally { println("cleanup " + (1 + 1)) }
+} catch (Exception e) { println(e.message) }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "java.lang.NullPointerException\n\
+         java.lang.NullPointerException\n\
+         nulla\n\
+         cleanup 2\n\
+         inner\n"
+    );
+}
+
+#[test]
+fn a_range_interpolated_into_a_gstring_renders_as_a_range() {
+    // Apache Groovy 6.0.0 renders an embedded range through its `toString`, as
+    // `println` and `+` do (5.x wrote its elements).
+    let (out, ok) = run(r#"println("x${1..3}y ${1..<3} ${'a'..'c'} ${[1..2]}")"#);
+    assert!(ok);
+    assert_eq!(out, "x1..3y 1..<3 a..c [1..2]\n");
 }

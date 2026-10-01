@@ -288,7 +288,9 @@ Implemented and checked against Apache Groovy:
   its value: a boxed cell holds every local some closure in that scope captures,
   so a mutation made after the closure was created is visible to a later call of
   it, and a declaration inside a loop body is a fresh variable per iteration
-  (`for (x in 0..2) { def y = x*2; q << { y } }` collects 0, 2, 4). A curried
+  (`for (x in 0..2) { def y = x*2; q << { y } }` collects 0, 2, 4). So is the
+  `for (x in …)` variable itself (`for (x in 0..2) a << { x }` collects
+  `[0, 1, 2]`); the C-style `for (;;)` variable is one binding for the loop. A curried
   `{ x -> { y -> x + y } }` and a chained call `f(a)(b)` work.
 - **Closure-driven GDK** — over lists, ranges and a `String`'s characters:
   `each`, `eachWithIndex`, `reverseEach`, `collect`, `collectMany`,
@@ -524,9 +526,10 @@ Implemented and checked against Apache Groovy:
   (`case 1, 2 -> …`), and is valued by its arm's trailing expression, so a
   braced body is a block (`case 2 -> { 5 }` is `5`) and an arm ending in
   `println` is `null`. The colon form keeps fall-through and says `yield`. A
-  subject that matches no label is `null` — Groovy asks no exhaustiveness of a
-  switch expression. An arrow `switch` in statement position still carries its
-  value, so a method whose last statement is one returns the arm's value.
+  consumed switch expression whose subject matches no label and that has no
+  `default` raises `IllegalStateException`. An arrow `switch` in statement
+  position still carries its value, so a method whose last statement is one
+  returns the arm's value (`null` when no label matches).
 - **Output** — `println` / `print` with Groovy value formatting, in both the
   `println(x)` and paren-less `println x` command forms.
 - **Comments** — `//` line, `/* … */` block.

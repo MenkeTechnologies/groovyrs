@@ -1693,19 +1693,13 @@ impl Parser {
             step(v(&hi), false)
         };
 
-        // The loop variable is declared **once**, outside the loop, and assigned
-        // per iteration. Groovy's `for (x in …)` binds one variable for the whole
-        // loop, so every closure built in the body shares it and they all read
-        // the final value — declaring it inside the body would give each
-        // iteration its own binding (see `host::GCELL_NEW`).
-        let assign_var = Stmt::new(
-            line,
-            StmtKind::Assign {
-                name: var.clone(),
-                op: AssignOp::Assign,
-                value: v(&cur),
-            },
-        );
+        // The loop variable is declared **inside** the body, so each iteration
+        // gets a fresh binding (see `host::GCELL_RENEW`): a closure built in one
+        // iteration keeps that iteration's value, and a write to the variable
+        // later in the same iteration shows through it. Groovy's `for (x in …)`
+        // does exactly this (`for (x in 0..2) a << { x }` collects `[0, 1, 2]`);
+        // only the C-style `for (;;)` shares one variable across iterations.
+        let assign_var = local(&var, v(&cur));
         body.insert(0, assign_var);
         let at_or_before = bin(BinOp::Le, v(&cur), v(&last));
         let at_or_after = bin(BinOp::Ge, v(&cur), v(&last));
@@ -1799,20 +1793,19 @@ impl Parser {
                 },
             )
         };
-        // One binding for the whole loop, assigned per iteration — see the range
-        // form's note.
+        // A fresh binding per iteration — see the range form's note.
         body.insert(
             0,
             Stmt::new(
                 line,
-                StmtKind::Assign {
+                StmtKind::Local {
+                    ty: "def".into(),
                     name: var.clone(),
-                    op: AssignOp::Assign,
-                    value: Expr::Index {
+                    init: Some(Expr::Index {
                         recv: Box::new(Expr::Var(seq.clone())),
                         index: Box::new(Expr::Var(idx.clone())),
                         line,
-                    },
+                    }),
                 },
             ),
         );

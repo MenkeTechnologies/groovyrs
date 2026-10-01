@@ -229,6 +229,15 @@ struct Compiler {
     /// t * 2000000000` is still 64-bit arithmetic — so these are exempt from the
     /// narrowing above until the name is re-declared.
     pinned_wide: HashSet<String>,
+    /// Names declared with a type Groovy converts on assignment (`int`,
+    /// `double`, `String`, …; see [`COERCED_TYPES`]), and that type. A store to
+    /// one goes through `castToType` exactly as a Java-style cast does, so
+    /// `int i = 3.7` holds `3` and `double d = 3` holds `3.0`.
+    typed_vars: HashMap<String, String>,
+    /// How many `finally` bodies being emitted inline by an exit path enclose
+    /// the code being lowered. An unwind emits them while its exception is still
+    /// pending, so a pending check there would cut the `finally` short.
+    inline_finally_depth: u32,
     /// Names the compiler can see are bound to a host-heap object whose `>>` is
     /// *not* a bit shift: a closure (`f >> g` is `Closure.andThen`, forward
     /// composition) or a user-class instance (a `rightShift` overload). Only
@@ -321,6 +330,7 @@ struct WidthScope {
     returns: HashSet<String>,
     pinned: HashSet<String>,
     objs: HashSet<String>,
+    typed: HashMap<String, String>,
 }
 
 /// A closure body queued for emission as a subroutine region. `params` already
@@ -501,6 +511,8 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         wide_vars: HashSet::new(),
         wide_returns: HashSet::new(),
         pinned_wide: HashSet::new(),
+        typed_vars: HashMap::new(),
+        inline_finally_depth: 0,
         obj_vars: HashSet::new(),
         wide_sites: HashSet::new(),
         cells: boxed_names(&[], &prog.body),
@@ -950,12 +962,14 @@ impl Compiler {
             returns: self.wide_returns.clone(),
             pinned: self.pinned_wide.clone(),
             objs: self.obj_vars.clone(),
+            typed: self.typed_vars.clone(),
         };
         for p in params {
             self.wide_vars.remove(p);
             self.wide_returns.remove(p);
             self.pinned_wide.remove(p);
             self.obj_vars.remove(p);
+            self.typed_vars.remove(p);
         }
         saved
     }
@@ -966,6 +980,7 @@ impl Compiler {
         self.wide_returns = saved.returns;
         self.pinned_wide = saved.pinned;
         self.obj_vars = saved.objs;
+        self.typed_vars = saved.typed;
     }
 
     /// Does every value this body hands back have a statically-`Long` width?
@@ -1683,7 +1698,7 @@ impl Compiler {
             StmtKind::Expr(Expr::Println { .. }) => self.stmt(last)?,
             StmtKind::Expr(e) => {
                 self.cur_line = last.line;
-                self.expr(e)?;
+                self.stmt_expr(e)?;
                 self.b.emit(Op::ReturnValue, last.line);
             }
             // Groovy's implicit return reaches through a trailing `if` or `try`:
@@ -1720,8 +1735,13 @@ impl Compiler {
                 // The initializer is lowered first: it may read an *outer*
                 // variable this declaration shadows, which still has its own
                 // width until the new binding takes effect.
-                if let Some(e) = init {
+                //
+                // A primitive declared without one starts at its zero, as
+                // Java's does: `int x; println x` prints `0`, not `null`.
+                let init = init.clone().or_else(|| primitive_zero(ty));
+                if let Some(e) = &init {
                     self.expr(e)?;
+                    self.emit_typed_coercion(ty, e)?;
                     self.note_var_width(ty, name, init.as_ref());
                     self.emit_decl_store(name, self.cur_line);
                     // `def y = null - 1` raises from the numeric hook, which has
@@ -1753,7 +1773,13 @@ impl Compiler {
                 // already holds, so it can only widen. The new width is applied
                 // *after* the value is lowered, because the value may read the
                 // variable itself (`a = a * 2`) at its old width.
-                let new_wide = if matches!(op, AssignOp::Assign) {
+                let narrow = self
+                    .typed_vars
+                    .get(name)
+                    .is_some_and(|t| is_narrow_int_type(t));
+                let new_wide = if narrow {
+                    false
+                } else if matches!(op, AssignOp::Assign) {
                     self.is_wide(value)
                 } else {
                     self.wide_vars.contains(name) || self.is_wide(value)
@@ -1797,6 +1823,19 @@ impl Compiler {
                         // range when the second `+=` overflows it.
                         self.mark_wide_site(pos, &Expr::Var(name.clone()), value);
                     }
+                }
+                if let Some(ty) = self.typed_vars.get(name).cloned() {
+                    // A compound `x op= e` stores `x op e`; that is the value
+                    // whose static shape decides whether a cast is needed.
+                    let stored = match compound_binop(*op) {
+                        Some(bin) => Expr::Binary {
+                            op: bin,
+                            lhs: Box::new(Expr::Var(name.clone())),
+                            rhs: Box::new(value.clone()),
+                        },
+                        None => value.clone(),
+                    };
+                    self.emit_typed_coercion(&ty, &stored)?;
                 }
                 self.emit_name_store(name, self.cur_line)?;
                 // As for a declaration: `y = null - 1` raises from the numeric
@@ -1909,7 +1948,7 @@ impl Compiler {
                 self.inc_dec_update(name, *inc)
             }
             StmtKind::Expr(e) => {
-                self.expr(e)?;
+                self.stmt_expr(e)?;
                 self.b.emit(Op::Pop, self.cur_line);
                 // A throw raised by fusevm's numeric hook — `null % 3`, `null + 1`
                 // — has no check of its own: the hook is called from inside the
@@ -1927,7 +1966,7 @@ impl Compiler {
             StmtKind::If { cond, then, els } => self.branch_stmt(|c| c.if_stmt(cond, then, els)),
             StmtKind::While { cond, body } => self.branch_stmt(|c| c.while_stmt(cond, body)),
             StmtKind::DoWhile { body, cond } => self.branch_stmt(|c| c.do_while_stmt(body, cond)),
-            StmtKind::Switch(sw) => self.branch_stmt(|c| c.switch_lower(sw, None)),
+            StmtKind::Switch(sw) => self.branch_stmt(|c| c.switch_lower(sw, None, false)),
             StmtKind::Yield(value) => self.yield_stmt(value),
             StmtKind::Labeled { label, stmt } => {
                 self.pending_label = Some(label.clone());
@@ -2137,11 +2176,15 @@ impl Compiler {
         }
         let saved = std::mem::take(&mut self.finallys);
         let mut result = Ok(());
+        // An unwind runs these with its exception still pending; see
+        // [`Compiler::println`].
+        self.inline_finally_depth += 1;
         for &i in &selected {
             for s in &saved[i].body {
                 result = result.and(self.stmt(s));
             }
         }
+        self.inline_finally_depth -= 1;
         self.finallys = saved;
         result
     }
@@ -2577,7 +2620,12 @@ impl Compiler {
     /// colon form pushes — an arrow arm is not a `break` target in Groovy, so a
     /// `break` written inside one belongs to the enclosing loop. `continue`
     /// passes through either to the enclosing loop.
-    fn switch_lower(&mut self, sw: &SwitchBody, result: Option<&str>) -> Result<(), String> {
+    fn switch_lower(
+        &mut self,
+        sw: &SwitchBody,
+        result: Option<&str>,
+        exhaustive: bool,
+    ) -> Result<(), String> {
         let SwitchBody {
             subject,
             cases,
@@ -2634,6 +2682,28 @@ impl Compiler {
                 arm_exits.push(self.b.emit(Op::Jump(0), self.cur_line));
             }
         }
+        // A consumed switch with no `default` that matched nothing raises, as
+        // Groovy does; the raise sits past the last arm, which a colon arm's
+        // fall-through must jump over.
+        let has_default = cases.iter().any(|c| c.labels.is_empty());
+        let uncovered = if exhaustive && result.is_some() && !has_default {
+            let skip = self.b.emit(Op::Jump(0), self.cur_line);
+            let at = self.b.current_pos();
+            let message = Expr::GString(vec![
+                GStringPart::Text("the switch expression does not cover the value ".into()),
+                GStringPart::Expr(Expr::Var(subject_tmp.clone())),
+            ]);
+            let exc = Expr::New {
+                class: "IllegalStateException".into(),
+                args: vec![message],
+                line: self.cur_line,
+            };
+            self.throw_stmt(&exc, self.cur_line)?;
+            arm_exits.push(skip);
+            Some(at)
+        } else {
+            None
+        };
         let end = self.b.current_pos();
         let yielded = result.map(|_| self.yields.pop().unwrap());
         let l = if *arrow {
@@ -2648,7 +2718,7 @@ impl Compiler {
         let default_start = cases
             .iter()
             .position(|c| c.labels.is_empty())
-            .map_or(end, |i| starts[i]);
+            .map_or(uncovered.unwrap_or(end), |i| starts[i]);
         self.b.patch_jump(no_match, default_start);
         for op in arm_exits {
             self.b.patch_jump(op, end);
@@ -2710,10 +2780,26 @@ impl Compiler {
         Ok(())
     }
 
+    /// Lower an expression written as a statement (possibly the trailing one a
+    /// body returns). Only an arrow `switch` lowers differently there: it is not
+    /// a consumed switch expression, so an uncovered subject answers `null`.
+    fn stmt_expr(&mut self, e: &Expr) -> Result<(), String> {
+        match e {
+            Expr::Switch(sw) => self.switch_expr(sw, false),
+            _ => self.expr(e),
+        }
+    }
+
     /// A `switch` in value position: lower it into a temporary, then load it.
-    fn switch_expr(&mut self, sw: &SwitchBody) -> Result<(), String> {
+    ///
+    /// `exhaustive` is set when the value is really consumed (`def v = switch …`,
+    /// an argument, a `return`): Groovy then raises `IllegalStateException: the
+    /// switch expression does not cover the value <v>` when no label matches and
+    /// there is no `default`. An arrow `switch` written as a statement — even the
+    /// trailing one whose value a method returns — answers `null` instead.
+    fn switch_expr(&mut self, sw: &SwitchBody, exhaustive: bool) -> Result<(), String> {
         let result = self.fresh_temp("switchval");
-        self.branch_stmt(|c| c.switch_lower(sw, Some(&result)))?;
+        self.branch_stmt(|c| c.switch_lower(sw, Some(&result), exhaustive))?;
         self.emit_temp_get(&result);
         Ok(())
     }
@@ -2777,6 +2863,14 @@ impl Compiler {
         let n = match arg {
             Some(e) => {
                 self.expr(e)?;
+                // A throw from fusevm's numeric hook (`null + 1`) has no check of
+                // its own; settle it before the print runs, or the placeholder
+                // `null` the hook answered is printed ahead of the handler.
+                // Not inside a `finally` an unwind is running, whose exception
+                // is legitimately still pending.
+                if self.inline_finally_depth == 0 {
+                    self.emit_exc_check(self.cur_line)?;
+                }
                 1
             }
             None => 0,
@@ -2885,7 +2979,7 @@ impl Compiler {
                 // Groovy `null` — fusevm has no Null variant, so it rides as Undef.
                 self.b.emit(Op::LoadUndef, self.cur_line);
             }
-            Expr::Switch(sw) => self.switch_expr(sw)?,
+            Expr::Switch(sw) => self.switch_expr(sw, true)?,
             Expr::Var(name) => {
                 // A bare field name inside a method/constructor is `this.field`.
                 if self.is_field(name) {
@@ -3668,7 +3762,60 @@ impl Compiler {
     /// width of its initializer, and re-binds the name either way — a
     /// declaration is a fresh variable, so `def a = 2000000000` after an earlier
     /// `def a = 5L` is an `Integer` again.
+    /// Convert the value on the stack to a variable's declared type, as Groovy
+    /// does on every store to a typed variable. Skipped when the value already
+    /// statically has that type, so `int s = 0; s += i` over typed operands
+    /// keeps its native arithmetic.
+    fn emit_typed_coercion(&mut self, ty: &str, value: &Expr) -> Result<(), String> {
+        if !COERCED_TYPES.contains(&ty) {
+            return Ok(());
+        }
+        let kind = self.static_num_kind(value);
+        let already = match ty {
+            "int" | "Integer" => kind == Some(NumKind::Int),
+            "long" | "Long" => matches!(kind, Some(NumKind::Int | NumKind::Long)),
+            "double" | "Double" => kind == Some(NumKind::Double),
+            _ => false,
+        };
+        if already {
+            return Ok(());
+        }
+        let tidx = self.b.add_constant(Value::str(ty.to_string()));
+        self.b.emit(Op::LoadConst(tidx), self.cur_line);
+        self.emit_call_builtin(crate::host::GJCAST, 0, self.cur_line)
+    }
+
+    /// The numeric type `e` statically has: a literal, a typed variable, or
+    /// `+`/`-`/`*` over operands that have one (Java's binary promotion).
+    fn static_num_kind(&self, e: &Expr) -> Option<NumKind> {
+        match e {
+            Expr::Int(_, IntWidth::Int) => Some(NumKind::Int),
+            Expr::Int(_, IntWidth::Long) => Some(NumKind::Long),
+            Expr::Float(_) => Some(NumKind::Double),
+            Expr::Var(n) => match self.typed_vars.get(n).map(String::as_str) {
+                Some("int" | "Integer") => Some(NumKind::Int),
+                Some("long" | "Long") => Some(NumKind::Long),
+                Some("double" | "Double") => Some(NumKind::Double),
+                _ => None,
+            },
+            Expr::Binary {
+                op: BinOp::Add | BinOp::Sub | BinOp::Mul,
+                lhs,
+                rhs,
+            } => {
+                let (l, r) = (self.static_num_kind(lhs)?, self.static_num_kind(rhs)?);
+                Some(l.max(r))
+            }
+            _ => None,
+        }
+    }
+
     fn note_var_width(&mut self, ty: &str, name: &str, init: Option<&Expr>) {
+        if COERCED_TYPES.contains(&ty) {
+            self.typed_vars.insert(name.to_string(), ty.to_string());
+        } else {
+            self.typed_vars.remove(name);
+        }
         // A declaration re-binds the name's `>>` receiver shape too, and does so
         // whatever its width turns out to be.
         self.set_var_obj(ty, name, init);
@@ -3678,7 +3825,7 @@ impl Compiler {
             return;
         }
         self.pinned_wide.remove(name);
-        self.set_var_width(name, init.is_some_and(|e| self.is_wide(e)));
+        self.set_var_width(name, !is_narrow_int_type(ty) && init.is_some_and(|e| self.is_wide(e)));
         // `def f = { -> 5L }` binds a callable, not a number: record what
         // *calling* it yields so `f()` has a width at the call site.
         self.wide_returns.remove(name);
@@ -5021,4 +5168,73 @@ fn compound_op(op: AssignOp) -> Op {
             unreachable!("the bitwise forms lower through Compiler::binary, not compound_op")
         }
     }
+}
+
+/// The declared types whose stores Groovy converts with `castToType` — the
+/// same conversion a Java-style `(Type) value` cast performs. `int i = 3.7` is
+/// `3`, `double d = 3` is `3.0`, `String s = 5` is `"5"`, `int c = 'a' as
+/// char` is `97`. Other declared types are left alone.
+const COERCED_TYPES: &[&str] = &[
+    "int",
+    "long",
+    "short",
+    "byte",
+    "double",
+    "float",
+    "char",
+    "boolean",
+    "Integer",
+    "Long",
+    "Short",
+    "Byte",
+    "Double",
+    "Float",
+    "Character",
+    "Boolean",
+    "String",
+    "BigDecimal",
+    "BigInteger",
+];
+
+/// The numeric type an expression statically has, where the compiler can see
+/// it without running anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum NumKind {
+    Int,
+    Long,
+    Double,
+}
+
+/// The [`BinOp`] a compound assignment applies (`x += e` is `x + e`), or `None`
+/// for a plain `=`.
+fn compound_binop(op: AssignOp) -> Option<BinOp> {
+    match op {
+        AssignOp::Assign => None,
+        AssignOp::Add => Some(BinOp::Add),
+        AssignOp::Sub => Some(BinOp::Sub),
+        AssignOp::Mul => Some(BinOp::Mul),
+        AssignOp::Div => Some(BinOp::Div),
+        AssignOp::Mod => Some(BinOp::Mod),
+        AssignOp::Bin(b) => Some(b),
+    }
+}
+
+/// Is `ty` a declared integer type narrower than `Long`? A store to one is
+/// converted to it, so it never holds a `Long` whatever the value was.
+fn is_narrow_int_type(ty: &str) -> bool {
+    matches!(ty, "int" | "Integer" | "short" | "Short" | "byte" | "Byte")
+}
+
+/// The zero a primitive local starts at when declared without an initializer
+/// (`int x` is `0`, `double d` is `0.0`, `boolean b` is `false`). A boxed type
+/// (`Integer`) and every other type start at `null`, which is `None` here.
+fn primitive_zero(ty: &str) -> Option<Expr> {
+    Some(match ty {
+        "int" | "short" | "byte" => Expr::Int(0, IntWidth::Int),
+        "long" => Expr::Int(0, IntWidth::Long),
+        "double" => Expr::Float(0.0),
+        "float" => Expr::Single(0.0),
+        "boolean" => Expr::Bool(false),
+        _ => return None,
+    })
 }

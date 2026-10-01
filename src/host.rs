@@ -2813,12 +2813,11 @@ fn b_gstring(vm: &mut VM, _argc: u8) -> Value {
     vals.reverse();
     let mut out = String::new();
     for v in &vals {
-        // A `GString` placeholder goes through `InvokerHelper.write`, which
-        // writes any `Collection` as its elements — so an embedded range renders
-        // `[1, 2, 3]` where `println` and `+` (which take `toString`) render
-        // `1..3`. Verified against Apache Groovy 5.0.8: `"x${1..3}y"` is
-        // `x[1, 2, 3]y`.
-        out.push_str(&render_value(vm, &range_as_list(v)));
+        // A range renders through its own `toString` here, as it does for
+        // `println` and `+`: Apache Groovy 6.0.0 gives `"x${1..3}y"` as
+        // `x1..3y` and `"${1..<3}"` as `1..<3` (5.x wrote the elements,
+        // `x[1, 2, 3]y`).
+        out.push_str(&render_value(vm, v));
     }
     Value::str(out)
 }
@@ -10791,11 +10790,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             let key = groovy_str(&args[0]);
             let previous = omap_get(recv, &key).flatten();
             omap_set(recv, key, args[1].clone());
-            // `put` answers the value it displaced; `putAt` (the `m[k] = v`
-            // spelling) answers nothing.
+            // `put` answers the value it displaced; the GDK's `putAt(Map, K, V)`
+            // answers the value it stored (`m.putAt('b', 2)` is `2`).
             match method {
                 "put" => previous.unwrap_or(Value::Undef),
-                _ => Value::Undef,
+                _ => args[1].clone(),
             }
         }
         (_, "get" | "getAt") if args.len() == 1 && is_omap(recv) => {

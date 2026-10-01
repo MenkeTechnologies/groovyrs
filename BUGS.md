@@ -621,10 +621,12 @@ reported as parse or compile errors, never silently mis-run.
   braced arrow body is a BLOCK, so `case 2 -> { 5 }` is `5` and not a closure,
   and an arm ending in `println` is `null`, the rule an implicit return uses.
   `case L:` keeps fall-through and carries its value out with `yield`, which
-  runs any `finally` it leaves on the way. A subject matching no label is `null`:
-  Groovy asks no exhaustiveness of a switch expression, unlike Java. An arrow
-  `switch` written in statement position is still a value, which is why a method
-  whose last statement is one returns the arm's value. Mixing `->` and `:`
+  runs any `finally` it leaves on the way. A *consumed* switch expression whose
+  subject matches no label and that has no `default` raises
+  `IllegalStateException: the switch expression does not cover the value <v>`,
+  as Groovy 6 does. An arrow `switch` written in statement position is still a
+  value, which is why a method whose last statement is one returns the arm's
+  value — and there an uncovered subject is `null`, not a throw. Mixing `->` and `:`
   sections in one `switch` is refused, as Groovy refuses it. `yield` is
   contextual — only inside a switch arm; elsewhere it is an ordinary name.
   A comma label list is switch-EXPRESSION grammar: `case 3, 4:` makes the whole
@@ -1233,9 +1235,13 @@ infinite loop on both sides.
 - **`Map.Entry` is modeled only as far as the GDK needs.** It prints `k=v` and
   answers `key`/`value`/`getKey()`/`getValue()`; `setValue` and the rest of the
   interface are absent, and its key is always the map's `String` key.
-- **Types are not checked.** Declared types (`int`, `String`, `def`) are kept
-  for diagnostics but do not gate execution — the runtime is dynamically typed on
-  the fusevm value model.
+- **Types are not checked beyond conversion.** A store to a local declared with
+  a primitive, boxed-number, `String`, `BigDecimal` or `BigInteger` type is
+  converted with `castToType`, as Groovy does (`int i = 3.7` holds `3`, `double
+  d = 3` holds `3.0`, `int x` starts at `0`); any other declared type is kept
+  for diagnostics but does not gate execution, and method parameter types are
+  not used to select or convert. A `char` local holds a one-character `String`
+  (groovyrs has no `Character` value).
 - **`Set` membership uses `==`'s numeric equality, where Java's is TYPED.**
   Groovy's `==` on two numbers compares their values across classes (`1.0d ==
   1.0f` and `1 == 1.0G` are both true), but `Set` membership runs

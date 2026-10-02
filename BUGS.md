@@ -1070,8 +1070,9 @@ infinite loop on both sides.
   arguments anyway drops them instead of failing the way Groovy's arity check
   does.
 - **Implicit return does not reach through a trailing loop or assignment.** It
-  reaches through a trailing expression, `if`, and `try`; a body ending in a
-  `for`/`while` or a bare assignment still returns `null`.
+  reaches through a trailing expression, declaration (`def r = 5` answers `5`),
+  `if`, and `try`; a body ending in a `for`/`while` or a bare assignment still
+  returns `null`.
 - **A captured local's cell is reclaimed only when nothing captured it.** A
   boxed binding's cell is reused in place when the target's current one has not
   been captured, so a loop that builds a closure only sometimes costs one cell

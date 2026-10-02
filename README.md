@@ -161,7 +161,7 @@ Implemented and checked against Apache Groovy:
   fusevm subroutine regions over the native `Op::Call` frame ABI. Parameters and
   locals are frame slots, so recursion and mutual recursion are sound; `return
   <expr>` carries a value out, and a `return`-less body returns its last value
-  expression (else `null`).
+  expression or declaration (else `null`).
   A defaulted parameter (`def g(a, b = 10)`, also on methods and constructors)
   declares the shorter overloads Groovy generates — defaults drop from the
   right and may read earlier parameters. A variadic last parameter (`... xs`,
@@ -175,8 +175,10 @@ Implemented and checked against Apache Groovy:
   octal, with `_` group separators and the `L`/`G` suffixes) / decimal / string
   (single-, double- and triple-quoted) / boolean / `null` literals; `+ - * / % **`,
   `== != < > <= >=`, `&& ||` (short-circuiting), the bitwise `& | ^ ~` and the
-  shifts `<< >> >>>`, `x in coll` (which is `coll.isCase(x)`, so on a String it is equality, not
-  containment; on a list it is `contains`, Java's uncoerced `Object.equals`),
+  shifts `<< >> >>>`, `x in coll` (on a list it is `contains`, Java's uncoerced `Object.equals`;
+  on a String it is Groovy 6's substring `contains` for a string needle, while
+  a `switch` label on a String still tests equality), its negation `x !in coll`
+  and `x !instanceof T`,
   the `value as Type` coercion and the Java-style `(Type) value` cast — which
   is Groovy's `castToType`, so `(Integer) "7"` is `55` where `"7" as Integer`
   is `7` — unary `-` and `!`, grouping. `==` coerces as Groovy's does: numbers

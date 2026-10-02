@@ -2846,3 +2846,11 @@ int[] a = [1, 2]; println a.class.name; String[] b = ['x']; println b.class.simp
 Map<String, Integer> m = [a: 1]; List<List<Integer>> n = [[1]]; println m; println n; final x = 3; final int y = 4; println x + y
 %%
 println(([1] as int[]).getClass().simpleName); println(([1] as Integer[]).getClass().simpleName)
+%%
+def m = [b: 2, a: 1, c: 3]; println m.min { a, b -> a.value <=> b.value }; println m.inject(0) { acc, k, v -> acc + v }; println m.findResult { k, v -> v > 1 ? k : null }; println m.findResult('none') { k, v -> null }
+%%
+println('b' in 'abc'); println('x' in 'abc'); println(1 in '123'); println('b' !in 'abc')
+%%
+println(3G << 4294967297L); println(3G << 9223372036854775807); println(3G >> -1L)
+%%
+def c = { def x = 7 }; println c()

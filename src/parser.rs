@@ -2134,6 +2134,18 @@ impl Parser {
     fn binary_from_inner(&mut self, mut lhs: Expr, min_bp: u8) -> Result<Expr, String> {
         loop {
             self.deepen()?;
+            // `x !in c` and `x !instanceof T` (Groovy 3+) are the negated
+            // operators: the `!` is consumed here and the result wrapped below.
+            let negated = RELATIONAL_BP >= min_bp
+                && matches!(self.peek(), Tok::Not)
+                && matches!(self.peek_at(1), Tok::In | Tok::Ident(_))
+                && match self.peek_at(1) {
+                    Tok::Ident(k) => k == "instanceof",
+                    _ => true,
+                };
+            if negated {
+                self.advance();
+            }
             // `value instanceof Type` — relational precedence, recorded under
             // the `instanceof` keyword's column.
             if RELATIONAL_BP >= min_bp && matches!(self.peek(), Tok::Ident(k) if k == "instanceof")
@@ -2151,6 +2163,12 @@ impl Parser {
                         class,
                     },
                 );
+                if negated {
+                    lhs = Expr::Unary {
+                        op: UnOp::Not,
+                        rhs: Box::new(lhs),
+                    };
+                }
                 continue;
             }
             // `value as Type` — a coercion whose right side is a *type name*,
@@ -2210,6 +2228,12 @@ impl Parser {
                     rhs: Box::new(rhs),
                 },
             );
+            if negated {
+                lhs = Expr::Unary {
+                    op: UnOp::Not,
+                    rhs: Box::new(lhs),
+                };
+            }
         }
         Ok(lhs)
     }

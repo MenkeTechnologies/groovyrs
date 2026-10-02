@@ -4670,16 +4670,17 @@ println(" a b ".split("\\s+").toList())"#);
     );
 }
 
-/// `x in str` is `str.isCase(x)`, which for a `String` is **equality**. Reading
-/// it as containment is the natural guess and the wrong one — the same rule
-/// decides whether `switch` takes a `case`.
+/// Groovy 6 answers `x in str` with `contains` for a string needle, where a
+/// `switch` label (`str.isCase(x)`) still tests equality. Measured against Apache
+/// Groovy 6.0.0, the harness oracle; Groovy 5 answered `'a' in 'abc'` with `false`.
 #[test]
-fn in_on_a_string_is_equality_not_containment() {
+fn in_on_a_string_is_containment_but_a_case_label_is_equality() {
     let (out, ok) = run(r#"println('a' in 'abc')
 println('abc' in 'abc')
+println(1 in '123')
 switch ('abc') { case 'a': println('sub'); break; case 'abc': println('eq'); break }"#);
     assert!(ok);
-    assert_eq!(out, "false\ntrue\neq\n");
+    assert_eq!(out, "true\ntrue\nfalse\neq\n");
 }
 
 /// `intdiv` is defined on the integral types only; a decimal on either side
@@ -8832,5 +8833,117 @@ println(([1] as int[]).getClass().simpleName); println(([1] as Integer[]).getCla
         out,
         "int[]\n\
          Integer[]\n"
+    );
+}
+
+#[test]
+fn a_trailing_declaration_is_the_implicit_return() {
+    // `def f() { def r = 5 }` answers `5`, in a function, a closure, a method and an `if` branch. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+def f() { def r = 5 }
+println f()
+def g() { int y = 3 }
+println g()
+def c = { def x = 7 }; println c()
+def m(b) { if (b) { def q = 'y' } else { 'n' } }
+println m(true); println m(false)
+class K { def v() { def z = 9 } }
+println new K().v()
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "5\n\
+         3\n\
+         7\n\
+         y\n\
+         n\n\
+         9\n"
+    );
+}
+
+#[test]
+fn an_uncovered_switch_expression_raises_without_any_try_in_the_program() {
+    // A consumed colon-form switch expression with no `default` raises even when nothing else arms exceptions. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+def f(x) {
+  def r = switch (x) {
+    case 1:
+      yield 'one'
+  }
+}
+println f(1)
+try { f(2) } catch (IllegalStateException e) { println e.message }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "one\n\
+         the switch expression does not cover the value 2\n"
+    );
+}
+
+#[test]
+fn map_min_inject_and_find_result_spread_by_closure_arity() {
+    // A two-parameter `min`/`max` closure is a comparator, a three-parameter `inject` closure takes `(acc, key, value)`, and `findResult` spreads like `find`. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+def m = [b: 2, a: 1, c: 3]
+println m.min { a, b -> a.value <=> b.value }; println m.max { a, b -> a.value <=> b.value }
+println m.inject(0) { acc, k, v -> acc + v }; println m.inject('') { acc, e -> acc + e.key }
+println m.findResult { k, v -> v > 1 ? k : null }; println m.findResult('none') { k, v -> null }; println m.findResult { e -> e.value == 3 ? e.key : null }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "a=1\n\
+         c=3\n\
+         6\n\
+         bac\n\
+         b\n\
+         none\n\
+         c\n"
+    );
+}
+
+#[test]
+fn a_big_integer_shift_distance_is_its_low_32_bits() {
+    // `BigInteger.shiftLeft` takes the count's `intValue()`. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+println(3G << 4294967297L); println(3G << 9223372036854775807); println(3G >> -1L); println(5G << 12345678901234567890G); println(1G << 100)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "6\n\
+         1\n\
+         6\n\
+         0\n\
+         1267650600228229401496703205376\n"
+    );
+}
+
+#[test]
+fn negated_in_and_instanceof_operators() {
+    // `!in` and `!instanceof` negate the membership and type tests. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+println('b' !in 'abc'); println(4 !in [1, 2]); println(2 !in 1..3); println('s' !instanceof Integer); println(1 !instanceof Integer)
+def x = 5; if (x !in [1, 2]) println 'absent'
+println(!(1 in [1]))
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "false\n\
+         true\n\
+         false\n\
+         true\n\
+         false\n\
+         absent\n\
+         false\n"
     );
 }

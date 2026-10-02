@@ -1751,6 +1751,13 @@ impl Compiler {
                 self.stmt_expr(e)?;
                 self.b.emit(Op::ReturnValue, last.line);
             }
+            // A trailing declaration is a value too: Groovy returns what it
+            // stored, so `def f() { def r = 5 }` answers `5`.
+            StmtKind::Local { name, .. } => {
+                self.stmt(last)?;
+                self.emit_name_load(name, last.line)?;
+                self.b.emit(Op::ReturnValue, last.line);
+            }
             // Groovy's implicit return reaches through a trailing `if` or `try`:
             // the value is the last expression of whichever branch runs. Rewrite
             // that expression into an explicit `return` so the ordinary return
@@ -4856,6 +4863,16 @@ fn tail_return(body: &[Stmt]) -> Option<Vec<Stmt>> {
                 value: Some(e.clone()),
             },
         ),
+        StmtKind::Local { name, .. } => {
+            let mut out = body.to_vec();
+            out.push(Stmt::new(
+                last.line,
+                StmtKind::Return {
+                    value: Some(Expr::Var(name.clone())),
+                },
+            ));
+            return Some(out);
+        }
         StmtKind::If { cond, then, els } => Stmt::new(
             last.line,
             StmtKind::If {
@@ -4896,7 +4913,10 @@ fn tail_return(body: &[Stmt]) -> Option<Vec<Stmt>> {
 /// closure bodies) is a `try` or a `throw`. Gates every exception-related op the
 /// compiler emits, so an exception-free program's bytecode is unchanged.
 fn switch_uses_exceptions(sw: &SwitchBody) -> bool {
-    expr_uses_exceptions(&sw.subject)
+    // A switch *expression* with no `default` raises `IllegalStateException`
+    // when it is consumed and no label matches, so it needs the throw machinery.
+    !sw.cases.iter().any(|c| c.labels.is_empty())
+        || expr_uses_exceptions(&sw.subject)
         || sw
             .cases
             .iter()

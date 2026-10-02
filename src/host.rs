@@ -8665,8 +8665,14 @@ fn dispatch_map_iteration(
                 _ => return None,
             };
             for (k, v) in entries {
-                let entry = heap_push(HeapObj::Entry(k.clone(), v.clone()));
-                match invoke_closure(vm, clo, &[acc, entry]) {
+                // A three-parameter closure takes `(acc, key, value)`, else
+                // `(acc, entry)`.
+                let call = if closure_meta(clo).map(|m| m.params).unwrap_or(2) >= 3 {
+                    vec![acc, Value::str(k.clone()), v.clone()]
+                } else {
+                    vec![acc, heap_push(HeapObj::Entry(k.clone(), v.clone()))]
+                };
+                match invoke_closure(vm, clo, &call) {
                     Ok(r) => acc = r,
                     Err(e) => return Some(Err(e)),
                 }
@@ -8710,6 +8716,27 @@ fn dispatch_map_iteration(
                 sort_values(vm, &handles, &order)
                     .map(|sorted| gmap(sorted.iter().filter_map(as_entry).collect())),
             )
+        }
+        // `map.findResult { k, v -> … }` — the first non-null closure result, or
+        // the default the two-argument form leads with (else `null`).
+        "findResult" => {
+            let clo = clo?;
+            for (k, v) in entries {
+                let r = match invoke_closure(vm, clo, &entry_args(clo, k, v)) {
+                    Ok(r) => r,
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                if !matches!(r, Value::Undef) {
+                    return Some(Ok(r));
+                }
+            }
+            Some(Ok(match args {
+                [dflt, _] => dflt.clone(),
+                _ => Value::Undef,
+            }))
         }
         // `map.count { k, v -> … }` — how many entries the closure accepts.
         "count" => {
@@ -8781,7 +8808,14 @@ fn dispatch_map_iteration(
             } else {
                 std::cmp::Ordering::Less
             };
-            Some(extreme_value(vm, &handles, &OrderBy::Key(clo), want))
+            // A two-parameter closure is a comparator over the entries, as it is
+            // for a list (`m.min { a, b -> a.value <=> b.value }`).
+            Some(extreme_value(
+                vm,
+                &handles,
+                &OrderBy::of(std::slice::from_ref(clo)),
+                want,
+            ))
         }
         _ => None,
     }
@@ -11661,10 +11695,10 @@ fn bigint_shift(vm: &mut VM, left: bool, lhs: &Value, rhs: &Value) -> Option<Val
     // is `56`. Reading only a machine integer here left both raising the
     // "Shift distance must be an integral type" `UnsupportedOperationException`
     // that belongs to a *fractional* distance.
-    let n = match plain_int(rhs) {
-        Some(n) => n,
-        None => decimal::to_i64(&as_bigint(rhs)?)?,
-    };
+    // `BigInteger.shiftLeft` takes an `int`, which Groovy reaches through the
+    // count's `intValue()` — its low 32 bits: `3G << Long.MAX_VALUE` shifts by
+    // `-1` and answers `1`.
+    let n = i64::from(shift_count(rhs)? as i32);
     match decimal::shift(left, &as_exact_dec(lhs)?, n) {
         Some(d) => Some(bigint_value(d)),
         // The distance is fine; the RESULT is not. A `BigInteger` holds at most
@@ -11723,7 +11757,7 @@ fn b_ushr(vm: &mut VM, _argc: u8) -> Value {
 }
 
 /// `GIN`: Groovy's `x in coll`. A collection answers `contains`, a range its
-/// bounds, a map key membership, a string substring containment.
+/// bounds, a map key membership, a string substring containment of a string.
 fn b_in(vm: &mut VM, _argc: u8) -> Value {
     // `x in 1..5` asks the range's `contains`, which is its element list's. A
     // list handle reads through its transient array form.
@@ -11741,11 +11775,12 @@ fn b_in(vm: &mut VM, _argc: u8) -> Value {
         // A list's `isCase` is `contains`, which is `Object.equals`: `1 in [1.0]`
         // and `"1" in [1]` are false.
         Value::Array(a) => checked_equal(vm, || a.iter().any(|v| java_equals(v, &needle))),
-        // `x in str` is `str.isCase(x)`, and `String.isCase` is *equality*, not
-        // containment: `'a' in 'abc'` is `false` in Groovy. (`'a' in 'abc'`
-        // reading as a substring test is the natural guess, and the wrong one —
-        // `switch ('abc') { case 'a': }` does not match either.)
-        Value::Str(s) => **s == groovy_str(&needle),
+        // Groovy 6 answers `x in str` for a `CharSequence` needle with
+        // `contains`: `'b' in 'abc'` is `true`, while `str.isCase(x)` — what a
+        // `switch` label asks — is still equality, so `switch ('b') { case
+        // 'abc': }` does not match. A non-string needle is never in a string
+        // (`1 in '123'` is `false`).
+        Value::Str(s) => matches!(needle, Value::Str(_)) && s.contains(&*groovy_str(&needle)),
         Value::Undef => false,
         other => values_equal(other, &needle),
     })

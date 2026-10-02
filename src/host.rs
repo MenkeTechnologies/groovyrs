@@ -1247,6 +1247,24 @@ fn simple_class_name(v: &Value) -> String {
 /// name a `MissingMethodException` lists in its `argument types: (…)`. Both
 /// verified against Apache Groovy 5.0.8.
 fn simple_name_of(qualified: &str) -> String {
+    // An array class is named by its JVM descriptor (`[I`, `[Ljava.lang.Object;`)
+    // and its simple name is the element's plus one `[]` per dimension.
+    let rank = qualified.chars().take_while(|c| *c == '[').count();
+    if rank > 0 {
+        let elem = &qualified[rank..];
+        let base = match elem {
+            "I" => "int".to_string(),
+            "J" => "long".to_string(),
+            "S" => "short".to_string(),
+            "B" => "byte".to_string(),
+            "C" => "char".to_string(),
+            "F" => "float".to_string(),
+            "D" => "double".to_string(),
+            "Z" => "boolean".to_string(),
+            _ => simple_name_of(elem.trim_start_matches('L').trim_end_matches(';')),
+        };
+        return format!("{base}{}", "[]".repeat(rank));
+    }
     qualified
         .rsplit(['.', '$'])
         .next()
@@ -4272,6 +4290,32 @@ fn dispatch_buffer_method(recv: &Value, text: &str, method: &str, args: &[Value]
 
 /// `GNEW`: construct `new C(args)`. Stack: `argc` constructor args (deepest),
 /// class name on top.
+/// `new T[d0][d1]…`: an array of `rank` dimensions whose leading `dims.len()`
+/// have lengths. The innermost allocated level holds `elem`'s zero; a level
+/// past the given lengths is `null`. An outer level is an array of arrays,
+/// which groovyrs types as an `Object[]` (see BUGS.md).
+fn new_array(vm: &mut VM, elem: ArrayElem, rank: usize, dims: &[Value]) -> Value {
+    let Some(first) = dims.first() else {
+        return Value::Undef;
+    };
+    let len = first.to_int();
+    if len < 0 {
+        raise(vm, "NegativeArraySizeException", &len.to_string());
+        return Value::Undef;
+    }
+    if rank <= 1 {
+        return garray(vec![elem.zero(); len as usize], elem);
+    }
+    let mut rows = Vec::with_capacity(len as usize);
+    for _ in 0..len {
+        rows.push(new_array(vm, elem, rank - 1, &dims[1..]));
+        if pending_exc() {
+            return Value::Undef;
+        }
+    }
+    garray(rows, ArrayElem::Object)
+}
+
 fn b_new(vm: &mut VM, argc: u8) -> Value {
     let name = vm
         .stack
@@ -4288,12 +4332,10 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
     // element type (`0`, `0.0`, `false`, `null`). The parser routes it here as a
     // `new` of the array type with the length as its only argument.
     if let Some(elem) = name.strip_suffix("[]").and_then(ArrayElem::from_name) {
-        let len = args.first().map(|v| v.to_int()).unwrap_or(0);
-        if len < 0 {
-            raise(vm, "NegativeArraySizeException", &len.to_string());
-            return Value::Undef;
-        }
-        return garray(vec![elem.zero(); len as usize], elem);
+        // One length per allocated dimension; `new int[2][3]` is two rows of
+        // three zeros, and `new int[2][]` two `null` rows.
+        let rank = name.matches("[]").count();
+        return new_array(vm, elem, rank, &args);
     }
     // A script-declared class shadows a JDK one of the same name, so the
     // registry is consulted first. A *qualified* name (`new
@@ -5779,6 +5821,16 @@ fn dispatch_instance_method(
     method: &str,
     args: &[Value],
 ) -> Option<Result<Value, String>> {
+    // `C.m(args)` on a script class: its `static` methods are callable on the
+    // class itself. groovyrs keeps one method table per class, so the class
+    // handle stands in for `this` (a static body has no instance to read).
+    if let Some(cid) = as_class_ref(recv).and_then(|n| find_class(&n)) {
+        let idx = lookup_method_argc(cid, method, args.len())?;
+        let mut pushes = Vec::with_capacity(args.len() + 1);
+        pushes.push(recv.clone());
+        pushes.extend_from_slice(args);
+        return Some(invoke_sub(vm, idx, &pushes));
+    }
     let inst = as_instance(recv)?;
     // A handle whose class is not in the registry is not an instance call.
     class_meta(inst.class)?;
@@ -6942,6 +6994,20 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             // was the one receiver the universal `asBoolean` arm never saw,
             // because a null receiver is intercepted before the per-type table.
             "asBoolean" if args.is_empty() => Value::bool(false),
+            // `Object.is` answers on `NullObject` too: `null.is(x)` is `x == null`.
+            "is" if args.len() == 1 => Value::bool(matches!(args[0], Value::Undef)),
+            // The DGM iteration methods declared on `Object` walk
+            // `InvokerHelper.asIterator(null)`, an empty iterator, so they answer
+            // as over an empty collection: `null.collect { }` is `[]`,
+            // `null.any { }` is `false`, `null.inject(0) { … }` is `0`. `each` and
+            // `eachWithIndex` answer their receiver, `null`. The methods declared
+            // only on `Iterable`/`Collection` (`sum`, `size`, `join`, …) still
+            // raise below.
+            "each" | "eachWithIndex" => Value::Undef,
+            "collect" | "findAll" | "any" | "every" | "grep" | "find" | "findResult"
+            | "findIndexOf" | "findLastIndexOf" | "inject" | "iterator" | "split" => {
+                dispatch_call(vm, glist(Vec::new()), method, args)
+            }
             _ => {
                 raise(
                     vm,
@@ -8413,10 +8479,19 @@ fn dispatch_map_iteration(
                 _ => entries.iter().collect(),
             };
             for (i, (k, v)) in walked.into_iter().enumerate() {
-                let mut call = entry_args(clo, k, v);
-                if method == "eachWithIndex" {
-                    call.push(Value::int(i as i64));
-                }
+                // `eachWithIndex` spreads `(key, value, index)` only for a
+                // three-parameter closure; a two-parameter one gets
+                // `(entry, index)` (`callClosureForMapEntryAndCounter`).
+                let call = if method != "eachWithIndex" {
+                    entry_args(clo, k, v)
+                } else if closure_meta(clo).map(|m| m.params).unwrap_or(1) >= 3 {
+                    vec![Value::str(k.clone()), v.clone(), Value::int(i as i64)]
+                } else {
+                    vec![
+                        heap_push(HeapObj::Entry(k.clone(), v.clone())),
+                        Value::int(i as i64),
+                    ]
+                };
                 if let Err(e) = invoke_closure(vm, clo, &call) {
                     return Some(Err(e));
                 }
@@ -10139,6 +10214,74 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `9.mod(0.5d)` raises `modulus not positive` — `0.5` truncates to zero.
         // The answer comes back a `Double`. Measured against Apache Groovy
         // 5.1.1 / JVM 26.0.2.1.
+        // The arithmetic operators spelled as the methods they desugar to:
+        // `7.plus(2)` is `7 + 2`, `7.div(2)` is the `BigDecimal` `3.5`,
+        // `7.remainder(2)` is `7 % 2`. Two `Integer`s wrap at 32 bits exactly as
+        // the operator does unless the compiler marked either side a `Long`, so
+        // `Integer.MAX_VALUE.plus(1)` is `Integer.MIN_VALUE`. Everything else
+        // takes the operator's own path (the numeric hook, or `/`'s builtin).
+        (_, "plus" | "minus" | "multiply" | "div" | "remainder")
+            if args.len() == 1 && is_number(recv) =>
+        {
+            let arg = &args[0];
+            if method == "div" {
+                return divide_values(vm, recv.clone(), arg.clone());
+            }
+            let op = match method {
+                "plus" => NumOp::Add,
+                "minus" => NumOp::Sub,
+                "multiply" => NumOp::Mul,
+                _ => NumOp::Mod,
+            };
+            if let (Value::Int(x), Value::Int(y)) = (recv, arg) {
+                if matches!(op, NumOp::Mod) {
+                    if *y == 0 {
+                        raise(vm, "ArithmeticException", "/ by zero");
+                        return Value::Undef;
+                    }
+                    return Value::int(x.wrapping_rem(*y));
+                }
+                let wide = call_widths() & 0b11 != 0
+                    || i32::try_from(*x).is_err()
+                    || i32::try_from(*y).is_err();
+                let raw = match op {
+                    NumOp::Add => x.wrapping_add(*y),
+                    NumOp::Sub => x.wrapping_sub(*y),
+                    _ => x.wrapping_mul(*y),
+                };
+                return wrap_to_width(raw, wide);
+            }
+            match numeric_hook(op, recv, arg) {
+                Ok(v) => v,
+                Err(e) => {
+                    fault(vm, e);
+                    Value::Undef
+                }
+            }
+        }
+        // `unaryMinus()`/`unaryPlus()` are the GDK names of unary `-`/`+` on any
+        // `Number` (`negative()` is the operator's dispatch name, and is not a
+        // method a number answers). `next()`/`previous()` on a non-integral
+        // number step by one: `2.5d.next()` is `3.5`.
+        (_, "unaryMinus") if args.is_empty() && is_number(recv) => match recv {
+            Value::Int(x) => wrap_to_width(
+                x.wrapping_neg(),
+                call_widths() & 1 != 0 || i32::try_from(*x).is_err(),
+            ),
+            Value::Float(f) => Value::float(-f),
+            _ => numeric_hook(NumOp::Neg, recv, &Value::Undef).unwrap_or(Value::Undef),
+        },
+        (_, "unaryPlus") if args.is_empty() && is_number(recv) => recv.clone(),
+        (_, "next" | "previous")
+            if args.is_empty() && is_number(recv) && !matches!(recv, Value::Int(_)) =>
+        {
+            let op = if method == "next" {
+                NumOp::Add
+            } else {
+                NumOp::Sub
+            };
+            numeric_hook(op, recv, &Value::int(1)).unwrap_or(Value::Undef)
+        }
         (_, "mod")
             if args.len() == 1
                 // A `BigDecimal`/`BigInteger` receiver takes this path too — the
@@ -14955,6 +15098,12 @@ fn print_args(vm: &mut VM, argc: u8, newline: bool) -> Value {
 fn b_div(vm: &mut VM, _argc: u8) -> Value {
     let b = vm.stack.pop().unwrap_or(Value::Undef);
     let a = vm.stack.pop().unwrap_or(Value::Undef);
+    divide_values(vm, a, b)
+}
+
+/// `a / b` under Groovy's rules — the body of [`b_div`], shared with the
+/// spelled-out `n.div(m)` method call.
+fn divide_values(vm: &mut VM, a: Value, b: Value) -> Value {
     // A `java.lang.Float` operand widens to a `double` before dividing, exactly
     // as it does for every operator [`numeric_hook`] answers — `/` just reaches
     // this builtin instead of the hook. Without the widening the handle fell
@@ -15309,6 +15458,14 @@ fn utf16_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 /// user-class operand dispatches its `compareTo`, everything else falls to
 /// [`natural_order`].
 fn compare_values(vm: &mut VM, a: &Value, b: &Value) -> Result<std::cmp::Ordering, String> {
+    // `NumberAwareComparator` settles `null` before anything else, ordering it
+    // first: `[null, 2, 1].sort()` is `[null, 1, 2]`.
+    match (matches!(a, Value::Undef), matches!(b, Value::Undef)) {
+        (true, true) => return Ok(std::cmp::Ordering::Equal),
+        (true, false) => return Ok(std::cmp::Ordering::Less),
+        (false, true) => return Ok(std::cmp::Ordering::Greater),
+        _ => {}
+    }
     if let Some(res) = call_user_method(vm, a, "compareTo", std::slice::from_ref(b)) {
         return res.map(|v| v.to_int().cmp(&0));
     }

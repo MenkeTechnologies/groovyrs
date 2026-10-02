@@ -8600,3 +8600,237 @@ fn a_range_interpolated_into_a_gstring_renders_as_a_range() {
     assert!(ok);
     assert_eq!(out, "x1..3y 1..<3 a..c [1..2]\n");
 }
+
+#[test]
+fn a_null_receiver_iterates_as_an_empty_collection() {
+    // `NullObject` answers the DGM iteration methods declared on `Object` over an empty iterator; `sum` is `Iterable`-only and still raises. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+println null.collect { it }; println null.findAll { it }; println null.any { true }; println null.every { false }
+println null.inject(0) { a, b -> a + b }; println null.find { true }; println null.each { }; println null.is(null)
+try { null.sum() } catch (NullPointerException e) { println 'npe' }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[]\n\
+         []\n\
+         false\n\
+         true\n\
+         0\n\
+         null\n\
+         null\n\
+         true\n\
+         npe\n"
+    );
+}
+
+#[test]
+fn sort_orders_null_before_every_value() {
+    // `NumberAwareComparator` settles `null` first, with or without a key closure. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+println([null, 2, 1].sort()); println([3, null, 1].toSorted()); println(['b', null, 'a'].sort { it })
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[null, 1, 2]\n\
+         [null, 1, 3]\n\
+         [null, a, b]\n"
+    );
+}
+
+#[test]
+fn map_each_with_index_spreads_by_closure_arity() {
+    // Two parameters get `(entry, index)`; three get `(key, value, index)`. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+[x: 1, y: 2].eachWithIndex { e, i -> println "$i:${e.key}=${e.value}" }
+[x: 1].eachWithIndex { k, v, i -> println "$k $v $i" }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "0:x=1\n\
+         1:y=2\n\
+         x 1 0\n"
+    );
+}
+
+#[test]
+fn numbers_answer_their_operator_methods() {
+    // `plus`/`minus`/`multiply`/`div`/`remainder` are the operators spelled as calls, wrapping at 32 bits like the operator. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+println 7.plus(2); println 7.minus(2.5); println 7.multiply(2); println 7.div(2); println 7.remainder(2)
+println Integer.MAX_VALUE.plus(1); println 2.5.plus(1); println 7.plus('a'); println([1, 2, 3]*.multiply(2))
+println 7.unaryMinus(); println 2.5d.unaryMinus(); println 2.5d.next(); println 3.5.previous()
+try { 7.remainder(0) } catch (ArithmeticException e) { println e.message }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "9\n\
+         4.5\n\
+         14\n\
+         3.5\n\
+         1\n\
+         -2147483648\n\
+         3.5\n\
+         7a\n\
+         [2, 4, 6]\n\
+         -7\n\
+         -2.5\n\
+         3.5\n\
+         2.5\n\
+         / by zero\n"
+    );
+}
+
+#[test]
+fn array_typed_declarations_and_multi_dimensional_new() {
+    // `int[] a = [..]` converts like `as`; `new int[2][3]` allocates every dimension. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+int[] a = [1, 2]; println a; println a.class.name
+String[] b = ['x', 'y']; println b.join(',')
+def m = new int[2][3]; m[1][2] = 5; println m
+println new String[2][]
+def f(int[] xs) { xs.sum() }
+println f([3, 4] as int[])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[1, 2]\n\
+         [I\n\
+         x,y\n\
+         [[0, 0, 0], [0, 0, 5]]\n\
+         [null, null]\n\
+         7\n"
+    );
+}
+
+#[test]
+fn static_methods_are_callable_on_the_class() {
+    // A modifier stands in for `def`, and a class name in expression position is the receiver of its static methods. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+class C {
+  static twice(a) { a * 2 }
+  static plusOne(a) { twice(a) + 1 }
+  static int sq(int x) { x * x }
+}
+println C.twice(3); println C.plusOne(3); println C.sq(5); println C; println C.simpleName
+final x = 1
+final int y = 2
+static int cube(int n) { n * n * n }
+println x + y + cube(2)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "6\n\
+         7\n\
+         25\n\
+         class C\n\
+         C\n\
+         11\n"
+    );
+}
+
+#[test]
+fn default_parameters_declare_shorter_overloads() {
+    // Defaults drop from the right, may read earlier parameters, and work on methods and constructors. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+def g(a, b = 10) { a + b }
+println g(1); println g(1, 2)
+def h(a = 1, b) { "$a$b" }
+println h(5); println h(6, 7)
+def k(a, b = a * 2, c = b + 1) { [a, b, c] }
+println k(1); println k(1, 5); println k(1, 5, 9)
+class P {
+  def x
+  P(x = 3) { this.x = x }
+  def m(a, b = 'd') { "$x$a$b" }
+}
+println new P().x; println new P(8).x; println new P().m('q'); println new P(1).m('q', 'r')
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "11\n\
+         3\n\
+         15\n\
+         67\n\
+         [1, 2, 3]\n\
+         [1, 5, 6]\n\
+         [1, 5, 9]\n\
+         3\n\
+         8\n\
+         3qd\n\
+         1qr\n"
+    );
+}
+
+#[test]
+fn a_variadic_parameter_collects_trailing_arguments() {
+    // `... xs`, `Object... xs` and `String... xs` collect the trailing arguments into an array. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+def v(... args) { args.size() }
+println v(1, 2, 3); println v()
+def w(String p, Object... rest) { p + rest.toList() + rest.getClass().simpleName }
+println w('a', 1, 2); println w('b')
+def z(String... s) { s.length }
+println z('x', 'y')
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "3\n\
+         0\n\
+         a[1, 2]Object[]\n\
+         b[]Object[]\n\
+         2\n"
+    );
+}
+
+#[test]
+fn generic_and_nested_types_declare_locals_and_parameters() {
+    // Generic arguments are erased; `Map.Entry` is a nested type name. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+Map<String, Integer> m = [a: 1]; List<String> l = ['x']; println m; println l
+List<List<Integer>> n = [[1]]; println n
+def f(List<String> xs, Map<String, List<Integer>> m2) { xs.size() + m2.size() }
+println f(['a'], [:])
+for (Map.Entry<String, Integer> e in [a: 1]) println e.key
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[a:1]\n\
+         [x]\n\
+         [[1]]\n\
+         1\n\
+         a\n"
+    );
+}
+
+#[test]
+fn an_array_class_simple_name_reads_as_its_element() {
+    // `[I` reads `int[]` and `[Ljava.lang.Integer;` reads `Integer[]`. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+println(([1] as int[]).getClass().simpleName); println(([1] as Integer[]).getClass().simpleName)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "int[]\n\
+         Integer[]\n"
+    );
+}

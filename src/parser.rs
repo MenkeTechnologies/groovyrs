@@ -46,6 +46,8 @@ pub fn parse(src: &str) -> Result<Program, String> {
         tmp: 0,
         recording: None,
         pending: Vec::new(),
+        param_defaults: Vec::new(),
+        param_varargs: None,
         depth: 0,
         switch_exprs: 0,
     };
@@ -69,6 +71,11 @@ struct Parser {
     /// a multi-declarator `def a = 1, b = 2` or a destructuring `def (a, b) = l`.
     /// Drained by every statement-list site through [`Parser::statements`].
     pending: Vec<Stmt>,
+    /// The default-value expressions of the last parameter list parsed, one
+    /// slot per parameter; see [`Parser::default_overloads`].
+    param_defaults: Vec<Option<Expr>>,
+    /// The array type of the last parameter list's variadic last parameter.
+    param_varargs: Option<String>,
     /// How deep the AST being built is at this point, bounded by
     /// [`MAX_NESTING`]. Maintained at the three places source nesting becomes
     /// tree depth: [`Parser::unary`] (every parenthesised, bracketed, braced or
@@ -397,9 +404,28 @@ impl Parser {
             return Ok(StmtKind::Expr(e));
         }
 
-        // `def name(params) { .. }` (a function) or `def name [= expr]` (a local).
-        if self.is(&Tok::Def) {
+        // Modifiers in front of a script-level declaration (`final x = 1`,
+        // `static int sq(int x) { … }`) have no runtime effect here; with no type
+        // behind them they stand in for `def`, as Groovy reads them.
+        let mut modified = false;
+        while matches!(
+            self.peek(),
+            Tok::Ident(m) if matches!(
+                m.as_str(),
+                "final" | "static" | "public" | "private" | "protected" | "synchronized"
+            )
+        ) && matches!(self.peek_at(1), Tok::Ident(_) | Tok::Def)
+        {
             self.advance();
+            modified = true;
+        }
+        // `def name(params) { .. }` (a function) or `def name [= expr]` (a local).
+        if self.is(&Tok::Def)
+            || (modified && !self.looks_like_decl() && matches!(self.peek(), Tok::Ident(_)))
+        {
+            if self.is(&Tok::Def) {
+                self.advance();
+            }
             // `def (a, b) = expr` — multiple assignment. The right side is
             // evaluated once into a temporary, then each name takes its element.
             if self.is(&Tok::LParen) {
@@ -436,12 +462,21 @@ impl Parser {
         // Typed declaration `Type name [= expr]` or typed function
         // `Type name(params) { .. }` (two identifiers in a row).
         if self.looks_like_decl() {
-            let ty = self.ident()?;
+            let ty = self.decl_type()?;
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
                 return self.function_def(name);
             }
-            let init = self.opt_initializer()?;
+            let mut init = self.opt_initializer()?;
+            // An array-typed local converts its initializer the way `as` does:
+            // `int[] a = [1, 2]` holds an `int[]`, not the `ArrayList`.
+            if ty.ends_with("[]") {
+                init = init.map(|value| Expr::Cast {
+                    value: Box::new(value),
+                    ty: ty.clone(),
+                    java: false,
+                });
+            }
             return Ok(StmtKind::Local { ty, name, init });
         }
 
@@ -627,11 +662,32 @@ impl Parser {
     /// Parse a function definition `name(params) { body }` with the name already
     /// consumed and the `(` as the current token.
     fn function_def(&mut self, name: String) -> Result<StmtKind, String> {
+        let line = self.line();
         let params = self.param_list()?;
+        let overloads = self.default_overloads(&params);
+        let varargs = self.param_varargs.take();
         self.skip_newlines();
         self.eat(&Tok::LBrace)?;
         let body = self.block()?;
-        Ok(StmtKind::Function { name, params, body })
+        // Queued only now: the body's own statement list drains `pending`.
+        for (kept, prelude) in overloads {
+            let body = forward_body(&name, &params, prelude, line);
+            self.pending.push(Stmt::new(
+                line,
+                StmtKind::Function {
+                    name: name.clone(),
+                    params: kept,
+                    body,
+                    varargs: None,
+                },
+            ));
+        }
+        Ok(StmtKind::Function {
+            name,
+            params,
+            body,
+            varargs,
+        })
     }
 
     /// Does a `class`/`interface` declaration start here, possibly behind
@@ -908,6 +964,7 @@ impl Parser {
         }
         // Skip modifier keywords. `default` is a real token (the `switch` label),
         // and in front of an interface method it is a modifier like the rest.
+        let mut modified = false;
         while self.is(&Tok::Default)
             || matches!(
                 self.peek(),
@@ -919,14 +976,35 @@ impl Parser {
             )
         {
             self.advance();
+            modified = true;
         }
         // `def name` — a field or method.
-        if self.is(&Tok::Def) {
-            self.advance();
+        if self.is(&Tok::Def)
+            // A modifier stands in for `def`: `static m(a) { … }` and `static x = 1`
+            // declare an untyped method and field, as Groovy reads them.
+            || (modified
+                && matches!(self.peek(), Tok::Ident(n) if n != class_name)
+                && matches!(
+                    self.peek_at(1),
+                    Tok::LParen | Tok::Assign | Tok::Nl | Tok::Semi | Tok::RBrace
+                ))
+        {
+            if self.is(&Tok::Def) {
+                self.advance();
+            }
             let ty = "def".to_string();
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
                 let params = self.param_list()?;
+                let line = self.line();
+                for (kept, supply) in self.default_overloads(&params) {
+                    let body = forward_body(&name, &params, supply, line);
+                    methods.push(Method {
+                        name: name.clone(),
+                        params: kept,
+                        body,
+                    });
+                }
                 let Some(body) = self.opt_member_body(in_interface)? else {
                     abstract_methods.push(name);
                     return Ok(());
@@ -945,17 +1023,36 @@ impl Parser {
         {
             self.advance(); // class name
             let params = self.param_list()?;
+            let overloads = self.default_overloads(&params);
             let body = self.member_body()?;
+            // A shorter constructor runs the defaults' prelude, then the same
+            // body (groovyrs has no `this(...)` delegation to forward through).
+            for (kept, mut pre) in overloads {
+                pre.extend(body.iter().cloned());
+                ctors.push(Ctor {
+                    params: kept,
+                    body: pre,
+                });
+            }
             ctors.push(Ctor { params, body });
             return Ok(());
         }
         // A typed member `Type name ...` — a field or method.
         if self.looks_like_decl() {
             // The declared type: a *primitive* field's zero depends on it.
-            let ty = self.ident()?;
+            let ty = self.decl_type()?;
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
                 let params = self.param_list()?;
+                let line = self.line();
+                for (kept, supply) in self.default_overloads(&params) {
+                    let body = forward_body(&name, &params, supply, line);
+                    methods.push(Method {
+                        name: name.clone(),
+                        params: kept,
+                        body,
+                    });
+                }
                 let Some(body) = self.opt_member_body(in_interface)? else {
                     abstract_methods.push(name);
                     return Ok(());
@@ -1001,16 +1098,38 @@ impl Parser {
         self.eat(&Tok::LParen)?;
         self.skip_newlines();
         let mut out = Vec::new();
+        let mut defaults: Vec<Option<Expr>> = Vec::new();
+        let mut varargs: Option<String> = None;
         if !self.is(&Tok::RParen) {
             loop {
+                varargs = None;
                 if self.is(&Tok::Def) {
                     self.advance();
+                } else if self.looks_like_decl() {
+                    // A type in front of the parameter name; an array type on the
+                    // last parameter makes it variadic, as Groovy reads it.
+                    let ty = self.decl_type()?;
+                    varargs = ty.ends_with("[]").then_some(ty);
                 } else if matches!(self.peek(), Tok::Ident(_))
-                    && matches!(self.peek_at(1), Tok::Ident(_))
+                    && matches!(self.peek_at(1), Tok::Ellipsis)
                 {
-                    self.advance(); // a type in front of the parameter name
+                    let ty = self.ident()?;
+                    varargs = Some(format!("{ty}[]"));
+                }
+                // `Type... name` / `... name` — the variadic spelling.
+                if self.is(&Tok::Ellipsis) {
+                    self.advance();
+                    varargs.get_or_insert_with(|| "Object[]".to_string());
                 }
                 out.push(self.ident()?);
+                // `b = 10` — a default value, kept for [`Self::default_overloads`].
+                if self.is(&Tok::Assign) {
+                    self.advance();
+                    self.skip_newlines();
+                    let d = self.expression()?;
+                    defaults.resize(out.len() - 1, None);
+                    defaults.push(Some(d));
+                }
                 self.skip_newlines();
                 if self.is(&Tok::Comma) {
                     self.advance();
@@ -1021,7 +1140,73 @@ impl Parser {
             }
         }
         self.eat(&Tok::RParen)?;
+        defaults.resize(out.len(), None);
+        self.param_defaults = defaults;
+        self.param_varargs = varargs;
         Ok(out)
+    }
+
+    /// The shorter signatures a parameter list with defaults declares, as Groovy
+    /// generates them: defaulted parameters drop from the RIGHT, one more per
+    /// overload, so `f(a, b = 1, c = 2)` adds `f(a, b)` and `f(a)`. Each entry
+    /// is the kept parameter names and a prelude declaring each dropped one as a
+    /// local holding its default, in parameter order — so a default can read an
+    /// earlier parameter, dropped or not (`f(a, b = a * 2, c = b + 1)`).
+    /// Reads (and clears) what the last [`Self::param_list`] recorded.
+    fn default_overloads(&mut self, params: &[String]) -> Vec<(Vec<String>, Vec<Stmt>)> {
+        let line = self.line();
+        let defaults = std::mem::take(&mut self.param_defaults);
+        let defaulted: Vec<usize> = (0..params.len())
+            .filter(|&i| defaults.get(i).is_some_and(Option::is_some))
+            .collect();
+        let mut out = Vec::new();
+        for drop in 1..=defaulted.len() {
+            let dropped = &defaulted[defaulted.len() - drop..];
+            let kept: Vec<String> = (0..params.len())
+                .filter(|i| !dropped.contains(i))
+                .map(|i| params[i].clone())
+                .collect();
+            let prelude: Vec<Stmt> = dropped
+                .iter()
+                .map(|&i| {
+                    Stmt::new(
+                        line,
+                        StmtKind::Local {
+                            ty: "def".into(),
+                            name: params[i].clone(),
+                            init: defaults[i].clone(),
+                        },
+                    )
+                })
+                .collect();
+            out.push((kept, prelude));
+        }
+        out
+    }
+
+    /// The type of a declaration [`Self::looks_like_decl`] accepted: its name
+    /// plus one `[]` per array dimension (`int[]`, `String[][]`).
+    fn decl_type(&mut self) -> Result<String, String> {
+        let mut ty = self.ident()?;
+        while self.is(&Tok::Dot) && matches!(self.peek_at(1), Tok::Ident(_)) {
+            self.advance();
+            ty.push('.');
+            ty.push_str(&self.ident()?);
+        }
+        // Generic arguments (`Map<String, Integer>`) are erased: read past.
+        if self.is(&Tok::Lt) {
+            if let Some(end) = self.generic_args_end(0) {
+                for _ in 0..end {
+                    self.advance();
+                }
+            }
+        }
+        while self.is(&Tok::LBracket) && matches!(self.peek_at(1), Tok::RBracket) {
+            self.advance();
+            self.advance();
+            ty.push_str("[]");
+        }
+        Ok(ty)
     }
 
     /// Heuristic: two identifiers in a row (`Type name`) — a typed declaration.
@@ -1031,6 +1216,22 @@ impl Parser {
             return false;
         }
         let mut j = self.pos + 1;
+        // A nested type is a chain of capitalised names: `Map.Entry e`.
+        let capital =
+            |k: Option<&Tok>| matches!(k, Some(Tok::Ident(t)) if t.starts_with(char::is_uppercase));
+        let kind = |i: usize| self.toks.get(i).map(|t| &t.kind);
+        if capital(kind(self.pos)) {
+            while matches!(kind(j), Some(Tok::Dot)) && capital(kind(j + 1)) {
+                j += 2;
+            }
+        }
+        // A capitalised type may carry generic arguments: `List<String> xs`.
+        if capital(kind(self.pos)) && matches!(kind(j), Some(Tok::Lt)) {
+            match self.generic_args_end(j - self.pos) {
+                Some(end) => j = self.pos + end,
+                None => return false,
+            }
+        }
         while matches!(self.toks.get(j).map(|t| &t.kind), Some(Tok::LBracket))
             && matches!(self.toks.get(j + 1).map(|t| &t.kind), Some(Tok::RBracket))
         {
@@ -1584,7 +1785,7 @@ impl Parser {
         if self.is(&Tok::Def) {
             self.advance();
         } else if self.looks_like_decl() {
-            self.ident()?; // type
+            self.decl_type()?; // type
         }
         let var = self.ident()?;
         self.eat(&Tok::In)?;
@@ -2460,13 +2661,26 @@ impl Parser {
                 // so it cannot ride in the type name; it becomes the single
                 // constructor argument of the array type, which is what
                 // `host::b_new` builds from.
+                // Each further `[n]` is another dimension (`new int[2][3]`), one
+                // length argument per dimension.
                 if self.is(&Tok::LBracket) && !class.ends_with("[]") {
-                    self.advance();
-                    let len = self.expression()?;
-                    self.eat(&Tok::RBracket)?;
+                    let mut class = class;
+                    let mut dims = Vec::new();
+                    while self.is(&Tok::LBracket) && !matches!(self.peek_at(1), Tok::RBracket) {
+                        self.advance();
+                        dims.push(self.expression()?);
+                        self.eat(&Tok::RBracket)?;
+                        class.push_str("[]");
+                    }
+                    // `new int[2][]` leaves the inner dimensions unallocated.
+                    while self.is(&Tok::LBracket) && matches!(self.peek_at(1), Tok::RBracket) {
+                        self.advance();
+                        self.advance();
+                        class.push_str("[]");
+                    }
                     return Ok(Expr::New {
-                        class: format!("{class}[]"),
-                        args: vec![len],
+                        class,
+                        args: dims,
                         line,
                     });
                 }
@@ -3325,6 +3539,24 @@ fn qualified_type(name: &str) -> String {
 /// Parse the source of one `${ … }` / `$name` placeholder into an expression.
 /// It runs the same lexer and expression grammar as the enclosing script, so an
 /// interpolation is not a second, weaker language.
+/// The body of a default-argument overload: its `prelude` (the dropped
+/// parameters' defaults as locals), then a call of the full signature with every
+/// parameter, whose result it returns.
+fn forward_body(name: &str, params: &[String], mut prelude: Vec<Stmt>, line: u32) -> Vec<Stmt> {
+    let args = params.iter().map(|p| Expr::Var(p.clone())).collect();
+    prelude.push(Stmt::new(
+        line,
+        StmtKind::Return {
+            value: Some(Expr::Call {
+                name: name.to_string(),
+                args,
+                line,
+            }),
+        },
+    ));
+    prelude
+}
+
 fn parse_interpolation(src: &str) -> Result<Expr, String> {
     let tokens = crate::lexer::lex(src)?;
     let mut p = Parser {
@@ -3336,6 +3568,8 @@ fn parse_interpolation(src: &str) -> Result<Expr, String> {
         // placeholder rather than the script — see BUGS.md.
         recording: None,
         pending: Vec::new(),
+        param_defaults: Vec::new(),
+        param_varargs: None,
         depth: 0,
         switch_exprs: 0,
     };

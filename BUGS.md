@@ -1437,12 +1437,23 @@ infinite loop on both sides.
   `@EqualsAndHashCode`'s and `@TupleConstructor`'s. An annotation outside the
   family (`@Immutable`, `@Sortable`, `@CompileStatic`, …) is consumed and has no
   effect, which is what the member-level annotation skip already did.
-- **A `static` method is not callable on the class.** `class Z { static String s() { 'x' } }; Z.s()`
-  raises: a class name in expression position is a `java.lang.Class` and the
-  static half of a class's method table is not modeled, so nothing answers.
-  Calling it on an *instance* works, because that is ordinary dispatch. This is
-  not trait-specific — a `static` method in a `trait` is unreachable for the same
-  reason.
+- **A `static` method has no static state.** `C.m(args)` calls a script
+  class's `static` method with the class handle standing in for `this`, so a
+  static body can call its sibling statics and compute from its arguments, but
+  `static` *fields* are not modeled — every field is per-instance — and a static
+  body that reads one finds nothing. Groovy also keeps statics and instance
+  methods apart; groovyrs has one method table, so an instance method is
+  callable on the class too.
+- **A variadic parameter is resolved only for script functions, and only by
+  shape.** `def f(Object... xs)` collects the trailing arguments of a call to
+  `f`. A call passing exactly the declared arity hands its last argument through
+  when it is statically an array (`x as int[]`) or `null`, and wraps it
+  otherwise, so a *variable* holding an array is wrapped where Groovy passes it
+  through. A class *method*'s variadic parameter is not collected.
+- **A multi-dimensional array's outer levels are `Object[]`.** `new int[2][3]`
+  allocates and prints like Groovy's, and its rows are `int[]`, but the outer
+  array reports `[Ljava.lang.Object;` / `Object[]` where Groovy reports `[[I` /
+  `int[][]`.
 - **A user instance renders as its class name, not `Class@hash`.** `new W()`
   prints `W` where Groovy prints `W@60fa3495`, and `toString()` agrees with it.
   The suffix is the JVM identity hash, which is not reproducible here — the same

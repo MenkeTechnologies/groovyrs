@@ -134,6 +134,10 @@ pub enum StmtKind {
         name: String,
         params: Vec<String>,
         body: Vec<Stmt>,
+        /// The array type the last parameter collects a call's trailing
+        /// arguments into when it is variadic (`Object... rest`, `... rest`,
+        /// `String[] rest`), else `None`.
+        varargs: Option<String>,
     },
     /// A class declaration: `class C { fields; C(..){..}; def m(){..} }`. Fields,
     /// constructors, and methods are hoisted like functions and lowered to

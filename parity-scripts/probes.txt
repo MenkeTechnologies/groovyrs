@@ -2830,3 +2830,19 @@ def m = [:]; println m.putAt('k', 7)
 def v = switch ('z') { case 'a' -> 1 }; println v
 %%
 try { println(null - 1) } catch (e) { println e.getClass().getName() }
+%%
+println null.collect { it }; println null.findAll { it }; println null.any { true }; println null.every { false }; println null.inject(0) { a, b -> a + b }; println null.each { }
+%%
+println([null, 2, 1].sort()); println([3, null, 1].toSorted()); println(['b', null, 'a'].sort { it })
+%%
+[x: 1, y: 2].eachWithIndex { e, i -> println "$i:$e" }; [x: 1].eachWithIndex { k, v, i -> println "$k $v $i" }
+%%
+println 7.plus(2); println 7.minus(2.5); println 7.multiply(2); println 7.div(2); println 7.remainder(2); println Integer.MAX_VALUE.plus(1); println([1, 2, 3]*.multiply(2))
+%%
+println 7.unaryMinus(); println 2.5d.unaryMinus(); println 2.5d.next(); println 3.5.previous()
+%%
+int[] a = [1, 2]; println a.class.name; String[] b = ['x']; println b.class.simpleName; def m = new int[2][3]; m[1][2] = 5; println m
+%%
+Map<String, Integer> m = [a: 1]; List<List<Integer>> n = [[1]]; println m; println n; final x = 3; final int y = 4; println x + y
+%%
+println(([1] as int[]).getClass().simpleName); println(([1] as Integer[]).getClass().simpleName)

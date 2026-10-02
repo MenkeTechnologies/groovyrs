@@ -162,6 +162,15 @@ Implemented and checked against Apache Groovy:
   locals are frame slots, so recursion and mutual recursion are sound; `return
   <expr>` carries a value out, and a `return`-less body returns its last value
   expression (else `null`).
+  A defaulted parameter (`def g(a, b = 10)`, also on methods and constructors)
+  declares the shorter overloads Groovy generates — defaults drop from the
+  right and may read earlier parameters. A variadic last parameter (`... xs`,
+  `Object... xs`, `String[] xs`) collects a call's trailing arguments into an
+  array. A modifier stands in for `def` (`static m(a) { … }`, `final x = 1`),
+  and a class's `static` methods are callable on the class (`C.m(1)`).
+  Declared types may be generic (`Map<String, List<Integer>> m`, erased),
+  nested (`Map.Entry e`) or arrays (`int[] a = [1, 2]` holds an `int[]`;
+  `new int[2][3]` allocates every dimension).
 - **Expressions** — integer (decimal, `0x` hex, `0b` binary and leading-zero
   octal, with `_` group separators and the `L`/`G` suffixes) / decimal / string
   (single-, double- and triple-quoted) / boolean / `null` literals; `+ - * / % **`,
@@ -552,9 +561,8 @@ Implemented and checked against Apache Groovy:
   `catch (groovy.lang.MissingMethodException e)`, a multi-catch arm,
   `instanceof`, and `new`.
 
-See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`static` methods on a
-class, method overloading by parameter type, script-declared class names as
-values, `GString` as a type, `++`/`--` not calling `next`/`previous`).
+See [`BUGS.md`](BUGS.md) for the honest known-gaps list (method overloading by
+parameter type, `GString` as a type, `++`/`--` not calling `next`/`previous`).
 
 ---
 
@@ -655,24 +663,21 @@ Next waves, in priority order:
 1. **Method overloading by parameter type** — overloading by *arity* works;
    two declarations taking the same number of arguments still collapse, because
    the runtime is dynamically typed and nothing tells them apart.
-2. **`static` methods on a class.** `Z.s()` does not resolve — a class name in
-   expression position is a `java.lang.Class`, and the static half of a method
-   table is not modeled. On an instance it is ordinary dispatch and works.
-3. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
+2. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
    `"$s".getClass()` reports `java.lang.String` where Groovy reports
    `org.codehaus.groovy.runtime.GStringImpl`.
-4. **A `List` implementation kind.** A set and a map each carry one, so a
+3. **A `List` implementation kind.** A set and a map each carry one, so a
    `TreeSet` and a `TreeMap` sort; a list does not, so
    `new LinkedList([1,2]).getClass()` reports `java.util.ArrayList`. The same
    missing kind is why `asImmutable()` takes a write instead of raising
    `UnsupportedOperationException` — a *wrapper* kind is unmodeled on every
    collection, maps included.
-5. **Collection view types.** `keySet()`, `entrySet()` and `values()` answer a
+4. **Collection view types.** `keySet()`, `entrySet()` and `values()` answer a
    plain `List` with the right contents in the right order, but they are copies
    rather than live views, and `getClass()` names `java.util.ArrayList` where
    Groovy names `java.util.TreeMap$KeySet`. A `Map.Entry` carries no class
    either.
-6. **Command-argument chains beyond one argument** — `println a, b` and
+5. **Command-argument chains beyond one argument** — `println a, b` and
    `foo bar baz` do not parse; the parenthesised call always does.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.

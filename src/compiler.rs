@@ -135,6 +135,9 @@ struct Compiler {
     /// The arities each user function name is declared at, so a call can pick
     /// the body matching its argument count.
     fn_arities: HashMap<String, HashSet<usize>>,
+    /// The user functions whose last parameter is variadic: the declared arity
+    /// and the array type the trailing arguments are collected into.
+    fn_varargs: HashMap<String, (usize, String)>,
     /// The subset of [`Compiler::fn_names`] that can reach itself through the
     /// static call graph. Each of these gets a [`crate::host::GDEPTH`] check in
     /// its prologue, so runaway native recursion raises a catchable
@@ -426,9 +429,16 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     // Which arities each function name is declared at. A same-named function of
     // a different arity is a *different* function, so its body needs a name of
     // its own — see `Compiler::fn_sub_name`.
+    let mut fn_varargs: HashMap<String, (usize, String)> = HashMap::new();
     let mut fn_arities: HashMap<String, HashSet<usize>> = HashMap::new();
     for stmt in &prog.body {
         if let StmtKind::Function { name, params, .. } = &stmt.kind {
+            if let StmtKind::Function {
+                varargs: Some(ty), ..
+            } = &stmt.kind
+            {
+                fn_varargs.insert(name.clone(), (params.len(), ty.clone()));
+            }
             fn_names.insert(name.clone());
             fn_arities
                 .entry(name.clone())
@@ -479,6 +489,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         has_ffi,
         fn_names,
         fn_arities,
+        fn_varargs,
         recursive_fns: recursive,
         scope: None,
         cur_class_fields: None,
@@ -587,7 +598,10 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     // instead of running into a body (only reachable via `Op::Call`/dispatch).
     let skip = c.b.emit(Op::Jump(0), 0);
     for stmt in &prog.body {
-        if let StmtKind::Function { name, params, body } = &stmt.kind {
+        if let StmtKind::Function {
+            name, params, body, ..
+        } = &stmt.kind
+        {
             c.function(stmt.line, name, params, body)?;
         }
     }
@@ -1112,6 +1126,42 @@ impl Compiler {
     }
 
     // ── Classes ─────────────────────────────────────────────────────────────
+
+    /// The argument list a call of variadic function `name` really passes, or
+    /// `None` when the call needs no packing. Groovy collects every argument
+    /// from the variadic position on into one array (`f(1, 2, 3)` against
+    /// `f(Object... xs)` passes `[1, 2, 3]` as `Object[]`), so `f()` passes an
+    /// empty one. A call with exactly the declared arity passes its last
+    /// argument through when it is already an array or `null`, and wraps it
+    /// otherwise; only those two shapes are recognised statically, so a
+    /// variable holding an array is wrapped (see BUGS.md).
+    fn varargs_args(&self, name: &str, args: &[Expr]) -> Option<Vec<Expr>> {
+        let (arity, ty) = self.fn_varargs.get(name)?;
+        let fixed = arity - 1;
+        if args.len() < fixed
+            || (args.len() != *arity
+                && self
+                    .fn_arities
+                    .get(name)
+                    .is_some_and(|a| a.contains(&args.len())))
+        {
+            return None;
+        }
+        if args.len() == *arity {
+            match &args[fixed] {
+                Expr::Null => return None,
+                Expr::Cast { ty: t, .. } if t.ends_with("[]") => return None,
+                _ => {}
+            }
+        }
+        let mut out = args[..fixed].to_vec();
+        out.push(Expr::Cast {
+            value: Box::new(Expr::List(args[fixed..].to_vec())),
+            ty: ty.clone(),
+            java: false,
+        });
+        Some(out)
+    }
 
     /// The subroutine name a user function's body is registered under.
     ///
@@ -2984,6 +3034,12 @@ impl Compiler {
                 // A bare field name inside a method/constructor is `this.field`.
                 if self.is_field(name) {
                     self.emit_field_get(name)?;
+                } else if self.class_index.contains_key(name) && !self.is_local(name) {
+                    // A script class named as a value is its `java.lang.Class`,
+                    // the receiver a `static` method call dispatches on.
+                    let nidx = self.b.add_constant(Value::str(name.clone()));
+                    self.b.emit(Op::LoadConst(nidx), self.cur_line);
+                    self.emit_call_builtin(crate::host::GCLASSREF, 0, self.cur_line)?;
                 } else if self.is_static_class_ref(name) {
                     // `Math`, `Integer`, … resolve to the JDK class, so that
                     // `Math.max(1, 2)` has a receiver to dispatch on.
@@ -3469,6 +3525,11 @@ impl Compiler {
                 self.emit_exc_check(line)?;
                 return Ok(());
             }
+            // A variadic function collects the trailing arguments into its
+            // array parameter, unless another declaration matches the call's
+            // arity exactly.
+            let packed = self.varargs_args(name, args);
+            let args = packed.as_deref().unwrap_or(args);
             let nidx = self.b.add_name(&self.fn_sub_name(name, args.len()));
             for a in args {
                 self.expr(a)?;
@@ -3825,7 +3886,10 @@ impl Compiler {
             return;
         }
         self.pinned_wide.remove(name);
-        self.set_var_width(name, !is_narrow_int_type(ty) && init.is_some_and(|e| self.is_wide(e)));
+        self.set_var_width(
+            name,
+            !is_narrow_int_type(ty) && init.is_some_and(|e| self.is_wide(e)),
+        );
         // `def f = { -> 5L }` binds a callable, not a number: record what
         // *calling* it yields so `f()` has a width at the call site.
         self.wide_returns.remove(name);

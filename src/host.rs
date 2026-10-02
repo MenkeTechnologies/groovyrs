@@ -6541,6 +6541,15 @@ fn dispatch_map_method_exists(method: &str) -> bool {
     matches!(
         method,
         "size"
+            | "putIfAbsent"
+            | "computeIfAbsent"
+            | "computeIfPresent"
+            | "compute"
+            | "merge"
+            | "removeAll"
+            | "retainAll"
+            | "forEach"
+            | "replaceAll"
             | "getSize"
             | "isEmpty"
             | "containsKey"
@@ -7720,7 +7729,9 @@ fn dispatch_iteration(
         // (`removeAll([2, 3])`) are the pure-GDK arm; only the closure form
         // re-enters the VM, so only it belongs here. Verified against Groovy
         // 5.0.8: `[1, 2, 3].removeAll { it > 1 }` answers `true` and leaves `[1]`.
-        "removeAll" | "retainAll" => {
+        // Java's `Collection.removeIf(Predicate)` is the same filter as the
+        // closure `removeAll`, answering whether anything was removed.
+        "removeAll" | "retainAll" | "removeIf" => {
             let clo = args.last()?;
             closure_meta(clo)?;
             let mut kept: Vec<Value> = Vec::new();
@@ -8796,6 +8807,91 @@ fn dispatch_map_iteration(
             }
             Some(Ok(view))
         }
+        // Java 8's `Map` default methods, which a Groovy map inherits. A
+        // closure stands in for the functional interface; a `null` result
+        // removes the key, as the JDK specifies.
+        "computeIfAbsent" if args.len() == 2 => {
+            let clo = clo?;
+            let key = groovy_str(&args[0]);
+            if let Some(Some(v)) = omap_get(recv, &key).filter(|v| !matches!(v, Some(Value::Undef)))
+            {
+                return Some(Ok(v));
+            }
+            let v = match invoke_closure(vm, clo, std::slice::from_ref(&args[0])) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !matches!(v, Value::Undef) {
+                omap_set(recv, key, v.clone());
+            }
+            Some(Ok(v))
+        }
+        "computeIfPresent" | "compute" | "merge" => {
+            let clo = clo?;
+            let key = groovy_str(args.first()?);
+            let old = omap_get(recv, &key)
+                .flatten()
+                .filter(|v| !matches!(v, Value::Undef));
+            let call = match (method, &old) {
+                ("computeIfPresent", None) => return Some(Ok(Value::Undef)),
+                ("merge", None) => {
+                    let v = args.get(1).cloned().unwrap_or(Value::Undef);
+                    omap_set(recv, key, v.clone());
+                    return Some(Ok(v));
+                }
+                ("merge", Some(o)) => vec![o.clone(), args.get(1).cloned().unwrap_or(Value::Undef)],
+                (_, o) => vec![args[0].clone(), o.clone().unwrap_or(Value::Undef)],
+            };
+            let v = match invoke_closure(vm, clo, &call) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if pending_exc() {
+                return Some(Ok(Value::Undef));
+            }
+            if matches!(v, Value::Undef) {
+                omap_retain(recv, |k| k != key);
+            } else {
+                omap_set(recv, key, v.clone());
+            }
+            Some(Ok(v))
+        }
+        // `removeAll`/`retainAll` with a closure are the GDK's `Map` filters:
+        // they drop the entries the closure accepts (rejects) and answer
+        // whether anything changed.
+        "removeAll" | "retainAll" | "forEach" | "replaceAll" => {
+            let clo = clo?;
+            let mut drop: Vec<String> = Vec::new();
+            for (k, v) in entries {
+                let call = match method {
+                    "forEach" | "replaceAll" => vec![Value::str(k.clone()), v.clone()],
+                    _ => entry_args(clo, k, v),
+                };
+                let r = match invoke_closure(vm, clo, &call) {
+                    Ok(r) => r,
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                match method {
+                    "forEach" => {}
+                    "replaceAll" => {
+                        omap_set(recv, k.clone(), r);
+                    }
+                    _ => {
+                        if groovy_truthy(vm, &r) != (method == "retainAll") {
+                            drop.push(k.clone());
+                        }
+                    }
+                }
+            }
+            if matches!(method, "forEach" | "replaceAll") {
+                return Some(Ok(Value::Undef));
+            }
+            omap_retain(recv, |k| !drop.iter().any(|d| d == k));
+            Some(Ok(Value::bool(!drop.is_empty())))
+        }
         // `map.max { it.value }` / `min` yield the extreme *entry*.
         "max" | "min" => {
             let clo = clo?;
@@ -9235,6 +9331,30 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             Some(n) => Value::str(s.repeat(n as usize)),
             None => raise_missing_method(vm, recv, method, args),
         },
+        // `codePointAt(i)` indexes UTF-16 code units and joins a surrogate pair.
+        (Value::Str(s), "codePointAt") if args.len() == 1 => {
+            let units: Vec<u16> = s.encode_utf16().collect();
+            let i = args.first().and_then(as_i64).unwrap_or(-1);
+            match usize::try_from(i).ok().filter(|i| *i < units.len()) {
+                Some(i) => {
+                    let end = (i + 2).min(units.len());
+                    let cp = char::decode_utf16(units[i..end].iter().copied())
+                        .next()
+                        .and_then(Result::ok)
+                        .map(u32::from)
+                        .unwrap_or(u32::from(units[i]));
+                    Value::int(i64::from(cp))
+                }
+                None => {
+                    raise(
+                        vm,
+                        "StringIndexOutOfBoundsException",
+                        &format!("index {i}, length {}", units.len()),
+                    );
+                    Value::Undef
+                }
+            }
+        }
         (Value::Str(s), "charAt") => {
             let i = args.first().and_then(as_i64).unwrap_or(0);
             let len = utf16_len(s);
@@ -10985,6 +11105,18 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 None => map_default(vm, recv, &k, args.first().unwrap_or(&Value::Undef)),
             }
         }
+        // `putIfAbsent` stores only over an absent or `null` value and answers
+        // the value that was there.
+        (_, "putIfAbsent") if args.len() == 2 && is_omap(recv) => {
+            let key = groovy_str(&args[0]);
+            match omap_get(recv, &key).flatten() {
+                Some(v) if !matches!(v, Value::Undef) => v,
+                _ => {
+                    omap_set(recv, key, args[1].clone());
+                    Value::Undef
+                }
+            }
+        }
         (_, "containsKey") if args.len() == 1 && is_omap(recv) => {
             Value::bool(omap_get(recv, &groovy_str(&args[0])).flatten().is_some())
         }
@@ -12304,7 +12436,9 @@ pub fn jdk_class_package(name: &str) -> Option<&'static str> {
         | "Character" | "String" | "StringBuilder" | "System" | "Object" | "Number" | "Thread"
         | "Runtime" => "java.lang",
         "BigDecimal" | "BigInteger" => "java.math",
-        "Collections" | "Arrays" | "List" | "Map" | "Set" | "Random" | "UUID" => "java.util",
+        "Collections" | "Arrays" | "List" | "Map" | "Set" | "Random" | "UUID" | "Objects" => {
+            "java.util"
+        }
         // Named for its resolve-strategy constants (`Closure.DELEGATE_FIRST`).
         "Closure" => "groovy.lang",
         _ => return None,
@@ -12832,6 +12966,43 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         }
         ("String", "valueOf") => Value::str(render_value(vm, &arg0)),
         ("String", "format") => Value::str(java_format(vm, &groovy_str(&arg0), &args[1..])),
+        // `java.util.Objects`' null-tolerant helpers.
+        ("Objects", "equals") if args.len() == 2 => Value::bool(java_equals(&args[0], &args[1])),
+        ("Objects", "isNull") if args.len() == 1 => Value::bool(matches!(arg0, Value::Undef)),
+        ("Objects", "nonNull") if args.len() == 1 => Value::bool(!matches!(arg0, Value::Undef)),
+        ("Objects", "toString") if !args.is_empty() => match (&arg0, args.get(1)) {
+            (Value::Undef, Some(dflt)) => dflt.clone(),
+            _ => Value::str(render_value(vm, &arg0)),
+        },
+        ("Objects", "requireNonNullElse") if args.len() == 2 => match arg0 {
+            Value::Undef => args[1].clone(),
+            v => v,
+        },
+        ("Objects", "requireNonNull") if !args.is_empty() => match arg0 {
+            Value::Undef => {
+                // Java's message-less form throws a `NullPointerException`
+                // with a `null` message.
+                match args.get(1) {
+                    Some(m) => raise(vm, "NullPointerException", &groovy_str(m)),
+                    None => {
+                        set_pending(new_throwable_with("NullPointerException", None, Vec::new()))
+                    }
+                }
+                Value::Undef
+            }
+            v => v,
+        },
+        ("Objects", "hash") => Value::int(i64::from(list_hash(args))),
+        // `String.join(delim, elements…)` and `String.join(delim, iterable)`.
+        ("String", "join") if args.len() >= 2 => {
+            let parts: Vec<Value> = if args.len() == 2 && !matches!(args[1], Value::Str(_)) {
+                iteration_elements(&args[1])
+            } else {
+                args[1..].to_vec()
+            };
+            let rendered: Vec<String> = parts.iter().map(|p| render_value(vm, p)).collect();
+            Value::str(rendered.join(&groovy_str(&arg0)))
+        }
 
         // `java.lang.Character`'s classification statics. A Groovy `char` is a
         // one-character `String` here, and the `int` overloads take a code

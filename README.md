@@ -367,7 +367,10 @@ Implemented and checked against Apache Groovy:
   sets. Maps answer `put`, `remove`, `getOrDefault`, `entrySet`, `keySet`,
   `values`, `subMap`, `spread`, `minus`, `intersect`, `iterator`,
   `containsValue`, `putAt`, `putAll`, `clear`, and `leftShift` (`map << other`, a
-  `putAll` that answers the receiver so it chains). Numbers answer `power`, the scaled
+  `putAll` that answers the receiver so it chains). The JDK `Map` defaults
+  `putIfAbsent`, `computeIfAbsent` / `computeIfPresent` / `compute`, `merge`,
+  `forEach` and `replaceAll` work in place (a `null` result removes the key), as
+  do the closure `removeAll` / `retainAll` and a collection's `removeIf`. Numbers answer `power`, the scaled
   `round(n)` and `trunc([n])`, `intdiv` (integral operands only — a decimal on
   either side raises `UnsupportedOperationException`, though a `BigInteger`
   answers one), `mod` in all four spellings (a `BigInteger` modulus must be
@@ -386,7 +389,8 @@ Implemented and checked against Apache Groovy:
   with no `compareTo` are not, so `[1, 2] <=> [1, 3]` raises the
   `IllegalArgumentException` Groovy raises (even for two equal lists) rather than
   inventing an order. `null` still orders before everything.
-- **JDK statics** — `Math` (`max`, `min`, `abs`, `round`, `signum`, `sqrt`,
+- **JDK statics** — `Objects` (`equals`, `isNull` / `nonNull`, `toString`,
+  `requireNonNull` / `requireNonNullElse`, `hash`), `String.join`, `Math` (`max`, `min`, `abs`, `round`, `signum`, `sqrt`,
   `floor`, `ceil`, `rint`, `pow`, `hypot`, `atan2`, the trig and log family,
   `floorDiv` / `floorMod`, `IEEEremainder`, `ulp`, `copySign`, `nextUp` /
   `nextDown` / `nextAfter`, `getExponent`, the `addExact` / `subtractExact` /

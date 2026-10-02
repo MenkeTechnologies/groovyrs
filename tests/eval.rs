@@ -8947,3 +8947,113 @@ println(!(1 in [1]))
          false\n"
     );
 }
+
+#[test]
+fn map_default_methods_follow_the_jdk() {
+    // `putIfAbsent`, `computeIfAbsent`, `computeIfPresent`, `compute`, `merge`, `forEach`, `replaceAll` and the closure `removeAll`/`retainAll` mutate the map in place; a `null` result removes the key. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+def m = [a: 1]
+println m.putIfAbsent('b', 2); println m.putIfAbsent('a', 9); println m
+println m.computeIfAbsent('c') { k -> k * 2 }; println m.computeIfAbsent('a') { 7 }; println m
+m.computeIfPresent('a') { k, v -> v + 10 }; m.computeIfPresent('zz') { k, v -> 1 }; println m
+m.computeIfPresent('b') { k, v -> null }; println m
+m.merge('a', 5) { x, y -> x + y }; m.merge('n', 5) { x, y -> x + y }; println m
+m.compute('n') { k, v -> v * 3 }; println m
+m.remove("c"); println m.removeAll { it.value > 10 }; println m; println m.retainAll { k, v -> v == 15 }; println m
+m.forEach { k, v -> println "$k=$v" }
+def r = [x: 1, y: 2]; r.replaceAll { k, v -> v * 10 }; println r
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "null\n\
+         1\n\
+         [a:1, b:2]\n\
+         cc\n\
+         1\n\
+         [a:1, b:2, c:cc]\n\
+         [a:11, b:2, c:cc]\n\
+         [a:11, c:cc]\n\
+         [a:16, c:cc, n:5]\n\
+         [a:16, c:cc, n:15]\n\
+         true\n\
+         [:]\n\
+         false\n\
+         [:]\n\
+         [x:10, y:20]\n"
+    );
+}
+
+#[test]
+fn string_join_and_code_point_at() {
+    // `String.join` takes varargs or an iterable; `codePointAt` joins a surrogate pair. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+println String.join('-', ['a', 'b']); println String.join('/', 'x', 'y', 'z'); println String.join(',', [] as List)
+println 'abc'.codePointAt(1); println '😀x'.codePointAt(0); println '😀x'.codePointAt(2)
+try { 'ab'.codePointAt(5) } catch (StringIndexOutOfBoundsException e) { println e.message }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "a-b\n\
+         x/y/z\n\
+         \n\
+         98\n\
+         128512\n\
+         120\n\
+         index 5, length 2\n"
+    );
+}
+
+#[test]
+fn java_util_objects_helpers() {
+    // `Objects` equals/isNull/nonNull/toString/requireNonNull*/hash. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+println Objects.equals(1, 1); println Objects.equals(null, null); println Objects.equals([1], [1])
+println Objects.isNull(null); println Objects.nonNull(3); println Objects.toString(null); println Objects.toString(null, 'dflt'); println Objects.toString([1, 2])
+println Objects.requireNonNullElse(null, 4); println Objects.hash(1); println Objects.hash('a', 2)
+try { Objects.requireNonNull(null, 'gone') } catch (NullPointerException e) { println e.message }
+try { Objects.requireNonNull(null) } catch (NullPointerException e) { println e.message }
+println Objects.requireNonNull(5)
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "true\n\
+         true\n\
+         true\n\
+         true\n\
+         true\n\
+         null\n\
+         dflt\n\
+         [1, 2]\n\
+         4\n\
+         32\n\
+         3970\n\
+         gone\n\
+         null\n\
+         5\n"
+    );
+}
+
+#[test]
+fn collection_remove_if_filters_in_place() {
+    // `removeIf` answers whether it removed anything and writes back through the receiver. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+def l = [1, 2, 3, 4]; println l.removeIf { it % 2 == 0 }; println l; println l.removeIf { it > 9 }; println l
+def m = [k: [5, 6, 7]]; m.k.removeIf { it > 5 }; println m
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "true\n\
+         [1, 3]\n\
+         false\n\
+         [1, 3]\n\
+         [k:[5]]\n"
+    );
+}

@@ -4308,6 +4308,7 @@ impl Compiler {
                     | "removeElement"
                     | "removeAll"
                     | "retainAll"
+                    | "removeIf"
                     | "set"
                     | "putAt"
                     | "clear"

@@ -2854,3 +2854,13 @@ println('b' in 'abc'); println('x' in 'abc'); println(1 in '123'); println('b' !
 println(3G << 4294967297L); println(3G << 9223372036854775807); println(3G >> -1L)
 %%
 def c = { def x = 7 }; println c()
+%%
+def m = [a: 1]; println m.putIfAbsent('b', 2); println m.computeIfAbsent('c') { k -> k * 2 }; m.computeIfPresent('a') { k, v -> v + 10 }; m.merge('a', 5) { x, y -> x + y }; println m; m.computeIfPresent('b') { k, v -> null }; println m
+%%
+def r = [x: 1, y: 2]; r.replaceAll { k, v -> v * 10 }; println r; r.forEach { k, v -> print "$k$v " }; println(); println r.removeAll { it.value > 10 }; println r
+%%
+println String.join('-', ['a', 'b']); println String.join('/', 'x', 'y'); println 'abc'.codePointAt(1)
+%%
+println Objects.equals([1], [1]); println Objects.isNull(null); println Objects.toString(null, 'd'); println Objects.requireNonNullElse(null, 4); println Objects.hash('a', 2)
+%%
+def l = [1, 2, 3, 4]; println l.removeIf { it % 2 == 0 }; println l

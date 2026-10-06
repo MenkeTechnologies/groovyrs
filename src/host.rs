@@ -438,6 +438,11 @@ pub const GFIELD_SET: u16 = 777;
 /// type name.
 pub const GJCAST: u16 = 778;
 
+/// The method name `list.remove((Object) x)` compiles to: the cast selects
+/// `Collection.remove(Object)` over `List.remove(int)`, which only the call
+/// site can see. Not an identifier, so no script can name it.
+pub const REMOVE_OBJECT: &str = "remove$Object";
+
 /// The call depth at which groovyrs raises `java.lang.StackOverflowError`.
 ///
 /// Groovy's depth is the JVM's: whatever fits in the thread's `-Xss`. Measured
@@ -7267,6 +7272,12 @@ fn b_method_wide(vm: &mut VM, argc: u8) -> Value {
 /// (they re-enter the VM to run a closure body) and falling back to the pure GDK
 /// dispatch. Shared by [`b_method`] and [`b_method_safe`].
 fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
+    // `list.remove((Object) x)`: the compiler saw the cast that selects
+    // `Collection.remove(Object)`, which on a list is the element removal.
+    if method == REMOVE_OBJECT {
+        let m = if is_list(&recv) { "removeElement" } else { "remove" };
+        return dispatch_call(vm, recv, m, args);
+    }
     // Drop any mutated-receiver contents a previous call parked but whose
     // writeback never ran (the receiver was not a plain variable).
     take_mutated();
@@ -7504,6 +7515,7 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         // absent — `reverse` reaches the list below only in its mutating
         // `reverse(true)` spelling, which `mutated` already gates.
         let answers_receiver = matches!(method, "each" | "eachWithIndex" | "reverseEach")
+            || method == "asList"
             || (mutated && matches!(method, "sort" | "unique" | "leftShift" | "swap" | "reverse"));
         if answers_receiver && matches!(answer, Value::Array(_)) {
             return recv;
@@ -8625,14 +8637,21 @@ fn dispatch_iteration(
         }
         // `list.collectEntries { … }` — build a map from each closure result,
         // which is either a two-element `[key, value]` list or a whole map.
+        // With no closure it is `collectEntries(Closure.IDENTITY)`: each element
+        // is itself the pair (a `withIndex()` tuple, a `Map.Entry`, a map).
         "collectEntries" => {
-            let clo = args.last()?;
-            closure_meta(clo)?;
+            let clo = args.last();
+            if clo.is_some_and(|c| closure_meta(c).is_none()) || args.len() > 1 {
+                return None;
+            }
             let mut out: Vec<(String, Value)> = Vec::new();
             for it in items {
-                let v = match invoke_closure(vm, clo, &item_args(clo, it)) {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
+                let v = match clo {
+                    Some(c) => match invoke_closure(vm, c, &item_args(c, it)) {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    },
+                    None => it.clone(),
                 };
                 if pending_exc() {
                     return Some(Ok(Value::Undef));
@@ -8660,6 +8679,31 @@ fn dispatch_iteration(
                     return Some(Ok(Value::Undef));
                 }
                 out.extend(iteration_elements(&v));
+            }
+            Some(Ok(Value::array(out)))
+        }
+        // `list.findResults { … }` — every non-null closure result, in order;
+        // without a closure, every non-null element (`Closure.IDENTITY`).
+        "findResults" => {
+            let clo = args.last();
+            if clo.is_some_and(|c| closure_meta(c).is_none()) || args.len() > 1 {
+                return None;
+            }
+            let mut out = Vec::new();
+            for it in items {
+                let v = match clo {
+                    Some(c) => match invoke_closure(vm, c, &item_args(c, it)) {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    },
+                    None => it.clone(),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                if !matches!(v, Value::Undef) {
+                    out.push(v);
+                }
             }
             Some(Ok(Value::array(out)))
         }
@@ -9193,6 +9237,24 @@ fn dispatch_map_iteration(
                 [dflt, _] => dflt.clone(),
                 _ => Value::Undef,
             }))
+        }
+        // `map.findResults { k, v -> … }` — every non-null closure result.
+        "findResults" => {
+            let clo = clo?;
+            let mut out = Vec::new();
+            for (k, v) in entries {
+                let r = match invoke_closure(vm, clo, &entry_args(clo, k, v)) {
+                    Ok(r) => r,
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                if !matches!(r, Value::Undef) {
+                    out.push(r);
+                }
+            }
+            Some(Ok(Value::array(out)))
         }
         // `map.count { k, v -> … }` — how many entries the closure accepts.
         "count" => {
@@ -10397,6 +10459,8 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `list.toArray()` answers an `Object[]` — a real array, so its
         // `getClass()` is `[Ljava.lang.Object;` and it has a `.length`.
         (Value::Array(a), "toArray") if args.is_empty() => garray(a.to_vec(), ArrayElem::Object),
+        // `asList(Iterable)` answers a `List` receiver itself.
+        (Value::Array(a), "asList") if args.is_empty() => Value::array(a.to_vec()),
         (Value::Array(a), "toSet") => make_set(
             a.to_vec(),
             SetKind::Hash {

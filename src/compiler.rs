@@ -3233,6 +3233,23 @@ impl Compiler {
                     self.expr(recv)?;
                     return self.emit_call_builtin(crate::host::GCLASS_LONG, 1, *line);
                 }
+                // `list.remove((Object) x)` / `remove(x as Object)`: the cast is
+                // how Groovy selects `Collection.remove(Object)` over
+                // `List.remove(int)`, and only the cast — a variable holding the
+                // same `Integer` still removes by index. The call is renamed so
+                // the host can see the choice (see `host::dispatch_call`).
+                if method == "remove"
+                    && matches!(args.as_slice(), [Expr::Cast { ty, .. }] if ty == "Object" || ty == "java.lang.Object")
+                {
+                    let renamed = Expr::MethodCall {
+                        recv: recv.clone(),
+                        method: crate::host::REMOVE_OBJECT.to_string(),
+                        args: args.clone(),
+                        line: *line,
+                        safe: *safe,
+                    };
+                    return self.expr(&renamed);
+                }
                 // `this.f(args)` outside a class is a call on the script, whose
                 // methods are the script's functions.
                 if matches!(**recv, Expr::This)
@@ -4349,6 +4366,7 @@ impl Compiler {
                     | "remove"
                     | "removeAt"
                     | "removeElement"
+                    | crate::host::REMOVE_OBJECT
                     | "removeAll"
                     | "retainAll"
                     | "removeIf"

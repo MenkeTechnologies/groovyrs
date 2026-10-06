@@ -309,7 +309,8 @@ Implemented and checked against Apache Groovy:
   `{ x -> { y -> x + y } }` and a chained call `f(a)(b)` work.
 - **Closure-driven GDK** — over lists, ranges and a `String`'s characters:
   `each`, `eachWithIndex`, `reverseEach`, `collect`, `collectMany`,
-  `collectEntries`, `findAll`, `find`, `findResult`, `findIndexOf`, `any`,
+  `collectEntries` (with no closure, each element is the pair), `findAll`,
+  `find`, `findResult`, `findResults`, `findIndexOf`, `any`,
   `every`, `count`, `countBy`, `inject`, `sum`, `sort`, `toSorted`, `unique`,
   `toUnique`, `max`, `min`, `groupBy`, `split`, `takeWhile`, `dropWhile`, `grep`,
   `findIndexValues`, `join`, `reverse`
@@ -353,7 +354,8 @@ Implemented and checked against Apache Groovy:
   `withIndex`, `indexed`, `iterator`/`listIterator` (whose handle answers the
   `Iterator` GDK: `find`/`any`/`every`/`findResult` stop at the deciding
   element, the folds consume it), `find()` without a closure, `toSet`, `subList`,
-  `toList`, `containsAll`, `putAt`, `removeAt`/`removeElement` and the mutators,
+  `toList`, `containsAll`, `putAt`, `removeAt`/`removeElement` (and `remove((Object) x)`, whose cast selects
+  the element removal over the index one), `asList`, and the mutators,
   and every value answers `inspect()` (the *verbose* rendering, so
   `[1, 'a'].inspect()` is `[1, 'a']` where `toString()` is `[1, a]`) with
   `toListString`/`toMapString` as the plain-rendering aliases (their `(int

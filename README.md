@@ -178,7 +178,11 @@ Implemented and checked against Apache Groovy:
   shifts `<< >> >>>`, `x in coll` (on a list it is `contains`, Java's uncoerced `Object.equals`;
   on a String it is Groovy 6's substring `contains` for a string needle, while
   a `switch` label on a String still tests equality), its negation `x !in coll`
-  and `x !instanceof T`,
+  and `x !instanceof T` (which follows the JDK hierarchy for the collection,
+  regex, closure and `Comparable`/`Serializable`/`Cloneable` interfaces, and a
+  user class's `implements` clause), method pointers `recv.&name`
+  (`this.&f`, `Math.&abs`, `obj.&m`), `x(args)` on a non-closure value as
+  `x.call(args)`,
   the `value as Type` coercion and the Java-style `(Type) value` cast — which
   is Groovy's `castToType`, so `(Integer) "7"` is `55` where `"7" as Integer`
   is `7` — unary `-` and `!`, grouping. `==` coerces as Groovy's does: numbers
@@ -345,6 +349,7 @@ Implemented and checked against Apache Groovy:
   `plus(index, other)` splice), `disjoint`, `transpose`, `collate`,
   `combinations`, `permutations` and `subsequences` (both answering the
   `java.util.HashSet<List>` Groovy does, in the JDK's bucket order),
+  `eachPermutation` (every index permutation in lexicographic order),
   `withIndex`, `indexed`, `iterator`/`listIterator`, `toSet`, `subList`,
   `toList`, `containsAll`, `putAt`, `removeAt`/`removeElement` and the mutators,
   and every value answers `inspect()` (the *verbose* rendering, so
@@ -528,7 +533,10 @@ Implemented and checked against Apache Groovy:
   comma-separated list, `for (int i = 0, j = n; i < j; i++, j--)` — the
   `for (x in a..b)` / `for (x in a..<b)`
   range loop and the `for (x in <collection>)` loop (a list's elements, a map's
-  entries, a `String`'s characters), `break`, `continue`, labeled
+  entries, a `String`'s characters, an iterator's remaining elements, and a
+  user object through its own `iterator()` or, for an `implements Iterator`
+  class, its `hasNext()`/`next()` — which also drive `each`, `collect` and the
+  rest of the iteration GDK on such an object), `break`, `continue`, labeled
   `break`/`continue`, `return`.
 - **`assert`** — with Groovy's power-assert rendering: the statement's source
   followed by every sub-expression's value under its own column. The
@@ -649,7 +657,7 @@ combinators (`curry` / `rcurry` / `ncurry` / `memoize` / `andThen` / `compose`),
 delegating `with` / `tap`, and the spread operator
 and nested-closure upvalue capture (curried `{ x -> { y -> x + y } }`, chained
 `f(a)(b)`), classes (fields, constructors, methods, `this`, property get/set with
-auto getter/setter, direct field access `obj.@f` and the declaring class's own
+auto getter/setter, a `boolean isX()` read as the property `x`, direct field access `obj.@f` and the declaring class's own
 bare-field reads, `new`, `toString`, `getAt` subscript) on a host object heap,
 single-inheritance `extends` (virtual dispatch, `super`, `instanceof`), operator
 overloading (`plus`/`minus`/`multiply`/`div`/`remainder`/`power`/`negative`/

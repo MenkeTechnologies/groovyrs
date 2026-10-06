@@ -735,32 +735,32 @@ this file.
 
 - `enum Color { RED, GREEN }` — every `enum` declaration is a parse error
   (`expected end of statement but found LBrace`).
-- Method pointers and references: `this.&sq`, `Math.&abs`, `String.&toUpperCase`
-  and `Integer::sum` are parse errors.
-- A *method's* default parameter (`def m(a, b = 5)`) and varargs parameter
-  (`def m(String... xs)`) are parse errors; a closure's are supported.
+- Method references `Integer::sum` are parse errors. Method *pointers*
+  (`this.&sq`, `Math.&abs`, `obj.&m`) work, except a class receiver naming an
+  *instance* method (`String.&toUpperCase`, whose first argument becomes the
+  receiver): it is tried as a static call. A pointer's `getClass()` is
+  `groovy.lang.Closure`, not `org.codehaus.groovy.runtime.MethodClosure`, and
+  its `maximumNumberOfParameters` is that of a varargs closure.
 - `class Outer { static class Inner { … } }` — a nested class is a parse error.
 - A script-declared class's static members through the class name:
   `P.K` (a `static final` field) raises `NullPointerException`, and a
   constructor that bumps a `static int n` (`Q() { n++ }`) raises
   `Cannot execute null+1`. (`P.make()` is the documented static-method entry.)
-- A user setter: `class P { def x = 1; def setX(v) { x = v * 10 } }` then
-  `p.x = 2` recurses into `StackOverflowError`; Groovy writes the field from
-  inside the setter and prints `20`.
-- A boolean `isOk()` getter is not read as the property `ok`, and a user class
-  answering `iterator()` is iterated by `for (x in obj)` as one element.
-- `obj.hasProperty('a')`, and `c(4)` on an instance whose class declares
-  `call(x)`, are not dispatched.
+- `obj.hasProperty('a')` is not dispatched.
+- A bare call no binding answers (`foo(1)` with no `foo` anywhere) faults with
+  the uncatchable `unresolved reference: foo`; Groovy raises a catchable
+  `MissingMethodException` naming the script class. `tests/eval.rs`
+  (`unresolved_call_still_faults`) and `tests/ffi.rs` pin the fault, so the
+  change needs those expectations revisited. A *bound* non-closure value is
+  called through its own `call` method, as Groovy's is.
 - A trait method calling a method only the implementing class declares
   (`trait T { def greet() { name() } }`) is `unresolved reference`.
-- Inside a closure, a bare call with only a trailing closure
-  (`[1, 2, 3].with { collect { it + 1 } }`) is a parse error.
 
 **Operators and literals:** `"${-> x}"` (a lazy GString closure) is a parse
 error.
 
 **Missing GDK methods** (`MissingMethodException` where Groovy answers):
-`String.lines`, `eachPermutation`, `Map.toSpreadMap`, `asReversed`, `shuffled`,
+`String.lines`, `Map.toSpreadMap`, `asReversed`, `shuffled`,
 `List.stream()`, `Range.by(n)`, `BigDecimal.step(to, step) { … }`. `Eval.me` raises
 `MissingPropertyException` and `new Expando()` is `unable to resolve class`.
 
@@ -1537,3 +1537,10 @@ as `println++`) and prints `6` here.
   neither side names a decimal — keeps the native lowering, which reads the
   heap handle as `0`. Naming either operand's decimal-ness anywhere in the
   expression is enough to route it correctly.
+- **A user iterable is walked eagerly.** `for (x in obj)` and the iteration
+  GDK (`each`, `collect`, …) on an object that iterates through its own
+  `iterator()` — or an `implements Iterator` class's `hasNext()`/`next()` —
+  draw the whole sequence before the first element is used, the same
+  materialisation a range loop does. The elements and their order are Groovy's;
+  what differs is interleaving: side effects in `next()` all happen before the
+  loop body's, and an unbounded iterator never reaches a `break`.

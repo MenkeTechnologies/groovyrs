@@ -1308,6 +1308,17 @@ impl Compiler {
             self.b.emit(Op::LoadInt(sub as i64), line);
         }
         self.b.emit(Op::MakeHash((methods.len() * 2) as u16), line);
+        // The `isX()` methods declared `boolean` with no parameters — the only
+        // `is` spelling Groovy reads as the getter of the property `x`.
+        let bool_getters: Vec<&Method> = methods
+            .iter()
+            .filter(|m| m.ret_ty == "boolean" && m.params.is_empty() && m.name.len() > 2 && m.name.starts_with("is"))
+            .collect();
+        for m in &bool_getters {
+            let c = self.b.add_constant(Value::str(m.name.clone()));
+            self.b.emit(Op::LoadConst(c), line);
+        }
+        self.b.emit(Op::MakeArray(bool_getters.len() as u16), line);
         self.b.emit(Op::CallBuiltin(crate::host::GCLASS, 0), line);
         self.b.emit(Op::Pop, line);
     }
@@ -3102,6 +3113,9 @@ impl Compiler {
                 // closure-call builtin with a synthetic name for diagnostics.
                 self.expr(callee)?;
                 let argc = self.emit_args(args, *line)?;
+                // A value always binds: a non-closure answers its own `call`.
+                let bidx = self.b.add_constant(Value::bool(true));
+                self.b.emit(Op::LoadConst(bidx), *line);
                 let nidx = self.b.add_constant(Value::str("<closure>".to_string()));
                 self.b.emit(Op::LoadConst(nidx), *line);
                 self.emit_call_builtin(crate::host::GCLOSURE_CALL, argc, *line)?;
@@ -3218,6 +3232,15 @@ impl Compiler {
                 if method == "getClass" && args.is_empty() && self.is_wide(recv) {
                     self.expr(recv)?;
                     return self.emit_call_builtin(crate::host::GCLASS_LONG, 1, *line);
+                }
+                // `this.f(args)` outside a class is a call on the script, whose
+                // methods are the script's functions.
+                if matches!(**recv, Expr::This)
+                    && self.cur_class_methods.is_none()
+                    && !self.is_local("this")
+                    && self.fn_names.contains(method.as_str())
+                {
+                    return self.call(method, args, *line);
                 }
                 if matches!(**recv, Expr::Super) {
                     self.emit_this();
@@ -3586,10 +3609,12 @@ impl Compiler {
         }
         // Otherwise `name(args)` is a call through a variable — a closure invoked
         // directly, `def f = { it * 2 }; f(21)`. Load the value, push the args,
-        // and dispatch through the closure-call builtin, which faults with
-        // `unresolved reference: name` if the value is not a closure.
+        // and dispatch through the closure-call builtin. Groovy reads the call as
+        // `name.call(args)`, so a bound non-closure answers its own `call`.
         self.emit_var_read(name, line);
         let argc = self.emit_args(args, line)?;
+        let bidx = self.b.add_constant(Value::bool(!self.nothing_binds(name)));
+        self.b.emit(Op::LoadConst(bidx), line);
         let nidx = self.b.add_constant(Value::str(name.to_string()));
         self.b.emit(Op::LoadConst(nidx), line);
         self.emit_call_builtin(crate::host::GCLOSURE_CALL, argc, line)?;

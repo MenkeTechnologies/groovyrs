@@ -2974,3 +2974,11 @@ println Math.foo(1)
 println String.zork('a', 2)
 %%
 println([1, "1", 1.0, 1G, null].count(1)); println([null, null, 1].count(null)); println([[1], [1], [2]].count([1])); println([1, 2, "1"].unique())
+%%
+def sq(y) { y * y }; def f = this.&sq; println([f(3), [1, 2].collect(this.&sq), Math.&max(2, 7), this.sq(5)])
+%%
+def s = 'ab'; def u = s.&toUpperCase; s = 'zz'; println u(); def l = []; def a = l.&add; a(1); a(2); println l
+%%
+['x', 'y', 'z'].eachPermutation { print it.join('') + ' ' }; println(); [2, 2].eachPermutation { print it }; println()
+%%
+println([{ 1 } instanceof Closure, [1].toSet() instanceof Set, new TreeSet() instanceof SortedSet, (1..2) instanceof ArrayList, ([1] as int[]) instanceof List, 'a' instanceof Comparable, [a: 1] instanceof Cloneable, new StringWriter() instanceof CharSequence])

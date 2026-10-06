@@ -1003,13 +1003,19 @@ impl Parser {
                         name: name.clone(),
                         params: kept,
                         body,
+                        ret_ty: ty.clone(),
                     });
                 }
                 let Some(body) = self.opt_member_body(in_interface)? else {
                     abstract_methods.push(name);
                     return Ok(());
                 };
-                methods.push(Method { name, params, body });
+                methods.push(Method {
+                    name,
+                    params,
+                    body,
+                    ret_ty: ty,
+                });
             } else {
                 let init = self.opt_initializer()?;
                 fields.push(Field { name, ty, init });
@@ -1051,13 +1057,19 @@ impl Parser {
                         name: name.clone(),
                         params: kept,
                         body,
+                        ret_ty: ty.clone(),
                     });
                 }
                 let Some(body) = self.opt_member_body(in_interface)? else {
                     abstract_methods.push(name);
                     return Ok(());
                 };
-                methods.push(Method { name, params, body });
+                methods.push(Method {
+                    name,
+                    params,
+                    body,
+                    ret_ty: ty,
+                });
             } else {
                 let init = self.opt_initializer()?;
                 fields.push(Field { name, ty, init });
@@ -2542,6 +2554,17 @@ impl Parser {
                     );
                     continue;
                 }
+                // `recv.&name` — a method pointer: a closure calling `name` on the
+                // receiver, which is evaluated once, here (see `method_pointer`).
+                if self.is(&Tok::Amp) {
+                    if safe {
+                        return Err(format!("groovyrs: `?.&` is not supported on line {line}"));
+                    }
+                    self.advance();
+                    let name = self.ident()?;
+                    e = method_pointer(e, name, line);
+                    continue;
+                }
                 let member = self.ident()?;
                 if self.is(&Tok::LParen) {
                     let mut args = self.call_args()?;
@@ -3648,9 +3671,6 @@ fn qualified_type(name: &str) -> String {
     format!("{pkg}.{name}")
 }
 
-/// Parse the source of one `${ … }` / `$name` placeholder into an expression.
-/// It runs the same lexer and expression grammar as the enclosing script, so an
-/// interpolation is not a second, weaker language.
 /// The body of a default-argument overload: its `prelude` (the dropped
 /// parameters' defaults as locals), then a call of the full signature with every
 /// parameter, whose result it returns.
@@ -3669,6 +3689,51 @@ fn forward_body(name: &str, params: &[String], mut prelude: Vec<Stmt>, line: u32
     prelude
 }
 
+/// Lower Groovy's method pointer `recv.&name` (a `MethodClosure`): a closure
+/// that calls `name` on the receiver with whatever arguments it is given.
+///
+/// The receiver is evaluated once, when the pointer is made — `def up =
+/// s.&toUpperCase; s = "x"; up()` still upper-cases the first string — so the
+/// pointer is `{ $mp -> { Object... $args -> $mp.name(*$args) } }(recv)`. A
+/// `this` receiver stays `this` inside the closure, where it already names the
+/// script (whose functions answer) or the enclosing instance.
+fn method_pointer(recv: Expr, name: String, line: u32) -> Expr {
+    let call = |recv: Expr| Expr::Closure {
+        params: vec!["$args".to_string()],
+        body: vec![Stmt::new(
+            line,
+            StmtKind::Expr(Expr::MethodCall {
+                recv: Box::new(recv),
+                method: name.clone(),
+                args: vec![Expr::SpreadArg(Box::new(Expr::Var("$args".to_string())))],
+                line,
+                safe: false,
+            }),
+        )],
+        explicit_params: true,
+        varargs: true,
+    };
+    if matches!(recv, Expr::This) {
+        return call(Expr::This);
+    }
+    Expr::CallValue {
+        callee: Box::new(Expr::Closure {
+            params: vec!["$mp".to_string()],
+            body: vec![Stmt::new(
+                line,
+                StmtKind::Expr(call(Expr::Var("$mp".to_string()))),
+            )],
+            explicit_params: true,
+            varargs: false,
+        }),
+        args: vec![recv],
+        line,
+    }
+}
+
+/// Parse the source of one `${ … }` / `$name` placeholder into an expression.
+/// It runs the same lexer and expression grammar as the enclosing script, so an
+/// interpolation is not a second, weaker language.
 fn parse_interpolation(src: &str) -> Result<Expr, String> {
     let tokens = crate::lexer::lex(src)?;
     let mut p = Parser {

@@ -1408,6 +1408,7 @@ fn register_throwables() {
                 overloads: std::collections::HashMap::new(),
                 method_arity: std::collections::HashMap::new(),
                 ctors: std::collections::HashMap::new(),
+                bool_getters: std::collections::HashSet::new(),
             });
         }
     });
@@ -2034,6 +2035,9 @@ struct ClassMeta {
     method_arity: std::collections::HashMap<String, u8>,
     /// constructor subroutine name-pool indices keyed by arity.
     ctors: std::collections::HashMap<u8, u16>,
+    /// The `isX()` methods declared `boolean` with no parameters: the getters
+    /// Groovy reads the property `x` through, ahead of a `getX()`.
+    bool_getters: std::collections::HashSet<String>,
 }
 
 /// Clear the object heap, class registry, and decimal-literal intern table
@@ -3676,6 +3680,20 @@ fn lookup_overload_exact(class: u32, method: &str, argc: usize) -> Option<u16> {
     None
 }
 
+/// The `boolean isX()` getter `method` names, declared on `class` or inherited
+/// from its superclass chain, as its subroutine index.
+fn lookup_bool_getter(class: u32, method: &str) -> Option<u16> {
+    let mut cur = Some(class);
+    while let Some(id) = cur {
+        let meta = class_meta(id)?;
+        if meta.bool_getters.contains(method) {
+            return meta.overloads.get(&format!("{method}/0")).copied();
+        }
+        cur = meta.superclass.as_deref().and_then(find_class);
+    }
+    None
+}
+
 fn lookup_method(class: u32, method: &str) -> Option<u16> {
     let mut cur = Some(class);
     while let Some(id) = cur {
@@ -3925,6 +3943,7 @@ fn capitalize(s: &str) -> String {
 /// constructor table on top.
 fn b_class(vm: &mut VM, _argc: u8) -> Value {
     // Pushed last by `register_class`, so these pop first and in reverse.
+    let bool_getters_a = vm.stack.pop().unwrap_or(Value::Undef);
     let overloads_h = vm.stack.pop().unwrap_or(Value::Undef);
     let arities_h = vm.stack.pop().unwrap_or(Value::Undef);
     let ctors_h = vm.stack.pop().unwrap_or(Value::Undef);
@@ -4000,10 +4019,15 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
         Value::Hash(h) => h.into_iter().map(|(k, v)| (k, v.to_int() as u16)).collect(),
         _ => std::collections::HashMap::new(),
     };
+    let bool_getters: std::collections::HashSet<String> = match bool_getters_a {
+        Value::Array(a) => a.iter().map(|v| v.as_str_cow().into_owned()).collect(),
+        _ => std::collections::HashSet::new(),
+    };
     CLASSES.with(|c| {
         c.borrow_mut().push(ClassMeta {
             name,
             overloads,
+            bool_getters,
             method_arity,
             superclass,
             interfaces,
@@ -5792,6 +5816,17 @@ fn value_is_a(value: &Value, class: &str) -> bool {
             return class_chain(inst.class).contains(&target)
                 || interface_closure(inst.class).contains(&target);
         }
+        // A JDK interface the class (or an ancestor) names in its `implements`
+        // clause — `Comparable`, `Serializable` — is not a registered class, so
+        // the declaration itself answers. Every `Throwable` is `Serializable`.
+        let short = class.rsplit('.').next().unwrap_or(class);
+        let declares = class_chain(inst.class)
+            .iter()
+            .filter_map(|id| class_meta(*id))
+            .any(|m| m.interfaces.iter().any(|i| i.rsplit('.').next() == Some(short)));
+        if declares || (short == "Serializable" && is_throwable_class(inst.class)) {
+            return true;
+        }
         // Named type is not a user class — fall through to built-in checks (an
         // instance is still an `Object`/`GroovyObject`).
     }
@@ -5806,9 +5841,9 @@ fn value_is_a(value: &Value, class: &str) -> bool {
     match short {
         "Object" | "GroovyObject" => true,
         "String" | "GString" => matches!(value, Value::Str(_)),
-        // A `StringBuilder`/`StringBuffer`/`StringWriter` is a `CharSequence`
-        // too, which is what `sb instanceof CharSequence` asks.
-        "CharSequence" => matches!(value, Value::Str(_)) || as_buffer(value).is_some(),
+        // A `StringBuilder`/`StringBuffer` is a `CharSequence` too, which is what
+        // `sb instanceof CharSequence` asks; a `StringWriter` is only a `Writer`.
+        "CharSequence" => matches!(value, Value::Str(_)) || is_builder(value),
         "StringBuilder" | "StringBuffer" | "StringWriter" | "Appendable" => as_buffer(value)
             .is_some_and(|(c, _)| simple_name_of(c) == short || short == "Appendable"),
         "Integer" | "Int" | "Long" | "Short" | "Byte" => matches!(value, Value::Int(_)),
@@ -5829,14 +5864,52 @@ fn value_is_a(value: &Value, class: &str) -> bool {
                 || as_float_handle(value).is_some()
         }
         "Boolean" => matches!(value, Value::Bool(_)),
-        // A Groovy `Range` *is* a `java.util.List`, so it answers both.
-        // `instanceof` is a type test, not a read: a stale window is still a
-        // `List`, so this asks the raw shape.
-        "List" | "ArrayList" | "Collection" | "Iterable" => {
-            matches!(value, Value::Array(_))
-                || as_list_raw(value).is_some()
-                || as_range(value).is_some()
+        // A Groovy `Range` *is* a `java.util.List` (an `AbstractList`), but not
+        // an `ArrayList`; a `SubList` window is an `AbstractList` and
+        // `RandomAccess`, but not an `ArrayList`. An array is none of them — a
+        // Java array is not a `Collection`. `instanceof` is a type test, not a
+        // read: a stale window is still a `List`, so this asks the shape.
+        "List" | "AbstractList" => is_plain_list(value) || as_range(value).is_some(),
+        "ArrayList" => is_plain_list(value) && !is_sublist(value),
+        "RandomAccess" => is_plain_list(value),
+        "Collection" | "Iterable" => {
+            is_plain_list(value) || as_range(value).is_some() || as_set(value).is_some()
         }
+        // The set implementations follow the JDK's hierarchy: `LinkedHashSet
+        // extends HashSet`, and only a `TreeSet` is sorted.
+        "Set" => as_set(value).is_some(),
+        "HashSet" => matches!(
+            as_set(value),
+            Some((_, SetKind::Hash { .. } | SetKind::Linked))
+        ),
+        "LinkedHashSet" => matches!(as_set(value), Some((_, SetKind::Linked))),
+        "TreeSet" | "SortedSet" | "NavigableSet" => {
+            matches!(as_set(value), Some((_, SetKind::Tree)))
+        }
+        "Closure" => closure_meta(value).is_some(),
+        "Pattern" => regex_source(value).is_some(),
+        "Matcher" => as_matcher(value).is_some(),
+        "Entry" | "Map$Entry" => as_entry(value).is_some(),
+        // Every JDK number, `String`, `Boolean`, and (since JDK 11) the two
+        // builders are `Comparable`; a `StringWriter` is not.
+        "Comparable" => is_jdk_scalar(value) || is_builder(value),
+        // `Serializable` and `Cloneable` per the JDK classes groovyrs models:
+        // the collections and arrays are both, the scalars only the first. An
+        // `ObjectRange` (and the empty range) is neither; a `SubList` window
+        // and a `withDefault` view are neither.
+        "Serializable" => {
+            is_jdk_scalar(value)
+                || is_builder(value)
+                || is_cloneable(value)
+                || regex_source(value).is_some()
+                || as_range(value).is_some_and(|r| {
+                    !matches!(
+                        range_class(&r),
+                        "groovy.lang.ObjectRange" | "groovy.lang.EmptyRange"
+                    )
+                })
+        }
+        "Cloneable" => is_cloneable(value),
         "Range" | "IntRange" | "ObjectRange" | "NumberRange" => as_range(value).is_some(),
         // Every map answers `Map`. The concrete names follow the JDK's hierarchy
         // rather than aliasing each other: `LinkedHashMap extends HashMap`, so a
@@ -5856,6 +5929,35 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         "TreeMap" | "SortedMap" | "NavigableMap" => omap_kind(value) == Some(MapKind::Tree),
         _ => false,
     }
+}
+
+/// A `java.util.List` that is not a Java array (arrays ride the list
+/// representation, but are not `Collection`s).
+fn is_plain_list(v: &Value) -> bool {
+    is_list(v) && array_elem(v).is_none()
+}
+
+/// A `String`, `Boolean` or JDK number — the immutable value classes, every one
+/// `Comparable` and `Serializable`.
+fn is_jdk_scalar(v: &Value) -> bool {
+    matches!(v, Value::Str(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_))
+        || as_dec(v).is_some()
+        || as_float_handle(v).is_some()
+}
+
+/// A `StringBuilder` or `StringBuffer` (not a `StringWriter`).
+fn is_builder(v: &Value) -> bool {
+    as_buffer(v).is_some_and(|(c, _)| c != "java.io.StringWriter")
+}
+
+/// The modeled classes implementing `Cloneable` (all of them `Serializable`
+/// too): `ArrayList`, the arrays, the sets, the maps, and `Closure`.
+fn is_cloneable(v: &Value) -> bool {
+    (is_plain_list(v) && !is_sublist(v))
+        || array_elem(v).is_some()
+        || as_set(v).is_some()
+        || ((matches!(v, Value::Hash(_)) || omap_kind(v).is_some()) && !is_map_with_default(v))
+        || closure_meta(v).is_some()
 }
 
 /// Dispatch a method call on a class instance: a user method (implicit `this`),
@@ -5974,6 +6076,52 @@ fn instance_method_miss(
     Some(Ok(raise_missing_method(vm, recv, method, args)))
 }
 
+/// A GDK iteration method on a user instance that iterates through its own
+/// `iterator()` (see [`drain_iterable`]). `None` when the receiver is not such
+/// an instance or the method is not one of them.
+fn dispatch_iterable_instance(
+    vm: &mut VM,
+    recv: &Value,
+    method: &str,
+    args: &[Value],
+) -> Option<Result<Value, String>> {
+    // The GDK iteration methods Groovy declares on `Object` walk the receiver
+    // through its own `iterator()`, and a class that `implements Iterable`
+    // answers the `Iterable` GDK the same way. They are real methods on the
+    // metaclass, so they come before `methodMissing`.
+    let inst = as_instance(recv)?;
+    class_meta(inst.class)?;
+    let object_level = matches!(
+        method,
+        "each" | "eachWithIndex" | "collect" | "findAll" | "any" | "every" | "grep" | "find"
+            | "findResult" | "findIndexOf" | "findLastIndexOf" | "inject" | "toList"
+    );
+    let iterable_level = matches!(
+        method,
+        "sum" | "max" | "min" | "join" | "first" | "last" | "size" | "sort" | "toSet"
+            | "count" | "collectEntries" | "groupBy" | "countBy" | "unique" | "withIndex"
+            | "indexed" | "collectMany" | "findResults" | "reverse"
+    );
+    if object_level || (iterable_level && value_is_a(recv, "Iterable")) {
+        if let Some(items) = drain_iterable(vm, recv) {
+            let items = match items {
+                Ok(items) => items,
+                Err(e) => return Some(Err(e)),
+            };
+            if pending_exc() {
+                return Some(Ok(Value::Undef));
+            }
+            let out = dispatch_call(vm, Value::array(items), method, args.to_vec());
+            return Some(Ok(if matches!(method, "each" | "eachWithIndex") {
+                recv.clone()
+            } else {
+                out
+            }));
+        }
+    }
+    None
+}
+
 /// [`dispatch_instance_method`] plus the miss handling — for the callers that
 /// have no further chain to fall through to (`getAt`/`putAt`).
 fn dispatch_instance_method_or_miss(
@@ -6006,6 +6154,10 @@ fn dispatch_instance_prop_get(
     let inst = as_instance(recv)?;
     // A handle whose class is not in the registry is not an instance read.
     class_meta(inst.class)?;
+    // A `boolean isX()` is the getter Groovy tries first.
+    if let Some(idx) = lookup_bool_getter(inst.class, &format!("is{}", capitalize(name))) {
+        return Some(invoke_sub(vm, idx, std::slice::from_ref(recv)));
+    }
     let getter = format!("get{}", capitalize(name));
     if let Some(idx) = lookup_method(inst.class, &getter) {
         return Some(invoke_sub(vm, idx, std::slice::from_ref(recv)));
@@ -6469,7 +6621,13 @@ fn raise_negative_index(vm: &mut VM, index: i64, len: usize) -> Value {
 }
 
 /// `GCLOSURE_CALL`: invoke a closure directly (`f(args)`). Stack: the closure
-/// (deepest), `argc` args, then the callee name on top.
+/// (deepest), `argc` args, whether the compiler saw a binding for the callee,
+/// then the callee name on top.
+///
+/// Groovy compiles `f(args)` on a variable to `f.call(args)`, so a bound value
+/// that is not a closure answers its own `call` (a class declaring `call(x)`),
+/// and raises the `MissingMethodException` / `NullPointerException` that call
+/// does. A name nothing binds still faults `unresolved reference`.
 fn b_closure_call(vm: &mut VM, argc: u8) -> Value {
     let name = vm
         .stack
@@ -6477,15 +6635,27 @@ fn b_closure_call(vm: &mut VM, argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
+    let bound = matches!(vm.stack.pop(), Some(Value::Bool(true)));
     let args = pop_call_args(vm, argc);
     let clo = vm.stack.pop().unwrap_or(Value::Undef);
     if closure_meta(&clo).is_none() {
+        // A bound value answers its own `call`. A `null` one may be a script
+        // `def` not yet reached (groovyrs binds those program-wide), which Groovy
+        // would not see yet, so the delegate is asked before `null.call` raises.
+        if bound && !matches!(clo, Value::Undef) {
+            return dispatch_call(vm, clo, "call", args);
+        }
         // The owner (the script) has no such closure, so a `with`/`tap` delegate
         // is next in Groovy's `OWNER_FIRST` chain — innermost first.
         if let Some(v) = dispatch_on_delegate(vm, &name, &args) {
             return v;
         }
-        // Faithful to the compile-time diagnostic the non-closure path replaced.
+        if bound {
+            return dispatch_call(vm, clo, "call", args);
+        }
+        // Groovy raises `MissingMethodException` naming the script class here;
+        // groovyrs keeps the `unresolved reference` fault its tests pin (see
+        // BUGS.md).
         fault(vm, format!("unresolved reference: {name}"));
         return Value::Undef;
     }
@@ -7394,6 +7564,15 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             }
         };
     }
+    if let Some(res) = dispatch_iterable_instance(vm, &recv, method, &args) {
+        return match res {
+            Ok(v) => v,
+            Err(e) => {
+                fault(vm, e);
+                Value::Undef
+            }
+        };
+    }
     // The `groovy.lang.Closure` combinators, which answer another closure.
     if let Some(meta) = closure_meta(&recv) {
         if let Some(v) = closure_combinator(&recv, &meta, method, &args) {
@@ -7951,6 +8130,33 @@ fn dispatch_iteration(
                 }
             }
             Some(Ok(Value::array(out)))
+        }
+        // `iterable.eachPermutation { … }` — a port of `DGM.eachPermutation`: a
+        // `groovy.util.PermutationGenerator` walks every index permutation in
+        // lexicographic order (duplicates included, unlike `permutations`), and
+        // the spent generator is the answer. Its constructor refuses an empty
+        // collection.
+        "eachPermutation" => {
+            let clo = args.last()?;
+            closure_meta(clo)?;
+            if items.is_empty() {
+                raise(vm, "IllegalArgumentException", "At least one item required");
+                return Some(Ok(Value::Undef));
+            }
+            for p in permutations_of(items) {
+                let p = Value::array(p);
+                if let Err(e) = invoke_closure(vm, clo, &item_args(clo, &p)) {
+                    return Some(Err(e));
+                }
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+            }
+            Some(Ok(heap_push(HeapObj::Iter {
+                class: "groovy.util.PermutationGenerator",
+                items: Vec::new(),
+                pos: 0,
+            })))
         }
         // `list.permutations { it -> … }` is Groovy's `collect(permutations(self),
         // closure)` — the permutation *set* walked in its own bucket order, with
@@ -15909,7 +16115,66 @@ fn class_ref_of(v: &Value) -> Value {
 /// `for (x in 5)` runs once).
 fn b_iter(vm: &mut VM, _argc: u8) -> Value {
     let v = vm.stack.pop().unwrap_or(Value::Undef);
-    Value::array(iteration_elements(&v))
+    match drain_iterable(vm, &v) {
+        Some(Ok(items)) => Value::array(items),
+        Some(Err(e)) => {
+            fault(vm, e);
+            Value::Undef
+        }
+        None => Value::array(iteration_elements(&v)),
+    }
+}
+
+/// The elements Groovy's `InvokerHelper.asIterator` walks for a value that
+/// iterates through **its own** `iterator()` — an iterator handle (from its
+/// current position, consuming it), a user instance whose class declares
+/// `iterator()`, and a user class that `implements Iterator` (driven through
+/// its `hasNext()`/`next()`). `None` for every other value, which
+/// [`iteration_elements`] answers. The walk is eager: the whole sequence is
+/// drawn before the first element is used.
+fn drain_iterable(vm: &mut VM, v: &Value) -> Option<Result<Vec<Value>, String>> {
+    if as_iter(v).is_some() {
+        let mut out = Vec::new();
+        while let Some(x) = iter_next(v) {
+            out.push(x);
+        }
+        return Some(Ok(out));
+    }
+    let inst = as_instance(v)?;
+    class_meta(inst.class)?;
+    if let Some(idx) = lookup_overload_exact(inst.class, "iterator", 0) {
+        let it = match invoke_sub(vm, idx, std::slice::from_ref(v)) {
+            Ok(it) => it,
+            Err(e) => return Some(Err(e)),
+        };
+        if pending_exc() {
+            return Some(Ok(Vec::new()));
+        }
+        return Some(match drain_iterable(vm, &it) {
+            Some(r) => r,
+            None => Ok(iteration_elements(&it)),
+        });
+    }
+    if !value_is_a(v, "Iterator") {
+        return None;
+    }
+    let has_next = lookup_overload_exact(inst.class, "hasNext", 0)?;
+    let next = lookup_overload_exact(inst.class, "next", 0)?;
+    let mut out = Vec::new();
+    loop {
+        match invoke_sub(vm, has_next, std::slice::from_ref(v)) {
+            Ok(more) if more.is_truthy() && !pending_exc() => {}
+            Ok(_) => return Some(Ok(out)),
+            Err(e) => return Some(Err(e)),
+        }
+        match invoke_sub(vm, next, std::slice::from_ref(v)) {
+            Ok(x) => out.push(x),
+            Err(e) => return Some(Err(e)),
+        }
+        if pending_exc() {
+            return Some(Ok(out));
+        }
+    }
 }
 
 /// `GWRITEBACK`: pick the value a self-mutating GDK call stores back over its

@@ -295,6 +295,10 @@ pub struct Method {
     pub name: String,
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
+    /// The declared return type, as written (`def` when untyped). Read for one
+    /// run-time decision: a no-argument `isX()` declared `boolean` is the getter
+    /// of the property `x`, which Groovy honours only for the primitive type.
+    pub ret_ty: String,
 }
 
 /// Compound-assignment operator. `Assign` is a plain `=`.
@@ -447,8 +451,8 @@ pub enum Expr {
     /// Invoke the value produced by an arbitrary expression: `callee(args...)`.
     /// This is the postfix call-application that makes chained calls parse —
     /// `f(a)(b)` is `CallValue { callee: Call(f, [a]), args: [b] }` — and lets a
-    /// method result or a bracketed closure be invoked directly. The callee must
-    /// evaluate to a closure handle at runtime; otherwise the call faults.
+    /// method result or a bracketed closure be invoked directly. A callee that
+    /// is not a closure answers its own `call(args)`, as Groovy's does.
     CallValue {
         callee: Box<Expr>,
         args: Vec<Expr>,

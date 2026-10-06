@@ -2975,7 +2975,7 @@ println String.zork('a', 2)
 %%
 println([1, "1", 1.0, 1G, null].count(1)); println([null, null, 1].count(null)); println([[1], [1], [2]].count([1])); println([1, 2, "1"].unique())
 %%
-def sq(y) { y * y }; def f = this.&sq; println([f(3), [1, 2].collect(this.&sq), Math.&max(2, 7), this.sq(5)])
+def s = 'x'; def f = s.&toUpperCase; println([f(), Math.&max(2, 7), [1, -2].collect(Math.&abs)])
 %%
 def s = 'ab'; def u = s.&toUpperCase; s = 'zz'; println u(); def l = []; def a = l.&add; a(1); a(2); println l
 %%

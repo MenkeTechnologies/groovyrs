@@ -1913,6 +1913,11 @@ pub struct RangeVal {
     /// Groovy builds an `IntRange` only from two `Integer`s, and a `Long` range
     /// is a `NumberRange`, with that class's membership and bounds.
     long: bool,
+    /// The first endpoint is excluded too — `a<..b` / `a<..<b`. Only an
+    /// `IntRange` or `NumberRange` carries it; [`b_range`] folds it into the
+    /// endpoints of an `ObjectRange` and into `EmptyRange` where Groovy's
+    /// `createRange` does.
+    excl_left: bool,
 }
 
 /// A registered closure: the body's name-pool index, its parameter count, and
@@ -7051,6 +7056,23 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             return Value::bool(matches!(args[0], Value::Obj(other) if other == id));
         }
     }
+    // `IntRange.equals(IntRange)` compares the fields as written — endpoints and
+    // both inclusivity flags — not the elements, so `(1<..4).equals(2..4)` and
+    // `(1..<4).equals(1..3)` are false where `==` (`DefaultGroovyMethods.equals
+    // (List, List)`) is true. Any other argument falls to `AbstractList.equals`.
+    if method == "equals" && args.len() == 1 {
+        if let (Some(a), Some(b)) = (as_range(&recv), as_range(&args[0])) {
+            let int = |r: &RangeVal| range_class(r) == "groovy.lang.IntRange";
+            if int(&a) && int(&b) {
+                return Value::bool(
+                    values_equal(&a.from, &b.from)
+                        && values_equal(&a.to, &b.to)
+                        && a.inclusive == b.inclusive
+                        && a.excl_left == b.excl_left,
+                );
+            }
+        }
+    }
     // `Object.equals(other)` on a collection. Groovy's `==` *is* `equals`, so the
     // two have to agree; these are the values with no per-type table entry for it
     // (`String`/`Number` have their own, and a user class's own `equals` is
@@ -7560,6 +7582,39 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
                 Value::array(out)
             };
         }
+    }
+    // `s.collectReplacements { ch -> … }` — `StringGroovyMethods`: each
+    // character is handed to the closure, a non-null answer replaces it and a
+    // `null` keeps it.
+    if let (Value::Str(s), "collectReplacements") = (&recv, method) {
+        if args.len() == 1 && closure_meta(&args[0]).is_some() {
+            let mut out = String::with_capacity(s.len());
+            for c in s.chars() {
+                let ch = Value::str(c.to_string());
+                let replacement = match invoke_closure(vm, &args[0], std::slice::from_ref(&ch)) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        fault(vm, e);
+                        return Value::Undef;
+                    }
+                };
+                if pending_exc() {
+                    return Value::Undef;
+                }
+                match replacement {
+                    Value::Undef => out.push(c),
+                    v => out.push_str(&render_value(vm, &v)),
+                }
+            }
+            return Value::str(out);
+        }
+    }
+    // `String.count` is `StringGroovyMethods.count(CharSequence, CharSequence)`
+    // alone — a substring count, with no closure or element overload — so it
+    // must not reach the character iteration below, which would count equal
+    // *characters* and accept a predicate.
+    if let (Value::Str(_), "count") = (&recv, method) {
+        return dispatch_method(vm, &recv, method, &args);
     }
     // A `String` iterates over its characters, so the same closure-driven GDK
     // applies. The `each` family answers the receiver itself, not a list.
@@ -9791,6 +9846,62 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 }
                 None => Value::str(String::new()),
             }
+        }
+        // `CharSequence.takeRight(n)` / `dropRight(n)`: the last `n` characters,
+        // or all but them. A negative count takes nothing and drops nothing.
+        (Value::Str(s), "takeRight" | "dropRight") if args.len() == 1 => {
+            let n = args.first().and_then(as_i64).unwrap_or(0);
+            let cs: Vec<char> = s.chars().collect();
+            let kept: &[char] = match (method, n < 0) {
+                ("takeRight", true) => &[],
+                ("takeRight", false) => &cs[cs.len().saturating_sub(n as usize)..],
+                (_, true) => &cs,
+                (_, false) => &cs[..cs.len().saturating_sub(n as usize)],
+            };
+            Value::str(kept.iter().collect::<String>())
+        }
+        // `StringGroovyMethods.count(CharSequence, CharSequence)`: a scan of
+        // `indexOf` hits stepping one past each, so overlapping occurrences
+        // count (`"aaa".count("aa")` is 2). The loop stops once a hit lands
+        // before the running count — Java's `indexOf("", from)` clamps `from` to
+        // the length, which is what ends the empty needle's walk (GROOVY-5858).
+        (Value::Str(s), "count") if matches!(args, [Value::Str(_)]) => {
+            let hay: Vec<u16> = s.encode_utf16().collect();
+            let needle: Vec<u16> = groovy_str(&args[0]).encode_utf16().collect();
+            let index_of = |from: usize| -> Option<usize> {
+                let from = from.min(hay.len());
+                if needle.is_empty() {
+                    return Some(from);
+                }
+                hay[from..]
+                    .windows(needle.len())
+                    .position(|w| w == needle.as_slice())
+                    .map(|p| p + from)
+            };
+            let mut answer = 0usize;
+            let mut idx = 0usize;
+            while let Some(at) = index_of(idx) {
+                if at < answer {
+                    break;
+                }
+                answer += 1;
+                idx = at + 1;
+            }
+            Value::int(answer as i64)
+        }
+        // `startsWithAny(prefixes…)` / `endsWithAny(suffixes…)`.
+        (Value::Str(s), "startsWithAny" | "endsWithAny")
+            if args.iter().all(|a| matches!(a, Value::Str(_))) =>
+        {
+            let starts = method == "startsWithAny";
+            Value::bool(args.iter().any(|a| {
+                let t = groovy_str(a);
+                if starts {
+                    s.starts_with(t.as_str())
+                } else {
+                    s.ends_with(t.as_str())
+                }
+            }))
         }
         (Value::Str(s), "take" | "drop") => {
             let n = args.first().and_then(as_i64).unwrap_or(0).max(0) as usize;
@@ -13853,18 +13964,89 @@ fn group_integer_digits(text: &str) -> String {
 }
 
 /// `GRANGE`: build a range literal's `groovy.lang.Range` object. Stack: from,
-/// to, inclusive, then whether the compiler saw a `Long` endpoint.
+/// to, inclusive, whether the compiler saw a `Long` endpoint, then whether the
+/// first endpoint is excluded (`a<..b`).
 fn b_range(vm: &mut VM, _argc: u8) -> Value {
+    let excl_left = matches!(vm.stack.pop(), Some(Value::Bool(true)));
     let long = matches!(vm.stack.pop(), Some(Value::Bool(true)));
     let inclusive = matches!(vm.stack.pop(), Some(Value::Bool(true)));
     let to = vm.stack.pop().unwrap_or(Value::Undef);
     let from = vm.stack.pop().unwrap_or(Value::Undef);
-    heap_push(HeapObj::Range(RangeVal {
+    let range = if excl_left {
+        exclusive_left_range(from, to, inclusive, long)
+    } else {
+        RangeVal {
+            from,
+            to,
+            inclusive,
+            long,
+            excl_left: false,
+        }
+    };
+    heap_push(HeapObj::Range(range))
+}
+
+/// The exclusive-left half of `ScriptBytecodeAdapter.createRange`.
+///
+/// - Equal endpoints are an `EmptyRange` on the first one, and so is a range
+///   excluded at both ends whose endpoints are one step apart *and* on the same
+///   side of zero (`5<..<6`; `0<..<-1` stays an `IntRange`, because a list
+///   subscript reads it from the end).
+/// - Two `Integer`s make an inclusive-aware `IntRange`, any other two numbers a
+///   `NumberRange`; both keep the flag.
+/// - Anything else is an `ObjectRange`, which has no flags, so both excluded
+///   endpoints are stepped inward first: `'a'<..'d'` is `b..d`.
+fn exclusive_left_range(from: Value, to: Value, inclusive: bool, long: bool) -> RangeVal {
+    use std::cmp::Ordering;
+    let empty = |at: Value| RangeVal {
+        from: at.clone(),
+        to: at,
+        inclusive: false,
+        long,
+        excl_left: false,
+    };
+    let equal = natural_order(&from, &to) == Ordering::Equal;
+    if equal {
+        return empty(from);
+    }
+    let numeric = |v: &Value| is_number(v);
+    if !inclusive {
+        let ascending = natural_order(&from, &to) == Ordering::Less;
+        let stepped = successor(&from, ascending);
+        let same_sign = if numeric(&from) && numeric(&to) {
+            let zero = Value::int(0);
+            let neg = |v: &Value| natural_order(v, &zero) == Ordering::Less;
+            neg(&from) == neg(&to)
+        } else {
+            true
+        };
+        if same_sign && stepped.is_some_and(|s| natural_order(&s, &to) == Ordering::Equal) {
+            return empty(from);
+        }
+    }
+    if numeric(&from) && numeric(&to) {
+        return RangeVal {
+            from,
+            to,
+            inclusive,
+            long,
+            excl_left: true,
+        };
+    }
+    let mut to = to;
+    if !inclusive {
+        let down = natural_order(&from, &to) == Ordering::Greater;
+        to = successor(&to, down).unwrap_or(to);
+    }
+    let down = natural_order(&from, &to) == Ordering::Greater;
+    let from = successor(&from, !down).unwrap_or(from);
+    RangeVal {
         from,
         to,
-        inclusive,
+        inclusive: true,
         long,
-    }))
+        excl_left: false,
+    }
 }
 
 /// Clone the range behind a handle, if `v` is one.
@@ -13902,18 +14084,19 @@ fn range_bounds(r: &RangeVal) -> (i64, i64) {
     match (as_i64(&r.from), as_i64(&r.to)) {
         (Some(a), Some(b)) => (a, b),
         _ => (
-            as_dec(&r.from)
-                .map(|d| decimal::truncate_to_i64(&d))
-                .unwrap_or(0),
-            as_dec(&r.to)
-                .map(|d| decimal::truncate_to_i64(&d))
-                .unwrap_or(0),
+            range_end_i64(&r.from),
+            range_end_i64(&r.to),
         ),
     }
 }
 
 /// Whether a range counts down — `5..1` and `'e'..'a'` do.
 fn range_is_reverse(r: &RangeVal) -> bool {
+    // Mixed numeric endpoints (`1.5..4`) order by value, not by their
+    // truncations — `1.9..1.5` counts down.
+    if is_number(&r.from) && is_number(&r.to) {
+        return natural_order(&r.from, &r.to) == std::cmp::Ordering::Greater;
+    }
     let (from, to) = range_bounds(r);
     from > to
 }
@@ -13936,28 +14119,59 @@ fn range_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
         (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
-        _ => match (as_dec(a), as_dec(b)) {
-            (Some(x), Some(y)) => Some(decimal::cmp(&x, &y)),
-            _ => None,
-        },
+        // Any two numbers order by value — an `Integer` against a `BigDecimal`
+        // or a `Double` too, which a `1.5..4` walk compares at every step.
+        _ if is_number(a) && is_number(b) => Some(natural_order(a, b)),
+        _ => None,
     }
 }
 
-/// How many values a range enumerates, by Groovy's own arithmetic:
-/// `floor(|to - from|)` plus one when the range is inclusive.
+/// A numeric range endpoint as the integer its walk counts from: an integer
+/// as is, a decimal or a double truncated toward zero.
+fn range_end_i64(v: &Value) -> i64 {
+    match v {
+        Value::Float(f) => *f as i64,
+        _ => as_exact_dec(v)
+            .map(|d| decimal::truncate_to_i64(&d))
+            .unwrap_or(0),
+    }
+}
+
+/// How many values a range enumerates, by each range class's own arithmetic.
 ///
 /// This is *not* always `range_elements(r).len()`, and the difference is
-/// Groovy's, not ours: `(1.5..<4.0).size()` answers 2 while `toList()` walks
-/// three values, because `size` divides the span and the walk steps by one.
+/// Groovy's, not ours — see [`number_range_size`].
 fn range_size(r: &RangeVal) -> i64 {
-    let span = match (as_dec(&r.from), as_dec(&r.to)) {
-        (Some(a), Some(b)) => decimal::truncate_to_i64(&decimal::abs(&decimal::sub(&b, &a))),
+    match range_class(r) {
+        // `IntRange.size`: `max(getTo() - getFrom() + 1, 0)` over the bounds
+        // the exclusions already adjusted.
+        "groovy.lang.IntRange" => {
+            let lo = as_i64(&range_lower(r)).unwrap_or(0);
+            let hi = as_i64(&range_upper(r)).unwrap_or(0);
+            (hi - lo + 1).max(0)
+        }
+        "groovy.lang.NumberRange" => number_range_size(r),
         _ => {
             let (a, b) = range_bounds(r);
-            (b - a).abs()
+            (b - a).abs() + i64::from(r.inclusive)
         }
+    }
+}
+
+/// `NumberRange.calcSize`. With integral or decimal bounds it is arithmetic:
+/// the *normalised* lower bound steps up by one when the left end is excluded,
+/// the upper one down when the right end is, and the difference truncates
+/// toward zero before one is added — so `(1.5..<4.0).size()` is 2 while the
+/// walk yields three values, and `(1.0<..1.5).size()` is 1 while it yields
+/// none. Those are Groovy's answers. A `Double` bound is counted by walking.
+fn number_range_size(r: &RangeVal) -> i64 {
+    let (Some(lo), Some(hi)) = (as_exact_dec(&range_lower(r)), as_exact_dec(&range_upper(r))) else {
+        return range_elements(r).len() as i64;
     };
-    span + i64::from(r.inclusive)
+    let one = decimal::from_i64(1);
+    let from = if r.excl_left { decimal::add(&lo, &one) } else { lo };
+    let to = if r.inclusive { hi } else { decimal::sub(&hi, &one) };
+    decimal::truncate_to_i64(&decimal::sub(&to, &from)) + 1
 }
 
 /// Whether a range enumerates nothing — only an exclusive range with equal
@@ -13992,12 +14206,13 @@ fn range_bound(r: &RangeVal, upper: bool) -> Value {
     // The end an exclusive walk stops short of is always the *second* endpoint
     // written, whichever side of the order that puts it on. An inclusive range,
     // an empty one, and a `NumberRange` all report their endpoint unadjusted.
-    let excluded = !r.inclusive
-        && !range_is_empty(r)
-        && range_class(r) != "groovy.lang.NumberRange"
-        && upper != desc;
-    if excluded {
+    let adjusts = !range_is_empty(r) && range_class(r) != "groovy.lang.NumberRange";
+    if adjusts && !r.inclusive && upper != desc {
         successor(end, desc).unwrap_or_else(|| end.clone())
+    } else if adjusts && r.excl_left && upper == desc {
+        // `IntRange.getFrom`/`getTo`: an excluded FIRST endpoint (`a<..b`)
+        // steps inward from whichever side of the order it sits on.
+        successor(end, !desc).unwrap_or_else(|| end.clone())
     } else {
         end.clone()
     }
@@ -14013,6 +14228,9 @@ fn successor(v: &Value, forward: bool) -> Option<Value> {
     let delta: i64 = if forward { 1 } else { -1 };
     match v {
         Value::Int(n) => Some(Value::int(n.wrapping_add(delta))),
+        // `Double.next()` is `plus(1)`, still a `Double` — what a `1.5d..4d`
+        // walk steps by.
+        Value::Float(f) => Some(Value::float(f + delta as f64)),
         Value::Str(s) => {
             let mut chars: Vec<char> = s.chars().collect();
             let last = chars.pop()?;
@@ -14040,6 +14258,13 @@ fn range_elements(r: &RangeVal) -> Vec<Value> {
     let desc = range_is_reverse(r);
     let mut out = Vec::new();
     let mut cur = r.from.clone();
+    // An excluded first endpoint (`a<..b`) starts the walk one step in.
+    if r.excl_left {
+        match successor(&cur, !desc) {
+            Some(next) => cur = next,
+            None => return out,
+        }
+    }
     // Walk from the endpoint written first toward the other one, stepping with
     // `next`/`previous`. Stepping rather than renumbering is what keeps the
     // element *type* — `1.5..4.0` walks `1.5, 2.5, 3.5`, not `1, 2, 3`.
@@ -14086,6 +14311,21 @@ fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]
         // of the endpoints, not of the `..<` form: `(1..<5).isReverse()` is
         // false.
         "isReverse" => Value::bool(range_reported_reverse(r)),
+        // The inclusivity flags an `IntRange` / `NumberRange` built from a
+        // literal carries (`getInclusive` is the right one).
+        "getInclusiveLeft" | "getInclusiveRight" | "getInclusive"
+            if args.is_empty()
+                && matches!(
+                    range_class(r),
+                    "groovy.lang.IntRange" | "groovy.lang.NumberRange"
+                ) =>
+        {
+            Value::bool(if method == "getInclusiveLeft" {
+                !r.excl_left
+            } else {
+                r.inclusive
+            })
+        }
         "toString" => Value::str(range_str(r)),
         "inspect" => Value::str(range_inspect(r)),
         "size" | "getSize" => Value::int(range_size(r)),
@@ -14181,6 +14421,7 @@ fn range_sublist(vm: &mut VM, r: &RangeVal, args: &[Value]) -> Option<Value> {
             to: lower,
             inclusive: false,
             long: r.long,
+            excl_left: false,
         })));
     }
     let mut asc = range_elements(r);
@@ -14200,6 +14441,7 @@ fn range_sublist(vm: &mut VM, r: &RangeVal, args: &[Value]) -> Option<Value> {
         to: b,
         inclusive: true,
         long: r.long,
+        excl_left: false,
     })))
 }
 
@@ -14822,6 +15064,22 @@ fn normalize_range_index(r: &RangeVal, len: usize) -> Option<Value> {
     let (from, to) = (as_i64(&r.from)?, as_i64(&r.to)?);
     let norm = |i: i64| if i < 0 { len as i64 + i } else { i };
     let (a, mut b) = (norm(from), norm(to));
+    // An exclusive-left subscript is `IntRange.subListBorders` with
+    // `inclusiveLeft` false: the half-open window `[lo, hi)`, walked backwards
+    // when the resolved endpoints are descending — `l[0<..<-1]` drops the first
+    // and last elements.
+    if r.excl_left {
+        let (lo, hi, rev) = if a > b {
+            (if r.inclusive { b } else { b + 1 }, a, true)
+        } else {
+            (a + 1, if r.inclusive { b + 1 } else { b }, false)
+        };
+        let mut idxs: Vec<Value> = (lo..hi.max(lo)).map(Value::Int).collect();
+        if rev {
+            idxs.reverse();
+        }
+        return Some(Value::array(idxs));
+    }
     if !r.inclusive {
         // An exclusive range drops its endpoint. When the endpoints coincide
         // that leaves NOTHING — `l[0..<0]` is `[]`, not a range that has
@@ -14874,9 +15132,10 @@ fn range_rendered(r: &RangeVal, render: impl Fn(&Value) -> String) -> String {
         return format!("{}..{}", render(&r.from), render(&last));
     }
     format!(
-        "{}{}{}",
+        "{}{}..{}{}",
         render(&r.from),
-        if r.inclusive { ".." } else { "..<" },
+        if r.excl_left { "<" } else { "" },
+        if r.inclusive { "" } else { "<" },
         render(&r.to)
     )
 }
@@ -15309,6 +15568,16 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
         return match name {
             "from" => range_lower(&r),
             "to" => range_upper(&r),
+            // The boolean getters, read as properties: `r.reverse` is
+            // `isReverse()`, `r.inclusiveLeft` is `getInclusiveLeft()`.
+            "reverse" => Value::bool(range_reported_reverse(&r)),
+            "inclusiveLeft" | "inclusiveRight" | "inclusive" => {
+                let getter = format!("get{}{}", name[..1].to_uppercase(), &name[1..]);
+                match dispatch_range_method(vm, &r, &getter, &[]) {
+                    Some(v) => v,
+                    None => dispatch_property(vm, &Value::array(range_elements(&r)), name),
+                }
+            }
             _ => dispatch_property(vm, &Value::array(range_elements(&r)), name),
         };
     }

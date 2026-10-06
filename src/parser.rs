@@ -1802,6 +1802,22 @@ impl Parser {
                 self.advance();
                 false
             }
+            // An exclusive-left range walks the elements the range object
+            // enumerates, whose first element depends on the endpoints' class
+            // (`IntRange`, `NumberRange`, `ObjectRange`, `EmptyRange`) — so it
+            // iterates the built range rather than the counted loop below.
+            Tok::LtDotDot | Tok::LtDotDotLt => {
+                let inclusive = matches!(self.peek(), Tok::LtDotDot);
+                self.advance();
+                let end = self.binary(0)?;
+                let range = Expr::Range {
+                    start: Box::new(start),
+                    end: Box::new(end),
+                    inclusive,
+                    exclusive_left: true,
+                };
+                return self.for_in_sequence(line, var, range);
+            }
             // Not a range: `for (x in <collection>)`, desugared below.
             _ => return self.for_in_sequence(line, var, start),
         };
@@ -2095,10 +2111,8 @@ impl Parser {
     /// (`0..n-1` is `0..(n-1)`, but `1..3 as List` casts the whole range).
     fn range_expr(&mut self) -> Result<Expr, String> {
         let start = self.binary(RANGE_OPERAND_BP)?;
-        let inclusive = match self.peek() {
-            Tok::DotDot => true,
-            Tok::DotDotLt => false,
-            _ => return self.binary_from(start, 0),
+        let Some((exclusive_left, inclusive)) = range_op(self.peek()) else {
+            return self.binary_from(start, 0);
         };
         self.advance();
         self.skip_newlines();
@@ -2107,6 +2121,7 @@ impl Parser {
             start: Box::new(start),
             end: Box::new(end),
             inclusive,
+            exclusive_left,
         };
         // A range is itself an operand of anything below the shift band, so the
         // precedence loop resumes over it (`1..3 as List`, `(1..3) == r`).
@@ -2231,8 +2246,9 @@ impl Parser {
             // unconsumed and `1 in 1..3` a parse error. An operator that binds
             // TIGHTER than the range takes the endpoint instead and must not
             // absorb it: `1 + 1..3` is `(1 + 1)..3`, measured.
-            let rhs = if bp <= RELATIONAL_BP && matches!(self.peek(), Tok::DotDot | Tok::DotDotLt) {
-                let inclusive = matches!(self.peek(), Tok::DotDot);
+            let rhs = if let Some((exclusive_left, inclusive)) =
+                range_op(self.peek()).filter(|_| bp <= RELATIONAL_BP)
+            {
                 self.advance();
                 self.skip_newlines();
                 let end = self.binary(RANGE_OPERAND_BP)?;
@@ -2240,6 +2256,7 @@ impl Parser {
                     start: Box::new(rhs),
                     end: Box::new(end),
                     inclusive,
+                    exclusive_left,
                 }
             } else {
                 rhs
@@ -3383,6 +3400,18 @@ fn binop(t: &Tok) -> Option<(BinOp, u8)> {
     })
 }
 
+/// The range operator at `t`, as `(exclusive_left, inclusive)`: `..`, `..<`,
+/// `<..` and `<..<`.
+fn range_op(t: &Tok) -> Option<(bool, bool)> {
+    Some(match t {
+        Tok::DotDot => (false, true),
+        Tok::DotDotLt => (false, false),
+        Tok::LtDotDot => (true, true),
+        Tok::LtDotDotLt => (true, false),
+        _ => return None,
+    })
+}
+
 /// The binding power of `**`, the tightest band — tighter than the prefix
 /// operators, which is why a prefix parses its operand up to here.
 const POWER_BP: u8 = 12;
@@ -3537,10 +3566,12 @@ fn expr_text(e: &Expr) -> String {
             start,
             end,
             inclusive,
+            exclusive_left,
         } => format!(
-            "({}{}{})",
+            "({}{}..{}{})",
             expr_text(start),
-            if *inclusive { ".." } else { "..<" },
+            if *exclusive_left { "<" } else { "" },
+            if *inclusive { "" } else { "<" },
             expr_text(end)
         ),
         // The condition is wrapped once here and again by its own `getText`

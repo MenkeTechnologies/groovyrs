@@ -757,7 +757,7 @@ this file.
   (`[1, 2, 3].with { collect { it + 1 } }`) is a parse error.
 
 **Operators and literals:** `"${-> x}"` (a lazy GString closure) is a parse
-error; the exclusive-left ranges `1<..4` and `1<..<4` are parse errors.
+error.
 
 **Missing GDK methods** (`MissingMethodException` where Groovy answers):
 `String.lines`, `eachPermutation`, `Map.toSpreadMap`, `asReversed`, `shuffled`,

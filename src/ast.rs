@@ -526,6 +526,8 @@ pub enum Expr {
         start: Box<Expr>,
         end: Box<Expr>,
         inclusive: bool,
+        /// `a<..b` / `a<..<b`: the first endpoint is excluded too.
+        exclusive_left: bool,
     },
     /// The ternary conditional `cond ? then : els`. `cond` uses Groovy
     /// truthiness (0/""/empty/null are false).

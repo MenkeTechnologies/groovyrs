@@ -3309,6 +3309,7 @@ impl Compiler {
                 start,
                 end,
                 inclusive,
+                exclusive_left,
             } => {
                 // Materialise to a Groovy list of the enumerated values. This
                 // goes through the host rather than the native `Op::Range`
@@ -3332,6 +3333,14 @@ impl Compiler {
                 let long = self.is_wide(start) || self.is_wide(end);
                 self.b.emit(
                     if long { Op::LoadTrue } else { Op::LoadFalse },
+                    self.cur_line,
+                );
+                self.b.emit(
+                    if *exclusive_left {
+                        Op::LoadTrue
+                    } else {
+                        Op::LoadFalse
+                    },
                     self.cur_line,
                 );
                 self.emit_call_builtin(crate::host::GRANGE, 0, self.cur_line)?;

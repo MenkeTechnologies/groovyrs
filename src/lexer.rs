@@ -102,6 +102,8 @@ pub enum Tok {
     Dot,
     DotDot,      // `..` inclusive range
     DotDotLt,    // `..<` half-open range
+    LtDotDot,    // `<..` exclusive-left range (Groovy 4+)
+    LtDotDotLt,  // `<..<` exclusive at both ends
     Ellipsis,    // `...` varargs parameter
     Arrow,       // `->` closure parameter separator
     Question,    // `?` ternary
@@ -581,7 +583,27 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         // the window ends inside a multi-byte character — `println("١٢")` puts
         // one two bytes past a `(`, and no operator spans a non-ASCII byte
         // anyway.
-        // `>>>=` is the only four-character operator, and it has to be matched
+        // `<..<` and `<..` — the exclusive-left ranges — ahead of `<` and of
+        // `<=`/`<<`, none of which can be followed by `..` in valid source.
+        if src.get(i..i + 4).unwrap_or("") == "<..<" {
+            out.push(Token {
+                kind: Tok::LtDotDotLt,
+                line,
+                offset: tok_start,
+            });
+            i += 4;
+            continue;
+        }
+        if src.get(i..i + 3).unwrap_or("") == "<.." {
+            out.push(Token {
+                kind: Tok::LtDotDot,
+                line,
+                offset: tok_start,
+            });
+            i += 3;
+            continue;
+        }
+        // `>>>=` is the other four-character operator, and it has to be matched
         // before `>>>` claims its first three characters and leaves a bare `=`.
         if src.get(i..i + 4).unwrap_or("") == ">>>=" {
             out.push(Token {

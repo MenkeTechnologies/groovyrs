@@ -429,10 +429,10 @@ Implemented and checked against Apache Groovy:
   `class java.lang.Integer` and answers `name`/`simpleName`/`canonicalName`.
 - **`String.toBigDecimal()`** — `new BigDecimal(text.trim())`, with the exact
   scale and `BigDecimal`'s own character-level `NumberFormatException` messages.
-- **Ranges** — `0..5` / `0..<5`, descending (`5..1`), character (`'a'..'e'`) and
-  decimal (`1.5..4.0`), as a real `groovy.lang.Range`: it prints `1..5`,
+- **Ranges** — `0..5` / `0..<5`, the exclusive-left `1<..5` / `1<..<5`, descending (`5..1`), character (`'a'..'e'`) and
+  decimal or mixed (`1.5..4.0`, `1.5..4`), as a real `groovy.lang.Range`: it prints `1..5`,
   `getClass()` names `IntRange`/`ObjectRange`/`NumberRange`/`EmptyRange`, and
-  `from`/`to`/`step(n)`/`reverse()`/`size()`/`contains(x)`/`isReverse()` are its
+  `from`/`to`/`step(n)`/`reverse()`/`size()`/`contains(x)`/`isReverse()`/`containsWithinBounds(x)` and the `inclusiveLeft`/`inclusiveRight` flags are its
   own members — with `from`/`to` reporting the bounds of what is enumerated, so
   `(4..0).from` is 0 and `(0..<4).to` is 3. The walk steps with `next`/`previous`
   and so keeps the element type (`1.5..4.0` is `[1.5, 2.5, 3.5]`). A `Long`

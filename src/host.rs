@@ -13190,7 +13190,7 @@ fn static_field(class: &str, name: &str) -> Option<Value> {
         ("Float", "MAX_EXPONENT") => Value::int(127),
         ("Float", "MIN_EXPONENT") => Value::int(-126),
         // A `char` is a one-character `String` here (BUGS.md, *Java `char`*), so
-        // `Character`'s bounds are the code points `' '` and `'￿'`.
+        // `Character`'s bounds are the code points `'\u0000'` and `'\uFFFF'`.
         // `java.math.RoundingMode`'s constants. Each is its own name as a
         // `String`: that is what an enum constant *prints*, what
         // `BigDecimal.setScale` reads back here, and what comparing two of them

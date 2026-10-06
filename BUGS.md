@@ -724,6 +724,76 @@ the `break` is never reached. A `BigDecimal` with an extreme scale
 in Groovy too, and `while (true) { try { return 1 } finally { continue } }` is an
 infinite loop on both sides.
 
+## Found by a differential sweep against Groovy 6.0.0 — open
+
+Measured against Apache Groovy 6.0.0 on JVM 21.0.12 (`JAVA_HOME` pinned to
+`openjdk@21`). Each line was run on both sides; none is documented elsewhere in
+this file.
+
+**Declarations that do not parse or do not resolve:**
+
+- `enum Color { RED, GREEN }` — every `enum` declaration is a parse error
+  (`expected end of statement but found LBrace`).
+- Method pointers and references: `this.&sq`, `Math.&abs`, `String.&toUpperCase`
+  and `Integer::sum` are parse errors.
+- A *method's* default parameter (`def m(a, b = 5)`) and varargs parameter
+  (`def m(String... xs)`) are parse errors; a closure's are supported.
+- `class Outer { static class Inner { … } }` — a nested class is a parse error.
+- A script-declared class's static members through the class name:
+  `P.K` (a `static final` field) raises `NullPointerException`, and a
+  constructor that bumps a `static int n` (`Q() { n++ }`) raises
+  `Cannot execute null+1`. (`P.make()` is the documented static-method entry.)
+- A user setter: `class P { def x = 1; def setX(v) { x = v * 10 } }` then
+  `p.x = 2` recurses into `StackOverflowError`; Groovy writes the field from
+  inside the setter and prints `20`.
+- A boolean `isOk()` getter is not read as the property `ok`, and a user class
+  answering `iterator()` is iterated by `for (x in obj)` as one element.
+- `obj.hasProperty('a')`, and `c(4)` on an instance whose class declares
+  `call(x)`, are not dispatched.
+- A trait method calling a method only the implementing class declares
+  (`trait T { def greet() { name() } }`) is `unresolved reference`.
+- Inside a closure, a bare call with only a trailing closure
+  (`[1, 2, 3].with { collect { it + 1 } }`) is a parse error.
+
+**Operators and literals:** `===` / `!==` are parse errors; `"${-> x}"` (a
+lazy GString closure) is a parse error; the exclusive-left ranges `1<..4` and
+`1<..<4` are parse errors.
+
+**Missing GDK methods** (`MissingMethodException` where Groovy answers):
+`String.unexpand`, `String.lines`, `String.toCharacter`, the instance spelling
+`"a%sb".format("x")`, `List.chop`, `eachPermutation`, `Map.toSpreadMap`,
+`List.zip`, `asReversed`, `partitionPoint`, `shuffled`, `List.stream()`,
+`Range.by(n)`, `Range.containsWithinBounds`, `BigDecimal.step(to, step) { … }`,
+a plain `isCase` call (`5.isCase(5)`, `Integer.isCase(5)`),
+`Double.toBigDecimal()` (`3.14d.toBigDecimal()` is `3.14`). `Eval.me` raises
+`MissingPropertyException` and `new Expando()` is `unable to resolve class`.
+
+**Wrong values:**
+
+- `[1, 2, 3].asImmutable()` does not refuse a later `<< 4` (Groovy raises
+  `UnsupportedOperationException`), and reports `java.util.ArrayList` /
+  `LinkedHashMap` instead of `Collections$UnmodifiableRandomAccessList` /
+  `UnmodifiableMap`.
+- `[1, 2, '2'].unique()` is `[1, 2]` and `[1, 1.0].toSet().size()` is `1`;
+  Groovy keeps both (`[1, 2, 2]`, `2`) — `unique` and the hashed collections
+  still equate a `String` with a number, or two numbers of different classes,
+  where `==`, `contains` and `count` no longer do.
+- `[1, 2, 3].first(2)` / `last(2)` answer one element; Groovy has no such
+  overload and raises `MissingMethodException`.
+
+**The probe corpus under 6.0.0.** `parity-scripts/probes.txt` was captured on
+Groovy 5.x, and 13 of its 1,199 compared probes miss under 6.0.0 — identically
+on the pre-sweep and the post-sweep build. Eight are Groovy 6 semantics the
+corpus predates: a `for (x in …)` loop variable is captured *per iteration* by
+a closure (`for (x in 0..2) a << { x }` collects `[0, 1, 2]`, groovyrs
+`[2, 2, 2]`; five probes), an arrow `switch` with no matching arm raises
+`IllegalStateException`, `"x${1..3}y"` renders the range as `1..3`, and
+`map.putAt(k, v)` answers `v`. Two are the documented Java cast and GString
+class. `println ++i` raises `MissingPropertyException` in Groovy (it parses as
+`println++`) and prints `6` here. And `println(null + 1)` / `println(null + [1])`
+print `null` before the `NullPointerException` reaches the `catch` — the
+`println` still runs on the failed operand.
+
 ## Not implemented (errors today)
 
 - **`java.lang.Character` is a one-character `String`.** groovyrs has no

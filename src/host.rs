@@ -5042,6 +5042,13 @@ fn is_case(vm: &mut VM, label: &Value, subject: &Value) -> Value {
             items.iter().any(|v| java_equals(v, &subject))
         }));
     }
+    // `DefaultGroovyMethods.isCase(Map, Object)`: the subject is a key the map
+    // holds *and* whose value is Groovy-true (GROOVY-9848 guards the `get` with
+    // `containsKey`), so `case [a: 1]:` matches `'a'` and not `[a: 1]`.
+    if is_omap(&label) {
+        let hit = omap_get(&label, &groovy_str(&subject)).flatten();
+        return Value::bool(hit.is_some_and(|v| groovy_truthy(vm, &v)));
+    }
     // `case null:` matches only null; otherwise Groovy's `equals`.
     if matches!(label, Value::Undef) || matches!(subject, Value::Undef) {
         return Value::bool(matches!(label, Value::Undef) && matches!(subject, Value::Undef));
@@ -7005,6 +7012,9 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             "asBoolean" if args.is_empty() => Value::bool(false),
             // `Object.is` answers on `NullObject` too: `null.is(x)` is `x == null`.
             "is" if args.len() == 1 => Value::bool(matches!(args[0], Value::Undef)),
+            // `null.isCase(x)` is `DefaultGroovyMethods.isCase(Object, Object)`
+            // reached through `NullObject`: a match only for `null`.
+            "isCase" if args.len() == 1 => Value::bool(matches!(args[0], Value::Undef)),
             // The DGM iteration methods declared on `Object` walk
             // `InvokerHelper.asIterator(null)`, an empty iterator, so they answer
             // as over an empty collection: `null.collect { }` is `[]`,
@@ -7750,6 +7760,57 @@ fn dispatch_iteration(
             let changed = kept.len() != items.len();
             set_mutated(Value::array(kept));
             Some(Ok(Value::bool(changed)))
+        }
+        // `list.partitionPoint([range,] { pred })` — a port of
+        // `DefaultGroovyMethods.partitionPoint`: a binary search for the first
+        // index (within the range's `subListBorders`) whose element fails the
+        // predicate, assuming the list is partitioned by it. An empty list
+        // answers 0 without consulting the closure.
+        "partitionPoint" => {
+            let clo = args.last()?;
+            closure_meta(clo)?;
+            let (lo, hi) = match args.len() {
+                1 if items.is_empty() => return Some(Ok(Value::int(0))),
+                1 => (0, items.len() as i64),
+                2 => {
+                    let r = as_range(&args[0])?;
+                    // A reversed or negative-index range goes through
+                    // `subListBorders`' normalisation, which is not modeled.
+                    if range_class(&r) != "groovy.lang.IntRange" || range_is_reverse(&r) {
+                        return None;
+                    }
+                    let (a, b) = (as_i64(&range_lower(&r))?, as_i64(&range_upper(&r))?);
+                    if a < 0 || b + 1 < a || b + 1 > items.len() as i64 {
+                        let msg = format!(
+                            "Range [{a}, {}) out of bounds for length {}",
+                            b + 1,
+                            items.len()
+                        );
+                        raise(vm, "IndexOutOfBoundsException", &msg);
+                        return Some(Ok(Value::Undef));
+                    }
+                    (a, b + 1)
+                }
+                _ => return None,
+            };
+            let (mut result, mut left, mut right) = (lo, lo, hi - 1);
+            while left <= right {
+                let mid = left + (right - left) / 2;
+                let hit = match invoke_closure(vm, clo, &item_args(clo, &items[mid as usize])) {
+                    Ok(v) => groovy_truthy(vm, &v),
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                if hit {
+                    result = mid + 1;
+                    left = mid + 1;
+                } else {
+                    right = mid - 1;
+                }
+            }
+            Some(Ok(Value::int(result)))
         }
         // `list.each { it -> ... }` — run the closure for its side effects on
         // each element; the list itself is returned.
@@ -9112,6 +9173,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         }
     }
     match (recv, method) {
+        // `x.isCase(y)` spelled as a call is the same test a `switch` label and
+        // `grep` apply — one implementation, [`is_case`].
+        (_, "isCase") if args.len() == 1 => is_case(vm, recv, &args[0]),
         // Universal size query (String chars / list elements / map entries) —
         // for the values that HAVE one. A number does not: `42.size()` is a
         // `MissingMethodException` in Groovy, and answering `0` here (which is
@@ -9606,6 +9670,44 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 read_lines(s).iter().map(|l| expand_tabs(l, stop)).collect();
             Value::str(expanded.join("\n"))
         }
+        // `s.unexpand([tabStop])` — `StringGroovyMethods.unexpand`: each line is
+        // cut into tab-stop-long pieces and a piece's trailing whitespace run
+        // becomes one tab. The line terminator is normalized to `\n`, and a
+        // trailing one is kept only if the receiver had it.
+        (Value::Str(s), "unexpand") => {
+            if s.is_empty() {
+                return recv.clone();
+            }
+            let stop = args.first().and_then(as_i64).unwrap_or(8).max(1) as usize;
+            let mut out: String = read_lines(s)
+                .iter()
+                .map(|l| unexpand_line(l, stop) + "\n")
+                .collect();
+            if !s.ends_with('\n') {
+                out.pop();
+            }
+            Value::str(out)
+        }
+        // `s.toCharacter()` is `s.charAt(0)`; a `char` is a one-character
+        // `String` here (BUGS.md, *Java `char`*).
+        (Value::Str(s), "toCharacter") if args.is_empty() => match s.chars().next() {
+            Some(c) => Value::str(c.to_string()),
+            None => {
+                raise(
+                    vm,
+                    "StringIndexOutOfBoundsException",
+                    "Index 0 out of bounds for length 0",
+                );
+                Value::Undef
+            }
+        },
+        // `"…".format(fmt, args…)` is the *static* `String.format` reached
+        // through an instance, so the receiver is ignored and the first
+        // argument is the format — `"a%sb".format("x")` is `x`. A first
+        // argument that is not a `String` matches no overload.
+        (Value::Str(_), "format") if args.first().is_some_and(|f| matches!(f, Value::Str(_))) => {
+            Value::str(java_format(vm, &groovy_str(&args[0]), &args[1..]))
+        }
         // `normalize` folds CRLF and lone CR to LF; `denormalize` puts the
         // platform's line separator back (which is LF here).
         (Value::Str(s), "normalize" | "denormalize") => {
@@ -9784,6 +9886,12 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `head`/`first` raise on an empty list; `tail`/`init` are the
         // complementary slices and raise for the same reason. Each carries the
         // wording its own GDK method uses.
+        // None of the five takes an argument — the GDK spells a count `take`,
+        // `takeRight`, `drop` and `dropRight` — so `[1, 2, 3].first(2)` is a
+        // `MissingMethodException`, not a slice.
+        (Value::Array(_), "first" | "head" | "last" | "tail" | "init") if !args.is_empty() => {
+            raise_missing_method(vm, recv, method, args)
+        }
         (Value::Array(a), "first" | "head" | "last" | "tail" | "init") => {
             if a.is_empty() {
                 raise(
@@ -10080,6 +10188,19 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             items: s.chars().map(|c| Value::str(c.to_string())).collect(),
             pos: 0,
         }),
+        // `Iterable.zip(Iterable)` (Groovy 5+): the pairs of the two walks, as
+        // long as the shorter one. Each pair is a `Tuple2`, which prints and
+        // compares as the two-element list it is.
+        (Value::Array(a), "zip") if args.len() == 1
+            && (is_list(&args[0]) || as_range(&args[0]).is_some() || as_set(&args[0]).is_some()) => {
+            let other = iteration_elements(&args[0]);
+            Value::array(
+                a.iter()
+                    .zip(other)
+                    .map(|(x, y)| Value::array(vec![x.clone(), y]))
+                    .collect(),
+            )
+        }
         // `list.takeRight(n)` / `dropRight(n)` — `take`/`drop` from the end.
         (Value::Array(a), "takeRight" | "dropRight") => {
             let n = (args.first().and_then(as_i64).unwrap_or(0).max(0) as usize).min(a.len());
@@ -10627,6 +10748,12 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
         }
         // ── Double ──
+        // `NumberMath.toBigDecimal` reads a `Double` through its `toString`
+        // (`new BigDecimal(d.toString())`), so `3.14d.toBigDecimal()` is `3.14`,
+        // not the binary expansion, and `1e20d` is `1.0E+20`.
+        (Value::Float(f), "toBigDecimal") if args.is_empty() => {
+            float_text_to_decimal(vm, &decimal::format_double(*f))
+        }
         (Value::Float(f), "abs") => Value::float(f.abs()),
         (Value::Float(f), "round") if args.is_empty() => Value::int(java_round(*f)),
         // `d.round(n)` keeps `n` decimal places and stays a `double`; `trunc(n)`
@@ -10696,6 +10823,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // Already a `Float`; widening and re-narrowing would be a
                 // round trip through a wider type for no change.
                 "floatValue" | "toFloat" => recv.clone(),
+                // `Float.toString` is what `NumberMath.toBigDecimal` reads, so
+                // `3.14f.toBigDecimal()` is `3.14`.
+                "toBigDecimal" if args.is_empty() => {
+                    float_text_to_decimal(vm, &decimal::format_float(f))
+                }
                 // The GDK operations that answer the receiver's OWN type:
                 // `(-5.5f).abs()`, `5.55f.round(1)` and `5.55f.trunc()` are all
                 // `Float`. `round()` with no argument is not one of them — it
@@ -11699,6 +11831,24 @@ fn bit_op_values(vm: &mut VM, op: &str, lhs: &Value, rhs: &Value) -> Value {
 /// two's-complement `not`, which is `-x - 1` at any width.
 fn b_bitnot(vm: &mut VM, _argc: u8) -> Value {
     let v = vm.stack.pop().unwrap_or(Value::Undef);
+    bit_not_value(vm, &v)
+}
+
+/// `InvokerHelper.bitwiseNegate`: an integer's complement, a `String`'s
+/// `Pattern`, an `ArrayList` negated element by element (`~[1, 2]` is
+/// `[-2, -3]`), and `bitwiseNegate()` dispatched on anything else.
+fn bit_not_value(vm: &mut VM, v: &Value) -> Value {
+    let v = v.clone();
+    if java_class_name(&v) == "java.util.ArrayList" {
+        let mut out = Vec::new();
+        for e in iteration_elements(&v) {
+            out.push(bit_not_value(vm, &e));
+            if pending_exc() {
+                return Value::Undef;
+            }
+        }
+        return glist(out);
+    }
     if let Some(n) = plain_int(&v) {
         return Value::int(!n);
     }
@@ -11707,8 +11857,20 @@ fn b_bitnot(vm: &mut VM, _argc: u8) -> Value {
             return bigint_value(r);
         }
     }
-    // Groovy's `~` desugars to `bitwiseNegate()`, and reports the operand under
-    // that name. It is unary, so the "argument" it blames is the operand itself.
+    // `StringGroovyMethods.bitwiseNegate(CharSequence)` is `Pattern.compile`,
+    // so `~text` is the same `Pattern` a `~/…/` literal builds.
+    if let Value::Str(s) = &v {
+        vm.stack.push(Value::str(s.to_string()));
+        return b_regex(vm, 1);
+    }
+    // Groovy's `~` desugars to `bitwiseNegate()`. A receiver that is not a
+    // `Number` has no such method, and the miss names no arguments
+    // (`~true` is `bitwiseNegate for class: java.lang.Boolean … ()`).
+    if !matches!(v, Value::Undef) && !is_number(&v) {
+        return raise_missing_method(vm, &v, "bitwiseNegate", &[]);
+    }
+    // A number reports the operand under that name. It is unary, so the
+    // "argument" it blames is the operand itself.
     raise_operator_operand(vm, "bitwiseNegate", &v, &v)
 }
 
@@ -13935,6 +14097,9 @@ fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]
             r,
             &args.first().cloned().unwrap_or(Value::Undef),
         )),
+        "containsWithinBounds" if args.len() == 1 => {
+            Value::bool(range_contains_within_bounds(r, &args[0]))
+        }
         // `AbstractCollection.containsAll` asks the range's own `contains` for
         // each item, so an `IntRange` refuses `1.0` here too.
         "containsAll" => {
@@ -16389,6 +16554,27 @@ fn expand_tabs(line: &str, stop: usize) -> String {
     out
 }
 
+/// One line of `unexpand` — a port of `StringGroovyMethods.unexpandLine`. The
+/// line is walked in `stop`-long pieces; a piece ending in whitespace has that
+/// run replaced by a tab, and the walk resumes just past the tab.
+fn unexpand_line(line: &str, stop: usize) -> String {
+    let mut b: Vec<char> = line.chars().collect();
+    let mut index = 0usize;
+    while index + stop < b.len() {
+        let piece = &b[index..index + stop];
+        let count = piece.iter().rev().take_while(|c| java_is_whitespace(**c)).count();
+        if count > 0 {
+            let mut repl: Vec<char> = piece[..stop - count].to_vec();
+            repl.push('\t');
+            b.splice(index..index + stop, repl);
+            index = index + stop - (count - 1);
+        } else {
+            index += stop;
+        }
+    }
+    b.into_iter().collect()
+}
+
 /// Expand a `tr` character set: `a-c` becomes `abc` and a reversed `c-a` becomes
 /// `cba`; a hyphen with no character on one side of it stays literal.
 fn expand_hyphen(spec: &str) -> Vec<char> {
@@ -16983,5 +17169,70 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
             "groovyrs: unary `-` is not defined for `{}`",
             groovy_str(a)
         )),
+    }
+}
+
+/// `new BigDecimal(text)` over a floating value's `toString`. `NaN` and the
+/// infinities are not decimal text, so they raise `NumberFormatException` the
+/// way the constructor does.
+fn float_text_to_decimal(vm: &mut VM, text: &str) -> Value {
+    match decimal::parse_java(text) {
+        Ok(d) => dec_value(d),
+        Err(msg) => {
+            raise_opt(vm, "NumberFormatException", msg.as_deref());
+            Value::Undef
+        }
+    }
+}
+
+/// `Range.containsWithinBounds(value)` — whether `value` lies in the continuous
+/// interval between the bounds, not whether the range enumerates it. Each class
+/// answers its own way:
+///
+/// - `IntRange`: a `Number` compares against `getFrom()`/`getTo()` (so `2.5` is
+///   within `1..3`); anything else falls back to `contains`.
+/// - `ObjectRange`: a comparable value equal to the lower bound, or above it
+///   and not above the upper one; anything else is `contains`.
+/// - `NumberRange`: strictly between the bounds, with each end admitted only
+///   when inclusive — the written-right end is the lower one of a reversed range.
+fn range_contains_within_bounds(r: &RangeVal, value: &Value) -> bool {
+    use std::cmp::Ordering;
+    let lower = range_lower(r);
+    let upper = range_upper(r);
+    let numeric = matches!(value, Value::Int(_) | Value::Float(_)) || as_dec(value).is_some();
+    match range_class(r) {
+        "groovy.lang.IntRange" if numeric => {
+            natural_order(value, &lower) != Ordering::Less
+                && natural_order(value, &upper) != Ordering::Greater
+        }
+        "groovy.lang.ObjectRange" if numeric || matches!(value, Value::Str(_)) => {
+            match natural_order(&lower, value) {
+                Ordering::Equal => true,
+                Ordering::Less => {
+                    natural_order(&upper, value) != Ordering::Less
+                }
+                _ => false,
+            }
+        }
+        "groovy.lang.NumberRange" if numeric => {
+            let reverse = range_is_reverse(r);
+            let (lower_in, upper_in) = if reverse {
+                (r.inclusive, true)
+            } else {
+                (true, r.inclusive)
+            };
+            let above_lower = match natural_order(&lower, value) {
+                Ordering::Less => true,
+                Ordering::Equal => lower_in,
+                _ => false,
+            };
+            let below_upper = match natural_order(&upper, value) {
+                Ordering::Greater => true,
+                Ordering::Equal => upper_in,
+                _ => false,
+            };
+            above_lower && below_upper
+        }
+        _ => range_contains(r, value),
     }
 }

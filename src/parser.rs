@@ -2184,6 +2184,30 @@ impl Parser {
                 };
                 continue;
             }
+            // `a === b` / `a !== b` sit at the equality band and are reference
+            // identity — Groovy's `a.is(b)` — so they lower to that call (and
+            // its negation) rather than to a new operator.
+            if EQUALITY_BP >= min_bp && matches!(self.peek(), Tok::Identical | Tok::NotIdentical) {
+                let negate = matches!(self.peek(), Tok::NotIdentical);
+                let line = self.line();
+                self.advance();
+                self.skip_newlines();
+                let rhs = self.binary(EQUALITY_BP + 1)?;
+                lhs = Expr::MethodCall {
+                    recv: Box::new(lhs),
+                    method: "is".to_string(),
+                    args: vec![rhs],
+                    line,
+                    safe: false,
+                };
+                if negate {
+                    lhs = Expr::Unary {
+                        op: UnOp::Not,
+                        rhs: Box::new(lhs),
+                    };
+                }
+                continue;
+            }
             let Some((op, bp)) = binop(self.peek()) else {
                 break;
             };
@@ -2435,6 +2459,30 @@ impl Parser {
                     )),
                 }
             }
+            // `~/re/` is the prefix `~` applied to a slashy string, and a prefix
+            // operator takes the whole postfix chain as its operand: Groovy
+            // reads `~/a.c/.isCase(s)` as `~(/a.c/.isCase(s))`. The lexer hands
+            // the pair over as one `Regex` token, so when a postfix follows it
+            // is taken apart again here.
+            Tok::Regex(src)
+                if matches!(
+                    self.peek_at(1),
+                    Tok::Dot | Tok::QuestionDot | Tok::StarDot | Tok::LBracket
+                ) =>
+            {
+                let src = src.clone();
+                let col = self.col_at(0);
+                self.advance();
+                let operand = self.postfix_chain(Expr::Str(src))?;
+                let rhs = Box::new(self.binary_from(operand, POWER_BP)?);
+                Ok(self.record(
+                    col,
+                    Expr::Unary {
+                        op: UnOp::BitNot,
+                        rhs,
+                    },
+                ))
+            }
             _ => self.primary(),
         }
     }
@@ -2442,7 +2490,13 @@ impl Parser {
     /// A primary expression: an atom followed by any run of postfix `.member`
     /// method calls (`x.foo(args)`) and property reads (`x.size`).
     fn primary(&mut self) -> Result<Expr, String> {
-        let mut e = self.atom()?;
+        let e = self.atom()?;
+        self.postfix_chain(e)
+    }
+
+    /// The postfix run after an already-parsed atom: member calls, property
+    /// reads, spread calls, call parentheses and subscripts.
+    fn postfix_chain(&mut self, mut e: Expr) -> Result<Expr, String> {
         loop {
             if self.is(&Tok::Dot) || self.is(&Tok::QuestionDot) {
                 let safe = self.is(&Tok::QuestionDot);
@@ -3307,8 +3361,8 @@ fn binop(t: &Tok) -> Option<(BinOp, u8)> {
         // `(a == b) =~ c` — Groovy's own ordering.
         Tok::Match => (BinOp::Match, 6),
         Tok::MatchFull => (BinOp::MatchFull, 6),
-        Tok::EqEq => (BinOp::Eq, 7),
-        Tok::NotEq => (BinOp::Ne, 7),
+        Tok::EqEq => (BinOp::Eq, EQUALITY_BP),
+        Tok::NotEq => (BinOp::Ne, EQUALITY_BP),
         // `<=>` sits at Groovy's equality precedence, below relational ops.
         Tok::Spaceship => (BinOp::Cmp, 7),
         Tok::Lt => (BinOp::Lt, RELATIONAL_BP),
@@ -3332,6 +3386,9 @@ fn binop(t: &Tok) -> Option<(BinOp, u8)> {
 /// The binding power of `**`, the tightest band — tighter than the prefix
 /// operators, which is why a prefix parses its operand up to here.
 const POWER_BP: u8 = 12;
+
+/// The binding power of the equality band — `==`, `!=`, `<=>`, `===`, `!==`.
+const EQUALITY_BP: u8 = 7;
 
 /// The binding power of the relational band — where `instanceof`, `in` and the
 /// `as` cast also sit.

@@ -534,7 +534,8 @@ Implemented and checked against Apache Groovy:
   followed by every sub-expression's value under its own column. The
   `assert cond : message` form raises the plain `AssertionError` Groovy does.
 - **`switch`** — Groovy's, with the full `isCase` semantics: constant, range,
-  list, type (`case String:`), `~/…/` pattern, closure, and `null` labels,
+  list, type (`case String:`), `~/…/` pattern, closure, map (a key with a
+  Groovy-true value) and `null` labels,
   source-order fall-through until a `break`, and a `default` anywhere.
 - **`switch` expressions** — both value forms. The arrow form `case L -> v`
   runs one arm and never falls through, takes several labels per arm

@@ -3127,7 +3127,16 @@ impl Compiler {
                 // native op read the handle as `0` and answered `-1`).
                 UnOp::BitNot => {
                     self.expr(rhs)?;
-                    if self.bit_operand_is_object(rhs) {
+                    // Only an integer literal is known to be a plain `Integer`
+                    // here: `~` on a `String` (a variable, a call result, a
+                    // GString) is `Pattern.compile`, and on a `Boolean` it is a
+                    // `MissingMethodException` — both of which the native op
+                    // would answer as an integer.
+                    let bare = match &**rhs {
+                        Expr::Recorded { inner, .. } => &**inner,
+                        e => e,
+                    };
+                    if !matches!(bare, Expr::Int(..)) {
                         self.emit_call_builtin(crate::host::GBITNOT, 1, self.cur_line)?;
                     } else {
                         self.b.emit(Op::BitNot, self.cur_line);

@@ -128,6 +128,8 @@ pub enum Tok {
     MinusMinus,
     EqEq,
     NotEq,
+    Identical,    // `===` reference identity (`a.is(b)`)
+    NotIdentical, // `!==`
     Lt,
     Gt,
     Le,
@@ -603,6 +605,21 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         }
         // `...` — a varargs parameter. Checked ahead of `..` so the range
         // operator does not claim the first two dots and leave a stray `.`.
+        // `===` / `!==` (Groovy 3+), ahead of `==` / `!=` so neither is split
+        // into an equality and a stray `=`.
+        if let Some(kind) = match three {
+            "===" => Some(Tok::Identical),
+            "!==" => Some(Tok::NotIdentical),
+            _ => None,
+        } {
+            out.push(Token {
+                kind,
+                line,
+                offset: tok_start,
+            });
+            i += 3;
+            continue;
+        }
         if three == "..." {
             out.push(Token {
                 kind: Tok::Ellipsis,

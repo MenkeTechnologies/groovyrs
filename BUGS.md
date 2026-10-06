@@ -610,7 +610,8 @@ reported as parse or compile errors, never silently mis-run.
   (`case String:`, `case MyClass:`, `case IOException:`) is an `instanceof`, a
   `~/…/` pattern label matches the subject's string form *entirely*
   (`Matcher.matches`, not `find`), a closure label is called with the subject and
-  read for Groovy truth, and `case null:` matches only `null`. Sections keep
+  read for Groovy truth, a map label matches a key it holds with a
+  Groovy-true value, and `case null:` matches only `null`. Sections keep
   source order and fall through until a `break`; `default` may sit anywhere and
   is entered only when no label matched. The subject is evaluated once and the
   labels only until one matches. A `switch` is a `break` target but not a
@@ -755,17 +756,12 @@ this file.
 - Inside a closure, a bare call with only a trailing closure
   (`[1, 2, 3].with { collect { it + 1 } }`) is a parse error.
 
-**Operators and literals:** `===` / `!==` are parse errors; `"${-> x}"` (a
-lazy GString closure) is a parse error; the exclusive-left ranges `1<..4` and
-`1<..<4` are parse errors.
+**Operators and literals:** `"${-> x}"` (a lazy GString closure) is a parse
+error; the exclusive-left ranges `1<..4` and `1<..<4` are parse errors.
 
 **Missing GDK methods** (`MissingMethodException` where Groovy answers):
-`String.unexpand`, `String.lines`, `String.toCharacter`, the instance spelling
-`"a%sb".format("x")`, `List.chop`, `eachPermutation`, `Map.toSpreadMap`,
-`List.zip`, `asReversed`, `partitionPoint`, `shuffled`, `List.stream()`,
-`Range.by(n)`, `Range.containsWithinBounds`, `BigDecimal.step(to, step) { … }`,
-a plain `isCase` call (`5.isCase(5)`, `Integer.isCase(5)`),
-`Double.toBigDecimal()` (`3.14d.toBigDecimal()` is `3.14`). `Eval.me` raises
+`String.lines`, `eachPermutation`, `Map.toSpreadMap`, `asReversed`, `shuffled`,
+`List.stream()`, `Range.by(n)`, `BigDecimal.step(to, step) { … }`. `Eval.me` raises
 `MissingPropertyException` and `new Expando()` is `unable to resolve class`.
 
 **Wrong values:**
@@ -774,25 +770,20 @@ a plain `isCase` call (`5.isCase(5)`, `Integer.isCase(5)`),
   `UnsupportedOperationException`), and reports `java.util.ArrayList` /
   `LinkedHashMap` instead of `Collections$UnmodifiableRandomAccessList` /
   `UnmodifiableMap`.
-- `[1, 2, '2'].unique()` is `[1, 2]` and `[1, 1.0].toSet().size()` is `1`;
-  Groovy keeps both (`[1, 2, 2]`, `2`) — `unique` and the hashed collections
-  still equate a `String` with a number, or two numbers of different classes,
-  where `==`, `contains` and `count` no longer do.
-- `[1, 2, 3].first(2)` / `last(2)` answer one element; Groovy has no such
-  overload and raises `MissingMethodException`.
+- `[1, 1.0].toSet().size()` is `1`; Groovy answers `2` — the hashed
+  collections still equate two numbers of different classes, where `==`,
+  `contains` and `count` no longer do. Their index narrows candidates by the
+  coercing equality, so switching them to `Object.equals` needs an index that
+  can answer more than one candidate per key.
+- `"abc".chars()` and `"a\nb".lines()` answer Java streams in Groovy
+  (`chars().toList()` is the code points `[97, 98, 99]`); groovyrs has no
+  stream values, so `chars()` answers the character list and `lines()` is a
+  `MissingMethodException`.
 
-**The probe corpus under 6.0.0.** `parity-scripts/probes.txt` was captured on
-Groovy 5.x, and 13 of its 1,199 compared probes miss under 6.0.0 — identically
-on the pre-sweep and the post-sweep build. Eight are Groovy 6 semantics the
-corpus predates: a `for (x in …)` loop variable is captured *per iteration* by
-a closure (`for (x in 0..2) a << { x }` collects `[0, 1, 2]`, groovyrs
-`[2, 2, 2]`; five probes), an arrow `switch` with no matching arm raises
-`IllegalStateException`, `"x${1..3}y"` renders the range as `1..3`, and
-`map.putAt(k, v)` answers `v`. Two are the documented Java cast and GString
-class. `println ++i` raises `MissingPropertyException` in Groovy (it parses as
-`println++`) and prints `6` here. And `println(null + 1)` / `println(null + [1])`
-print `null` before the `NullPointerException` reaches the `catch` — the
-`println` still runs on the failed operand.
+**The probe corpus under 6.0.0.** Of the probes in `parity-scripts/probes.txt`
+that still miss under 6.0.0, two are the documented Java cast and GString
+class, and `println ++i` raises `MissingPropertyException` in Groovy (it parses
+as `println++`) and prints `6` here.
 
 ## Not implemented (errors today)
 
@@ -1302,7 +1293,8 @@ print `null` before the `NullPointerException` reaches the `catch` — the
   Groovy answers from the JVM's boxing and interning caches. Those answers are
   the JVM's (`Integer.valueOf` caches -128..127, and literal `String`s are
   interned but computed ones are not), so modeling them means modeling the cache
-  boundaries rather than the language.
+  boundaries rather than the language. `a === b` / `a !== b` are `a.is(b)` and its
+  negation, so they share this limit.
 - **`Map.Entry` is modeled only as far as the GDK needs.** It prints `k=v` and
   answers `key`/`value`/`getKey()`/`getValue()`; `setValue` and the rest of the
   interface are absent, and its key is always the map's `String` key.
@@ -1539,7 +1531,7 @@ print `null` before the `NullPointerException` reaches the `catch` — the
   `map.collect`, `map.collectMany`, and the rest with a genuine `Map` overload —
   are modeled and answer Groovy's `(key, value)`.
 - **The bitwise operators need to *see* a decimal operand.**
-  `Compiler::bit_operand_is_object` decides statically whether `&`/`|`/`^`/`~`/
+  `Compiler::bit_operand_is_object` decides statically whether `&`/`|`/`^`/
   `>>` route to the host builtin that handles `BigInteger`s; a `G` literal, a
   name bound to one, and any expression containing either are spotted. An
   operand the compiler cannot see — `def a = f(); def b = g(); a & b`, where

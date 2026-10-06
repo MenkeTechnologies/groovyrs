@@ -2864,3 +2864,63 @@ println String.join('-', ['a', 'b']); println String.join('/', 'x', 'y'); printl
 println Objects.equals([1], [1]); println Objects.isNull(null); println Objects.toString(null, 'd'); println Objects.requireNonNullElse(null, 4); println Objects.hash('a', 2)
 %%
 def l = [1, 2, 3, 4]; println l.removeIf { it % 2 == 0 }; println l
+%%
+def a = [1]; def b = a; println([a === b, a !== b, a === [1], null === null, null !== 1])
+%%
+def m = [:]; println(m === m); println(m !== [:])
+%%
+def s = "a.c"; def p = ~s; println p.getClass().name; println p; println('abc' ==~ p)
+%%
+def n = "q"; println((~"a${n}b").getClass().name); println(~"x+".getClass().name)
+%%
+println(~[1, [2]]); println(~[1, 2].collect { it })
+%%
+println(~true)
+%%
+println(~/a.c/.isCase('abc'))
+%%
+println((~/a.c/).isCase('abc')); def l = [1, 2, 3]; println(~l.size())
+%%
+println(~(1..2))
+%%
+println([[a: 1].isCase('a'), [a: 0].isCase('a'), [a: 1].isCase('z'), ['a', 'b', 'c'].grep([a: 1, c: 2])])
+%%
+def r = switch ('b') { case [a: 1, b: 0] -> 'map'; case [b: 2] -> 'map2'; default -> 'no' }; println r
+%%
+println([5.isCase(5.0), 5.isCase(6), 'abc'.isCase('abc'), Integer.isCase(5), Number.isCase(5.0), String.isCase(1)])
+%%
+println([(1..3).isCase(2), [1, 2].isCase(3), { it > 2 }.isCase(5), null.isCase(null), null.isCase(1)])
+%%
+println([[1, 2, 3].zip(['a', 'b']), (1..3).zip([4, 5, 6]), [1].zip([])])
+%%
+println([[1, 2, 3, 4, 5].partitionPoint { it < 4 }, [1, 2, 3].partitionPoint { false }, [1, 2, 3].partitionPoint { true }, [].partitionPoint { true }, [1, 2, 3, 4, 5].partitionPoint(1..3) { it < 3 }])
+%%
+println([(1..5).containsWithinBounds(2.5), (1..5).containsWithinBounds(0), (5..1).containsWithinBounds(3), (1..<5).containsWithinBounds(5)])
+%%
+println([('a'..'e').containsWithinBounds('c'), ('a'..'e').containsWithinBounds('f'), (1.0..2.0).containsWithinBounds(2.0), (1.0..<2.0).containsWithinBounds(2.0), (1.0..<2.0).containsWithinBounds(1.0)])
+%%
+println([0.1d.toBigDecimal(), 3.14d.toBigDecimal(), 2.5f.toBigDecimal(), 3.14f.toBigDecimal(), 100d.toBigDecimal(), 1e-5d.toBigDecimal(), 1e20d.toBigDecimal()]); println 3.14d.toBigDecimal().scale()
+%%
+println Double.NaN.toBigDecimal()
+%%
+println(["a%sb".format("x"), "%s|%s".format("x", "y"), "".format("%05d", 42)])
+%%
+println "%d-%s".format(3, 'a')
+%%
+println(["hello".toCharacter(), "x".toCharacter()])
+%%
+println "".toCharacter()
+%%
+println(["\tx".unexpand(), "ab      cd      ef".unexpand(), "a  b".unexpand(2), "        ".unexpand(), "        x".unexpand()])
+%%
+print "line one        x\nline two        y\n".unexpand(); println "|"; println "abcdefgh        x".unexpand(4)
+%%
+println([1, 2, 3].first(2))
+%%
+println([1, 2, 3].last(2))
+%%
+println([1, 2, 3].head(1))
+%%
+println([1, 2, 3].tail(1))
+%%
+println([1, 2, 3].init(1))

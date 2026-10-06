@@ -1,0 +1,50 @@
+// Property-for-getter reads on scalars (s.allWhitespace is isAllWhitespace()),
+// String.plus/toSet, find() without a closure, and the GDK on an Iterator
+// (searches stop early and leave the rest; folds consume it).
+println(["  ".allWhitespace, "".allWhitespace, "12".number, "ab".blank, "".empty, "ab".bytes.toList(), "1.5".bigDecimal, "7".integer])
+println(["\u0085".isBlank(), "  ".isAllWhitespace(), " \t\n".isAllWhitespace()])
+println(["ab".class.simpleName, 5.class.name, 1.5.class.name, true.class.name])
+try { println "aB".upperCase } catch (e) { println e.message.readLines()[0] }
+try { println 5.abs } catch (e) { println e.message.readLines()[0] }
+try { println "x".zork } catch (e) { println e.message.readLines()[0] }
+try { println true.zork } catch (e) { println e.message.readLines()[0] }
+println([0, 2, 3].find())
+println([].find())
+println([null, '', 'a'].find())
+println(null.find())
+println([0, null].find())
+println([0, 1, 2].findAll())
+println "Groovy".toSet().sort()
+println "abc".plus(1)
+println "abc".plus(null)
+println "abc".plus([1])
+println "ab".toSet().getClass().name
+println "zyxwvutsrqponmlkjihgfedcbaZYX".toSet()
+println "hello".toSet()
+println "abc".plus(1.0) + "x".plus(new StringBuilder("y"))
+println "abc".find()
+println([1, 2].iterator().find())
+def i0 = [1, 2, 3, 4].iterator()
+println i0.find { it > 1 }
+println i0.next()
+i0 = [1, 2, 3, 4].iterator()
+println i0.any { it == 2 }; println i0.next()
+i0 = [1, 2, 3, 4].iterator()
+println i0.every { it < 2 }; println i0.next()
+i0 = [0, 0, 5, 6].iterator(); println i0.find(); println i0.hasNext()
+println([1, 2, 3].iterator().collect { it * 2 })
+println([1, 2, 3].iterator().toList())
+println([1, 2, 3].iterator().sum())
+println([3, 1, 2].iterator().max())
+println([1, 2, 3].iterator().join('-'))
+println([1, 2, 3].iterator().inject(0) { a, b -> a + b })
+println([1, 2, 3].iterator().findAll { it != 2 })
+println([1, 2, 3].iterator().count(2))
+println([1, 2, 3].iterator().size())
+println([1, 2, 1].iterator().toSet())
+println([1, 2, 3].iterator().collectEntries { [it, it * it] })
+println([1, 2, 3].iterator().countBy { it % 2 })
+def j = [1, 2].iterator(); j.each { print it }; println j.hasNext()
+[5, 6].iterator().eachWithIndex { v, k -> print "$k:$v " }; println()
+println([1, 2, 3].iterator().findResult { it > 1 ? it * 10 : null })
+println([1, 2, 3].iterator().grep { it > 1 })

@@ -350,7 +350,9 @@ Implemented and checked against Apache Groovy:
   `combinations`, `permutations` and `subsequences` (both answering the
   `java.util.HashSet<List>` Groovy does, in the JDK's bucket order),
   `eachPermutation` (every index permutation in lexicographic order),
-  `withIndex`, `indexed`, `iterator`/`listIterator`, `toSet`, `subList`,
+  `withIndex`, `indexed`, `iterator`/`listIterator` (whose handle answers the
+  `Iterator` GDK: `find`/`any`/`every`/`findResult` stop at the deciding
+  element, the folds consume it), `find()` without a closure, `toSet`, `subList`,
   `toList`, `containsAll`, `putAt`, `removeAt`/`removeElement` and the mutators,
   and every value answers `inspect()` (the *verbose* rendering, so
   `[1, 'a'].inspect()` is `[1, 'a']` where `toString()` is `[1, a]`) with
@@ -359,10 +361,12 @@ Implemented and checked against Apache Groovy:
   `[1, 2, 3].toListString(5)` is `[1, 2, ...]`);
   strings answer `indexOf`/`lastIndexOf` (with the
   `fromIndex` and code-point overloads), `replace`, `split` (including the
-  no-argument whitespace-tokenizing form), `getBytes`/`bytes`, `tokenize`,
+  no-argument whitespace-tokenizing form), `getBytes`/`bytes` (and on a `String`, number or `Boolean` every
+  zero-argument `getX()`, or `isX()` answering a boolean, reads as the property
+  `x`: `s.allWhitespace`, `s.number`), `tokenize`,
   `charAt`, `substring`, `compareTo`, `padLeft`/`padRight`/`center`,
   `capitalize`, `take`/`drop`, `multiply`, `minus`, `startsWith`/`endsWith`,
-  `tr`, `trim`, `strip`/`stripLeading`/`stripTrailing`/`isBlank`, `stripIndent`,
+  `tr`, `trim`, `strip`/`stripLeading`/`stripTrailing`/`isBlank`/`isAllWhitespace`, `plus`, `toSet`, `stripIndent`,
   `stripMargin`, `expand`, `normalize`/`denormalize`, `readLines`, `formatted`,
   `equalsIgnoreCase`, `uncapitalize` and the
   `isInteger`/`isLong`/`isDouble`/`isBigDecimal`/`isBigInteger`/`isNumber`

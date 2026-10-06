@@ -6122,6 +6122,74 @@ fn dispatch_iterable_instance(
     None
 }
 
+/// The GDK's `Iterator` methods on an iterator handle. They consume the
+/// iterator: the searches (`find`, `findResult`, `any`, `every`) stop at the
+/// element that decides them and leave the rest for a later `next()`, exactly
+/// as Groovy's loops over `hasNext()`/`next()` do; the folds draw it dry first.
+/// `None` for a receiver that is not an iterator or a method not listed here.
+fn dispatch_iterator_gdk(
+    vm: &mut VM,
+    recv: &Value,
+    method: &str,
+    args: &[Value],
+) -> Option<Result<Value, String>> {
+    as_iter(recv)?;
+    let search = matches!(method, "find" | "findResult" | "any" | "every");
+    if search {
+        let clo = args.first();
+        if args.len() > 1 || clo.is_some_and(|c| closure_meta(c).is_none()) {
+            return None;
+        }
+        while let Some(x) = iter_next(recv) {
+            let v = match clo {
+                Some(c) => match invoke_closure(vm, c, &item_args(c, &x)) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                },
+                None => x.clone(),
+            };
+            if pending_exc() {
+                return Some(Ok(Value::Undef));
+            }
+            let decided = match method {
+                "findResult" => !matches!(v, Value::Undef),
+                "every" => !groovy_truthy(vm, &v),
+                _ => groovy_truthy(vm, &v),
+            };
+            if decided {
+                return Some(Ok(match method {
+                    "find" => x,
+                    "findResult" => v,
+                    "any" => Value::bool(true),
+                    _ => Value::bool(false),
+                }));
+            }
+        }
+        return Some(Ok(match method {
+            "any" => Value::bool(false),
+            "every" => Value::bool(true),
+            _ => Value::Undef,
+        }));
+    }
+    if !matches!(
+        method,
+        "each" | "eachWithIndex" | "collect" | "findAll" | "inject" | "toList" | "toSet" | "sum"
+            | "max" | "min" | "join" | "count" | "size" | "grep" | "collectEntries" | "countBy"
+    ) {
+        return None;
+    }
+    let mut items = Vec::new();
+    while let Some(x) = iter_next(recv) {
+        items.push(x);
+    }
+    let out = dispatch_call(vm, Value::array(items), method, args.to_vec());
+    Some(Ok(if matches!(method, "each" | "eachWithIndex") {
+        recv.clone()
+    } else {
+        out
+    }))
+}
+
 /// [`dispatch_instance_method`] plus the miss handling — for the callers that
 /// have no further chain to fall through to (`getAt`/`putAt`).
 fn dispatch_instance_method_or_miss(
@@ -7564,7 +7632,9 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             }
         };
     }
-    if let Some(res) = dispatch_iterable_instance(vm, &recv, method, &args) {
+    if let Some(res) = dispatch_iterator_gdk(vm, &recv, method, &args)
+        .or_else(|| dispatch_iterable_instance(vm, &recv, method, &args))
+    {
         return match res {
             Ok(v) => v,
             Err(e) => {
@@ -8230,6 +8300,19 @@ fn dispatch_iteration(
         // It is the identity predicate, so it shares `grep`'s body rather than
         // growing a second copy of Groovy truth.
         "findAll" if args.is_empty() => dispatch_iteration(vm, items, "grep", args),
+        // `find()` with no closure is `find(Closure.IDENTITY)`: the first
+        // Groovy-true element, or `null` — `[0, 2].find()` is `2`.
+        "find" if args.is_empty() => {
+            for it in items {
+                if groovy_truthy(vm, it) {
+                    return Some(Ok(it.clone()));
+                }
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+            }
+            Some(Ok(Value::Undef))
+        }
         // `list.findAll { it -> pred }` — keep the elements the closure accepts.
         "findAll" => {
             let clo = args.last()?;
@@ -9355,6 +9438,8 @@ fn b_prop(vm: &mut VM, _argc: u8) -> Value {
 fn java_is_whitespace(c: char) -> bool {
     match c {
         '\u{a0}' | '\u{2007}' | '\u{202f}' => false,
+        // NEL is Unicode White_Space but not a Java SPACE/LINE/PARAGRAPH separator.
+        '\u{85}' => false,
         '\u{1c}'..='\u{1f}' => true,
         _ => c.is_whitespace(),
     }
@@ -9526,6 +9611,18 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             Value::str(s.trim_end_matches(java_is_whitespace).to_string())
         }
         (Value::Str(s), "isBlank") => Value::bool(s.chars().all(java_is_whitespace)),
+        // DGM `isAllWhitespace`: every char is `Character.isWhitespace` (so `""`
+        // answers true), the same test as the JDK's `isBlank`.
+        (Value::Str(s), "isAllWhitespace") => Value::bool(s.chars().all(java_is_whitespace)),
+        // `String.plus(Object)` is the `+` operator spelled as a call.
+        (Value::Str(_), "plus") if args.len() == 1 => groovy_add(recv, &args[0]),
+        // `StringGroovyMethods.toSet` is `new HashSet<String>(toList(self))`:
+        // the characters, in the bucket order of a collection-sized table.
+        (Value::Str(s), "toSet") if args.is_empty() => {
+            let chars: Vec<Value> = s.chars().map(|c| Value::str(c.to_string())).collect();
+            let req = hash_req_for_collection(chars.len());
+            make_set(chars, SetKind::Hash { req })
+        }
         (Value::Str(s), "reverse") => Value::str(s.chars().rev().collect::<String>()),
         (Value::Str(s), "isEmpty") => Value::bool(s.is_empty()),
         (Value::Str(s), "contains") => {
@@ -15935,11 +16032,42 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
             }
             glist(out)
         }
+        // Groovy's property-for-getter rule on a `String`, a number or a
+        // `Boolean`: `s.allWhitespace` is `s.isAllWhitespace()`, `s.number` is
+        // `isNumber()` — a zero-argument `getX()`, else an `isX()` answering a
+        // `boolean`, from the JDK class or the GDK alike.
+        _ if is_jdk_scalar(recv) => match property_getter(vm, recv, name) {
+            Some(v) => v,
+            None => raise_missing_property(vm, recv, name),
+        },
         // `size`/`length` are *methods* on a String and a list, not properties:
         // Groovy raises `MissingPropertyException` for `[1, 2].size` and
         // `"abc".length` alike (a map's `m.size` is the key read handled above).
         _ => raise_missing_property(vm, recv, name),
     }
+}
+
+/// Read the property `name` of a built-in value through its getter: a
+/// zero-argument `getName()`, else an `isName()` whose answer is a `Boolean`
+/// (Groovy reads `isX` as a getter only for a `boolean` result). Each candidate
+/// is dispatched under [`MISS_PROBE`], so a getter the value lacks is reported
+/// back rather than raised. `None` when neither answers.
+fn property_getter(vm: &mut VM, recv: &Value, name: &str) -> Option<Value> {
+    let cap = capitalize(name);
+    for (getter, boolean_only) in [(format!("get{cap}"), false), (format!("is{cap}"), true)] {
+        let prev = MISS_PROBE.with(|p| p.borrow_mut().replace(getter.clone()));
+        let prev_probed = MISS_PROBED.with(|m| m.replace(false));
+        let answer = dispatch_method(vm, recv, &getter, &[]);
+        let missed = MISS_PROBED.with(|m| m.replace(prev_probed));
+        MISS_PROBE.with(|p| *p.borrow_mut() = prev);
+        if faulted() || pending_exc() {
+            return Some(Value::Undef);
+        }
+        if !missed && (!boolean_only || matches!(answer, Value::Bool(_))) {
+            return Some(answer);
+        }
+    }
+    None
 }
 
 /// `println` builtin: pop `argc` values (0 or 1 in slice 1), print them

@@ -931,10 +931,15 @@ fn raise_missing_method_wide(
         .collect::<Vec<_>>()
         .join(", ");
     let values = args.iter().map(groovy_str).collect::<Vec<_>>().join(", ");
-    let class = match recv {
-        Value::Int(_) if wide_at(0) => "java.lang.Long".to_string(),
+    // A call on a class itself (`Double.toString('x')`) misses a *static*
+    // method, and Groovy names the class the call was made on.
+    let static_on = as_class_ref(recv);
+    let class = match (recv, &static_on) {
+        (_, Some(q)) => q.clone(),
+        (Value::Int(_), None) if wide_at(0) => "java.lang.Long".to_string(),
         _ => java_class_name(recv),
     };
+    let kind = if static_on.is_some() { "static method" } else { "method" };
     // A probe for exactly this method: report the miss to the prober rather than
     // raising, so it can offer the call to `methodMissing` instead. Matched on
     // the method name, so a *nested* miss inside a GDK method that did exist is
@@ -949,7 +954,7 @@ fn raise_missing_method_wide(
         vm,
         "MissingMethodException",
         Some(&format!(
-            "No signature of method: {method} for class: {class} \
+            "No signature of {kind}: {method} for class: {class} \
              is applicable for argument types: ({types}) values: [{values}]"
         )),
         // Groovy's `MissingMethodException` carries the three things a handler
@@ -5421,6 +5426,19 @@ fn values_equal_shape(a: &Value, b: &Value) -> bool {
             _ => false,
         };
     }
+    // An instance whose class declares `equals` or `compareTo` is compared the
+    // way Groovy's `==` compares it (`DefaultTypeTransformation.compareEqual`):
+    // so `[a1] == [a2]`, `unique()` and the other element-wise answers agree
+    // with `a1 == a2`.
+    for (x, y) in [(a, b), (b, a)] {
+        if let Some(inst) = as_instance(x) {
+            if lookup_method(inst.class, "equals").is_some()
+                || lookup_method(inst.class, "compareTo").is_some()
+            {
+                return instance_equals(x, y).unwrap_or(false);
+            }
+        }
+    }
     // An instance of a class with a generated `equals` compares by its fields.
     // Decided here because the rendered-form fallback below would compare two
     // `toString`s — which happens to agree for `@Canonical` and disagrees for
@@ -5508,6 +5526,22 @@ fn java_equals_shape(a: &Value, b: &Value) -> bool {
     if let (Value::Obj(x), Value::Obj(y)) = (a, b) {
         if x == y {
             return true;
+        }
+    }
+    // `Object.equals` on an instance is its class's own `equals` when it
+    // declares one — what `ArrayList.contains`/`indexOf` call — and identity
+    // otherwise (a `compareTo` does not enter into `equals`).
+    for (x, y) in [(a, b), (b, a)] {
+        if let Some(inst) = as_instance(x) {
+            if lookup_method(inst.class, "equals").is_some() {
+                return with_vm(|vm| call_user_method(vm, x, "equals", std::slice::from_ref(y)))
+                    .flatten()
+                    .and_then(Result::ok)
+                    .is_some_and(|v| v.is_truthy());
+            }
+            if !class_generates(inst.class, GEN_EQUALS_HASH) {
+                return matches!((a, b), (Value::Obj(p), Value::Obj(q)) if p == q);
+            }
         }
     }
     let structured = |v: &Value| {
@@ -8127,11 +8161,9 @@ fn dispatch_iteration(
                     // two elements the same exactly when `==` does: `1` and
                     // `1.0` collapse, `1` and `"1"` (or `null` and `"null"`)
                     // do not, and two lists compare element by element. An
-                    // instance keeps its own `compareTo`.
-                    if matches!(order, OrderBy::Natural)
-                        && as_instance(it).is_none()
-                        && as_instance(kept).is_none()
-                    {
+                    // instance answers through its own `compareTo` or `equals`
+                    // (identity without either), as `==` does.
+                    if matches!(order, OrderBy::Natural) {
                         dup |= checked_equal(vm, || values_equal(it, kept));
                         if pending_exc() || faulted() {
                             return Some(Ok(Value::Undef));
@@ -8276,10 +8308,18 @@ fn dispatch_iteration(
         // counts elements equal to `value`.
         "count" => {
             let arg = args.last()?;
+            // `count(value)` counts the elements `DefaultTypeTransformation
+            // .compareEqual` matches — Groovy's `==`, so `[1, '1'].count(1)` is 1
+            // and a user class's `equals` decides for its instances.
             if closure_meta(arg).is_none() {
-                let want = groovy_str(arg);
-                let n = items.iter().filter(|v| groovy_str(v) == want).count();
-                return Some(Ok(Value::int(n as i64)));
+                let mut n = 0i64;
+                for v in items {
+                    n += checked_equal(vm, || values_equal(v, arg)) as i64;
+                    if pending_exc() {
+                        return Some(Ok(Value::Undef));
+                    }
+                }
+                return Some(Ok(Value::int(n)));
             }
             let mut n = 0i64;
             for it in items {
@@ -13124,6 +13164,25 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
             f0.to_bits() as i64
         }),
         ("Double", "doubleToRawLongBits") => Value::int(f0.to_bits() as i64),
+        // `Double.toString(double)` / `Float.toString(float)`: the argument
+        // widened or narrowed to the class's own type, then rendered by it —
+        // `Double.toString(100)` is `100.0`.
+        ("Double", "toString") if args.len() == 1 && is_number(&arg0) => {
+            Value::str(decimal::format_double(f0))
+        }
+        ("Float", "toString") if args.len() == 1 && is_number(&arg0) => {
+            Value::str(decimal::format_float(f0 as f32))
+        }
+        // `BigDecimal.valueOf(double)` is `new BigDecimal(Double.toString(d))`
+        // and `valueOf(long)` the integer at scale 0.
+        ("BigDecimal", "valueOf") if args.len() == 1 => match &arg0 {
+            Value::Float(f) => {
+                let text = decimal::format_double(*f);
+                float_text_to_decimal(vm, &text)
+            }
+            Value::Int(n) => dec_value(decimal::from_i64(*n)),
+            _ => return None,
+        },
         ("Double", "longBitsToDouble") => Value::float(f64::from_bits(as_i64(&arg0)? as u64)),
 
         // The bit-twiddling statics take their width from the class name, which

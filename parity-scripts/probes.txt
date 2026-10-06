@@ -2964,3 +2964,13 @@ def show = { r -> [r.toString(), r.toList(), r.size(), r.getClass().simpleName, 
 println([(1.5..4).contains(2.5), (1.5..4).contains(2), 3.5 in (1.5..4)]); println((0.5d..2.5d).collect { it * 2 }); def s = 0; for (x in 1.5..4) s += x; println s
 %%
 println([(1..<4).equals(1..3), (1..3).equals(1..3), (1..<4) == (1..3), (1..3).equals([1, 2, 3]), (3..1).equals(1..3)])
+%%
+println([Double.toString(100), Float.toString(1.0e10f), Double.toString(0.1), Float.toString(3), Double.toString(1e-5)]); println([BigDecimal.valueOf(0.1d), BigDecimal.valueOf(5), BigDecimal.valueOf(1e20d), BigDecimal.valueOf(100d).scale()])
+%%
+println Double.toString('x')
+%%
+println Math.foo(1)
+%%
+println String.zork('a', 2)
+%%
+println([1, "1", 1.0, 1G, null].count(1)); println([null, null, 1].count(null)); println([[1], [1], [2]].count([1])); println([1, 2, "1"].unique())

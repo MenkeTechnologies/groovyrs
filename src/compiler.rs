@@ -1312,7 +1312,12 @@ impl Compiler {
         // `is` spelling Groovy reads as the getter of the property `x`.
         let bool_getters: Vec<&Method> = methods
             .iter()
-            .filter(|m| m.ret_ty == "boolean" && m.params.is_empty() && m.name.len() > 2 && m.name.starts_with("is"))
+            .filter(|m| {
+                m.ret_ty == "boolean"
+                    && m.params.is_empty()
+                    && m.name.len() > 2
+                    && m.name.starts_with("is")
+            })
             .collect();
         for m in &bool_getters {
             let c = self.b.add_constant(Value::str(m.name.clone()));

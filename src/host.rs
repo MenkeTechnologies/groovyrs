@@ -944,7 +944,11 @@ fn raise_missing_method_wide(
         (Value::Int(_), None) if wide_at(0) => "java.lang.Long".to_string(),
         _ => java_class_name(recv),
     };
-    let kind = if static_on.is_some() { "static method" } else { "method" };
+    let kind = if static_on.is_some() {
+        "static method"
+    } else {
+        "method"
+    };
     // A probe for exactly this method: report the miss to the prober rather than
     // raising, so it can offer the call to `methodMissing` instead. Matched on
     // the method name, so a *nested* miss inside a GDK method that did exist is
@@ -5828,7 +5832,11 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         let declares = class_chain(inst.class)
             .iter()
             .filter_map(|id| class_meta(*id))
-            .any(|m| m.interfaces.iter().any(|i| i.rsplit('.').next() == Some(short)));
+            .any(|m| {
+                m.interfaces
+                    .iter()
+                    .any(|i| i.rsplit('.').next() == Some(short))
+            });
         if declares || (short == "Serializable" && is_throwable_class(inst.class)) {
             return true;
         }
@@ -5945,8 +5953,10 @@ fn is_plain_list(v: &Value) -> bool {
 /// A `String`, `Boolean` or JDK number — the immutable value classes, every one
 /// `Comparable` and `Serializable`.
 fn is_jdk_scalar(v: &Value) -> bool {
-    matches!(v, Value::Str(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_))
-        || as_dec(v).is_some()
+    matches!(
+        v,
+        Value::Str(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_)
+    ) || as_dec(v).is_some()
         || as_float_handle(v).is_some()
 }
 
@@ -6098,14 +6108,41 @@ fn dispatch_iterable_instance(
     class_meta(inst.class)?;
     let object_level = matches!(
         method,
-        "each" | "eachWithIndex" | "collect" | "findAll" | "any" | "every" | "grep" | "find"
-            | "findResult" | "findIndexOf" | "findLastIndexOf" | "inject" | "toList"
+        "each"
+            | "eachWithIndex"
+            | "collect"
+            | "findAll"
+            | "any"
+            | "every"
+            | "grep"
+            | "find"
+            | "findResult"
+            | "findIndexOf"
+            | "findLastIndexOf"
+            | "inject"
+            | "toList"
     );
     let iterable_level = matches!(
         method,
-        "sum" | "max" | "min" | "join" | "first" | "last" | "size" | "sort" | "toSet"
-            | "count" | "collectEntries" | "groupBy" | "countBy" | "unique" | "withIndex"
-            | "indexed" | "collectMany" | "findResults" | "reverse"
+        "sum"
+            | "max"
+            | "min"
+            | "join"
+            | "first"
+            | "last"
+            | "size"
+            | "sort"
+            | "toSet"
+            | "count"
+            | "collectEntries"
+            | "groupBy"
+            | "countBy"
+            | "unique"
+            | "withIndex"
+            | "indexed"
+            | "collectMany"
+            | "findResults"
+            | "reverse"
     );
     if object_level || (iterable_level && value_is_a(recv, "Iterable")) {
         if let Some(items) = drain_iterable(vm, recv) {
@@ -6178,8 +6215,22 @@ fn dispatch_iterator_gdk(
     }
     if !matches!(
         method,
-        "each" | "eachWithIndex" | "collect" | "findAll" | "inject" | "toList" | "toSet" | "sum"
-            | "max" | "min" | "join" | "count" | "size" | "grep" | "collectEntries" | "countBy"
+        "each"
+            | "eachWithIndex"
+            | "collect"
+            | "findAll"
+            | "inject"
+            | "toList"
+            | "toSet"
+            | "sum"
+            | "max"
+            | "min"
+            | "join"
+            | "count"
+            | "size"
+            | "grep"
+            | "collectEntries"
+            | "countBy"
     ) {
         return None;
     }
@@ -7275,7 +7326,11 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // `list.remove((Object) x)`: the compiler saw the cast that selects
     // `Collection.remove(Object)`, which on a list is the element removal.
     if method == REMOVE_OBJECT {
-        let m = if is_list(&recv) { "removeElement" } else { "remove" };
+        let m = if is_list(&recv) {
+            "removeElement"
+        } else {
+            "remove"
+        };
         return dispatch_call(vm, recv, m, args);
     }
     // Drop any mutated-receiver contents a previous call parked but whose
@@ -10709,8 +10764,12 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `Iterable.zip(Iterable)` (Groovy 5+): the pairs of the two walks, as
         // long as the shorter one. Each pair is a `Tuple2`, which prints and
         // compares as the two-element list it is.
-        (Value::Array(a), "zip") if args.len() == 1
-            && (is_list(&args[0]) || as_range(&args[0]).is_some() || as_set(&args[0]).is_some()) => {
+        (Value::Array(a), "zip")
+            if args.len() == 1
+                && (is_list(&args[0])
+                    || as_range(&args[0]).is_some()
+                    || as_set(&args[0]).is_some()) =>
+        {
             let other = iteration_elements(&args[0]);
             Value::array(
                 a.iter()
@@ -14509,10 +14568,7 @@ fn range_bounds(r: &RangeVal) -> (i64, i64) {
     }
     match (as_i64(&r.from), as_i64(&r.to)) {
         (Some(a), Some(b)) => (a, b),
-        _ => (
-            range_end_i64(&r.from),
-            range_end_i64(&r.to),
-        ),
+        _ => (range_end_i64(&r.from), range_end_i64(&r.to)),
     }
 }
 
@@ -14591,12 +14647,21 @@ fn range_size(r: &RangeVal) -> i64 {
 /// walk yields three values, and `(1.0<..1.5).size()` is 1 while it yields
 /// none. Those are Groovy's answers. A `Double` bound is counted by walking.
 fn number_range_size(r: &RangeVal) -> i64 {
-    let (Some(lo), Some(hi)) = (as_exact_dec(&range_lower(r)), as_exact_dec(&range_upper(r))) else {
+    let (Some(lo), Some(hi)) = (as_exact_dec(&range_lower(r)), as_exact_dec(&range_upper(r)))
+    else {
         return range_elements(r).len() as i64;
     };
     let one = decimal::from_i64(1);
-    let from = if r.excl_left { decimal::add(&lo, &one) } else { lo };
-    let to = if r.inclusive { hi } else { decimal::sub(&hi, &one) };
+    let from = if r.excl_left {
+        decimal::add(&lo, &one)
+    } else {
+        lo
+    };
+    let to = if r.inclusive {
+        hi
+    } else {
+        decimal::sub(&hi, &one)
+    };
     decimal::truncate_to_i64(&decimal::sub(&to, &from)) + 1
 }
 
@@ -17347,7 +17412,11 @@ fn unexpand_line(line: &str, stop: usize) -> String {
     let mut index = 0usize;
     while index + stop < b.len() {
         let piece = &b[index..index + stop];
-        let count = piece.iter().rev().take_while(|c| java_is_whitespace(**c)).count();
+        let count = piece
+            .iter()
+            .rev()
+            .take_while(|c| java_is_whitespace(**c))
+            .count();
         if count > 0 {
             let mut repl: Vec<char> = piece[..stop - count].to_vec();
             repl.push('\t');
@@ -17993,9 +18062,7 @@ fn range_contains_within_bounds(r: &RangeVal, value: &Value) -> bool {
         "groovy.lang.ObjectRange" if numeric || matches!(value, Value::Str(_)) => {
             match natural_order(&lower, value) {
                 Ordering::Equal => true,
-                Ordering::Less => {
-                    natural_order(&upper, value) != Ordering::Less
-                }
+                Ordering::Less => natural_order(&upper, value) != Ordering::Less,
                 _ => false,
             }
         }

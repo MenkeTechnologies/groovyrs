@@ -311,7 +311,8 @@ Implemented and checked against Apache Groovy:
    the explicit zero-parameter `{ -> … }`, and the implicit `{ it }` form as first-class
   callable values, invoked with `.call(args)` or directly (`def f = { it * 2 };
   f(21)`). Varargs parameters (`{ Object... xs -> }`) collect the call's
-  remaining arguments. A closure captures the enclosing *variable*, not a copy of
+  remaining arguments. `parameterTypes` answers each declared type (`Object`
+  when untyped) and `maximumNumberOfParameters` the arity. A closure captures the enclosing *variable*, not a copy of
   its value: a boxed cell holds every local some closure in that scope captures,
   so a mutation made after the closure was created is visible to a later call of
   it, and a declaration inside a loop body is a fresh variable per iteration

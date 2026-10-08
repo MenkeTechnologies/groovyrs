@@ -2932,6 +2932,7 @@ impl Parser {
                         body: vec![Stmt::new(line, StmtKind::Expr(inner))],
                         explicit_params: false,
                         varargs: false,
+                        param_types: Vec::new(),
                     }],
                     line,
                     // The spread is null-safe on its RECEIVER too:
@@ -3429,6 +3430,7 @@ impl Parser {
         let explicit_params = self.has_closure_arrow();
         let mut defaults: Vec<(String, Expr)> = Vec::new();
         let mut varargs = false;
+        let mut param_types: Vec<String> = Vec::new();
         let params = if explicit_params {
             let mut params = Vec::new();
             // `{ -> … }` declares an empty parameter list: no `it` is supplied.
@@ -3441,6 +3443,7 @@ impl Parser {
                     body,
                     explicit_params,
                     varargs,
+                    param_types,
                 });
             }
             loop {
@@ -3448,15 +3451,32 @@ impl Parser {
                 // second identifier follows, so skip the type name. A varargs
                 // parameter puts `...` between the two (`Object... xs`), and the
                 // type is always written, so the `...` is looked for there.
-                if matches!(self.peek(), Tok::Ident(_))
+                let mut ty = "def".to_string();
+                if self.is(&Tok::Def) && matches!(self.peek_at(1), Tok::Ident(_)) {
+                    self.advance();
+                } else if matches!(self.peek(), Tok::Ident(_))
                     && matches!(self.peek_at(1), Tok::Ident(_) | Tok::Ellipsis)
                 {
-                    self.advance();
+                    ty = self.ident()?;
+                }
+                // An array type, `int[] xs`.
+                else if matches!(self.peek(), Tok::Ident(_))
+                    && matches!(self.peek_at(1), Tok::LBracket)
+                    && matches!(self.peek_at(2), Tok::RBracket)
+                {
+                    ty = self.ident()?;
+                    while self.is(&Tok::LBracket) && matches!(self.peek_at(1), Tok::RBracket) {
+                        self.advance();
+                        self.advance();
+                        ty.push_str("[]");
+                    }
                 }
                 if self.is(&Tok::Ellipsis) {
                     self.advance();
                     varargs = true;
+                    ty.push_str("[]");
                 }
+                param_types.push(ty);
                 let name = self.ident()?;
                 // `{ a, b = 5 -> … }` — a default value for a trailing
                 // parameter. It becomes a guard at the top of the body, because
@@ -3514,6 +3534,7 @@ impl Parser {
             body,
             explicit_params,
             varargs,
+            param_types,
         })
     }
 
@@ -3550,6 +3571,18 @@ impl Parser {
                 // `Ellipsis` is the `...` of a varargs parameter, which sits
                 // between the type and the name (`Object... xs`).
                 Some(Tok::Ident(_)) | Some(Tok::Comma) | Some(Tok::Ellipsis) => j += 1,
+                // `[]` after a parameter type (`{ int[] xs -> … }`).
+                Some(Tok::LBracket)
+                    if matches!(self.toks.get(j + 1).map(|t| &t.kind), Some(Tok::RBracket)) =>
+                {
+                    j += 2
+                }
+                // `def` in front of a parameter name (`{ def a, b -> … }`).
+                Some(Tok::Def)
+                    if matches!(self.toks.get(j + 1).map(|t| &t.kind), Some(Tok::Ident(_))) =>
+                {
+                    j += 1
+                }
                 // A default value runs to the next top-level `,` or `->`.
                 Some(Tok::Assign) => {
                     j += 1;
@@ -4030,6 +4063,7 @@ fn method_pointer(recv: Expr, name: String, line: u32) -> Expr {
         )],
         explicit_params: true,
         varargs: true,
+        param_types: Vec::new(),
     };
     if matches!(recv, Expr::This) {
         return call(Expr::This);
@@ -4043,6 +4077,7 @@ fn method_pointer(recv: Expr, name: String, line: u32) -> Expr {
             )],
             explicit_params: true,
             varargs: false,
+            param_types: Vec::new(),
         }),
         args: vec![recv],
         line,

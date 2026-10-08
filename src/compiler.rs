@@ -257,6 +257,10 @@ struct Compiler {
     /// to the host as [`crate::host::set_wide_sites`]. See
     /// [`Compiler::is_wide`].
     wide_sites: HashSet<usize>,
+    /// The declared parameter types of every closure literal that types one,
+    /// keyed by its body's name-pool index and handed to the host as
+    /// [`crate::host::set_closure_param_types`].
+    closure_param_types: HashMap<u16, Vec<String>>,
     /// The names in the *current* scope that live in a boxed binding — a
     /// [`crate::host::GCELL_NEW`] cell — because some closure written in that
     /// scope captures them. Every read of one goes through
@@ -531,6 +535,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         inline_finally_depth: 0,
         obj_vars: HashSet::new(),
         wide_sites: HashSet::new(),
+        closure_param_types: HashMap::new(),
         cells: boxed_names(&[], &prog.body),
         preloaded_lhs: false,
         ret_ty: None,
@@ -663,6 +668,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         c.b.patch_jump(jf, after);
     }
     crate::host::set_wide_sites(std::mem::take(&mut c.wide_sites));
+    crate::host::set_closure_param_types(std::mem::take(&mut c.closure_param_types));
     Ok(c.b.build())
 }
 
@@ -3393,7 +3399,8 @@ impl Compiler {
                 body,
                 explicit_params,
                 varargs,
-            } => self.closure(params, body, *explicit_params, *varargs)?,
+                param_types,
+            } => self.closure(params, body, *explicit_params, *varargs, param_types)?,
             Expr::Range {
                 start,
                 end,
@@ -3481,6 +3488,7 @@ impl Compiler {
         body: &[Stmt],
         explicit_params: bool,
         varargs: bool,
+        param_types: &[String],
     ) -> Result<(), String> {
         // No parameter list at all means Groovy's single implicit `it`; an
         // explicit list — even the empty `{ -> … }` — is taken as written.
@@ -3530,6 +3538,10 @@ impl Compiler {
         let id = self.closures_seen;
         self.closures_seen += 1;
         let name_idx = self.b.add_name(&format!("$closure_{id}"));
+        if param_types.iter().any(|t| t != "def") {
+            self.closure_param_types
+                .insert(name_idx, param_types.to_vec());
+        }
         let cell_captures: HashSet<String> = captures
             .iter()
             .filter(|n| self.cells.contains(*n))

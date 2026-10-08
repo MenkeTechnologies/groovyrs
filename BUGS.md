@@ -884,11 +884,11 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   stack-flattened runs as an ordinary one until it hits the frame limit. The
   compositions (`>>`, `<<`, `curry`/`rcurry`/`ncurry`, `memoize`,
   `maximumNumberOfParameters`, `delegate`) are all answered.
-- **`Closure.parameterTypes`.** A closure's declared parameter *types* are not
-  kept — `ClosureMeta` carries the count and nothing else — so the list Groovy
-  answers (`[class java.lang.Object]` for an untyped parameter, the declared
-  class for a typed one) cannot be built. `maximumNumberOfParameters` is
-  answered, since the count is what is kept.
+- **`Closure.parameterTypes` of a derived closure.** A closure literal answers
+  its declared types (`[int, class java.lang.String]`, `Object` when untyped);
+  one built by `curry`, `>>` or `memoize`, and a method pointer, answers
+  `Object` for each parameter it accepts, where Groovy answers the remaining
+  declared types (a method pointer's are the method's).
 - **A `GString` is a `String`.** An interpolated literal produces a plain
   `java.lang.String`, so `"$s".getClass()` reports `java.lang.String` where
   Groovy reports `org.codehaus.groovy.runtime.GStringImpl`.

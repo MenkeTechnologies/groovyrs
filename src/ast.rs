@@ -527,6 +527,10 @@ pub enum Expr {
         /// that stops short of it still binds it (to an empty one). Without it a
         /// call's extra arguments are dropped.
         varargs: bool,
+        /// Each parameter's declared type as written (`def` when untyped, `T[]`
+        /// for a `T...` varargs one), parallel to `params`; empty when nothing
+        /// is typed. Read only by `Closure.getParameterTypes()`.
+        param_types: Vec<String>,
     },
     /// The sequence a `for (x in <expr>)` walks — the parser wraps the loop's
     /// subject in this, and it lowers to the host's iteration builtin

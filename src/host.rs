@@ -691,6 +691,37 @@ thread_local! {
     static WIDE_SITES: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
 
+thread_local! {
+    /// The declared parameter types of each closure literal that types one,
+    /// by its body's name-pool index. Replaced on each compile.
+    static CLOSURE_PARAM_TYPES: RefCell<HashMap<u16, Vec<String>>> = RefCell::new(HashMap::new());
+}
+
+/// Publish the compiler's typed closure parameter lists for this chunk.
+pub fn set_closure_param_types(types: HashMap<u16, Vec<String>>) {
+    CLOSURE_PARAM_TYPES.with(|t| *t.borrow_mut() = types);
+}
+
+/// `Closure.getParameterTypes()`: a `Class[]` of each declared parameter's
+/// type. An untyped parameter (and the implicit `it`) is `Object`; a closure
+/// derived by a combinator reports `Object` for each parameter it accepts.
+fn closure_parameter_types(meta: &ClosureMeta) -> Value {
+    let declared = match meta.derived {
+        None => CLOSURE_PARAM_TYPES.with(|t| t.borrow().get(&meta.name_idx).cloned()),
+        Some(_) => None,
+    };
+    let types: Vec<Value> = (0..meta.params as usize)
+        .map(|i| {
+            let ty = declared
+                .as_ref()
+                .and_then(|d| d.get(i))
+                .map_or("def", String::as_str);
+            declared_type_class(ty)
+        })
+        .collect();
+    garray(types, ArrayElem::Ref("java.lang.Class"))
+}
+
 /// Publish the compiler's statically-`Long` arithmetic sites for this chunk.
 pub fn set_wide_sites(sites: HashSet<usize>) {
     WIDE_SITES.with(|s| *s.borrow_mut() = sites);
@@ -2542,6 +2573,37 @@ fn closure_meta(v: &Value) -> Option<ClosureMeta> {
         }),
         _ => None,
     }
+}
+
+/// Whether the class a `java.lang.Class` handle names is an interface — what
+/// `Class.toString()` (`interface java.util.List`) and `isInterface()` read. A
+/// script `interface` or `trait` is one, and so is each JDK interface a script
+/// can name.
+fn is_interface_class(qualified: &str) -> bool {
+    if let Some(m) = find_class(qualified).and_then(class_meta) {
+        return m.is_interface;
+    }
+    matches!(
+        qualified,
+        "java.util.List"
+            | "java.util.Map"
+            | "java.util.Map$Entry"
+            | "java.util.Set"
+            | "java.util.SortedSet"
+            | "java.util.SortedMap"
+            | "java.util.Collection"
+            | "java.util.Iterator"
+            | "java.util.Queue"
+            | "java.util.Deque"
+            | "java.lang.Iterable"
+            | "java.lang.Comparable"
+            | "java.lang.CharSequence"
+            | "java.lang.Runnable"
+            | "java.lang.Appendable"
+            | "java.io.Serializable"
+            | "groovy.lang.GroovyObject"
+            | "groovy.lang.MetaClass"
+    )
 }
 
 /// The `(class, name, declared type)` of a `MetaProperty` handle, if `v` is one.
@@ -6648,6 +6710,13 @@ fn class_properties(cid: u32) -> Vec<PropInfo> {
 /// answers it: an untyped declaration is `Object`, a primitive keeps its own
 /// name, and a script class is itself.
 fn declared_type_class(ty: &str) -> Value {
+    // An array type is named by its JVM descriptor: `String[]` is
+    // `[Ljava.lang.String;`, one more `[` per further dimension.
+    if let Some(elem) = ty.strip_suffix("[]").and_then(ArrayElem::from_name) {
+        let rank = ty.matches("[]").count();
+        let name = "[".repeat(rank - 1) + &elem.array_class();
+        return heap_push(HeapObj::ClassRef(name));
+    }
     let qualified = match ty {
         "def" | "Object" | "var" => "java.lang.Object".to_string(),
         "int" | "long" | "short" | "byte" | "double" | "float" | "char" | "boolean" | "void" => {
@@ -8170,6 +8239,12 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     }
     // The `groovy.lang.Closure` combinators, which answer another closure.
     if let Some(meta) = closure_meta(&recv) {
+        if method == "getParameterTypes" && args.is_empty() {
+            return closure_parameter_types(&meta);
+        }
+        if method == "getMaximumNumberOfParameters" && args.is_empty() {
+            return Value::int(i64::from(meta.params));
+        }
         if let Some(v) = closure_combinator(&recv, &meta, method, &args) {
             return v;
         }
@@ -12243,6 +12318,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             match method {
                 "getName" | "getTypeName" | "getCanonicalName" => Value::str(qualified),
                 "getSimpleName" => Value::str(simple_name_of(&qualified)),
+                "isInterface" if args.is_empty() => Value::bool(is_interface_class(&qualified)),
                 _ => match dispatch_static(vm, &simple_name_of(&qualified), method, args) {
                     Some(v) => v,
                     None => raise_missing_method(vm, recv, method, args),
@@ -16682,7 +16758,7 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
             // BUGS.md), so it reads as `null` here.
             "delegate" => meta.delegate.clone().unwrap_or(Value::Undef),
             "resolveStrategy" => Value::int(meta.resolve_strategy),
-            "parameterTypes" => glist(Vec::new()),
+            "parameterTypes" => closure_parameter_types(&meta),
             _ => raise_missing_property(vm, recv, name),
         };
     }
@@ -17681,8 +17757,9 @@ pub fn groovy_str(v: &Value) -> String {
     if let Some(m) = as_matcher(v) {
         return matcher_str(&m);
     }
-    // `java.lang.Class.toString` prefixes the qualified name with `class ` —
-    // except for a primitive type's class, which is just its name (`int`).
+    // `java.lang.Class.toString` prefixes the qualified name with `class `, or
+    // `interface ` for an interface — except for a primitive type's class,
+    // which is just its name (`int`).
     if let Some(name) = as_class_ref(v) {
         let primitive = matches!(
             name.as_str(),
@@ -17690,6 +17767,8 @@ pub fn groovy_str(v: &Value) -> String {
         );
         return if primitive {
             name
+        } else if is_interface_class(&name) {
+            format!("interface {name}")
         } else {
             format!("class {name}")
         };

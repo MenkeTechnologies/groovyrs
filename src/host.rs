@@ -7111,6 +7111,8 @@ fn dispatch_map_method_exists(method: &str) -> bool {
             | "reverseEach"
             | "take"
             | "drop"
+            | "takeWhile"
+            | "dropWhile"
     )
 }
 
@@ -9362,6 +9364,30 @@ fn dispatch_map_iteration(
                 "every" => Value::bool(true),
                 _ => Value::Undef,
             }))
+        }
+        // `map.takeWhile { … }` — the longest prefix of entries the closure
+        // accepts; `dropWhile` the rest from the first it rejects. Both answer
+        // a map of the receiver's kind.
+        "takeWhile" | "dropWhile" => {
+            let clo = clo?;
+            let mut cut = entries.len();
+            for (i, (k, v)) in entries.iter().enumerate() {
+                let r = match invoke_closure(vm, clo, &entry_args(clo, k, v)) {
+                    Ok(r) => r,
+                    Err(e) => return Some(Err(e)),
+                };
+                if pending_exc() {
+                    return Some(Ok(Value::Undef));
+                }
+                if !groovy_truthy(vm, &r) {
+                    cut = i;
+                    break;
+                }
+            }
+            let mut kept = entries.to_vec();
+            let rest = kept.split_off(cut);
+            let kept = if method == "takeWhile" { kept } else { rest };
+            Some(Ok(gmap_kind(kept, similar_map_kind(kind))))
         }
         // `map.groupBy { … }` — a map from the closure's value to the *sub-map*
         // of entries that produced it.
@@ -12119,6 +12145,8 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // implementation as its source, so the kind rides along —
                 // `new TreeMap(…).clone()` is a `TreeMap` and still sorts.
                 "spread" | "clone" | "asImmutable" | "asSynchronized" => gmap_kind(entries, kind),
+                // `map.plus(other)` is `map + other`, overloads and all.
+                "plus" if args.len() == 1 => groovy_add(recv, &args[0]),
                 // `map - other` / `map.minus(other)` drops the entries the other
                 // map holds *identically* (same key and same value).
                 "minus" => {

@@ -9120,3 +9120,16 @@ fn paren_less_println_of_a_list_literal_is_a_subscript() {
     assert!(ok);
     assert_eq!(out, "groovy.lang.MissingPropertyException\n");
 }
+
+#[test]
+fn map_plus_method_and_take_drop_while() {
+    // `map.plus(other)` is `map + other`; `takeWhile`/`dropWhile` cut a map at
+    // the first entry the closure rejects. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+def m = [a:1, b:2, c:1]
+println m.plus([b:9]); println m.takeWhile { k, v -> v < 2 }; println m.dropWhile { e -> e.value < 2 }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[a:1, b:9, c:1]\n[a:1]\n[b:2, c:1]\n");
+}

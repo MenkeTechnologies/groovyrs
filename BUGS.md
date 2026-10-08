@@ -782,8 +782,8 @@ error.
 
 **The probe corpus under 6.0.0.** Of the probes in `parity-scripts/probes.txt`
 that still miss under 6.0.0, two are the documented Java cast and GString
-class, and `println ++i` raises `MissingPropertyException` in Groovy (it parses
-as `println++`) and prints `6` here.
+class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
+`MissingPropertyException`.)
 
 ## Not implemented (errors today)
 

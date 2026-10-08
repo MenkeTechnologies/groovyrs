@@ -2892,6 +2892,24 @@ impl Parser {
             self.eat(&Tok::RParen)?;
             return Ok(Expr::Println { newline, arg });
         }
+        // `println ++i` is not a command call with a pre-increment argument:
+        // Groovy's grammar binds the `++` to the name as a postfix, so it is
+        // `(println++)(i)`, and reading the property `println` raises
+        // `MissingPropertyException` before `i` is touched.
+        if matches!(self.peek(), Tok::PlusPlus | Tok::MinusMinus) {
+            let inc = self.is(&Tok::PlusPlus);
+            let line = self.line();
+            self.advance();
+            let arg = self.expression()?;
+            return Ok(Expr::CallValue {
+                callee: Box::new(Expr::PostIncDec {
+                    name: name.to_string(),
+                    inc,
+                }),
+                args: vec![arg],
+                line,
+            });
+        }
         // Command form: a bare argument up to the statement terminator. With no
         // argument (`println` at end of line) it prints an empty line.
         let arg = if matches!(self.peek(), Tok::Nl | Tok::Semi | Tok::RBrace | Tok::Eof) {

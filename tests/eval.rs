@@ -256,8 +256,10 @@ fn postfix_increment_in_expression_position() {
 
 #[test]
 fn prefix_increment_in_expression_position() {
-    // `++i` yields the value after the update.
-    let (out, _) = run("int i = 5\nprintln ++i\nprintln i");
+    // `++i` yields the value after the update. (Paren-less `println ++i` is
+    // `(println++)(i)` in Groovy, so the parenthesised call is the one that
+    // passes `++i` as an argument.)
+    let (out, _) = run("int i = 5\nprintln(++i)\nprintln i");
     assert_eq!(out, "6\n6\n");
 }
 

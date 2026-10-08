@@ -9164,3 +9164,17 @@ try { a.i = 'abc' } catch (e) { println e.class.simpleName }
     assert!(ok);
     assert_eq!(out, "7 1.0\n3.0 String\nGroovyCastException\n");
 }
+
+#[test]
+fn declared_return_type_converts_the_returned_value() {
+    // `double f() { 2 }` answers `2.0` on every return path, and a `void`
+    // method answers null. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+double f(x) { if (x) return 1; 2 }
+class A { void v() { 5 }; int i() { 2.9 } }
+println f(true); println f(false); println new A().v(); println new A().i()
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "1.0\n2.0\nnull\n2\n");
+}

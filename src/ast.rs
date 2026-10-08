@@ -138,6 +138,10 @@ pub enum StmtKind {
         /// arguments into when it is variadic (`Object... rest`, `... rest`,
         /// `String[] rest`), else `None`.
         varargs: Option<String>,
+        /// The declared return type, as written (`def` when untyped). A value
+        /// the body returns is converted to it (`double f() { 2 }` answers
+        /// `2.0`), and a `void` function answers `null`.
+        ret_ty: String,
     },
     /// A class declaration: `class C { fields; C(..){..}; def m(){..} }`. Fields,
     /// constructors, and methods are hoisted like functions and lowered to

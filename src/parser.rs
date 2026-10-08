@@ -433,7 +433,7 @@ impl Parser {
             }
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
-                return self.function_def(name);
+                return self.function_def(name, "def".to_string());
             }
             let init = self.opt_initializer()?;
             // `def a = 1, b = 2` — the declarators after the first become their
@@ -465,7 +465,7 @@ impl Parser {
             let ty = self.decl_type()?;
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
-                return self.function_def(name);
+                return self.function_def(name, ty);
             }
             let mut init = self.opt_initializer()?;
             // An array-typed local converts its initializer the way `as` does:
@@ -661,7 +661,7 @@ impl Parser {
 
     /// Parse a function definition `name(params) { body }` with the name already
     /// consumed and the `(` as the current token.
-    fn function_def(&mut self, name: String) -> Result<StmtKind, String> {
+    fn function_def(&mut self, name: String, ret_ty: String) -> Result<StmtKind, String> {
         let line = self.line();
         let params = self.param_list()?;
         let overloads = self.default_overloads(&params);
@@ -679,6 +679,7 @@ impl Parser {
                     params: kept,
                     body,
                     varargs: None,
+                    ret_ty: "def".to_string(),
                 },
             ));
         }
@@ -687,6 +688,7 @@ impl Parser {
             params,
             body,
             varargs,
+            ret_ty,
         })
     }
 

@@ -196,6 +196,11 @@ struct Compiler {
     /// numeric hook) and so can leave an exception in flight. Gating on it keeps
     /// arithmetic native for every other program.
     exc_after_arith: bool,
+    /// The declared return type of the function or method body being lowered
+    /// (`None` in a closure, a constructor, a field initializer and the script
+    /// body). Every value the body returns is converted to it — see
+    /// [`Compiler::emit_return_coercion`].
+    ret_ty: Option<String>,
     /// The enclosing `try` blocks of the frame being lowered.
     tries: Vec<TryScope>,
     /// The enclosing `finally` bodies of the frame being lowered.
@@ -528,6 +533,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         wide_sites: HashSet::new(),
         cells: boxed_names(&[], &prog.body),
         preloaded_lhs: false,
+        ret_ty: None,
     };
     // Arm the host's exception machinery for this run. Emitted only by a program
     // that uses `try`/`throw`, and it is what lets a runtime `Throwable` (a zero
@@ -599,10 +605,14 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     let skip = c.b.emit(Op::Jump(0), 0);
     for stmt in &prog.body {
         if let StmtKind::Function {
-            name, params, body, ..
+            name,
+            params,
+            body,
+            ret_ty,
+            ..
         } = &stmt.kind
         {
-            c.function(stmt.line, name, params, body)?;
+            c.function(stmt.line, name, params, body, ret_ty)?;
         }
     }
     // Emit each class's field-initializer, constructor, and method subroutines.
@@ -844,6 +854,7 @@ impl Compiler {
         name: &str,
         params: &[String],
         body: &[Stmt],
+        ret_ty: &str,
     ) -> Result<(), String> {
         let entry = self.b.current_pos();
         let sub = self.fn_sub_name(name, params.len());
@@ -887,7 +898,9 @@ impl Compiler {
         }
 
         let prev_cells = self.enter_cell_scope(params, body, &HashSet::new(), line);
+        let prev_ret = self.ret_ty.replace(ret_ty.to_string());
         self.fn_body(body)?;
+        self.ret_ty = prev_ret;
         self.exit_cell_scope(prev_cells);
 
         // Fall-through: a function that does not hit an explicit `return` (or
@@ -1106,7 +1119,9 @@ impl Compiler {
         }
 
         let prev_cells = self.enter_cell_scope(&pc.params, &pc.body, &pc.cell_captures, pc.line);
+        let prev_ret = self.ret_ty.take();
         self.fn_body(&pc.body)?;
+        self.ret_ty = prev_ret;
         self.exit_cell_scope(prev_cells);
         self.closure_depth -= 1;
 
@@ -1365,6 +1380,7 @@ impl Compiler {
             _ => HashSet::new(),
         };
         self.cur_class_own_fields = Some(own_fields);
+        let prev_ret = self.ret_ty.take();
         for ctor in ctors {
             let sub = Self::ctor_sub_name(name, ctor.params.len());
             self.emit_member(
@@ -1378,8 +1394,10 @@ impl Compiler {
         }
         for m in methods {
             let sub = Self::method_sub_name(name, &m.name, m.params.len());
+            self.ret_ty = Some(m.ret_ty.clone());
             self.emit_member(line, &sub, &m.params, &m.body, &field_set, &method_set)?;
         }
+        self.ret_ty = prev_ret;
         self.cur_class_super = prev_super;
         self.cur_class_own_fields = prev_own;
         Ok(())
@@ -1774,6 +1792,7 @@ impl Compiler {
             StmtKind::Expr(e) => {
                 self.cur_line = last.line;
                 self.stmt_expr(e)?;
+                self.emit_return_coercion(e)?;
                 self.b.emit(Op::ReturnValue, last.line);
             }
             // A trailing declaration is a value too: Groovy returns what it
@@ -1781,6 +1800,7 @@ impl Compiler {
             StmtKind::Local { name, .. } => {
                 self.stmt(last)?;
                 self.emit_name_load(name, last.line)?;
+                self.emit_return_coercion(&Expr::Var(name.clone()))?;
                 self.b.emit(Op::ReturnValue, last.line);
             }
             // Groovy's implicit return reaches through a trailing `if` or `try`:
@@ -2085,6 +2105,7 @@ impl Compiler {
                 // already computed — Java/Groovy's rule.
                 if let Some(e) = value {
                     self.expr(e)?;
+                    self.emit_return_coercion(e)?;
                 }
                 self.emit_finallys(|_| true)?;
                 if self.scope.is_some() {
@@ -3904,6 +3925,23 @@ impl Compiler {
     /// width of its initializer, and re-binds the name either way — a
     /// declaration is a fresh variable, so `def a = 2000000000` after an earlier
     /// `def a = 5L` is an `Integer` again.
+    /// Convert the value on the stack — the one the body is about to return —
+    /// to the declared return type, as Groovy does: `double f() { 2 }` answers
+    /// `2.0`, `String f() { 5 }` the `String` `"5"`, and a `void` method
+    /// answers `null` whatever its last expression was. `value` is the
+    /// returned expression, read for its static type alone.
+    fn emit_return_coercion(&mut self, value: &Expr) -> Result<(), String> {
+        let Some(ty) = self.ret_ty.clone() else {
+            return Ok(());
+        };
+        if ty == "void" {
+            self.b.emit(Op::Pop, self.cur_line);
+            self.b.emit(Op::LoadUndef, self.cur_line);
+            return Ok(());
+        }
+        self.emit_typed_coercion(&ty, value)
+    }
+
     /// Convert the value on the stack to a variable's declared type, as Groovy
     /// does on every store to a typed variable. Skipped when the value already
     /// statically has that type, so `int s = 0; s += i` over typed operands

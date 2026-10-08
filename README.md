@@ -161,7 +161,9 @@ Implemented and checked against Apache Groovy:
   fusevm subroutine regions over the native `Op::Call` frame ABI. Parameters and
   locals are frame slots, so recursion and mutual recursion are sound; `return
   <expr>` carries a value out, and a `return`-less body returns its last value
-  expression or declaration (else `null`).
+  expression or declaration (else `null`). A declared return type converts
+  the returned value (`double f() { 2 }` answers `2.0`), and a `void` body
+  answers `null`.
   A defaulted parameter (`def g(a, b = 10)`, also on methods and constructors)
   declares the shorter overloads Groovy generates — defaults drop from the
   right and may read earlier parameters. A variadic last parameter (`... xs`,

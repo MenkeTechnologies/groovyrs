@@ -147,6 +147,10 @@ reported as parse or compile errors, never silently mis-run.
   the second. Not modeled: a bucket that treeifies (8 collisions with a table of
   64+), and an element whose hash is the JVM identity hash — that one keeps its
   insertion position, and it is not reproducible across two JVM runs either.
+- **`asReversed()`, as a live view.** It answers Groovy's read-only
+  `org.apache.groovy.util.ReversedList`: reads see the list as it is now (a
+  later `<<` on the list shows up reversed), and every write through the view
+  raises `UnsupportedOperationException`.
 - **`subList`, as a live view.** `list.subList(from, to)` answers a
   `java.util.ArrayList$SubList` — a **window** onto the backing list, not a copy.
   A write through the window reaches the backing list (`s.set(0, 99)`,
@@ -774,7 +778,7 @@ this file.
 error.
 
 **Missing GDK methods** (`MissingMethodException` where Groovy answers):
-`String.lines`, `Map.toSpreadMap`, `asReversed`, `shuffled`,
+`String.lines`, `Map.toSpreadMap`, `shuffled`,
 `List.stream()`, `Range.by(n)`, `BigDecimal.step(to, step) { … }`. `Eval.me` raises
 `MissingPropertyException`.
 

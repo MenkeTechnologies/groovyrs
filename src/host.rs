@@ -1275,6 +1275,7 @@ fn java_class_name(v: &Value) -> String {
         // accessor: `getClass()` is one of the two calls Groovy still answers on
         // a stale window (`is()` is the other), so it must not comodification-check.
         _ if is_sublist(v) => "java.util.ArrayList$SubList",
+        _ if reversed_root(v).is_some() => "org.apache.groovy.util.ReversedList",
         // An array is a list *kind*, so it has to be asked about before the
         // plain-list arm claims it.
         _ if array_elem(v).is_some() => return array_elem(v).unwrap().array_class(),
@@ -1826,6 +1827,12 @@ enum HeapObj {
         name: String,
         ty: String,
     },
+    /// `list.asReversed()` — Groovy's `ReversedList`, a read-only live view
+    /// of `root` in reverse order. Reading it reads the root as it is now;
+    /// any write through it is `UnsupportedOperationException`.
+    ReversedList {
+        root: Value,
+    },
     /// A `groovy.util.Expando`: its properties live in the map handle it
     /// holds (a `HashMap`, or the map it was constructed from).
     Expando(Value),
@@ -2236,6 +2243,11 @@ fn list_slot(v: &Value) -> Option<(u32, usize, usize)> {
 /// [`as_list`] instead.
 fn as_list_raw(v: &Value) -> Option<Vec<Value>> {
     let Value::Obj(id) = v else { return None };
+    if let Some(root) = reversed_root(v) {
+        let mut items = as_list_raw(&root)?;
+        items.reverse();
+        return Some(items);
+    }
     HEAP.with(|h| {
         let h = h.borrow();
         match h.get(*id as usize) {
@@ -2383,6 +2395,7 @@ fn list_id(v: &Value) -> Option<u32> {
         let h = h.borrow();
         match h.get(*id as usize)? {
             HeapObj::ListVal { .. } => Some(*id),
+            HeapObj::ReversedList { .. } => Some(*id),
             // A window is a list while its backing storage still spans it —
             // the same condition `as_list_raw` answers `None` for.
             HeapObj::SubList {
@@ -2393,6 +2406,15 @@ fn list_id(v: &Value) -> Option<u32> {
             },
             _ => None,
         }
+    })
+}
+
+/// The list a `ReversedList` view reads, if `v` is one.
+fn reversed_root(v: &Value) -> Option<Value> {
+    let Value::Obj(id) = v else { return None };
+    HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::ReversedList { root }) => Some(root.clone()),
+        _ => None,
     })
 }
 
@@ -2413,6 +2435,11 @@ fn is_sublist(v: &Value) -> bool {
 /// change is structural whatever the caller claims, since the window's size
 /// moved.
 fn list_store(id: u32, items: Vec<Value>, structural: bool) {
+    // A `ReversedList` is read-only: every mutator reaches here and refuses.
+    if reversed_root(&Value::Obj(id)).is_some() {
+        with_vm(|vm| raise_opt(vm, "UnsupportedOperationException", None));
+        return;
+    }
     let Some((root, offset, len)) = list_slot(&Value::Obj(id)) else {
         return;
     };
@@ -8226,7 +8253,15 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         }
         // `subList` answers a live **window** onto this list, so it too is
         // decided on the handle rather than on the detached elements.
-        if method == "subList" && args.len() == 2 {
+        // `asReversed()` answers a read-only live view rather than a copy.
+        // A Java array is not a `List`, and has no `asReversed`.
+        if method == "asReversed" && args.is_empty() {
+            if array_elem(&recv).is_some() {
+                return raise_missing_method(vm, &recv, method, &args);
+            }
+            return heap_push(HeapObj::ReversedList { root: recv });
+        }
+        if method == "subList" && args.len() == 2 && reversed_root(&recv).is_none() {
             return make_sublist(vm, &recv, &args);
         }
         // Append, count and positional read on a ROOT list, in place. Falling

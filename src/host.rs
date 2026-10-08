@@ -13030,7 +13030,8 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
         if let Value::Array(items) = &v {
             let items = items.to_vec();
             let has_ctor = class_meta(cid).is_some_and(|m| {
-                m.ctors.contains_key(&(items.len() as u8)) || (items.is_empty() && m.ctors.is_empty())
+                m.ctors.contains_key(&(items.len() as u8))
+                    || (items.is_empty() && m.ctors.is_empty())
             });
             if has_ctor {
                 return construct(vm, &ty_simple, items);

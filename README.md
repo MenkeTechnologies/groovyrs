@@ -273,6 +273,8 @@ Implemented and checked against Apache Groovy:
   `super.m(args)` and `super(args)` chaining, inherited field initializers,
   `value instanceof Type` (user chain + built-in types), and `@Override` parsed
   and ignored.
+- **Nested types** — `class Outer { static class Inner { … } }` (also an
+  interface, trait or enum), named `Outer$Inner`, reached as `Outer.Inner`.
 - **Enums** — `enum E { A, B(args); members }` with `name()`/`ordinal()`,
   `values()`, `valueOf`, `next()`/`previous()`, `MIN_VALUE`/`MAX_VALUE`, ordinal
   `compareTo`, and constructors taking each constant's arguments.

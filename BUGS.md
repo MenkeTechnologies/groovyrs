@@ -272,6 +272,11 @@ reported as parse or compile errors, never silently mis-run.
   `null instanceof X` false), and `@Override` / other annotations parsed and
   ignored. A leading `abstract`/`public`/`final` modifier on the declaration is
   accepted and ignored.
+- **Nested types.** A class, interface, trait or enum declared inside a class
+  body is the top-level type `Outer$Inner` (its `getName()`; `getSimpleName()`
+  is `Inner`). Inside the enclosing body a bare `Inner` names it, and
+  `Outer.Inner` does anywhere. An `${…}` placeholder inside the enclosing body
+  is parsed on its own and does not see the bare name.
 - **Enums.** `enum E [implements I] { A, B(args); members }` compiles to the
   class Groovy builds: each constant a `static final` instance, `name()`,
   `ordinal()`, `compareTo` by ordinal, `toString()` (the name unless declared),
@@ -751,7 +756,6 @@ this file.
   receiver): it is tried as a static call. A pointer's `getClass()` is
   `groovy.lang.Closure`, not `org.codehaus.groovy.runtime.MethodClosure`, and
   its `maximumNumberOfParameters` is that of a varargs closure.
-- `class Outer { static class Inner { … } }` — a nested class is a parse error.
 - `obj.hasProperty('a')` is not dispatched.
 - A bare call no binding answers (`foo(1)` with no `foo` anywhere) faults with
   the uncatchable `unresolved reference: foo`; Groovy raises a catchable

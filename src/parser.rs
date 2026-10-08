@@ -38,7 +38,8 @@ pub const MAX_NESTING: usize = 5000;
 /// has no `rust` token), so the lexer/parser only ever see ordinary Groovy.
 pub fn parse(src: &str) -> Result<Program, String> {
     let src = crate::rust_ffi::desugar(src);
-    let tokens = crate::lexer::lex(&src)?;
+    let mut tokens = crate::lexer::lex(&src)?;
+    qualify_nested_types(&mut tokens);
     let mut p = Parser {
         toks: tokens,
         src,
@@ -46,6 +47,7 @@ pub fn parse(src: &str) -> Result<Program, String> {
         tmp: 0,
         recording: None,
         pending: Vec::new(),
+        hoisted: Vec::new(),
         param_defaults: Vec::new(),
         param_varargs: None,
         depth: 0,
@@ -71,6 +73,11 @@ struct Parser {
     /// a multi-declarator `def a = 1, b = 2` or a destructuring `def (a, b) = l`.
     /// Drained by every statement-list site through [`Parser::statements`].
     pending: Vec<Stmt>,
+    /// Type declarations found inside a class body (`static class Inner`),
+    /// already renamed to their binary name `Outer$Inner` by
+    /// [`qualify_nested_types`]. A class is compiled as a top-level
+    /// declaration, so [`Parser::program`] appends these to the body.
+    hoisted: Vec<Stmt>,
     /// The default-value expressions of the last parameter list parsed, one
     /// slot per parameter; see [`Parser::default_overloads`].
     param_defaults: Vec<Option<Expr>>,
@@ -199,6 +206,7 @@ impl Parser {
             self.expect_terminator()?;
             self.skip_terminators();
         }
+        body.append(&mut self.hoisted);
         Ok(Program { body })
     }
 
@@ -1236,6 +1244,24 @@ impl Parser {
             is_abstract |= matches!(self.peek(), Tok::Ident(m) if m == "abstract");
             self.advance();
             modified = true;
+        }
+        // A nested type declaration, already renamed `Outer$Inner` by
+        // `qualify_nested_types`: parsed as a class of its own and hoisted to
+        // the top level, which is where groovyrs compiles every class.
+        if matches!(self.peek(), Tok::Ident(w) if w == "enum")
+            && matches!(self.peek_at(1), Tok::Ident(_))
+        {
+            let line = self.line();
+            let kind = self.enum_decl()?;
+            self.hoisted.push(Stmt::new(line, kind));
+            return Ok(());
+        }
+        if let Some(is_interface) = self.type_decl_ahead() {
+            let line = self.line();
+            let is_trait = matches!(self.peek(), Tok::Ident(w) if w == "trait");
+            let kind = self.class_decl(is_interface, is_trait)?;
+            self.hoisted.push(Stmt::new(line, kind));
+            return Ok(());
         }
         // `def name` — a field or method.
         if self.is(&Tok::Def)
@@ -4028,6 +4054,7 @@ fn parse_interpolation(src: &str) -> Result<Expr, String> {
         // placeholder rather than the script — see BUGS.md.
         recording: None,
         pending: Vec::new(),
+        hoisted: Vec::new(),
         param_defaults: Vec::new(),
         param_varargs: None,
         depth: 0,
@@ -4050,4 +4077,135 @@ fn is_primitive_type(name: &str) -> bool {
         name,
         "int" | "long" | "short" | "byte" | "char" | "double" | "float" | "boolean"
     )
+}
+
+/// Rename every nested type declaration to its JVM binary name before parsing.
+///
+/// `class Outer { static class Inner { … } }` declares `Outer$Inner`: that is
+/// what `getClass().getName()` answers (`getSimpleName()` is still `Inner`).
+/// groovyrs compiles every class at the top level, so the nesting is resolved
+/// here, on the tokens, where it is still lexical:
+///
+/// * the declaration's own name becomes `Outer$Inner` (and so do its
+///   constructors, which are spelled with the class name);
+/// * inside the enclosing type's body a bare `Inner` that is not a member
+///   access (`x.Inner`) names the nested type, as Java's scoping rule says;
+/// * anywhere, a qualified `Outer.Inner` collapses to the one name
+///   `Outer$Inner`, and so does a deeper `A.B.C`.
+fn qualify_nested_types(toks: &mut Vec<Token>) {
+    const TYPE_KEYWORDS: [&str; 4] = ["class", "interface", "trait", "enum"];
+    struct Decl {
+        name_at: usize,
+        simple: String,
+        qualified: String,
+        /// The token range of the enclosing type's body, `None` at top level.
+        scope: Option<(usize, usize)>,
+    }
+    let ident = |t: &Token| match &t.kind {
+        Tok::Ident(s) => Some(s.clone()),
+        _ => None,
+    };
+    // One walk pairs each type declaration with its body's braces.
+    let mut decls: Vec<Decl> = Vec::new();
+    // Open type bodies: (index into `decls`, brace depth inside the body).
+    let mut open: Vec<(usize, usize)> = Vec::new();
+    // The declaration whose `{` has not been reached yet.
+    let mut awaiting: Option<usize> = None;
+    let mut body_start: Vec<usize> = Vec::new();
+    let mut ranges: Vec<Option<(usize, usize)>> = Vec::new();
+    let mut depth = 0usize;
+    for i in 0..toks.len() {
+        match &toks[i].kind {
+            Tok::Ident(w)
+                if TYPE_KEYWORDS.contains(&w.as_str())
+                    && !matches!(i.checked_sub(1).map(|p| &toks[p].kind), Some(Tok::Dot))
+                    && awaiting.is_none() =>
+            {
+                if let Some(simple) = toks.get(i + 1).and_then(ident) {
+                    let parent = open.last().map(|(d, _)| *d);
+                    let qualified = match parent {
+                        Some(p) => format!("{}${simple}", decls[p].qualified),
+                        None => simple.clone(),
+                    };
+                    decls.push(Decl {
+                        name_at: i + 1,
+                        simple,
+                        qualified,
+                        scope: None,
+                    });
+                    body_start.push(0);
+                    ranges.push(None);
+                    awaiting = Some(decls.len() - 1);
+                }
+            }
+            Tok::LBrace => {
+                depth += 1;
+                if let Some(d) = awaiting.take() {
+                    body_start[d] = i;
+                    open.push((d, depth));
+                }
+            }
+            Tok::RBrace => {
+                if let Some(&(d, at)) = open.last() {
+                    if at == depth {
+                        ranges[d] = Some((body_start[d], i));
+                        open.pop();
+                    }
+                }
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    // A nested declaration's scope is its parent's body: the innermost body
+    // range that contains its name token.
+    for d in 0..decls.len() {
+        let at = decls[d].name_at;
+        decls[d].scope = ranges
+            .iter()
+            .enumerate()
+            .filter(|(o, _)| *o != d)
+            .filter_map(|(_, r)| *r)
+            .filter(|(s, e)| *s < at && at < *e)
+            .max_by_key(|(s, _)| *s);
+    }
+    let nested: Vec<&Decl> = decls.iter().filter(|d| d.scope.is_some()).collect();
+    if nested.is_empty() {
+        return;
+    }
+    // Outermost first, so an inner scope's rename sees the final names.
+    let mut renames: Vec<(usize, String)> = Vec::new();
+    for d in &nested {
+        renames.push((d.name_at, d.qualified.clone()));
+        let (s, e) = d.scope.unwrap();
+        for i in s + 1..e {
+            if i == d.name_at || matches!(toks[i - 1].kind, Tok::Dot) {
+                continue;
+            }
+            if matches!(&toks[i].kind, Tok::Ident(w) if *w == d.simple) {
+                renames.push((i, d.qualified.clone()));
+            }
+        }
+    }
+    // A deeper declaration's rename is pushed later and wins.
+    for (i, q) in renames {
+        toks[i].kind = Tok::Ident(q);
+    }
+    // `Outer.Inner` (and `A.B.C`) collapse to the binary name.
+    let known: std::collections::HashSet<String> =
+        nested.iter().map(|d| d.qualified.clone()).collect();
+    let mut i = 0;
+    while i + 2 < toks.len() {
+        let merged = match (&toks[i].kind, &toks[i + 1].kind, &toks[i + 2].kind) {
+            (Tok::Ident(a), Tok::Dot, Tok::Ident(b)) => Some(format!("{a}${b}")),
+            _ => None,
+        };
+        match merged {
+            Some(m) if known.contains(&m) => {
+                toks[i].kind = Tok::Ident(m);
+                toks.drain(i + 1..i + 3);
+            }
+            _ => i += 1,
+        }
+    }
 }

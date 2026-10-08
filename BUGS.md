@@ -253,8 +253,10 @@ reported as parse or compile errors, never silently mis-run.
 - **Operator overloading.** A user-class instance operand dispatches the Groovy
   operator method: `+`→`plus`, `-`→`minus`, `*`→`multiply`, `/`→`div`,
   `%`→`remainder`, `**`→`power`, unary `-`→`negative`; `<`/`>`/`<=`/`>=` and
-  `<=>` go through `compareTo`; `==`/`!=` use `compareTo` (when the class defines
-  it, i.e. is `Comparable`) else `equals`, and are null-safe (an instance is
+  `<=>` go through `compareTo` (`<=>` answers its sign, `-1`/`0`/`1`, as Groovy 6
+  normalises it); `==`/`!=` use `compareTo` (when the class defines
+  it, i.e. is `Comparable`) else `equals` (`Object.equals`, reference identity,
+  when the class declares none), and are null-safe (an instance is
   never `== null`); `recv[i]` uses `getAt`. Primitive (`Int`/`Float`/`String`)
   operands never route to a method — only a user-class operand does. (They can
   still reach the numeric hook: `Integer`-range overflow and an integral/`double`

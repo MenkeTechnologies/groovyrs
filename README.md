@@ -281,7 +281,7 @@ Implemented and checked against Apache Groovy:
   operator method: `+`→`plus`, `-`→`minus`, `*`→`multiply`, `/`→`div`,
   `%`→`remainder`, `**`→`power`, unary `-`→`negative`, `[]`→`getAt`,
   `<<`→`leftShift`, `>>`→`rightShift`;
-  `<`/`>`/`<=`/`>=`/`<=>` via `compareTo`; null-safe `==`/`!=` via `compareTo`
+  `<`/`>`/`<=`/`>=`/`<=>` via `compareTo` (`<=>` answers its sign); null-safe `==`/`!=` via `compareTo`
   (Comparable) or `equals`. A primitive operand never routes to a method.
 - **Method / property dispatch** — `s.length()`, `list.size()`,
   `"hi".toUpperCase()`, `map.k`, chains on literals (`[1,2,3].size()`), over a

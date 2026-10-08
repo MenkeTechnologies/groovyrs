@@ -6216,6 +6216,14 @@ fn dispatch_instance_method(
     if method == "getClass" && args.is_empty() {
         return Some(Ok(class_ref_of(recv)));
     }
+    // `Object.equals(other)` for a class that declares none (a user override
+    // and the `@EqualsAndHashCode` one were found above): reference identity,
+    // which is handle identity here.
+    if method == "equals" && args.len() == 1 {
+        return Some(Ok(Value::bool(
+            matches!((recv, &args[0]), (Value::Obj(a), Value::Obj(b)) if a == b),
+        )));
+    }
     // The `Throwable` methods a script actually calls, for the modeled built-in
     // hierarchy (a user override was already found by `lookup_method` above).
     if is_throwable_class(inst.class) {
@@ -16817,15 +16825,19 @@ fn b_mod(vm: &mut VM, _argc: u8) -> Value {
 }
 
 /// `GCMP`: Groovy `<=>`. Pops `a <=> b`. A user-class instance left operand
-/// dispatches `compareTo` (Groovy returns its raw `int`); otherwise a numeric
-/// pair compares numerically and any other pair by Groovy string ordering, both
-/// yielding the sign `-1`/`0`/`1`. Byte-verified against Apache Groovy 5.0.7.
+/// dispatches `compareTo`; otherwise a numeric pair compares numerically and any
+/// other pair by Groovy string ordering. Every path yields the sign `-1`/`0`/`1`:
+/// Groovy 6 normalises a user `compareTo` answer too, so a `compareTo` returning
+/// `-4` makes `a <=> b` answer `-1` (it answered the raw `int` through Groovy 5).
 fn b_cmp(vm: &mut VM, _argc: u8) -> Value {
     let b = vm.stack.pop().unwrap_or(Value::Undef);
     let a = vm.stack.pop().unwrap_or(Value::Undef);
     if let Some(res) = call_user_method(vm, &a, "compareTo", std::slice::from_ref(&b)) {
         return match res {
-            Ok(v) => v,
+            Ok(v) => match as_i64(&v) {
+                Some(n) => Value::int(n.signum()),
+                None => v,
+            },
             Err(e) => {
                 fault(vm, e);
                 Value::Undef

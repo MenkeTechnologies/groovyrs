@@ -9133,3 +9133,18 @@ println m.plus([b:9]); println m.takeWhile { k, v -> v < 2 }; println m.dropWhil
     assert!(ok);
     assert_eq!(out, "[a:1, b:9, c:1]\n[a:1]\n[b:2, c:1]\n");
 }
+
+#[test]
+fn abstract_method_and_multi_name_field_declaration() {
+    // An `abstract` method has no body and dispatches to the subclass; one
+    // declaration can name several fields. Verified against Apache Groovy 6.0.0.
+    let src = r#"
+abstract class S { abstract f(); def g() { f() * 2 } }
+class T extends S { def f() { 3 } }
+class P { def x, y = 2; static int a = 1, b }
+println new T().g(); println new P(x: 1).x + new P().y; println "${P.a} ${P.b}"
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "6\n3\n1 0\n");
+}

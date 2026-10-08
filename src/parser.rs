@@ -921,6 +921,34 @@ impl Parser {
         })
     }
 
+    /// The fields of one declaration, the first name already read:
+    /// `def x, y = 2` declares two fields of the one type and modifiers, each
+    /// with its own optional initializer.
+    fn field_decls(
+        &mut self,
+        first: String,
+        ty: &str,
+        is_static: bool,
+        fields: &mut Vec<Field>,
+    ) -> Result<(), String> {
+        let mut name = first;
+        loop {
+            let init = self.opt_initializer()?;
+            fields.push(Field {
+                name,
+                ty: ty.to_string(),
+                init,
+                is_static,
+            });
+            if !self.is(&Tok::Comma) {
+                return Ok(());
+            }
+            self.advance();
+            self.skip_newlines();
+            name = self.ident()?;
+        }
+    }
+
     /// Parse one class member into the appropriate bucket. Leading visibility /
     /// `static` / `final` modifiers are skipped (dynamic runtime).
     ///
@@ -966,6 +994,7 @@ impl Parser {
         // and in front of an interface method it is a modifier like the rest.
         let mut modified = false;
         let mut is_static = false;
+        let mut is_abstract = false;
         while self.is(&Tok::Default)
             || matches!(
                 self.peek(),
@@ -977,6 +1006,7 @@ impl Parser {
             )
         {
             is_static |= matches!(self.peek(), Tok::Ident(m) if m == "static");
+            is_abstract |= matches!(self.peek(), Tok::Ident(m) if m == "abstract");
             self.advance();
             modified = true;
         }
@@ -988,7 +1018,7 @@ impl Parser {
                 && matches!(self.peek(), Tok::Ident(n) if n != class_name)
                 && matches!(
                     self.peek_at(1),
-                    Tok::LParen | Tok::Assign | Tok::Nl | Tok::Semi | Tok::RBrace
+                    Tok::LParen | Tok::Assign | Tok::Nl | Tok::Semi | Tok::RBrace | Tok::Comma
                 ))
         {
             if self.is(&Tok::Def) {
@@ -1008,7 +1038,7 @@ impl Parser {
                         ret_ty: ty.clone(),
                     });
                 }
-                let Some(body) = self.opt_member_body(in_interface)? else {
+                let Some(body) = self.opt_member_body(in_interface || is_abstract)? else {
                     abstract_methods.push(name);
                     return Ok(());
                 };
@@ -1019,13 +1049,7 @@ impl Parser {
                     ret_ty: ty,
                 });
             } else {
-                let init = self.opt_initializer()?;
-                fields.push(Field {
-                    name,
-                    ty,
-                    init,
-                    is_static,
-                });
+                self.field_decls(name, &ty, is_static, fields)?;
             }
             return Ok(());
         }
@@ -1067,7 +1091,7 @@ impl Parser {
                         ret_ty: ty.clone(),
                     });
                 }
-                let Some(body) = self.opt_member_body(in_interface)? else {
+                let Some(body) = self.opt_member_body(in_interface || is_abstract)? else {
                     abstract_methods.push(name);
                     return Ok(());
                 };
@@ -1078,13 +1102,7 @@ impl Parser {
                     ret_ty: ty,
                 });
             } else {
-                let init = self.opt_initializer()?;
-                fields.push(Field {
-                    name,
-                    ty,
-                    init,
-                    is_static,
-                });
+                self.field_decls(name, &ty, is_static, fields)?;
             }
             return Ok(());
         }

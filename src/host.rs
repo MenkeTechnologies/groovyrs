@@ -1224,6 +1224,9 @@ fn java_class_name(v: &Value) -> String {
     if as_matcher(v).is_some() {
         return "java.util.regex.Matcher".to_string();
     }
+    if let Some((class, _, _)) = as_meta_property(v) {
+        return class.to_string();
+    }
     match v {
         Value::Str(_) => "java.lang.String",
         Value::Float(_) => "java.lang.Double",
@@ -1425,6 +1428,9 @@ fn register_throwables() {
                 method_arity: std::collections::HashMap::new(),
                 ctors: std::collections::HashMap::new(),
                 bool_getters: std::collections::HashSet::new(),
+                declared_fields: Vec::new(),
+                plain_fields: std::collections::HashSet::new(),
+                ret_types: std::collections::HashMap::new(),
             });
         }
     });
@@ -1775,6 +1781,14 @@ enum HeapObj {
     /// Holds the fully-qualified class name (a script-declared class has no
     /// package, so its qualified and simple names coincide).
     ClassRef(String),
+    /// A `groovy.lang.MetaProperty` that `hasProperty` answers: `class` is the
+    /// concrete class Groovy uses (`MetaBeanProperty` or `CachedField`), `ty`
+    /// the declared type as written.
+    MetaProperty {
+        class: &'static str,
+        name: String,
+        ty: String,
+    },
     /// One `Map.Entry` — what the single-parameter closure form of a map's
     /// `each` / `collect` / `find` receives. Holds the entry's key and value; it
     /// prints as `k=v` and answers `key`/`value` (and `getKey`/`getValue`).
@@ -2082,6 +2096,14 @@ struct ClassMeta {
     /// The `isX()` methods declared `boolean` with no parameters: the getters
     /// Groovy reads the property `x` through, ahead of a `getX()`.
     bool_getters: std::collections::HashSet<String>,
+    /// Every field the class declares, instance and `static`, in declaration
+    /// order — the order `getProperties()` lists a class's own fields in.
+    declared_fields: Vec<String>,
+    /// The fields declared with an explicit `public`/`private`/`protected`:
+    /// plain fields rather than properties (see `ast::Field::is_property`).
+    plain_fields: std::collections::HashSet<String>,
+    /// `name/arity` → the method's declared return type, as written.
+    ret_types: std::collections::HashMap<String, String>,
 }
 
 /// Clear the object heap, class registry, and decimal-literal intern table
@@ -2516,6 +2538,19 @@ fn closure_meta(v: &Value) -> Option<ClosureMeta> {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
             Some(HeapObj::Closure(c)) => Some(c.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// The `(class, name, declared type)` of a `MetaProperty` handle, if `v` is one.
+fn as_meta_property(v: &Value) -> Option<(&'static str, String, String)> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::MetaProperty { class, name, ty }) => {
+                Some((*class, name.clone(), ty.clone()))
+            }
             _ => None,
         }),
         _ => None,
@@ -4112,6 +4147,7 @@ fn capitalize(s: &str) -> String {
 /// constructor table on top.
 fn b_class(vm: &mut VM, _argc: u8) -> Value {
     // Pushed last by `register_class`, so these pop first and in reverse.
+    let ret_types_h = vm.stack.pop().unwrap_or(Value::Undef);
     let bool_getters_a = vm.stack.pop().unwrap_or(Value::Undef);
     let overloads_h = vm.stack.pop().unwrap_or(Value::Undef);
     let arities_h = vm.stack.pop().unwrap_or(Value::Undef);
@@ -4145,14 +4181,23 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
     };
 
     // Each entry arrives as `name:type`, or `name:type:static` for a `static`
-    // field (see `Compiler::register_class`).
+    // field, then `:field` for a plain (non-property) field (see
+    // `Compiler::register_class`).
     let mut static_fields: Vec<String> = Vec::new();
+    let mut plain_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
     let declared: Vec<(String, String)> = match fields_a {
         Value::Array(a) => a
             .iter()
             .map(|v| {
                 let text = v.as_str_cow().into_owned();
                 let (n, t) = text.split_once(':').unwrap_or((&text, "def"));
+                let t = match t.strip_suffix(":field") {
+                    Some(t) => {
+                        plain_fields.insert(n.to_string());
+                        t
+                    }
+                    None => t,
+                };
                 match t.strip_suffix(":static") {
                     Some(t) => {
                         static_fields.push(n.to_string());
@@ -4164,6 +4209,7 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
             .collect(),
         _ => Vec::new(),
     };
+    let declared_fields: Vec<String> = declared.iter().map(|(n, _)| n.clone()).collect();
     let field_names: Vec<String> = declared
         .iter()
         .map(|(n, _)| n.clone())
@@ -4206,9 +4252,19 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
         Value::Array(a) => a.iter().map(|v| v.as_str_cow().into_owned()).collect(),
         _ => std::collections::HashSet::new(),
     };
+    let ret_types: std::collections::HashMap<String, String> = match ret_types_h {
+        Value::Hash(h) => h
+            .into_iter()
+            .map(|(k, v)| (k, v.as_str_cow().into_owned()))
+            .collect(),
+        _ => std::collections::HashMap::new(),
+    };
     CLASSES.with(|c| {
         c.borrow_mut().push(ClassMeta {
             name,
+            declared_fields,
+            plain_fields,
+            ret_types,
             overloads,
             bool_getters,
             method_arity,
@@ -6185,6 +6241,9 @@ fn dispatch_instance_method(
     // class itself. groovyrs keeps one method table per class, so the class
     // handle stands in for `this` (a static body has no instance to read).
     if let Some(cid) = as_class_ref(recv).and_then(|n| find_class(&n)) {
+        if method == "hasProperty" && args.len() == 1 && lookup_method(cid, method).is_none() {
+            return Some(Ok(has_property(cid, &groovy_str(&args[0]))));
+        }
         let idx = lookup_method_argc(cid, method, args.len())?;
         if let Err(e) = ensure_static_init(vm, cid) {
             return Some(Err(e));
@@ -6256,6 +6315,10 @@ fn dispatch_instance_method(
         return Some(Ok(Value::bool(
             matches!((recv, &args[0]), (Value::Obj(a), Value::Obj(b)) if a == b),
         )));
+    }
+    // `hasProperty(name)`, the GDK method on every object.
+    if method == "hasProperty" && args.len() == 1 && !is_throwable_class(inst.class) {
+        return Some(Ok(has_property(inst.class, &groovy_str(&args[0]))));
     }
     // The `Throwable` methods a script actually calls, for the modeled built-in
     // hierarchy (a user override was already found by `lookup_method` above).
@@ -6490,6 +6553,141 @@ fn lower_first(s: &str) -> String {
 
 /// Read a property on a class instance: a user `getX()` getter if defined, else
 /// the field, else fault. `None` when `recv` is not an instance.
+/// One property of a script class, as `getProperties()` and `hasProperty` see it.
+struct PropInfo {
+    name: String,
+    /// The declared type as written (`def` when untyped).
+    ty: String,
+    /// A field declared with an explicit visibility modifier — a `CachedField`
+    /// to `hasProperty` rather than a `MetaBeanProperty`.
+    plain_field: bool,
+}
+
+/// `java.beans.Introspector.decapitalize`: the property a getter's suffix
+/// names. A suffix opening with two capitals is kept as it is (`getURL` is the
+/// property `URL`), otherwise the first letter is lowered.
+fn decapitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(a), Some(b)) if a.is_uppercase() && b.is_uppercase() => s.to_string(),
+        (Some(a), _) => a.to_lowercase().collect::<String>() + &s[a.len_utf8()..],
+        _ => String::new(),
+    }
+}
+
+/// The properties of script class `cid` in the order Groovy's
+/// `getProperties()` lists them for a class with no superclass: every declared
+/// field, instance and `static`, in declaration order; then the JavaBeans
+/// properties its getters define (`getX()`, a `boolean isX()`, and
+/// `getClass()`'s `class`), sorted by name, skipping a name a field already
+/// supplied. A setter alone does not make a readable property.
+///
+/// A subclass lists its whole chain's fields first, root first. Groovy instead
+/// puts an inherited `def` property among the sorted getter properties and an
+/// inherited `static` one last (see BUGS.md).
+///
+/// An enum's own bookkeeping fields (`$name`, `$ordinal`) are not properties.
+fn class_properties(cid: u32) -> Vec<PropInfo> {
+    let chain = class_chain(cid);
+    let mut out: Vec<PropInfo> = Vec::new();
+    for id in &chain {
+        let Some(m) = class_meta(*id) else { continue };
+        for f in m.declared_fields.iter().filter(|f| !f.starts_with('$')) {
+            if out.iter().any(|p| p.name == *f) {
+                continue;
+            }
+            out.push(PropInfo {
+                name: f.clone(),
+                ty: m
+                    .field_types
+                    .get(f)
+                    .cloned()
+                    .unwrap_or_else(|| "def".into()),
+                plain_field: m.plain_fields.contains(f),
+            });
+        }
+    }
+    let mut beans: Vec<PropInfo> = vec![PropInfo {
+        name: "class".to_string(),
+        ty: "Class".to_string(),
+        plain_field: false,
+    }];
+    for id in &chain {
+        let Some(m) = class_meta(*id) else { continue };
+        for key in m.overloads.keys() {
+            let Some(method) = key.strip_suffix("/0") else {
+                continue;
+            };
+            let (prop, ty) = if let Some(rest) = method.strip_prefix("get") {
+                (decapitalize(rest), m.ret_types.get(key).cloned())
+            } else if m.bool_getters.contains(method) {
+                (decapitalize(&method[2..]), Some("boolean".to_string()))
+            } else {
+                continue;
+            };
+            if prop.is_empty() || beans.iter().any(|p| p.name == prop) {
+                continue;
+            }
+            beans.push(PropInfo {
+                name: prop,
+                ty: ty.unwrap_or_else(|| "def".into()),
+                plain_field: false,
+            });
+        }
+    }
+    beans.sort_by(|a, b| a.name.cmp(&b.name));
+    for b in beans {
+        if !out.iter().any(|p| p.name == b.name) {
+            out.push(b);
+        }
+    }
+    out
+}
+
+/// The `java.lang.Class` a declared type names, as `MetaProperty.getType()`
+/// answers it: an untyped declaration is `Object`, a primitive keeps its own
+/// name, and a script class is itself.
+fn declared_type_class(ty: &str) -> Value {
+    let qualified = match ty {
+        "def" | "Object" | "var" => "java.lang.Object".to_string(),
+        "int" | "long" | "short" | "byte" | "double" | "float" | "char" | "boolean" | "void" => {
+            ty.to_string()
+        }
+        "Class" => "java.lang.Class".to_string(),
+        "Closure" => "groovy.lang.Closure".to_string(),
+        other if find_class(other).is_some() => other.to_string(),
+        other => cast_target_class(other),
+    };
+    heap_push(HeapObj::ClassRef(qualified))
+}
+
+/// `obj.hasProperty(name)` on a script class instance (or the class itself):
+/// the `MetaProperty` Groovy answers, or `null`. A field declared with an
+/// explicit visibility modifier is a `CachedField`; a property, a getter, and
+/// a setter alone are a `MetaBeanProperty`.
+fn has_property(cid: u32, name: &str) -> Value {
+    let found = class_properties(cid).into_iter().find(|p| p.name == name);
+    let (ty, plain) = match found {
+        Some(p) => (p.ty, p.plain_field),
+        None => {
+            let setter = format!("set{}", capitalize(name));
+            if lookup_overload_exact(cid, &setter, 1).is_none() {
+                return Value::Undef;
+            }
+            ("def".to_string(), false)
+        }
+    };
+    heap_push(HeapObj::MetaProperty {
+        class: if plain {
+            "org.codehaus.groovy.reflection.CachedField"
+        } else {
+            "groovy.lang.MetaBeanProperty"
+        },
+        name: name.to_string(),
+        ty,
+    })
+}
+
 fn dispatch_instance_prop_get(
     vm: &mut VM,
     recv: &Value,
@@ -6516,6 +6714,23 @@ fn dispatch_instance_prop_get(
     // declared field named `class` (read above) still wins.
     if name == "class" {
         return Some(Ok(class_ref_of(recv)));
+    }
+    // `obj.properties` is the GDK's `getProperties()`: every property's current
+    // value, in the order `class_properties` lists them.
+    if name == "properties" && !is_throwable_class(inst.class) {
+        let mut entries = Vec::new();
+        for p in class_properties(inst.class) {
+            let v = match dispatch_instance_prop_get(vm, recv, &p.name) {
+                Some(Ok(v)) => v,
+                Some(Err(e)) => return Some(Err(e)),
+                None => Value::Undef,
+            };
+            if pending_exc() {
+                return Some(Ok(Value::Undef));
+            }
+            entries.push((p.name, v));
+        }
+        return Some(Ok(gmap(entries)));
     }
     // Groovy reads `e.cause` / `e.suppressed` through `getCause()` /
     // `getSuppressed()`, so a throwable's non-field members answer as properties
@@ -12035,6 +12250,16 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
         }
 
+        // ── groovy.lang.MetaProperty (host heap) ──
+        _ if as_meta_property(recv).is_some() => {
+            let (_, name, ty) = as_meta_property(recv).unwrap();
+            match method {
+                "getName" if args.is_empty() => Value::str(name),
+                "getType" if args.is_empty() => declared_type_class(&ty),
+                _ => raise_missing_method(vm, recv, method, args),
+            }
+        }
+
         // ── Map.Entry (host heap) ──
         _ if as_entry(recv).is_some() => {
             let (k, v) = as_entry(recv).unwrap();
@@ -16439,6 +16664,14 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
             _ => raise_missing_property(vm, recv, name),
         };
     }
+    // A `MetaProperty`'s `name` and `type` are its getters.
+    if let Some((_, prop, ty)) = as_meta_property(recv) {
+        return match name {
+            "name" => Value::str(prop),
+            "type" => declared_type_class(&ty),
+            _ => raise_missing_property(vm, recv, name),
+        };
+    }
     // A closure reports its declared arity (Groovy's `Closure` getters, which
     // the parameter-count-sensitive GDK methods read).
     if let Some(meta) = closure_meta(recv) {
@@ -17448,9 +17681,23 @@ pub fn groovy_str(v: &Value) -> String {
     if let Some(m) = as_matcher(v) {
         return matcher_str(&m);
     }
-    // `java.lang.Class.toString` prefixes the qualified name with `class `.
+    // `java.lang.Class.toString` prefixes the qualified name with `class ` —
+    // except for a primitive type's class, which is just its name (`int`).
     if let Some(name) = as_class_ref(v) {
-        return format!("class {name}");
+        let primitive = matches!(
+            name.as_str(),
+            "int" | "long" | "short" | "byte" | "double" | "float" | "char" | "boolean" | "void"
+        );
+        return if primitive {
+            name
+        } else {
+            format!("class {name}")
+        };
+    }
+    // A `MetaProperty` has `Object.toString`, rendered without the identity
+    // hash as a script instance's default is (see BUGS.md).
+    if let Some((class, _, _)) = as_meta_property(v) {
+        return class.to_string();
     }
     // An instance of a class with a generated `toString` renders through it, so
     // `println p` and `"$p"` agree with `p.toString()`.

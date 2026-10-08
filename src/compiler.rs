@@ -1258,12 +1258,15 @@ impl Compiler {
         // type after a `:` — the one thing the type decides at run time is an
         // uninitialised *primitive* field's zero, and packing it here avoids a
         // second parallel array through the register builtin. A `static` field
-        // carries a trailing `:static`.
+        // carries a trailing `:static`, and a plain field (one declared with an
+        // explicit `public`/`private`/`protected`, so not a property) a
+        // trailing `:field` after that.
         for f in fields {
             let marker = if f.is_static { ":static" } else { "" };
+            let plain = if f.is_property { "" } else { ":field" };
             let c = self
                 .b
-                .add_constant(Value::str(format!("{}:{}{marker}", f.name, f.ty)));
+                .add_constant(Value::str(format!("{}:{}{marker}{plain}", f.name, f.ty)));
             self.b.emit(Op::LoadConst(c), line);
         }
         self.b.emit(Op::MakeArray(fields.len() as u16), line);
@@ -1341,6 +1344,17 @@ impl Compiler {
             self.b.emit(Op::LoadConst(c), line);
         }
         self.b.emit(Op::MakeArray(bool_getters.len() as u16), line);
+        // The declared return type of every method, keyed `name/arity` — what a
+        // getter-backed `MetaBeanProperty` reports as its `type`.
+        for m in methods {
+            let k = self
+                .b
+                .add_constant(Value::str(format!("{}/{}", m.name, m.params.len())));
+            self.b.emit(Op::LoadConst(k), line);
+            let t = self.b.add_constant(Value::str(m.ret_ty.clone()));
+            self.b.emit(Op::LoadConst(t), line);
+        }
+        self.b.emit(Op::MakeHash((methods.len() * 2) as u16), line);
         self.b.emit(Op::CallBuiltin(crate::host::GCLASS, 0), line);
         self.b.emit(Op::Pop, line);
     }

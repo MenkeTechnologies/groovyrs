@@ -756,7 +756,11 @@ this file.
   receiver): it is tried as a static call. A pointer's `getClass()` is
   `groovy.lang.Closure`, not `org.codehaus.groovy.runtime.MethodClosure`, and
   its `maximumNumberOfParameters` is that of a varargs closure.
-- `obj.hasProperty('a')` is not dispatched.
+- `obj.properties` on a *subclass* lists the whole chain's fields first, root
+  first. Groovy lists an inherited public field first, then the class's own
+  fields, then the getter properties sorted by name (an inherited `def`
+  property among them), then an inherited `static` property; an inherited
+  `private` field is absent. A class with no superclass matches exactly.
 - A bare call no binding answers (`foo(1)` with no `foo` anywhere) faults with
   the uncatchable `unresolved reference: foo`; Groovy raises a catchable
   `MissingMethodException` naming the script class. `tests/eval.rs`

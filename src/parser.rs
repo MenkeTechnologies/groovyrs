@@ -1114,6 +1114,7 @@ impl Parser {
                         line: *line,
                     }),
                     is_static: true,
+                    is_property: false,
                 }
             })
             .collect();
@@ -1124,6 +1125,7 @@ impl Parser {
                     ty: name.clone(),
                     init: Some(Expr::Var(cname.to_string())),
                     is_static: true,
+                    is_property: false,
                 });
             }
         }
@@ -1164,6 +1166,7 @@ impl Parser {
         first: String,
         ty: &str,
         is_static: bool,
+        is_property: bool,
         fields: &mut Vec<Field>,
     ) -> Result<(), String> {
         let mut name = first;
@@ -1174,6 +1177,7 @@ impl Parser {
                 ty: ty.to_string(),
                 init,
                 is_static,
+                is_property,
             });
             if !self.is(&Tok::Comma) {
                 return Ok(());
@@ -1230,6 +1234,7 @@ impl Parser {
         let mut modified = false;
         let mut is_static = false;
         let mut is_abstract = false;
+        let mut has_visibility = false;
         while self.is(&Tok::Default)
             || matches!(
                 self.peek(),
@@ -1242,6 +1247,10 @@ impl Parser {
         {
             is_static |= matches!(self.peek(), Tok::Ident(m) if m == "static");
             is_abstract |= matches!(self.peek(), Tok::Ident(m) if m == "abstract");
+            has_visibility |= matches!(
+                self.peek(),
+                Tok::Ident(m) if matches!(m.as_str(), "public" | "private" | "protected")
+            );
             self.advance();
             modified = true;
         }
@@ -1302,7 +1311,7 @@ impl Parser {
                     ret_ty: ty,
                 });
             } else {
-                self.field_decls(name, &ty, is_static, fields)?;
+                self.field_decls(name, &ty, is_static, !has_visibility, fields)?;
             }
             return Ok(());
         }
@@ -1355,7 +1364,7 @@ impl Parser {
                     ret_ty: ty,
                 });
             } else {
-                self.field_decls(name, &ty, is_static, fields)?;
+                self.field_decls(name, &ty, is_static, !has_visibility, fields)?;
             }
             return Ok(());
         }

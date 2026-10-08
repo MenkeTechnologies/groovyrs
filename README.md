@@ -268,6 +268,9 @@ Implemented and checked against Apache Groovy:
   implicit `this`, property get/set with Groovy's auto `getX`/`setX`, a bare
   field resolving to `this.field`, and `toString()` driving `println`. Instances
   are heap objects with reference identity. A user `getAt(i)` drives `obj[i]`.
+  `obj.properties` lists fields then getter properties (Groovy's order), and
+  `obj.hasProperty(n)` answers a `MetaBeanProperty` / `CachedField` (with
+  `name` and `type`) or `null`.
 - **Inheritance** — `class C extends B { … }` with single-inheritance field and
   method inheritance, virtual dispatch (most-derived override wins),
   `super.m(args)` and `super(args)` chaining, inherited field initializers,

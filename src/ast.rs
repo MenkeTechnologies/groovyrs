@@ -284,6 +284,11 @@ pub struct Field {
     /// Declared `static`: one value per class rather than per instance,
     /// initialised when the class is first used.
     pub is_static: bool,
+    /// Declared without `public`/`private`/`protected` — a Groovy *property*,
+    /// which carries a generated getter. An explicit modifier makes a plain
+    /// field: it still reads and writes as a property, but `hasProperty`
+    /// answers a `CachedField` for it rather than a `MetaBeanProperty`.
+    pub is_property: bool,
 }
 
 /// A class constructor `C(params) { body }`. Overloads are distinguished by

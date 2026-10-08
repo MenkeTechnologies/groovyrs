@@ -277,6 +277,9 @@ pub struct Field {
     /// type is diagnostic — the runtime is dynamically typed.
     pub ty: String,
     pub init: Option<Expr>,
+    /// Declared `static`: one value per class rather than per instance,
+    /// initialised when the class is first used.
+    pub is_static: bool,
 }
 
 /// A class constructor `C(params) { body }`. Overloads are distinguished by

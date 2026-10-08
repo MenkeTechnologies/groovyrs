@@ -9090,3 +9090,21 @@ try { new C().n() } catch (e) { println e.class.simpleName }
     assert!(ok);
     assert_eq!(out, "5\nmethod\nMissingMethodException\n");
 }
+
+#[test]
+fn static_fields_hold_one_value_per_class() {
+    // A `static` field is shared by every instance and reachable through the
+    // class; a superclass's statics initialise first. Verified against Apache
+    // Groovy 6.0.0.
+    let src = r#"
+class Q { static int n = 0; def id; Q() { n++; id = n }; static int count() { n } }
+def a = new Q(); def b = new Q()
+println "${Q.n} ${a.id} ${b.id} ${Q.count()}"
+Q.n = 10; a.n += 1; println Q.n
+class S extends Q { static int m = n + 100 }
+println S.m
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "2 1 2 2\n11\n111\n");
+}

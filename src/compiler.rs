@@ -1242,11 +1242,13 @@ impl Compiler {
         // field-name array (declaration order). Each name carries its declared
         // type after a `:` — the one thing the type decides at run time is an
         // uninitialised *primitive* field's zero, and packing it here avoids a
-        // second parallel array through the register builtin.
+        // second parallel array through the register builtin. A `static` field
+        // carries a trailing `:static`.
         for f in fields {
+            let marker = if f.is_static { ":static" } else { "" };
             let c = self
                 .b
-                .add_constant(Value::str(format!("{}:{}", f.name, f.ty)));
+                .add_constant(Value::str(format!("{}:{}{marker}", f.name, f.ty)));
             self.b.emit(Op::LoadConst(c), line);
         }
         self.b.emit(Op::MakeArray(fields.len() as u16), line);

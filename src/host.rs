@@ -641,6 +641,11 @@ thread_local! {
     /// closure's heap id and the Groovy rendering of its arguments. Cleared with
     /// the heap.
     static MEMO: RefCell<HashMap<(u32, String), Value>> = RefCell::new(HashMap::new());
+    /// The `static` field values of each script class, keyed by class id. A
+    /// class is present once its static initialisation has *started* — the
+    /// JVM's rule too, so an initializer that reads its own class sees the
+    /// fields as they stand rather than re-entering. Cleared with the heap.
+    static STATICS: RefCell<HashMap<u32, HashMap<String, Value>>> = RefCell::new(HashMap::new());
     /// The default-value closure a map got from `map.withDefault { … }`, keyed by
     /// the map's heap id. A missing-key read then answers that closure's result
     /// and stores it, which is what `groovy.lang.MapWithDefault` does.
@@ -1413,6 +1418,8 @@ fn register_throwables() {
                     Vec::new()
                 },
                 field_inits: Vec::new(),
+                static_fields: Vec::new(),
+                static_inits: Vec::new(),
                 methods: std::collections::HashMap::new(),
                 overloads: std::collections::HashMap::new(),
                 method_arity: std::collections::HashMap::new(),
@@ -2028,6 +2035,13 @@ struct ClassMeta {
     /// Field initializer thunks: name-pool index of a synthetic 0-arg subroutine
     /// that computes the initial value, per field that has an initializer.
     field_inits: Vec<(String, u16)>,
+    /// The `static` fields this class declares, in declaration order. They are
+    /// not in `field_names`: an instance never holds them; their one value per
+    /// class lives in `STATICS`.
+    static_fields: Vec<String>,
+    /// Initializer thunks of the `static` fields, as `field_inits` is for the
+    /// instance ones. Run once, with the class handle as `this`.
+    static_inits: Vec<(String, u16)>,
     /// method name → subroutine name-pool index.
     methods: std::collections::HashMap<String, u16>,
     /// `name/arity` → subroutine name-pool index. What separates two same-named
@@ -2056,6 +2070,7 @@ fn reset_heap() {
     CLASSES.with(|c| c.borrow_mut().clear());
     DEC_LITERALS.with(|d| d.borrow_mut().clear());
     MEMO.with(|m| m.borrow_mut().clear());
+    STATICS.with(|s| s.borrow_mut().clear());
     MAP_DEFAULTS.with(|m| m.borrow_mut().clear());
     PENDING.with(|p| *p.borrow_mut() = None);
     EXC_ARMED.with(|a| a.set(false));
@@ -3893,6 +3908,97 @@ fn class_chain(class: u32) -> Vec<u32> {
     chain
 }
 
+/// The class a `static` member reference through `recv` is resolved in: the
+/// script class a class handle names (`Q.n`, and `this` inside a static
+/// method), or an instance's own class (`obj.n` reaches a static field too).
+fn static_scope(recv: &Value) -> Option<u32> {
+    match as_class_ref(recv) {
+        Some(name) => find_class(&name),
+        None => as_instance(recv).map(|i| i.class),
+    }
+}
+
+/// The class that declares the `static` field `name` seen from `class`: the
+/// class itself or its nearest superclass declaring it.
+fn static_owner(class: u32, name: &str) -> Option<u32> {
+    class_chain(class)
+        .into_iter()
+        .rev()
+        .find(|id| class_meta(*id).is_some_and(|m| m.static_fields.iter().any(|f| f == name)))
+}
+
+/// Run the static initialisation of `class` and its superclasses, root first,
+/// each exactly once — the JVM's class initialisation, which runs on a class's
+/// first `new`, static method call or static field access. Every static field
+/// starts at its type's zero, then the initializers run in declaration order
+/// with the class handle as `this`. A thrown exception is left pending for the
+/// caller to check.
+fn ensure_static_init(vm: &mut VM, class: u32) -> Result<(), String> {
+    for id in class_chain(class) {
+        if STATICS.with(|s| s.borrow().contains_key(&id)) {
+            continue;
+        }
+        let Some(meta) = class_meta(id) else { continue };
+        let zeros: HashMap<String, Value> = meta
+            .static_fields
+            .iter()
+            .map(|f| {
+                let zero = meta.field_types.get(f).and_then(|t| primitive_zero(t));
+                (f.clone(), zero.unwrap_or(Value::Undef))
+            })
+            .collect();
+        STATICS.with(|s| s.borrow_mut().insert(id, zeros));
+        let this = heap_push(HeapObj::ClassRef(meta.name.clone()));
+        for (field, init_idx) in &meta.static_inits {
+            let v = invoke_sub(vm, *init_idx, std::slice::from_ref(&this))?;
+            if pending_exc() {
+                return Ok(());
+            }
+            STATICS.with(|s| {
+                if let Some(fields) = s.borrow_mut().get_mut(&id) {
+                    fields.insert(field.clone(), v);
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Read the `static` field `name` through `recv` (see [`static_scope`]).
+/// `None` when no class in reach declares it.
+fn static_read(vm: &mut VM, recv: &Value, name: &str) -> Option<Result<Value, String>> {
+    let owner = static_owner(static_scope(recv)?, name)?;
+    Some(ensure_static_init(vm, owner).map(|()| {
+        STATICS.with(|s| {
+            s.borrow()
+                .get(&owner)
+                .and_then(|fields| fields.get(name).cloned())
+                .unwrap_or(Value::Undef)
+        })
+    }))
+}
+
+/// Write the `static` field `name` through `recv`. `None` when no class in
+/// reach declares it.
+fn static_write(vm: &mut VM, recv: &Value, name: &str, value: Value) -> Option<Result<(), String>> {
+    let owner = static_owner(static_scope(recv)?, name)?;
+    Some(ensure_static_init(vm, owner).map(|()| {
+        STATICS.with(|s| {
+            if let Some(fields) = s.borrow_mut().get_mut(&owner) {
+                fields.insert(name.to_string(), value);
+            }
+        })
+    }))
+}
+
+/// Unwrap a static-member result for a builtin: the value, or a fault.
+fn static_result(vm: &mut VM, res: Result<Value, String>) -> Value {
+    res.unwrap_or_else(|e| {
+        fault(vm, e);
+        Value::Undef
+    })
+}
+
 /// Invoke a user method `method` on instance `recv` (implicit `this`), resolving
 /// it through the superclass chain. Returns `None` when `recv` is not an instance
 /// or its class defines no such method (so the caller can fall back), `Some(Err)`
@@ -3984,21 +4090,31 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
         _ => Vec::new(),
     };
 
-    // Each entry arrives as `name:type` (see `Compiler::register_class`).
+    // Each entry arrives as `name:type`, or `name:type:static` for a `static`
+    // field (see `Compiler::register_class`).
+    let mut static_fields: Vec<String> = Vec::new();
     let declared: Vec<(String, String)> = match fields_a {
         Value::Array(a) => a
             .iter()
             .map(|v| {
                 let text = v.as_str_cow().into_owned();
-                match text.split_once(':') {
-                    Some((n, t)) => (n.to_string(), t.to_string()),
-                    None => (text, "def".to_string()),
+                let (n, t) = text.split_once(':').unwrap_or((&text, "def"));
+                match t.strip_suffix(":static") {
+                    Some(t) => {
+                        static_fields.push(n.to_string());
+                        (n.to_string(), t.to_string())
+                    }
+                    None => (n.to_string(), t.to_string()),
                 }
             })
             .collect(),
         _ => Vec::new(),
     };
-    let field_names: Vec<String> = declared.iter().map(|(n, _)| n.clone()).collect();
+    let field_names: Vec<String> = declared
+        .iter()
+        .map(|(n, _)| n.clone())
+        .filter(|n| !static_fields.contains(n))
+        .collect();
     let field_types: std::collections::HashMap<String, String> = declared.into_iter().collect();
     let methods: std::collections::HashMap<String, u16> = match methods_h {
         Value::Hash(h) => h.into_iter().map(|(k, v)| (k, v.to_int() as u16)).collect(),
@@ -4010,6 +4126,10 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
         _ => std::collections::HashMap::new(),
     };
     let field_inits: Vec<(String, u16)> = field_names
+        .iter()
+        .filter_map(|f| init_map.get(f).map(|idx| (f.clone(), *idx)))
+        .collect();
+    let static_inits: Vec<(String, u16)> = static_fields
         .iter()
         .filter_map(|f| init_map.get(f).map(|idx| (f.clone(), *idx)))
         .collect();
@@ -4046,6 +4166,8 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
             field_names,
             field_types,
             field_inits,
+            static_fields,
+            static_inits,
             methods,
             ctors,
         })
@@ -4395,6 +4517,14 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
     };
     if class_meta(cid).is_some_and(|m| m.is_interface) {
         fault(vm, format!("groovyrs: {name} is an interface"));
+        return Value::Undef;
+    }
+    // `new` is a first use of the class: its static initialisation runs first.
+    if let Err(e) = ensure_static_init(vm, cid) {
+        fault(vm, e);
+        return Value::Undef;
+    }
+    if pending_exc() {
         return Value::Undef;
     }
     // Materialise every field across the superclass chain (root → leaf), each
@@ -5989,6 +6119,12 @@ fn dispatch_instance_method(
     // handle stands in for `this` (a static body has no instance to read).
     if let Some(cid) = as_class_ref(recv).and_then(|n| find_class(&n)) {
         let idx = lookup_method_argc(cid, method, args.len())?;
+        if let Err(e) = ensure_static_init(vm, cid) {
+            return Some(Err(e));
+        }
+        if pending_exc() {
+            return Some(Ok(Value::Undef));
+        }
         let mut pushes = Vec::with_capacity(args.len() + 1);
         pushes.push(recv.clone());
         pushes.extend_from_slice(args);
@@ -6298,6 +6434,9 @@ fn dispatch_instance_prop_get(
     if inst.fields.contains_key(name) {
         return Some(Ok(inst.fields.get(name).cloned().unwrap_or(Value::Undef)));
     }
+    if let Some(res) = static_read(vm, recv, name) {
+        return Some(res);
+    }
     // `obj.class` is the `getClass()` property, on a user instance too — but a
     // declared field named `class` (read above) still wins.
     if name == "class" {
@@ -6356,7 +6495,10 @@ fn b_field_get(vm: &mut VM, _argc: u8) -> Value {
         Some(inst) if inst.fields.contains_key(&name) => {
             inst.fields.get(&name).cloned().unwrap_or(Value::Undef)
         }
-        _ => raise_missing_field(vm, &recv, &name),
+        _ => match static_read(vm, &recv, &name) {
+            Some(res) => static_result(vm, res),
+            None => raise_missing_field(vm, &recv, &name),
+        },
     }
 }
 
@@ -6374,7 +6516,10 @@ fn b_field_set(vm: &mut VM, _argc: u8) -> Value {
         set_instance_field(&recv, &name, value.clone());
         return value;
     }
-    raise_missing_field(vm, &recv, &name)
+    match static_write(vm, &recv, &name, value.clone()) {
+        Some(res) => static_result(vm, res.map(|()| value)),
+        None => raise_missing_field(vm, &recv, &name),
+    }
 }
 
 /// `GSETPROP`: assign `recv.name = value`. Stack: receiver (deepest), value,
@@ -6418,6 +6563,12 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
                 };
             }
         }
+        // A `static` field, reached through the instance.
+        if !inst.fields.contains_key(&name) {
+            if let Some(res) = static_write(vm, &recv, &name, value.clone()) {
+                return static_result(vm, res.map(|()| value));
+            }
+        }
         // `propertyMissing(String name, value)` — the write half of Groovy's
         // hook, tried after the setter and before the field check below, which
         // is Groovy's own order. The two-argument form is the writer; the
@@ -6441,6 +6592,12 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
         }
         set_instance_field(&recv, &name, value.clone());
         return value;
+    }
+    // `C.n = v` — a script class's `static` field.
+    if as_class_ref(&recv).is_some() {
+        if let Some(res) = static_write(vm, &recv, &name, value.clone()) {
+            return static_result(vm, res.map(|()| value));
+        }
     }
     // `map.k = v` mutates the ordered map in place (through its shared handle).
     if omap_set(&recv, name.clone(), value.clone()) {
@@ -8054,7 +8211,9 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // [`instance_method_miss`]), so it enters the branch too.
     if as_instance(&recv).is_some_and(|i| {
         lookup_method(i.class, "methodMissing").is_some()
-            || i.fields.get(method).is_some_and(|f| closure_meta(f).is_some())
+            || i.fields
+                .get(method)
+                .is_some_and(|f| closure_meta(f).is_some())
     }) {
         let prev = MISS_PROBE.with(|p| p.borrow_mut().replace(method.to_string()));
         let prev_probed = MISS_PROBED.with(|m| m.replace(false));
@@ -16089,6 +16248,10 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     // A `java.lang.Class` exposes its accessors as properties (`c.name`,
     // `c.simpleName`) — Groovy's getter-to-property rule.
     if let Some(qualified) = as_class_ref(recv) {
+        // A script class's `static` field (`Q.n`).
+        if let Some(res) = static_read(vm, recv, name) {
+            return static_result(vm, res);
+        }
         return match name {
             "name" | "typeName" | "canonicalName" => Value::str(qualified),
             "simpleName" => Value::str(simple_name_of(&qualified)),

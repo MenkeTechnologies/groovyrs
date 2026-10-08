@@ -742,10 +742,6 @@ this file.
   `groovy.lang.Closure`, not `org.codehaus.groovy.runtime.MethodClosure`, and
   its `maximumNumberOfParameters` is that of a varargs closure.
 - `class Outer { static class Inner { … } }` — a nested class is a parse error.
-- A script-declared class's static members through the class name:
-  `P.K` (a `static final` field) raises `NullPointerException`, and a
-  constructor that bumps a `static int n` (`Q() { n++ }`) raises
-  `Cannot execute null+1`. (`P.make()` is the documented static-method entry.)
 - `obj.hasProperty('a')` is not dispatched.
 - A bare call no binding answers (`foo(1)` with no `foo` anywhere) faults with
   the uncatchable `unresolved reference: foo`; Groovy raises a catchable

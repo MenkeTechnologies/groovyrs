@@ -965,6 +965,7 @@ impl Parser {
         // Skip modifier keywords. `default` is a real token (the `switch` label),
         // and in front of an interface method it is a modifier like the rest.
         let mut modified = false;
+        let mut is_static = false;
         while self.is(&Tok::Default)
             || matches!(
                 self.peek(),
@@ -975,6 +976,7 @@ impl Parser {
                 )
             )
         {
+            is_static |= matches!(self.peek(), Tok::Ident(m) if m == "static");
             self.advance();
             modified = true;
         }
@@ -1018,7 +1020,12 @@ impl Parser {
                 });
             } else {
                 let init = self.opt_initializer()?;
-                fields.push(Field { name, ty, init });
+                fields.push(Field {
+                    name,
+                    ty,
+                    init,
+                    is_static,
+                });
             }
             return Ok(());
         }
@@ -1072,7 +1079,12 @@ impl Parser {
                 });
             } else {
                 let init = self.opt_initializer()?;
-                fields.push(Field { name, ty, init });
+                fields.push(Field {
+                    name,
+                    ty,
+                    init,
+                    is_static,
+                });
             }
             return Ok(());
         }

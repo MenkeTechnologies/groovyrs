@@ -167,7 +167,9 @@ Implemented and checked against Apache Groovy:
   right and may read earlier parameters. A variadic last parameter (`... xs`,
   `Object... xs`, `String[] xs`) collects a call's trailing arguments into an
   array. A modifier stands in for `def` (`static m(a) { … }`, `final x = 1`),
-  and a class's `static` methods are callable on the class (`C.m(1)`).
+  and a class's `static` methods are callable on the class (`C.m(1)`). A
+  `static` field holds one value per class (`C.n`, `obj.n`, or a bare `n` in
+  the class's own code), initialised on the class's first use.
   Declared types may be generic (`Map<String, List<Integer>> m`, erased),
   nested (`Map.Entry e`) or arrays (`int[] a = [1, 2]` holds an `int[]`;
   `new int[2][3]` allocates every dimension).

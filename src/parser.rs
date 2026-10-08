@@ -2922,6 +2922,14 @@ impl Parser {
                 line,
             });
         }
+        // `println [1, 2]` is not a command call with a list argument either:
+        // a command argument cannot open with `[`, so Groovy reads the
+        // subscript `println[1, 2]` — of the property `println`, which raises
+        // `MissingPropertyException`. The name is handed back as a plain
+        // variable for the postfix loop to subscript.
+        if self.is(&Tok::LBracket) {
+            return Ok(Expr::Var(name.to_string()));
+        }
         // Command form: a bare argument up to the statement terminator. With no
         // argument (`println` at end of line) it prints an empty line.
         let arg = if matches!(self.peek(), Tok::Nl | Tok::Semi | Tok::RBrace | Tok::Eof) {

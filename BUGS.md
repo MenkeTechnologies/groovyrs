@@ -834,8 +834,7 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   `([1,2] as int[]) + [3]` work here; real Groovy raises
   `MissingMethodException` for both, because a Java array is not a `Collection`
   and only the GDK methods defined on arrays apply. This is deliberate
-  permissiveness of the same sort as `println [1,2].toString()` — every program
-  that works in Groovy works here, and tightening it would reject working
+  permissiveness — every program that works in Groovy works here, and tightening it would reject working
   programs to gain nothing but a matching error.
 - **`new Random(…)` / `new Date(…)` and the other stateful JDK classes.**
   Reproducing them means reproducing Java's exact LCG and clock, so they fault

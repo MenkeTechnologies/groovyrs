@@ -310,14 +310,16 @@ fn string_gdk_methods() {
 
 #[test]
 fn size_method_on_string_list_and_map() {
+    // A list literal takes the parenthesised call: paren-less `println [..]` is
+    // a subscript of the property `println` in Groovy.
     let (out, _) =
-        run("println \"abc\".size()\nprintln [1, 2, 3, 4].size()\nprintln([k: 1].size())");
+        run("println \"abc\".size()\nprintln([1, 2, 3, 4].size())\nprintln([k: 1].size())");
     assert_eq!(out, "3\n4\n1\n");
 }
 
 #[test]
 fn list_method_chain_on_literal() {
-    let (out, _) = run("println [10, 20, 30].contains(20)");
+    let (out, _) = run("println([10, 20, 30].contains(20))");
     assert_eq!(out, "true\n");
 }
 
@@ -9107,4 +9109,14 @@ println S.m
     let (out, ok) = run(src);
     assert!(ok);
     assert_eq!(out, "2 1 2 2\n11\n111\n");
+}
+
+#[test]
+fn paren_less_println_of_a_list_literal_is_a_subscript() {
+    // `println [1, 2]` reads `println[1, 2]`, the subscript of a property no
+    // binding has. Verified against Apache Groovy 6.0.0.
+    let src = "try { println [1, 2] } catch (e) { println e.class.name }";
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "groovy.lang.MissingPropertyException\n");
 }

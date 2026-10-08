@@ -3951,6 +3951,7 @@ fn ensure_static_init(vm: &mut VM, class: u32) -> Result<(), String> {
         let this = heap_push(HeapObj::ClassRef(meta.name.clone()));
         for (field, init_idx) in &meta.static_inits {
             let v = invoke_sub(vm, *init_idx, std::slice::from_ref(&this))?;
+            let v = typed_field_value(vm, id, field, v);
             if pending_exc() {
                 return Ok(());
             }
@@ -3962,6 +3963,37 @@ fn ensure_static_init(vm: &mut VM, class: u32) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `value` converted to the declared type of `class`'s field `field`, as Groovy
+/// converts every store to a typed field or property — the Java-style cast a
+/// typed local's store gets too (`double d` holds `3.0` after `d = 3`, `int i`
+/// holds `2` after `i = 2.7`, and `int i = 'abc'` is a `GroovyCastException`).
+/// The declaring class is found across the superclass chain and the traits;
+/// an untyped (`def`) field, or one of a type Groovy does not convert, keeps
+/// the value as given.
+fn typed_field_value(vm: &mut VM, class: u32, field: &str, value: Value) -> Value {
+    let ty = trait_closure(class)
+        .into_iter()
+        .chain(class_chain(class))
+        .filter_map(class_meta)
+        .find_map(|m| m.field_types.get(field).cloned());
+    match ty {
+        Some(ty) if crate::compiler::COERCED_TYPES.contains(&ty.as_str()) => {
+            java_cast(vm, value, &ty)
+        }
+        _ => value,
+    }
+}
+
+/// Write a field of a script-class instance from script code: the value is
+/// converted to the field's declared type first (see [`typed_field_value`]).
+fn store_instance_field(vm: &mut VM, recv: &Value, field: &str, value: Value) -> bool {
+    let Some(inst) = as_instance(recv) else {
+        return false;
+    };
+    let value = typed_field_value(vm, inst.class, field, value);
+    set_instance_field(recv, field, value)
 }
 
 /// Read the `static` field `name` through `recv` (see [`static_scope`]).
@@ -3983,6 +4015,7 @@ fn static_read(vm: &mut VM, recv: &Value, name: &str) -> Option<Result<Value, St
 fn static_write(vm: &mut VM, recv: &Value, name: &str, value: Value) -> Option<Result<(), String>> {
     let owner = static_owner(static_scope(recv)?, name)?;
     Some(ensure_static_init(vm, owner).map(|()| {
+        let value = typed_field_value(vm, owner, name, value);
         STATICS.with(|s| {
             if let Some(fields) = s.borrow_mut().get_mut(&owner) {
                 fields.insert(name.to_string(), value);
@@ -4557,6 +4590,7 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
         for (fname, init_idx) in &m.field_inits {
             match invoke_sub(vm, *init_idx, std::slice::from_ref(&handle)) {
                 Ok(v) => {
+                    let v = typed_field_value(vm, *id, fname, v);
                     if pending_exc() {
                         return Value::Undef;
                     }
@@ -4609,7 +4643,7 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
             return Value::Undef;
         }
         for (f, v) in generated_field_order(cid).into_iter().zip(args) {
-            set_instance_field(&handle, &f, v);
+            store_instance_field(vm, &handle, &f, v);
         }
     } else if argc == 1 && as_omap(&args[0]).is_some() && !meta.ctors.contains_key(&1) {
         // Groovy's **map constructor**: `new P(a: 1, b: 2)` with no matching
@@ -4631,7 +4665,7 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
                 }
                 continue;
             }
-            set_instance_field(&handle, &k, v);
+            store_instance_field(vm, &handle, &k, v);
         }
     } else if !meta.ctors.is_empty() {
         fault(
@@ -6152,7 +6186,7 @@ fn dispatch_instance_method(
         let key = lower_first(field);
         if inst.fields.contains_key(&key) {
             let v = args.first().cloned().unwrap_or(Value::Undef);
-            set_instance_field(recv, &key, v);
+            store_instance_field(vm, recv, &key, v);
             return Some(Ok(Value::Undef));
         }
     }
@@ -6513,7 +6547,7 @@ fn b_field_set(vm: &mut VM, _argc: u8) -> Value {
     let value = vm.stack.pop().unwrap_or(Value::Undef);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
     if as_instance(&recv).is_some_and(|i| i.fields.contains_key(&name)) {
-        set_instance_field(&recv, &name, value.clone());
+        store_instance_field(vm, &recv, &name, value.clone());
         return value;
     }
     match static_write(vm, &recv, &name, value.clone()) {
@@ -6590,7 +6624,7 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
         if !inst.fields.contains_key(&name) {
             return raise_missing_property(vm, &recv, &name);
         }
-        set_instance_field(&recv, &name, value.clone());
+        store_instance_field(vm, &recv, &name, value.clone());
         return value;
     }
     // `C.n = v` — a script class's `static` field.
@@ -7216,7 +7250,7 @@ fn b_name_set(vm: &mut VM, _argc: u8) -> Value {
                 return Value::Undef;
             }
             if as_instance(&recv).is_some_and(|i| i.fields.contains_key(&name)) {
-                set_instance_field(&recv, &name, value);
+                store_instance_field(vm, &recv, &name, value);
                 return Value::Undef;
             }
         }

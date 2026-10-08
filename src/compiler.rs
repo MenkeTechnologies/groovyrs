@@ -5334,7 +5334,7 @@ fn compound_op(op: AssignOp) -> Op {
 /// same conversion a Java-style `(Type) value` cast performs. `int i = 3.7` is
 /// `3`, `double d = 3` is `3.0`, `String s = 5` is `"5"`, `int c = 'a' as
 /// char` is `97`. Other declared types are left alone.
-const COERCED_TYPES: &[&str] = &[
+pub(crate) const COERCED_TYPES: &[&str] = &[
     "int",
     "long",
     "short",

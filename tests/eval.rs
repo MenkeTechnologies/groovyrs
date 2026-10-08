@@ -9148,3 +9148,19 @@ println new T().g(); println new P(x: 1).x + new P().y; println "${P.a} ${P.b}"
     assert!(ok);
     assert_eq!(out, "6\n3\n1 0\n");
 }
+
+#[test]
+fn typed_field_store_converts_to_declared_type() {
+    // A store to a typed field casts like a typed local's store does: in the
+    // initializer, a property write and the map constructor. Verified against
+    // Apache Groovy 6.0.0.
+    let src = r#"
+class A { int i = 7.9; double d; String s }
+def a = new A(d: 1); println "${a.i} ${a.d}"
+a.d = 3; a.s = 5; println "${a.d} ${a.s.class.simpleName}"
+try { a.i = 'abc' } catch (e) { println e.class.simpleName }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "7 1.0\n3.0 String\nGroovyCastException\n");
+}

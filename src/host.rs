@@ -1649,9 +1649,30 @@ impl ArrayElem {
             "Boolean" | "java.lang.Boolean" => ArrayElem::Ref("java.lang.Boolean"),
             "String" | "java.lang.String" => ArrayElem::Ref("java.lang.String"),
             "Object" | "java.lang.Object" => ArrayElem::Object,
+            // A script-declared class: a `V[]` is a `[LV;`.
+            other if find_class(other).is_some() => ArrayElem::Ref(interned_class_name(other)),
             _ => return None,
         })
     }
+}
+
+/// A script class name with the `'static` lifetime an [`ArrayElem::Ref`]
+/// carries. Each distinct name is leaked once, so the cost is bounded by the
+/// number of classes the script declares.
+fn interned_class_name(name: &str) -> &'static str {
+    thread_local! {
+        static NAMES: RefCell<std::collections::HashSet<&'static str>> =
+            RefCell::new(std::collections::HashSet::new());
+    }
+    NAMES.with(|n| {
+        let mut n = n.borrow_mut();
+        if let Some(s) = n.get(name) {
+            return *s;
+        }
+        let s: &'static str = Box::leak(name.to_string().into_boxed_str());
+        n.insert(s);
+        s
+    })
 }
 
 enum HeapObj {
@@ -4514,6 +4535,14 @@ fn new_array(vm: &mut VM, elem: ArrayElem, rank: usize, dims: &[Value]) -> Value
     garray(rows, ArrayElem::Object)
 }
 
+/// `new <name>(args)` from host code: the same path the `new` opcode takes.
+fn construct(vm: &mut VM, name: &str, args: Vec<Value>) -> Value {
+    let argc = args.len() as u8;
+    vm.stack.extend(args);
+    vm.stack.push(Value::str(name.to_string()));
+    b_new(vm, argc)
+}
+
 fn b_new(vm: &mut VM, argc: u8) -> Value {
     let name = vm
         .stack
@@ -6011,7 +6040,11 @@ fn value_is_a(value: &Value, class: &str) -> bool {
     // only one of the same element type, so a `List` and an `int[]` are not
     // instances of each other whatever they contain.
     if let Some(want) = class.strip_suffix("[]").and_then(ArrayElem::from_name) {
-        return array_elem(value) == Some(want);
+        // Java arrays are covariant: every reference-element array (`String[]`,
+        // `V[]`) is an `Object[]`; a primitive one (`int[]`) is not.
+        let have = array_elem(value);
+        return have == Some(want)
+            || (want == ArrayElem::Object && matches!(have, Some(ArrayElem::Ref(_))));
     }
     // Built-in Groovy/Java types (short or common fully-qualified names).
     let short = class.rsplit('.').next().unwrap_or(class);
@@ -12979,6 +13012,32 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
             items.push(converted);
         }
         return garray(items, elem);
+    }
+    // A script class target, as `DefaultGroovyMethods.asType` treats one: a value
+    // that already is one passes through, a map builds one through the
+    // named-argument constructor (`[n: 2] as V`), a list spreads its elements
+    // over a positional one (`[4] as V` is `new V(4)`), and anything else is a
+    // `GroovyCastException`. A closure is left to the interface coercion.
+    if let Some(cid) = resolve_class_name(ty).filter(|_| !ty.ends_with("[]")) {
+        if value_is_a(&v, ty) || closure_meta(&v).is_some() {
+            return v;
+        }
+        if as_omap(&v).is_some() {
+            return construct(vm, &ty_simple, vec![v]);
+        }
+        // `v` is the list's transient form here (see `deref_list` above); the
+        // diagnostic wants the list itself, which names its elements' classes.
+        if let Value::Array(items) = &v {
+            let items = items.to_vec();
+            let has_ctor = class_meta(cid).is_some_and(|m| {
+                m.ctors.contains_key(&(items.len() as u8)) || (items.is_empty() && m.ctors.is_empty())
+            });
+            if has_ctor {
+                return construct(vm, &ty_simple, items);
+            }
+            return raise_java_cast(vm, &glist(items), &ty_simple);
+        }
+        return raise_java_cast(vm, &v, &ty_simple);
     }
     match ty_simple.as_str() {
         // Integral targets truncate toward zero, as Java's narrowing casts do.

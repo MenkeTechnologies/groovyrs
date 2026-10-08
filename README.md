@@ -532,7 +532,11 @@ Implemented and checked against Apache Groovy:
   hook sees only what nothing else answered. `propertyMissing(String)` reads and
   `propertyMissing(String, value)` writes.
 - **Java arrays** — `new int[3]`, `[1,2,3] as int[]`, `.length`, and the JVM
-  class descriptors (`[I`, `[J`, `[D`, `[Z`, `[B`, `[C`, `[Ljava.lang.String;`).
+  class descriptors (`[I`, `[J`, `[D`, `[Z`, `[B`, `[C`, `[Ljava.lang.String;`),
+  including arrays of a script class (`[new V()] as V[]` is a `[LV;`, and every
+  reference-element array is an `Object[]`). `x as V` for a script class `V`
+  passes an instance through, builds one from a map or a list, and otherwise
+  raises `GroovyCastException`.
   Modeled as a list *kind*, the way a `TreeMap` is a map kind, so an array
   iterates, subscripts, `collect`s and prints as a list does; `split`,
   `toArray()`, `toCharArray()`, `String.bytes` and a varargs closure parameter

@@ -272,6 +272,13 @@ reported as parse or compile errors, never silently mis-run.
   `null instanceof X` false), and `@Override` / other annotations parsed and
   ignored. A leading `abstract`/`public`/`final` modifier on the declaration is
   accepted and ignored.
+- **Enums.** `enum E [implements I] { A, B(args); members }` compiles to the
+  class Groovy builds: each constant a `static final` instance, `name()`,
+  `ordinal()`, `compareTo` by ordinal, `toString()` (the name unless declared),
+  `values()` (an `E[]`), `valueOf(String)` with the JDK's `No enum constant E.X`,
+  the wrapping `next()`/`previous()`, `getDeclaringClass()`, `MIN_VALUE` /
+  `MAX_VALUE`, and `instanceof Enum` / `Comparable`. Declared constructors take
+  the constant's arguments.
 - **Interfaces.** `interface I { … }`, `class C implements A, B`, and an
   interface's own multiple `extends A, B`. A method declared with no body is an
   abstract declaration (it binds nothing, and a sibling `default` method may
@@ -735,8 +742,9 @@ this file.
 
 **Declarations that do not parse or do not resolve:**
 
-- `enum Color { RED, GREEN }` — every `enum` declaration is a parse error
-  (`expected end of statement but found LBrace`).
+- An `enum` constant with a class body (`A { … }`) is a parse error, a range of
+  enum constants (`S.A..S.C`) does not enumerate, and an enum constant used as
+  a map key prints as `(obj:N)` (see the map-key entry below).
 - Method references `Integer::sum` are parse errors. Method *pointers*
   (`this.&sq`, `Math.&abs`, `obj.&m`) work, except a class receiver naming an
   *instance* method (`String.&toUpperCase`, whose first argument becomes the

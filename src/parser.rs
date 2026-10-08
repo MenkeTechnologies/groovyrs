@@ -273,6 +273,13 @@ impl Parser {
                 let is_trait = matches!(self.peek(), Tok::Ident(w) if w == "trait");
                 self.class_decl_with(is_interface, is_trait, generated)?
             }
+            // `enum E { A, B }`, optionally behind modifiers.
+            Tok::Ident(_) if self.enum_decl_ahead() => {
+                while !matches!(self.peek(), Tok::Ident(w) if w == "enum") {
+                    self.advance();
+                }
+                self.enum_decl()?
+            }
             // `class`/`interface`, optionally behind modifiers
             // (`abstract class C`, `public final class C`).
             Tok::Ident(_) if self.type_decl_ahead().is_some() => {
@@ -919,6 +926,224 @@ impl Parser {
             fields,
             ctors,
             methods,
+            abstract_methods,
+        })
+    }
+
+    /// Does an `enum` declaration start here, possibly behind modifiers?
+    fn enum_decl_ahead(&self) -> bool {
+        let mut i = 0;
+        loop {
+            match self.peek_at(i) {
+                Tok::Ident(w) if w == "enum" => {
+                    return matches!(self.peek_at(i + 1), Tok::Ident(_));
+                }
+                Tok::Ident(w)
+                    if matches!(
+                        w.as_str(),
+                        "public" | "private" | "protected" | "static" | "final"
+                    ) =>
+                {
+                    i += 1;
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    /// Parse `enum E [implements A] { C1, C2(args), …; members }` into the
+    /// class Groovy compiles it to. The `enum` keyword is the current token.
+    ///
+    /// Each constant is a `static final` field holding an instance built by a
+    /// constructor that also receives the constant's name and ordinal — every
+    /// declared constructor gains those two trailing parameters, and an enum
+    /// that declares none gets the two-parameter one. On top of the declared
+    /// members the class carries what `java.lang.Enum` and Groovy's
+    /// `EnumVisitor` supply: `name()`, `ordinal()`, `compareTo` by ordinal,
+    /// `toString()` (the name, unless declared), `values()` as an `E[]`,
+    /// `valueOf(String)`, the wrapping `next()`/`previous()`,
+    /// `getDeclaringClass()`, and the `MIN_VALUE`/`MAX_VALUE` constants.
+    /// A constant with a class body (`A { … }`) is not supported.
+    fn enum_decl(&mut self) -> Result<StmtKind, String> {
+        self.advance(); // `enum`
+        let name = self.ident()?;
+        self.skip_newlines();
+        let mut interfaces = Vec::new();
+        while !self.is(&Tok::LBrace) && !self.is(&Tok::Eof) {
+            if matches!(self.peek(), Tok::Ident(k) if k == "implements") {
+                self.advance();
+                loop {
+                    interfaces.push(self.ident()?);
+                    if !self.is(&Tok::Comma) {
+                        break;
+                    }
+                    self.advance();
+                    self.skip_newlines();
+                }
+                continue;
+            }
+            self.advance();
+        }
+        self.eat(&Tok::LBrace)?;
+        self.skip_terminators();
+        // The constants: a name followed by `(args)`, `,`, `;`, a newline or `}`.
+        let mut constants: Vec<(String, Vec<Expr>, u32)> = Vec::new();
+        while matches!(self.peek(), Tok::Ident(_))
+            && matches!(
+                self.peek_at(1),
+                Tok::LParen | Tok::Comma | Tok::Semi | Tok::Nl | Tok::RBrace | Tok::LBrace
+            )
+        {
+            let line = self.line();
+            let cname = self.ident()?;
+            let args = if self.is(&Tok::LParen) {
+                self.call_args()?
+            } else {
+                Vec::new()
+            };
+            if self.is(&Tok::LBrace) {
+                return Err(format!(
+                    "groovyrs: enum constant {name}.{cname} with a class body is not supported on line {line}"
+                ));
+            }
+            constants.push((cname, args, line));
+            self.skip_newlines();
+            if !self.is(&Tok::Comma) {
+                break;
+            }
+            self.advance();
+            self.skip_newlines();
+        }
+        self.skip_terminators();
+        let mut fields = Vec::new();
+        let mut ctors = Vec::new();
+        let mut methods = Vec::new();
+        let mut abstract_methods = Vec::new();
+        while !self.is(&Tok::RBrace) && !self.is(&Tok::Eof) {
+            self.class_member(
+                &name,
+                false,
+                &mut fields,
+                &mut ctors,
+                &mut methods,
+                &mut abstract_methods,
+            )?;
+            self.expect_terminator()?;
+            self.skip_terminators();
+        }
+        self.eat(&Tok::RBrace)?;
+
+        let names: Vec<&str> = constants.iter().map(|(n, _, _)| n.as_str()).collect();
+        let declares_to_string = methods
+            .iter()
+            .any(|m| m.name == "toString" && m.params.is_empty());
+        let to_string = if declares_to_string {
+            ""
+        } else {
+            "String toString() { $name }"
+        };
+        let synthetic = format!(
+            "class {name} {{\n\
+             final String $name\n\
+             final int $ordinal\n\
+             {name}(String $name, int $ordinal) {{ this.$name = $name; this.$ordinal = $ordinal }}\n\
+             static {name}[] values() {{ [{list}] as {name}[] }}\n\
+             static {name} valueOf(String name) {{\n\
+               if (name == null) throw new NullPointerException('Name is null')\n\
+               for (c in values()) {{ if (c.$name == name) return c }}\n\
+               throw new IllegalArgumentException('No enum constant {name}.' + name)\n\
+             }}\n\
+             String name() {{ $name }}\n\
+             int ordinal() {{ $ordinal }}\n\
+             int compareTo(o) {{ $ordinal - o.$ordinal }}\n\
+             {to_string}\n\
+             {name} next() {{ def vs = values(); vs[($ordinal + 1) % vs.length] }}\n\
+             {name} previous() {{ def vs = values(); vs[($ordinal + vs.length - 1) % vs.length] }}\n\
+             Class getDeclaringClass() {{ {name} }}\n\
+             }}\n",
+            list = names.join(", "),
+        );
+        let Some(StmtKind::Class {
+            fields: syn_fields,
+            ctors: syn_ctors,
+            methods: syn_methods,
+            ..
+        }) = parse(&synthetic)?.body.into_iter().next().map(|s| s.kind)
+        else {
+            unreachable!("the synthetic enum source is a class declaration");
+        };
+
+        // Every declared constructor takes the name and ordinal after its own
+        // parameters and stores them before its body runs.
+        let store = syn_ctors[0].body.clone();
+        if ctors.is_empty() {
+            ctors = syn_ctors;
+        } else {
+            for c in &mut ctors {
+                c.params.push("$name".to_string());
+                c.params.push("$ordinal".to_string());
+                let mut body = store.clone();
+                body.append(&mut c.body);
+                c.body = body;
+            }
+        }
+
+        // The constants first, then `MIN_VALUE`/`MAX_VALUE`, then the declared
+        // fields — the order Groovy's `EnumVisitor` declares them in.
+        let mut all_fields: Vec<Field> = constants
+            .iter()
+            .enumerate()
+            .map(|(ordinal, (cname, args, line))| {
+                let mut args = args.clone();
+                args.push(Expr::Str(cname.clone()));
+                args.push(Expr::Int(ordinal as i64, IntWidth::Int));
+                Field {
+                    name: cname.clone(),
+                    ty: name.clone(),
+                    init: Some(Expr::New {
+                        class: name.clone(),
+                        args,
+                        line: *line,
+                    }),
+                    is_static: true,
+                }
+            })
+            .collect();
+        if let (Some(first), Some(last)) = (names.first(), names.last()) {
+            for (bound, cname) in [("MIN_VALUE", first), ("MAX_VALUE", last)] {
+                all_fields.push(Field {
+                    name: bound.to_string(),
+                    ty: name.clone(),
+                    init: Some(Expr::Var(cname.to_string())),
+                    is_static: true,
+                });
+            }
+        }
+        all_fields.extend(syn_fields);
+        all_fields.extend(fields);
+        // A declared method of the same name and arity replaces the generated
+        // one, as a declared `toString()` does.
+        let mut all_methods: Vec<Method> = syn_methods
+            .into_iter()
+            .filter(|g| {
+                !methods
+                    .iter()
+                    .any(|m| m.name == g.name && m.params.len() == g.params.len())
+            })
+            .collect();
+        all_methods.extend(methods);
+        interfaces.insert(0, "Comparable".to_string());
+        interfaces.insert(0, "Enum".to_string());
+        Ok(StmtKind::Class {
+            name,
+            superclass: None,
+            interfaces,
+            generated: Generated::default(),
+            is_interface: false,
+            is_trait: false,
+            fields: all_fields,
+            ctors,
+            methods: all_methods,
             abstract_methods,
         })
     }

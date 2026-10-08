@@ -868,11 +868,9 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   implementation they name — a `TreeMap` sorts, a `HashMap` buckets — as the
   three `Set` names do. The three `List` names all build the one implementation:
   see **A `List` is always an `ArrayList`** below.
-- **`java.util.UUID`.** `UUID.fromString` and `UUID.randomUUID` are not
-  modeled: a UUID is its own type (`getClass()` names `java.util.UUID`, and it
-  compares and hashes as 128 bits, not as its text), and answering the string
-  instead would get all three wrong. The class *name* resolves, so the call
-  raises `MissingMethodException` rather than failing to compile.
+- **`UUID.nameUUIDFromBytes`.** Not modeled (it is an MD5 digest); it raises
+  `MissingMethodException`. `randomUUID`, `fromString`, `new UUID(msb, lsb)`
+  and the instance methods are.
 - **`List.withDefault { … }`.** Only the `Map` spelling is modeled. Groovy's
   `groovy.util.ListWithDefault` answers the closure for an out-of-range read
   (`[1, 2].withDefault { 0 }[5]` is `0`) and grows the list to reach it;

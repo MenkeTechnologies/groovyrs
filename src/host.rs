@@ -1261,6 +1261,9 @@ fn java_class_name(v: &Value) -> String {
     if as_expando(v).is_some() {
         return "groovy.util.Expando".to_string();
     }
+    if as_uuid(v).is_some() {
+        return "java.util.UUID".to_string();
+    }
     if as_optional(v).is_some() {
         return "java.util.Optional".to_string();
     }
@@ -1827,6 +1830,8 @@ enum HeapObj {
         name: String,
         ty: String,
     },
+    /// A `java.util.UUID`: its most and least significant 64 bits.
+    Uuid(i64, i64),
     /// `list.asReversed()` — Groovy's `ReversedList`, a read-only live view
     /// of `root` in reverse order. Reading it reads the root as it is now;
     /// any write through it is `UnsupportedOperationException`.
@@ -2800,6 +2805,184 @@ fn optional_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         ("getClass", 0) => class_ref_of(recv),
         _ => raise_missing_method(vm, recv, method, args),
     }
+}
+
+/// The `(mostSigBits, leastSigBits)` of a `java.util.UUID` handle, if `v` is one.
+fn as_uuid(v: &Value) -> Option<(i64, i64)> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Uuid(msb, lsb)) => Some((*msb, *lsb)),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// `UUID.toString`: five lower-case hex groups, 8-4-4-4-12.
+fn uuid_str(msb: i64, lsb: i64) -> String {
+    let (m, l) = (msb as u64, lsb as u64);
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        m >> 32,
+        (m >> 16) & 0xffff,
+        m & 0xffff,
+        l >> 48,
+        l & 0xffff_ffff_ffff
+    )
+}
+
+/// `Long.parseLong(s, begin, end, 16)`, ported from the JDK with its two
+/// diagnostics: `For input string: "" under radix 16` for an empty range and
+/// `Error at index i in: "…"` (relative to `begin`) for a bad digit, a lone
+/// sign, or an overflow.
+fn parse_long_hex(s: &[char], begin: usize, end: usize) -> Result<i64, String> {
+    if begin == end {
+        return Err("For input string: \"\" under radix 16".to_string());
+    }
+    let error = |i: usize| {
+        let text: String = s[begin..end].iter().collect();
+        format!("Error at index {} in: \"{text}\"", i - begin)
+    };
+    let mut i = begin;
+    let first = s[i];
+    i += 1;
+    let mut negative = false;
+    let mut limit = -i64::MAX;
+    if first < '0' {
+        match first {
+            '-' => {
+                negative = true;
+                limit = i64::MIN;
+            }
+            '+' => {}
+            _ => return Err(error(i - 1)),
+        }
+        // A lone sign: the index past it.
+        if i == end {
+            return Err(error(i));
+        }
+    } else {
+        i = begin;
+    }
+    let multmin = limit / 16;
+    let mut result: i64 = 0;
+    while i < end {
+        let Some(digit) = s[i].to_digit(16).map(i64::from) else {
+            return Err(error(i));
+        };
+        if result < multmin {
+            return Err(error(i));
+        }
+        result *= 16;
+        if result < limit + digit {
+            return Err(error(i));
+        }
+        result -= digit;
+        i += 1;
+    }
+    Ok(if negative { result } else { -result })
+}
+
+/// `UUID.fromString`, ported from the JDK: five dash-separated hex fields, each
+/// parsed by `Long.parseLong` and masked to its width.
+fn uuid_from_string(vm: &mut VM, name: &str) -> Value {
+    let s: Vec<char> = name.chars().collect();
+    let len = s.len();
+    if len > 36 {
+        raise(vm, "IllegalArgumentException", "UUID string too large");
+        return Value::Undef;
+    }
+    let dash = |from: usize| (from..len).find(|&i| s[i] == '-');
+    let d1 = dash(0);
+    let d2 = d1.and_then(|d| dash(d + 1));
+    let d3 = d2.and_then(|d| dash(d + 1));
+    let d4 = d3.and_then(|d| dash(d + 1));
+    let d5 = d4.and_then(|d| dash(d + 1));
+    let (Some(d1), Some(d2), Some(d3), Some(d4), None) = (d1, d2, d3, d4, d5) else {
+        raise(
+            vm,
+            "IllegalArgumentException",
+            &format!("Invalid UUID string: {name}"),
+        );
+        return Value::Undef;
+    };
+    let fields = (|| -> Result<(i64, i64), String> {
+        let mut msb = parse_long_hex(&s, 0, d1)? & 0xffff_ffff;
+        msb = (msb << 16) | (parse_long_hex(&s, d1 + 1, d2)? & 0xffff);
+        msb = (msb << 16) | (parse_long_hex(&s, d2 + 1, d3)? & 0xffff);
+        let mut lsb = parse_long_hex(&s, d3 + 1, d4)? & 0xffff;
+        lsb = (lsb << 48) | (parse_long_hex(&s, d4 + 1, len)? & 0xffff_ffff_ffff);
+        Ok((msb, lsb))
+    })();
+    match fields {
+        Ok((msb, lsb)) => heap_push(HeapObj::Uuid(msb, lsb)),
+        Err(msg) => {
+            raise(vm, "NumberFormatException", &msg);
+            Value::Undef
+        }
+    }
+}
+
+/// `UUID.randomUUID()`: 122 random bits with the version-4 and IETF-variant
+/// bits set, as the JDK sets them. The bits come from the standard library's
+/// per-process random hash keys, mixed with a counter.
+fn uuid_random() -> Value {
+    use std::hash::{BuildHasher, Hasher};
+    thread_local! {
+        static STATE: std::collections::hash_map::RandomState =
+            std::collections::hash_map::RandomState::new();
+        static COUNTER: Cell<u64> = const { Cell::new(0) };
+    }
+    let word = || {
+        let n = COUNTER.with(|c| {
+            c.set(c.get() + 1);
+            c.get()
+        });
+        STATE.with(|s| {
+            let mut h = s.build_hasher();
+            h.write_u64(n);
+            h.finish()
+        })
+    };
+    let msb = (word() & !0xf000) | 0x4000;
+    let lsb = (word() & !(0xc000_0000_0000_0000)) | 0x8000_0000_0000_0000;
+    heap_push(HeapObj::Uuid(msb as i64, lsb as i64))
+}
+
+/// The `java.util.UUID` instance methods.
+fn uuid_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Value {
+    let (msb, lsb) = as_uuid(recv).unwrap_or_default();
+    match (method, args.len()) {
+        ("toString", 0) => Value::str(uuid_str(msb, lsb)),
+        ("getMostSignificantBits", 0) => Value::int(msb),
+        ("getLeastSignificantBits", 0) => Value::int(lsb),
+        ("version", 0) => Value::int((msb >> 12) & 0x0f),
+        // `(lsb >>> (64 - (lsb >>> 62))) & (lsb >> 63)`, Java's shifts being
+        // taken modulo 64.
+        ("variant", 0) => {
+            let l = lsb as u64;
+            let shift = (64 - (l >> 62)) % 64;
+            Value::int(((l >> shift) as i64) & (lsb >> 63))
+        }
+        ("compareTo", 1) => match as_uuid(&args[0]) {
+            Some(other) => Value::int(match (msb, lsb).cmp(&other) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            }),
+            None => raise_missing_method(vm, recv, method, args),
+        },
+        ("equals", 1) => Value::bool(as_uuid(&args[0]) == Some((msb, lsb))),
+        ("hashCode", 0) => Value::int(i64::from(uuid_hash(msb, lsb))),
+        ("getClass", 0) => class_ref_of(recv),
+        _ => raise_missing_method(vm, recv, method, args),
+    }
+}
+
+/// `UUID.hashCode`: the two halves of `msb ^ lsb` folded together.
+fn uuid_hash(msb: i64, lsb: i64) -> i32 {
+    let hilo = msb ^ lsb;
+    ((hilo >> 32) as i32) ^ (hilo as i32)
 }
 
 /// The `(class, name, declared type)` of a `MetaProperty` handle, if `v` is one.
@@ -4615,6 +4798,10 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
             };
             gmap_kind(entries, kind)
         }
+        "UUID" if args.len() == 2 => heap_push(HeapObj::Uuid(
+            as_i64(&args[0]).unwrap_or(0),
+            as_i64(&args[1]).unwrap_or(0),
+        )),
         // `new Expando()` starts an empty `HashMap`; `new Expando(map)` adopts
         // the map itself, as Groovy's constructor stores it.
         "Expando" => {
@@ -5984,6 +6171,10 @@ fn values_equal_shape(a: &Value, b: &Value) -> bool {
             _ => false,
         };
     }
+    // `UUID.equals` compares the 128 bits.
+    if as_uuid(a).is_some() || as_uuid(b).is_some() {
+        return as_uuid(a).is_some() && as_uuid(a) == as_uuid(b);
+    }
     // `Optional.equals`: two empties, or two values `Objects.equals` agrees on.
     let (oa, ob) = (as_optional(a), as_optional(b));
     if oa.is_some() || ob.is_some() {
@@ -6118,6 +6309,7 @@ fn java_equals_shape(a: &Value, b: &Value) -> bool {
             || as_buffer(v).is_some()
             || as_instance(v).is_some()
             || as_optional(v).is_some()
+            || as_uuid(v).is_some()
     };
     if structured(a) || structured(b) {
         // The pair is already on `EQ_PATH` (this is its guarded walk), so the
@@ -6259,6 +6451,9 @@ fn checked_hash_code(hash: impl FnOnce() -> i32) -> Option<i32> {
 fn shape_hash_code(v: &Value) -> i32 {
     // The heap-backed shapes first: they all wear a `Value::Obj` tag, so the
     // variant alone cannot tell them apart.
+    if let Some((msb, lsb)) = as_uuid(v) {
+        return uuid_hash(msb, lsb);
+    }
     // `Optional.hashCode` is `Objects.hashCode(value)`: `0` when empty.
     if let Some(o) = as_optional(v) {
         return o.map_or(0, |x| object_hash_code(&x));
@@ -12580,6 +12775,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
         }
 
+        // ── java.util.UUID (host heap) ──
+        _ if as_uuid(recv).is_some() => uuid_method(vm, recv, method, args),
+
         // ── java.util.Optional (host heap) ──
         _ if as_optional(recv).is_some() => optional_method(vm, recv, method, args),
 
@@ -14597,6 +14795,8 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         }
         ("String", "valueOf") => Value::str(render_value(vm, &arg0)),
         ("String", "format") => Value::str(java_format(vm, &groovy_str(&arg0), &args[1..])),
+        ("UUID", "randomUUID") if args.is_empty() => uuid_random(),
+        ("UUID", "fromString") if args.len() == 1 => uuid_from_string(vm, &groovy_str(&arg0)),
         // `java.util.Optional`'s factories. `of(null)` is the JDK's
         // `Objects.requireNonNull`, a message-less `NullPointerException`.
         ("Optional", "of") if args.len() == 1 => {
@@ -17019,6 +17219,14 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
             _ => raise_missing_property(vm, recv, name),
         };
     }
+    // A `UUID`'s two getters, read as properties.
+    if as_uuid(recv).is_some() {
+        return match name {
+            "mostSignificantBits" => uuid_method(vm, recv, "getMostSignificantBits", &[]),
+            "leastSignificantBits" => uuid_method(vm, recv, "getLeastSignificantBits", &[]),
+            _ => raise_missing_property(vm, recv, name),
+        };
+    }
     // A `MetaProperty`'s `name` and `type` are its getters.
     if let Some((_, prop, ty)) = as_meta_property(recv) {
         return match name {
@@ -17585,6 +17793,10 @@ fn java_to_string(vm: &mut VM, v: &Value) -> String {
 /// **code-unit** order. They invert for an astral character against
 /// `U+E000..U+FFFF`, so the fallback encodes before comparing.
 fn natural_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    // `UUID.compareTo`: the two halves as signed `long`s, most significant first.
+    if let (Some(x), Some(y)) = (as_uuid(a), as_uuid(b)) {
+        return x.cmp(&y);
+    }
     match (is_dec_handle(a) || is_dec_handle(b)).then(|| (as_exact_dec(a), as_exact_dec(b))) {
         Some((Some(x), Some(y))) => decimal::cmp(&x, &y),
         _ => match (as_num(a), as_num(b)) {
@@ -17911,6 +18123,9 @@ thread_local! {
 /// [`render_value`] for one value, its members rendered through the
 /// cycle-tracking entry point.
 fn render_shape(vm: &mut VM, v: &Value) -> String {
+    if let Some((msb, lsb)) = as_uuid(v) {
+        return uuid_str(msb, lsb);
+    }
     // `Expando.toString` is its property map's, Java-style (`{a=1}`).
     if let Some(props) = as_expando(v) {
         return java_to_string(vm, &props);
@@ -18044,6 +18259,9 @@ pub fn groovy_str(v: &Value) -> String {
     // `toString` does.
     if let Some((_, text)) = as_buffer(v) {
         return text;
+    }
+    if let Some((msb, lsb)) = as_uuid(v) {
+        return uuid_str(msb, lsb);
     }
     if let Some(o) = as_optional(v) {
         return match o {

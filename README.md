@@ -545,6 +545,9 @@ Implemented and checked against Apache Groovy:
   callable as methods with the expando as their delegate, `getProperties()`,
   `getProperty` / `setProperty`, `e['k']`, and the `HashMap` rendering and
   iteration order (`{a=1}`).
+- **`java.util.UUID`** — `randomUUID()` (version 4), `fromString` (the JDK's
+  parser and diagnostics), `new UUID(msb, lsb)`, `version`, `variant`, the two
+  bit getters, and 128-bit `equals` / `hashCode` / `compareTo`.
 - **`java.util.Optional`** — `Optional.of` / `ofNullable` / `empty`, `get`,
   `isPresent` / `isEmpty`, `orElse` / `orElseGet` / `orElseThrow`, `map`,
   `flatMap`, `filter`, `or`, `ifPresent` / `ifPresentOrElse` (a closure for each

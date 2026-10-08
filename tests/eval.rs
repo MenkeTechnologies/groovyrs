@@ -9059,3 +9059,18 @@ def m = [k: [5, 6, 7]]; m.k.removeIf { it > 5 }; println m
          [k:[5]]\n"
     );
 }
+
+#[test]
+fn field_initializer_reads_earlier_fields_and_methods() {
+    // A field initializer runs on the instance being built: `b = a + 1` reads
+    // the field `a`, and a bare method name is `this.method(...)`. Verified
+    // against Apache Groovy 6.0.0.
+    let src = r#"
+class A { def a = 1; def b = a + 1; def c = twice(b); def twice(x) { x * 2 } }
+class B extends A { def f = a + c }
+def x = new A(); println "${x.b} ${x.c}"; println new B().f
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "2 4\n5\n");
+}

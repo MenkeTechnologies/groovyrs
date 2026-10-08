@@ -1351,10 +1351,11 @@ impl Compiler {
         // Published for the constructor and method bodies only; the field
         // initializers below run with it cleared.
         let prev_own = self.cur_class_own_fields.take();
-        // Field-initializer thunks (0-arg subs that compute the initial value).
+        // Field-initializer thunks (subs of the instance that compute the
+        // initial value).
         for f in fields {
             if let Some(init) = &f.init {
-                self.emit_field_init(line, name, &f.name, init)?;
+                self.emit_field_init(line, name, &f.name, init, &field_set, &method_set)?;
             }
         }
         let own_fields = match self.class_index.get(name) {
@@ -1467,25 +1468,31 @@ impl Compiler {
         Ok(())
     }
 
-    /// Emit a field-initializer thunk: a 0-arg subroutine that evaluates the
-    /// initializer and returns it. No `this` is bound (initializers see script
-    /// globals, not other fields).
+    /// Emit a field-initializer thunk: a subroutine of the instance being built
+    /// (`this` in slot 0) that evaluates the initializer and returns it. An
+    /// initializer is class code, as in Groovy: a bare field or method name in
+    /// it is `this.field` / `this.method(...)` (`def b = a + 1` reads the field
+    /// `a`, already initialised in declaration order), and a script's own
+    /// locals are out of its reach.
     fn emit_field_init(
         &mut self,
         line: u32,
         class: &str,
         field: &str,
         init: &Expr,
+        field_set: &HashSet<String>,
+        method_set: &HashSet<String>,
     ) -> Result<(), String> {
         let entry = self.b.current_pos();
         let nidx = self.b.add_name(&Self::init_sub_name(class, field));
         self.b.add_sub_entry(nidx, entry);
         let prev = self.scope.replace(FnScope {
-            vars: HashMap::new(),
-            next_slot: 0,
+            vars: HashMap::from([("this".to_string(), 0)]),
+            next_slot: 1,
         });
-        let prev_fields = self.cur_class_fields.take();
-        let prev_methods = self.cur_class_methods.take();
+        self.b.emit(Op::SetSlot(0), line);
+        let prev_fields = self.cur_class_fields.replace(field_set.clone());
+        let prev_methods = self.cur_class_methods.replace(method_set.clone());
         let prev_tries = std::mem::take(&mut self.tries);
         let prev_finallys = std::mem::take(&mut self.finallys);
         let prev_cells = std::mem::take(&mut self.cells);

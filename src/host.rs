@@ -4425,7 +4425,7 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
     for id in traits.iter().chain(chain.iter()) {
         let Some(m) = class_meta(*id) else { continue };
         for (fname, init_idx) in &m.field_inits {
-            match invoke_sub(vm, *init_idx, &[]) {
+            match invoke_sub(vm, *init_idx, std::slice::from_ref(&handle)) {
                 Ok(v) => {
                     if pending_exc() {
                         return Value::Undef;

@@ -3820,7 +3820,7 @@ impl Compiler {
             } => {
                 matches!(
                     method.as_str(),
-                    "longValue" | "toLong" | "currentTimeMillis"
+                    "longValue" | "toLong" | "currentTimeMillis" | "nanoTime"
                 ) || (matches!(&**recv, Expr::Var(v) if v == "Long")
                     && matches!(method.as_str(), "valueOf" | "parseLong"))
                     || self.math_yields_long(recv, method, args)

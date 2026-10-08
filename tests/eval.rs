@@ -9178,3 +9178,17 @@ println f(true); println f(false); println new A().v(); println new A().i()
     assert!(ok);
     assert_eq!(out, "1.0\n2.0\nnull\n2\n");
 }
+
+#[test]
+fn as_array_converts_each_element_and_arrays_to_string() {
+    // `as double[]` converts every element (`2` becomes `2.0`), and
+    // `Arrays.toString` renders the array's elements. Verified against Apache
+    // Groovy 6.0.0.
+    let src = r#"
+println(([2.7, 3] as int[])); println Arrays.toString([1.5, 2] as double[])
+int[] a = [3.9, 4]; println a; println Arrays.toString([1, 2])
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "[2, 3]\n[1.5, 2.0]\n[3, 4]\n[[1, 2]]\n");
+}

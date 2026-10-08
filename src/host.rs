@@ -12950,14 +12950,26 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
     // `[1, 2, 3] as int[]` — the elements of whatever `v` enumerates, carried
     // into an array of the named element type. Answered ahead of the table
     // below because the target is an *array* type, which none of its arms name.
-    // The element values are not narrowed: Groovy's own `as int[]` coerces each
-    // element, and the coercion that matters here (a `String` element into an
-    // `int`) is the one the table below performs, so it is applied per element.
-    if ty.ends_with("[]") {
+    // Each element goes through `as` to the component type, as Groovy's
+    // `asArray` does: `[2.7] as int[]` holds `2`, `[1] as double[]` holds `1.0`,
+    // `['7'] as int[]` parses to `7`, and a `null` bound for an `int` slot is a
+    // `NullPointerException`. A multi-dimensional target recurses through its
+    // component array type.
+    if let Some(component) = ty.strip_suffix("[]") {
         let Some(elem) = ArrayElem::from_name(ty) else {
             return raise_cast(vm, &v, &ty_simple);
         };
-        let items = iteration_elements(&v);
+        let mut items = Vec::new();
+        for item in iteration_elements(&v) {
+            let converted = match elem {
+                ArrayElem::Object => item,
+                _ => as_type(vm, item, component),
+            };
+            if pending_exc() {
+                return Value::Undef;
+            }
+            items.push(converted);
+        }
         return garray(items, elem);
     }
     match ty_simple.as_str() {
@@ -14110,11 +14122,38 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         // `Arrays.asList(a, b, c)` — the varargs form, the only one a Groovy
         // script without real arrays can write.
         ("Arrays", "asList") => Value::array(args.to_vec()),
+        // `Arrays.toString(array)` — each element through `String.valueOf`,
+        // so a map element is Java's `{k=v}`. A null array is `"null"`, and a
+        // non-array argument is the one element of the `Object...` it is
+        // passed as: `Arrays.toString([1, 2])` is `[[1, 2]]`.
+        ("Arrays", "toString") if args.len() == 1 => {
+            let items = match (&arg0, array_elem(&arg0)) {
+                (Value::Undef, _) => return Some(Value::str("null")),
+                (_, Some(_)) => as_list(&arg0).unwrap_or_default(),
+                _ => vec![arg0.clone()],
+            };
+            let shown: Vec<String> = items.iter().map(|e| java_to_string(vm, e)).collect();
+            Value::str(format!("[{}]", shown.join(", ")))
+        }
 
         // `java.lang.System`'s property readers. `getProperty(name)` answers
         // null for a name the JVM does not carry, and the two-argument form
         // answers the supplied default instead.
         ("System", "lineSeparator") => Value::str("\n".to_string()),
+        // The two clocks: wall time in milliseconds since the epoch, and a
+        // monotonic nanosecond count from an arbitrary origin (positive here). Both `long`, which
+        // `Compiler::is_wide` reads off the method name.
+        ("System", "currentTimeMillis") if args.is_empty() => {
+            let since = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            Value::int(since.as_millis() as i64)
+        }
+        ("System", "nanoTime") if args.is_empty() => {
+            static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            let origin = ORIGIN.get_or_init(std::time::Instant::now);
+            Value::int(origin.elapsed().as_nanos() as i64 + 1)
+        }
         ("System", "getProperty") => match java_system_property(&groovy_str(&arg0)) {
             Some(v) => Value::str(v.to_string()),
             None => args.get(1).cloned().unwrap_or(Value::Undef),

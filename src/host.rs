@@ -1258,6 +1258,9 @@ fn java_class_name(v: &Value) -> String {
     if let Some((class, _, _)) = as_meta_property(v) {
         return class.to_string();
     }
+    if as_optional(v).is_some() {
+        return "java.util.Optional".to_string();
+    }
     match v {
         Value::Str(_) => "java.lang.String",
         Value::Float(_) => "java.lang.Double",
@@ -1820,6 +1823,9 @@ enum HeapObj {
         name: String,
         ty: String,
     },
+    /// A `java.util.Optional`: `Some` holds the (never `null`) value,
+    /// `None` is `Optional.empty()`.
+    Optional(Option<Value>),
     /// One `Map.Entry` — what the single-parameter closure form of a map's
     /// `each` / `collect` / `find` receives. Holds the entry's key and value; it
     /// prints as `k=v` and answers `key`/`value` (and `getKey`/`getValue`).
@@ -2606,6 +2612,108 @@ fn is_interface_class(qualified: &str) -> bool {
     )
 }
 
+/// The content of a `java.util.Optional` handle, if `v` is one: `Some(None)`
+/// for `Optional.empty()`.
+fn as_optional(v: &Value) -> Option<Option<Value>> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Optional(o)) => Some(o.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// The `java.util.Optional` instance methods. A closure stands in for each
+/// functional-interface argument (`Function`, `Predicate`, `Supplier`,
+/// `Consumer`, `Runnable`), as Groovy coerces one.
+fn optional_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Value {
+    let value = as_optional(recv).flatten();
+    let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undef);
+    let call = |vm: &mut VM, f: &Value, call_args: &[Value]| match invoke_closure(vm, f, call_args)
+    {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    };
+    let no_value = |vm: &mut VM| {
+        raise(vm, "NoSuchElementException", "No value present");
+        Value::Undef
+    };
+    match (method, args.len()) {
+        ("get" | "orElseThrow", 0) => value.unwrap_or_else(|| no_value(vm)),
+        ("isPresent", 0) => Value::bool(value.is_some()),
+        ("isEmpty", 0) => Value::bool(value.is_none()),
+        ("orElse", 1) => value.unwrap_or_else(|| arg(0)),
+        ("orElseGet", 1) => value.unwrap_or_else(|| call(vm, &arg(0), &[])),
+        // `orElseThrow(Supplier)` throws whatever the supplier answers.
+        ("orElseThrow", 1) => match value {
+            Some(v) => v,
+            None => {
+                let exc = call(vm, &arg(0), &[]);
+                if !pending_exc() {
+                    if EXC_ARMED.with(|a| a.get()) {
+                        set_pending(exc);
+                    } else {
+                        let text = throwable_str(&exc);
+                        fault(vm, text);
+                    }
+                }
+                Value::Undef
+            }
+        },
+        // `map` wraps a `null` answer as empty; `flatMap` answers the supplied
+        // `Optional` itself.
+        ("map", 1) => match value {
+            Some(v) => {
+                let out = call(vm, &arg(0), &[v]);
+                heap_push(HeapObj::Optional(
+                    (!matches!(out, Value::Undef)).then_some(out),
+                ))
+            }
+            None => recv.clone(),
+        },
+        ("flatMap", 1) => match value {
+            Some(v) => call(vm, &arg(0), &[v]),
+            None => recv.clone(),
+        },
+        ("filter", 1) => match value {
+            Some(v) => {
+                let keep = call(vm, &arg(0), std::slice::from_ref(&v));
+                if groovy_truthy(vm, &keep) {
+                    recv.clone()
+                } else {
+                    heap_push(HeapObj::Optional(None))
+                }
+            }
+            None => recv.clone(),
+        },
+        ("or", 1) => match value {
+            Some(_) => recv.clone(),
+            None => call(vm, &arg(0), &[]),
+        },
+        ("ifPresent", 1) => {
+            if let Some(v) = value {
+                call(vm, &arg(0), &[v]);
+            }
+            Value::Undef
+        }
+        ("ifPresentOrElse", 2) => {
+            match value {
+                Some(v) => call(vm, &arg(0), &[v]),
+                None => call(vm, &arg(1), &[]),
+            };
+            Value::Undef
+        }
+        ("equals", 1) => Value::bool(values_equal(recv, &args[0])),
+        ("toString", 0) => Value::str(render_value(vm, recv)),
+        ("getClass", 0) => class_ref_of(recv),
+        _ => raise_missing_method(vm, recv, method, args),
+    }
+}
+
 /// The `(class, name, declared type)` of a `MetaProperty` handle, if `v` is one.
 fn as_meta_property(v: &Value) -> Option<(&'static str, String, String)> {
     match v {
@@ -2920,6 +3028,10 @@ fn groovy_truthy(vm: &mut VM, v: &Value) -> bool {
             // fallback below would make `0.0f` truthy.
             if let Some(f) = as_float_handle(v) {
                 return f != 0.0;
+            }
+            // Groovy's `asBoolean(Optional)` is `isPresent()`.
+            if let Some(o) = as_optional(v) {
+                return o.is_some();
             }
             // A list is a collection: true when it holds anything. This has to
             // come before the generic "any handle is true" fallback, or an empty
@@ -5770,6 +5882,15 @@ fn values_equal_shape(a: &Value, b: &Value) -> bool {
             _ => false,
         };
     }
+    // `Optional.equals`: two empties, or two values `Objects.equals` agrees on.
+    let (oa, ob) = (as_optional(a), as_optional(b));
+    if oa.is_some() || ob.is_some() {
+        return match (oa, ob) {
+            (Some(Some(x)), Some(Some(y))) => java_equals(&x, &y),
+            (Some(None), Some(None)) => true,
+            _ => false,
+        };
+    }
     // An instance whose class declares `equals` or `compareTo` is compared the
     // way Groovy's `==` compares it (`DefaultTypeTransformation.compareEqual`):
     // so `[a1] == [a2]`, `unique()` and the other element-wise answers agree
@@ -5894,6 +6015,7 @@ fn java_equals_shape(a: &Value, b: &Value) -> bool {
             || as_range(v).is_some()
             || as_buffer(v).is_some()
             || as_instance(v).is_some()
+            || as_optional(v).is_some()
     };
     if structured(a) || structured(b) {
         // The pair is already on `EQ_PATH` (this is its guarded walk), so the
@@ -6035,6 +6157,10 @@ fn checked_hash_code(hash: impl FnOnce() -> i32) -> Option<i32> {
 fn shape_hash_code(v: &Value) -> i32 {
     // The heap-backed shapes first: they all wear a `Value::Obj` tag, so the
     // variant alone cannot tell them apart.
+    // `Optional.hashCode` is `Objects.hashCode(value)`: `0` when empty.
+    if let Some(o) = as_optional(v) {
+        return o.map_or(0, |x| object_hash_code(&x));
+    }
     if let Some(items) = as_list_raw(v) {
         return list_hash(&items);
     }
@@ -12326,6 +12452,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
         }
 
+        // ── java.util.Optional (host heap) ──
+        _ if as_optional(recv).is_some() => optional_method(vm, recv, method, args),
+
         // ── groovy.lang.MetaProperty (host heap) ──
         _ if as_meta_property(recv).is_some() => {
             let (_, name, ty) = as_meta_property(recv).unwrap();
@@ -13791,9 +13920,8 @@ pub fn jdk_class_package(name: &str) -> Option<&'static str> {
         | "Character" | "String" | "StringBuilder" | "System" | "Object" | "Number" | "Thread"
         | "Runtime" => "java.lang",
         "BigDecimal" | "BigInteger" => "java.math",
-        "Collections" | "Arrays" | "List" | "Map" | "Set" | "Random" | "UUID" | "Objects" => {
-            "java.util"
-        }
+        "Collections" | "Arrays" | "List" | "Map" | "Set" | "Random" | "UUID" | "Objects"
+        | "Optional" => "java.util",
         // Named for its resolve-strategy constants (`Closure.DELEGATE_FIRST`).
         "Closure" => "groovy.lang",
         _ => return None,
@@ -14340,6 +14468,19 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         }
         ("String", "valueOf") => Value::str(render_value(vm, &arg0)),
         ("String", "format") => Value::str(java_format(vm, &groovy_str(&arg0), &args[1..])),
+        // `java.util.Optional`'s factories. `of(null)` is the JDK's
+        // `Objects.requireNonNull`, a message-less `NullPointerException`.
+        ("Optional", "of") if args.len() == 1 => {
+            if matches!(arg0, Value::Undef) {
+                raise_opt(vm, "NullPointerException", None);
+                return Some(Value::Undef);
+            }
+            heap_push(HeapObj::Optional(Some(arg0)))
+        }
+        ("Optional", "ofNullable") if args.len() == 1 => heap_push(HeapObj::Optional(
+            (!matches!(arg0, Value::Undef)).then_some(arg0),
+        )),
+        ("Optional", "empty") if args.is_empty() => heap_push(HeapObj::Optional(None)),
         // `java.util.Objects`' null-tolerant helpers.
         ("Objects", "equals") if args.len() == 2 => Value::bool(java_equals(&args[0], &args[1])),
         ("Objects", "isNull") if args.len() == 1 => Value::bool(matches!(arg0, Value::Undef)),
@@ -17632,6 +17773,14 @@ thread_local! {
 /// [`render_value`] for one value, its members rendered through the
 /// cycle-tracking entry point.
 fn render_shape(vm: &mut VM, v: &Value) -> String {
+    // `Optional.toString`: `Optional[value]` (the value through Java's
+    // `toString`) or `Optional.empty`.
+    if let Some(o) = as_optional(v) {
+        return match o {
+            Some(x) => format!("Optional[{}]", java_to_string(vm, &x)),
+            None => "Optional.empty".to_string(),
+        };
+    }
     if let Some(inst) = as_instance(v) {
         return instance_to_string(vm, v).unwrap_or_else(|| instance_default_str(v, &inst));
     }
@@ -17753,6 +17902,12 @@ pub fn groovy_str(v: &Value) -> String {
     // `toString` does.
     if let Some((_, text)) = as_buffer(v) {
         return text;
+    }
+    if let Some(o) = as_optional(v) {
+        return match o {
+            Some(x) => format!("Optional[{}]", groovy_str(&x)),
+            None => "Optional.empty".to_string(),
+        };
     }
     if let Some(m) = as_matcher(v) {
         return matcher_str(&m);

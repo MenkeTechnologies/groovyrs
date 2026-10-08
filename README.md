@@ -540,6 +540,11 @@ Implemented and checked against Apache Groovy:
   that defines `methodMissing` still gets `obj.with { … }` from the GDK, and the
   hook sees only what nothing else answered. `propertyMissing(String)` reads and
   `propertyMissing(String, value)` writes.
+- **`java.util.Optional`** — `Optional.of` / `ofNullable` / `empty`, `get`,
+  `isPresent` / `isEmpty`, `orElse` / `orElseGet` / `orElseThrow`, `map`,
+  `flatMap`, `filter`, `or`, `ifPresent` / `ifPresentOrElse` (a closure for each
+  functional argument), JDK `equals` / `hashCode` / `toString`, and Groovy truth
+  (`isPresent()`). `stream()` is not modeled.
 - **Java arrays** — `new int[3]`, `[1,2,3] as int[]`, `.length`, and the JVM
   class descriptors (`[I`, `[J`, `[D`, `[Z`, `[B`, `[C`, `[Ljava.lang.String;`),
   including arrays of a script class (`[new V()] as V[]` is a `[LV;`, and every

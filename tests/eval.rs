@@ -9074,3 +9074,19 @@ def x = new A(); println "${x.b} ${x.c}"; println new B().f
     assert!(ok);
     assert_eq!(out, "2 4\n5\n");
 }
+
+#[test]
+fn closure_valued_field_is_callable_by_name() {
+    // `obj.d(4)` calls the closure the field `d` holds when no method `d`
+    // exists; a declared method wins, and a non-closure field is not called.
+    // Verified against Apache Groovy 6.0.0.
+    let src = r#"
+class C { def add = { x, y -> x + y }; def n = 5 }
+class B { def d = { -> 'field' }; def d() { 'method' } }
+println new C().add(2, 3); println new B().d()
+try { new C().n() } catch (e) { println e.class.simpleName }
+"#;
+    let (out, ok) = run(src);
+    assert!(ok);
+    assert_eq!(out, "5\nmethod\nMissingMethodException\n");
+}

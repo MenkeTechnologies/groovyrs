@@ -6075,6 +6075,15 @@ fn instance_method_miss(
 ) -> Option<Result<Value, String>> {
     let inst = as_instance(recv)?;
     class_meta(inst.class)?;
+    // A field holding a closure is callable by the field's name
+    // (`def d = { x -> x * 10 }` makes `obj.d(4)` answer `40`). Groovy tries it
+    // after every method and before `methodMissing`; a field holding anything
+    // else is not called.
+    if let Some(field) = inst.fields.get(method) {
+        if closure_meta(field).is_some() {
+            return Some(invoke_closure(vm, field, args));
+        }
+    }
     // The arguments arrive as one list, so a hook can forward them
     // (`args as List`, `args[0]`).
     if let Some(idx) = lookup_method(inst.class, "methodMissing") {
@@ -8040,8 +8049,13 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     // "Failed" is read off the pending exception the miss raises, rather than
     // predicted from a list of method names that would go stale as the GDK
     // grows. A class that declares no hook never enters this branch at all, so
-    // nothing about the existing dispatch changes for one.
-    if as_instance(&recv).is_some_and(|i| lookup_method(i.class, "methodMissing").is_some()) {
+    // nothing about the existing dispatch changes for one. A field holding a
+    // closure under the called name is the same kind of late answer (see
+    // [`instance_method_miss`]), so it enters the branch too.
+    if as_instance(&recv).is_some_and(|i| {
+        lookup_method(i.class, "methodMissing").is_some()
+            || i.fields.get(method).is_some_and(|f| closure_meta(f).is_some())
+    }) {
         let prev = MISS_PROBE.with(|p| p.borrow_mut().replace(method.to_string()));
         let prev_probed = MISS_PROBED.with(|m| m.replace(false));
         let answered = dispatch_method(vm, &recv, method, &args);

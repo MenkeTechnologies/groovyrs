@@ -1258,6 +1258,9 @@ fn java_class_name(v: &Value) -> String {
     if let Some((class, _, _)) = as_meta_property(v) {
         return class.to_string();
     }
+    if as_expando(v).is_some() {
+        return "groovy.util.Expando".to_string();
+    }
     if as_optional(v).is_some() {
         return "java.util.Optional".to_string();
     }
@@ -1823,6 +1826,9 @@ enum HeapObj {
         name: String,
         ty: String,
     },
+    /// A `groovy.util.Expando`: its properties live in the map handle it
+    /// holds (a `HashMap`, or the map it was constructed from).
+    Expando(Value),
     /// A `java.util.Optional`: `Some` holds the (never `null`) value,
     /// `None` is `Optional.empty()`.
     Optional(Option<Value>),
@@ -2610,6 +2616,61 @@ fn is_interface_class(qualified: &str) -> bool {
             | "groovy.lang.GroovyObject"
             | "groovy.lang.MetaClass"
     )
+}
+
+/// The property map behind a `groovy.util.Expando` handle, if `v` is one.
+fn as_expando(v: &Value) -> Option<Value> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Expando(m)) => Some(m.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// A method call on a `groovy.util.Expando`, as `Expando.invokeMethod` answers
+/// it: a closure-valued property runs with the expando as its delegate, and
+/// `getProperties` / `getProperty` / `setProperty` / `toString` are the
+/// class's own. `None` hands the call on to the GDK (and from there to
+/// `MissingMethodException`).
+fn expando_method(vm: &mut VM, props: &Value, method: &str, args: &[Value]) -> Option<Value> {
+    let run = |vm: &mut VM, clo: &Value, delegate: Value, args: &[Value]| {
+        DELEGATES.with(|d| d.borrow_mut().push(delegate));
+        let out = invoke_closure(vm, clo, args);
+        DELEGATES.with(|d| d.borrow_mut().pop());
+        match out {
+            Ok(v) => v,
+            Err(e) => {
+                fault(vm, e);
+                Value::Undef
+            }
+        }
+    };
+    let this = EXPANDO_SELF.with(|s| s.borrow().clone());
+    if let Some(Some(clo)) = omap_get(props, method) {
+        if closure_meta(&clo).is_some() {
+            return Some(run(vm, &clo, this, args));
+        }
+    }
+    Some(match (method, args.len()) {
+        ("getProperties", 0) => props.clone(),
+        ("getProperty", 1) => omap_get(props, &groovy_str(&args[0]))
+            .flatten()
+            .unwrap_or(Value::Undef),
+        ("setProperty", 2) => {
+            omap_set(props, groovy_str(&args[0]), args[1].clone());
+            Value::Undef
+        }
+        ("toString", 0) => Value::str(java_to_string(vm, props)),
+        _ => return None,
+    })
+}
+
+thread_local! {
+    /// The expando whose method [`expando_method`] is running — the delegate
+    /// its closure sees.
+    static EXPANDO_SELF: RefCell<Value> = const { RefCell::new(Value::Undef) };
 }
 
 /// The content of a `java.util.Optional` handle, if `v` is one: `Some(None)`
@@ -4526,6 +4587,20 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
                 },
             };
             gmap_kind(entries, kind)
+        }
+        // `new Expando()` starts an empty `HashMap`; `new Expando(map)` adopts
+        // the map itself, as Groovy's constructor stores it.
+        "Expando" => {
+            let props = match args.first() {
+                Some(m) if as_omap(m).is_some() => m.clone(),
+                _ => gmap_kind(
+                    Vec::new(),
+                    MapKind::Hash {
+                        req: DEFAULT_HASH_REQ,
+                    },
+                ),
+            };
+            heap_push(HeapObj::Expando(props))
         }
         "Object" => heap_push(HeapObj::Instance(Instance {
             class: u32::MAX,
@@ -7084,6 +7159,11 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
             return static_result(vm, res.map(|()| value));
         }
     }
+    // `e.k = v` on an `Expando` adds or replaces the property.
+    if let Some(props) = as_expando(&recv) {
+        omap_set(&props, name, value.clone());
+        return value;
+    }
     // `map.k = v` mutates the ordered map in place (through its shared handle).
     if omap_set(&recv, name.clone(), value.clone()) {
         return value;
@@ -7139,6 +7219,11 @@ fn map_default(vm: &mut VM, map: &Value, key: &str, subject: &Value) -> Value {
 /// `recv[index]`, shared by the `[…]` subscript builtin and by the `getAt(…)`
 /// method — Groovy defines the subscript *as* `getAt`, so both are one path.
 fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
+    // `e['k']` on an `Expando` is the property read (`DefaultGroovyMethods
+    // .getAt(Object, String)`).
+    if as_expando(&recv).is_some() {
+        return dispatch_property(vm, &recv, &groovy_str(&index));
+    }
     // `list[i]` at a plain in-range position, straight off the heap. The
     // conversion below detaches the whole list into a `Value::Array` first,
     // which costs a copy of every element for a read of one — and `list[i]` is
@@ -8338,6 +8423,14 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
                     Value::Undef
                 }
             };
+        }
+    }
+    if let Some(props) = as_expando(&recv) {
+        let prev = EXPANDO_SELF.with(|s| s.replace(recv.clone()));
+        let out = expando_method(vm, &props, method, &args);
+        EXPANDO_SELF.with(|s| *s.borrow_mut() = prev);
+        if let Some(v) = out {
+            return v;
         }
     }
     // A method on a class instance: a user method (implicit `this`) or Groovy's
@@ -13924,6 +14017,7 @@ pub fn jdk_class_package(name: &str) -> Option<&'static str> {
         | "Optional" => "java.util",
         // Named for its resolve-strategy constants (`Closure.DELEGATE_FIRST`).
         "Closure" => "groovy.lang",
+        "Expando" => "groovy.util",
         _ => return None,
     })
 }
@@ -16799,6 +16893,15 @@ fn parse_java_double(s: &str) -> Option<f64> {
 /// count properties on `String`/list/map; a map's `k` also reads entry `k`. An
 /// unmodeled property raises `groovy.lang.MissingPropertyException`.
 fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
+    // An `Expando` property is its map's entry, `null` when absent — except
+    // `class`, which no property shadows until one is set.
+    if let Some(props) = as_expando(recv) {
+        return match omap_get(&props, name).flatten() {
+            Some(v) => v,
+            None if name == "class" => class_ref_of(recv),
+            None => Value::Undef,
+        };
+    }
     // A map's property access is *only* a key read (`m.k` == `m['k']`), and an
     // absent key is `null` — including the names that are properties on every
     // other value: `[a:1].size`, `[a:1].class`, and `[a:1].length` are all
@@ -17773,6 +17876,10 @@ thread_local! {
 /// [`render_value`] for one value, its members rendered through the
 /// cycle-tracking entry point.
 fn render_shape(vm: &mut VM, v: &Value) -> String {
+    // `Expando.toString` is its property map's, Java-style (`{a=1}`).
+    if let Some(props) = as_expando(v) {
+        return java_to_string(vm, &props);
+    }
     // `Optional.toString`: `Optional[value]` (the value through Java's
     // `toString`) or `Optional.empty`.
     if let Some(o) = as_optional(v) {

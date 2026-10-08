@@ -540,6 +540,11 @@ Implemented and checked against Apache Groovy:
   that defines `methodMissing` still gets `obj.with { … }` from the GDK, and the
   hook sees only what nothing else answered. `propertyMissing(String)` reads and
   `propertyMissing(String, value)` writes.
+- **`groovy.util.Expando`** — `new Expando()` / `new Expando(map)`, properties
+  added by assignment (absent ones read `null`), closure-valued properties
+  callable as methods with the expando as their delegate, `getProperties()`,
+  `getProperty` / `setProperty`, `e['k']`, and the `HashMap` rendering and
+  iteration order (`{a=1}`).
 - **`java.util.Optional`** — `Optional.of` / `ofNullable` / `empty`, `get`,
   `isPresent` / `isEmpty`, `orElse` / `orElseGet` / `orElseThrow`, `map`,
   `flatMap`, `filter`, `or`, `ifPresent` / `ifPresentOrElse` (a closure for each

@@ -776,7 +776,7 @@ error.
 **Missing GDK methods** (`MissingMethodException` where Groovy answers):
 `String.lines`, `Map.toSpreadMap`, `asReversed`, `shuffled`,
 `List.stream()`, `Range.by(n)`, `BigDecimal.step(to, step) { … }`. `Eval.me` raises
-`MissingPropertyException` and `new Expando()` is `unable to resolve class`.
+`MissingPropertyException`.
 
 **Wrong values:**
 

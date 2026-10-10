@@ -9212,9 +9212,11 @@ fn parenthesised_expression_statement_is_not_a_destructuring() {
 
 #[test]
 fn typed_multi_declarators_share_the_declared_type() {
-    let (out, ok) = run("int p = 1, q = 2\nlong r = 3, s = 4\nprintln p + q + r + s\n\
+    let (out, ok) = run(
+        "int p = 1, q = 2\nlong r = 3, s = 4\nprintln p + q + r + s\n\
          println r.getClass().getName()\nint[] arr = [1, 2], brr = [3]\n\
-         println brr.getClass().getName()\nString s1 = 'a', s2 = 'b'\nprintln s1 + s2\n");
+         println brr.getClass().getName()\nString s1 = 'a', s2 = 'b'\nprintln s1 + s2\n",
+    );
     assert!(ok);
     assert_eq!(out, "10\njava.lang.Long\n[I\nab\n");
 }

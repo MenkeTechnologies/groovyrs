@@ -14999,9 +14999,7 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
             (Value::Undef, _) | (_, Value::Undef) => Value::Bool(false),
             (a, b) => {
                 let (a, b) = (iteration_elements(a), iteration_elements(b));
-                Value::Bool(
-                    a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| values_equal(x, y)),
-                )
+                Value::Bool(a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| values_equal(x, y)))
             }
         },
         ("Arrays", "fill") if args.len() == 2 && array_elem(&arg0).is_some() => {

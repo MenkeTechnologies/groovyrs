@@ -19,8 +19,7 @@
 **Groovy in Rust** — a Groovy frontend that lexes and parses Groovy script
 source, lowers it to [`fusevm`](https://github.com/MenkeTechnologies/fusevm)
 bytecode, and runs it on the shared three-tier Cranelift JIT — the same engine
-behind `zshrs`, `stryke`, `awkrs`, `elisp`, `ruby`, `python`, `php`, `node`, and
-`java`. No bespoke VM. No JVM. No `.class` files.
+every other fusevm frontend runs on. No bespoke VM. No JVM. No `.class` files.
 
 ---
 
@@ -75,8 +74,8 @@ frontend over the shared engine. Highlights:
   per-iteration lookup that cannot hit. Also fusevm's, and recorded here rather
   than worked around.
 - **fusevm-hosted, no JVM** — no local `vm.rs` / `jit.rs`, no `.class` files, no
-  `libjvm`. The same three-tier Cranelift engine that hosts zshrs, stryke,
-  awkrs, elisp, ruby, python, php, node, and java runs Groovy too.
+  `libjvm`. The same three-tier Cranelift engine that hosts the other fusevm
+  frontends runs Groovy too.
   `jit-disk-cache` persists native code across runs.
 - **The Groovy script model** — a `.groovy` file is a sequence of top-level
   statements (classes optional, no `main`); semicolons optional (newlines
@@ -660,7 +659,7 @@ Both editor servers ship in the same binary and speak their protocol over stdio:
 ## [0x05] ARCHITECTURE
 
 groovyrs contains no virtual machine or JIT of its own. The execution path
-mirrors how `zshrs` hosts zsh, `ruby` hosts Ruby, and `java` hosts Java:
+mirrors how the other fusevm frontends host their languages:
 
 ```
 Groovy script → lexer → parser (AST) → lower to fusevm bytecode → fusevm VM + Cranelift JIT
@@ -798,7 +797,7 @@ now that the `BigDecimal` model is exact. Modes:
 `arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
 `gstring`, `exceptions`, `faults`, `switch`, `asserts`, `modzero`, `gdk`,
 `conversions`, `classes`, `ranges`, `aliasing`, `views`, `switchexpr`, `regex`,
-`numeric`, `strops`, `listops`, `safenav`, `mixed`. `--dump` prints the corpus a
+`numeric`, `strops`, `listops`, `safenav`, `floats`, `mixed`. `--dump` prints the corpus a
 mode generates and runs nothing, which is how "does this fuzzer ever emit X"
 became a grep rather than a reading of the generator; `switchexpr`, `regex`,
 `numeric`, `strops`, `listops` and `safenav` were each added because that grep

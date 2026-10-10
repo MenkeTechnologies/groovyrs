@@ -264,6 +264,8 @@ struct Compiler {
     /// The fewest arguments a closure literal that defaults trailing parameters
     /// accepts, by body name-pool index. See [`crate::host::set_closure_min_params`].
     closure_min_params: HashMap<u16, u8>,
+    /// The simple names (and `pkg.*` wildcards) the script imports.
+    imports: HashSet<String>,
     /// The names in the *current* scope that live in a boxed binding — a
     /// [`crate::host::GCELL_NEW`] cell — because some closure written in that
     /// scope captures them. Every read of one goes through
@@ -540,6 +542,15 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         wide_sites: HashSet::new(),
         closure_param_types: HashMap::new(),
         closure_min_params: HashMap::new(),
+        imports: prog
+            .imports
+            .iter()
+            .flat_map(|i| match i.strip_suffix(".*") {
+                Some("java.math") => vec!["RoundingMode".to_string(), "MathContext".to_string()],
+                Some(_) => Vec::new(),
+                None => vec![i.clone()],
+            })
+            .collect(),
         cells: boxed_names(&[], &prog.body),
         preloaded_lhs: false,
         ret_ty: None,
@@ -1591,6 +1602,11 @@ impl Compiler {
     /// A script-declared class of the same name, a local, or a field all win,
     /// which is Groovy's own resolution order.
     fn is_static_class_ref(&self, name: &str) -> bool {
+        // A JDK type the script imported by name (or by its package's wildcard)
+        // resolves like one Groovy imports by default.
+        if self.imports.contains(name) && !self.is_local(name) {
+            return true;
+        }
         // A primitive type name in value position (`x.asType(int)`) is its
         // `Class`.
         let primitive = matches!(
@@ -4029,6 +4045,13 @@ impl Compiler {
     /// statically has that type, so `int s = 0; s += i` over typed operands
     /// keeps its native arithmetic.
     fn emit_typed_coercion(&mut self, ty: &str, value: &Expr) -> Result<(), String> {
+        // A closure stored in a `Comparator` variable is a `Comparator` — which
+        // `List.sort(Comparator)` then treats differently from a `Closure`.
+        if matches!(ty, "Comparator" | "java.util.Comparator") {
+            let tidx = self.b.add_constant(Value::str("Comparator".to_string()));
+            self.b.emit(Op::LoadConst(tidx), self.cur_line);
+            return self.emit_call_builtin(crate::host::GCAST, 0, self.cur_line);
+        }
         if !COERCED_TYPES.contains(&ty) {
             return Ok(());
         }

@@ -188,13 +188,45 @@ impl Parser {
     /// Parse the whole script: top-level statements until EOF.
     fn program(&mut self) -> Result<Program, String> {
         let mut body = Vec::new();
+        let mut imports = Vec::new();
         self.skip_terminators();
-        // Tolerate leading `package`/`import` lines (skipped to a terminator).
+        // Leading `package`/`import` lines. An import's class name is kept: the
+        // JDK types Groovy does not import by default (`java.math.RoundingMode`)
+        // are reachable by their simple name only through one.
         loop {
             match self.peek() {
                 Tok::Ident(w) if w == "package" || w == "import" => {
+                    let is_import = w == "import";
+                    self.advance();
+                    let mut last: Option<String> = None;
+                    let mut dotted = String::new();
                     while !matches!(self.peek(), Tok::Nl | Tok::Semi | Tok::Eof) {
+                        match self.peek().clone() {
+                            Tok::Ident(w) if w == "as" => {
+                                self.advance();
+                                if let Tok::Ident(alias) = self.peek().clone() {
+                                    last = Some(alias);
+                                }
+                            }
+                            Tok::Ident(w) => {
+                                dotted.push_str(&w);
+                                last = Some(w);
+                            }
+                            Tok::Dot => dotted.push('.'),
+                            Tok::Star => {
+                                dotted.push('*');
+                                last = Some("*".to_string());
+                            }
+                            _ => {}
+                        }
                         self.advance();
+                    }
+                    if is_import {
+                        match last {
+                            Some(l) if l == "*" => imports.push(dotted),
+                            Some(l) => imports.push(l),
+                            None => {}
+                        }
                     }
                     self.skip_terminators();
                 }
@@ -207,7 +239,7 @@ impl Parser {
             self.skip_terminators();
         }
         body.append(&mut self.hoisted);
-        Ok(Program { body })
+        Ok(Program { body, imports })
     }
 
     /// After a statement, require a terminator (`Nl`/`;`) or the end of a block
@@ -1581,6 +1613,19 @@ impl Parser {
         if capital(kind(self.pos)) {
             while matches!(kind(j), Some(Tok::Dot)) && capital(kind(j + 1)) {
                 j += 2;
+            }
+        } else if matches!(kind(self.pos + 1), Some(Tok::Dot)) {
+            // A package-qualified type: `java.util.concurrent.Callable c`. The
+            // chain has to end on a capitalised name, which is what tells it
+            // from a property read followed by a command argument.
+            let mut k = self.pos;
+            while matches!(kind(k + 1), Some(Tok::Dot))
+                && matches!(kind(k + 2), Some(Tok::Ident(_)))
+            {
+                k += 2;
+            }
+            if k > self.pos && capital(kind(k)) {
+                j = k + 1;
             }
         }
         // A capitalised type may carry generic arguments: `List<String> xs`.

@@ -18,6 +18,10 @@
 pub struct Program {
     /// The statements of the script body, run top to bottom.
     pub body: Vec<Stmt>,
+    /// The simple class names the script's `import` lines bring into scope
+    /// (`import java.math.RoundingMode` adds `RoundingMode`; an `as` alias adds
+    /// the alias), plus a `pkg.*` wildcard as `pkg.*`.
+    pub imports: Vec<String>,
 }
 
 /// A Groovy statement with its 1-based source line.

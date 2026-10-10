@@ -677,6 +677,10 @@ thread_local! {
     /// metaclass (`sum`, `average`) runs: a miss there is Groovy's
     /// `MissingMethodExceptionNoStack`, not the call-site `MissingMethodException`.
     static NO_STACK: Cell<bool> = const { Cell::new(false) };
+    /// Closures coerced to `java.util.Comparator` (a typed declaration or `as`).
+    /// `List.sort(Comparator)` is the JDK's `void` method on them, where a plain
+    /// `Closure` reaches the GDK `sort` that answers the list.
+    static COMPARATORS: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
 }
 
 // ── Integer width (`Integer` vs `Long`) ────────────────────────────────────
@@ -1314,6 +1318,9 @@ fn java_class_name(v: &Value) -> String {
     }
     if let Some((class, _, _)) = as_meta_property(v) {
         return class.to_string();
+    }
+    if as_class_ref(v).is_some() {
+        return "java.lang.Class".to_string();
     }
     if as_expando(v).is_some() {
         return "groovy.util.Expando".to_string();
@@ -2276,6 +2283,7 @@ fn reset_heap() {
     HEAP.with(|h| h.borrow_mut().clear());
     CLASSES.with(|c| c.borrow_mut().clear());
     DEC_LITERALS.with(|d| d.borrow_mut().clear());
+    COMPARATORS.with(|c| c.borrow_mut().clear());
     MEMO.with(|m| m.borrow_mut().clear());
     STATICS.with(|s| s.borrow_mut().clear());
     MAP_DEFAULTS.with(|m| m.borrow_mut().clear());
@@ -3449,6 +3457,10 @@ fn groovy_truthy(vm: &mut VM, v: &Value) -> bool {
             if let Some(m) = as_matcher(v) {
                 let handle = v.clone();
                 return matcher_find(vm, &handle, &m);
+            }
+            // An `Iterator` is truthy while it has another element.
+            if let Some((_, left)) = as_iter(v) {
+                return left > 0;
             }
             // A closure handle is an object: always true.
             if closure_meta(v).is_some() {
@@ -6490,14 +6502,44 @@ fn inspect_shape(v: &Value) -> String {
             .collect();
         return format!("[{}]", shown.join(", "));
     }
+    // A non-`String` `CharSequence` is inspected in double quotes.
+    if let Some((_, text)) = as_buffer(v) {
+        return format!("\"{}\"", inspect_escape(&text, '"'));
+    }
+    if as_gstring(v).is_some() {
+        return format!("\"{}\"", inspect_escape(&groovy_str(v), '"'));
+    }
     match v {
-        Value::Str(s) => format!("'{s}'"),
+        Value::Str(s) => format!("'{}'", inspect_escape(s, '\'')),
         Value::Array(a) => {
             let items: Vec<String> = a.iter().map(inspect_value).collect();
             format!("[{}]", items.join(", "))
         }
         other => groovy_str(other),
     }
+}
+
+/// `FormatHelper`'s escaping of a quoted string: the backslash, the quote
+/// character that delimits it, and the control characters Java writes as
+/// escapes.
+fn inspect_escape(s: &str, quote: char) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Groovy's value equality — what `==`, a `switch` label and `unique` ask:
@@ -8788,6 +8830,20 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
 }
 
 fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
+    // `list.sort(comparator)` with a `Comparator`-typed closure is the JDK's
+    // `List.sort`, which sorts in place and answers `void`.
+    if method == "sort" && args.len() == 1 {
+        if let Value::Obj(id) = &args[0] {
+            if COMPARATORS.with(|c| c.borrow().contains(id))
+                && (is_list(&recv) || matches!(recv, Value::Array(_)))
+            {
+                COMPARATORS.with(|c| c.borrow_mut().remove(id));
+                dispatch_call_inner(vm, recv, "sort", vec![args[0].clone()]);
+                COMPARATORS.with(|c| c.borrow_mut().insert(*id));
+                return Value::Undef;
+            }
+        }
+    }
     // `list.remove((Object) x)`: the compiler saw the cast that selects
     // `Collection.remove(Object)`, which on a list is the element removal.
     if method == REMOVE_OBJECT {
@@ -13586,6 +13642,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 "getSimpleName" => Value::str(simple_name_of(&qualified)),
                 "isInterface" if args.is_empty() => Value::bool(is_interface_class(&qualified)),
                 "getSuperclass" if args.is_empty() => class_superclass(&qualified),
+                "equals" if args.len() == 1 => {
+                    Value::bool(as_class_ref(&args[0]).is_some_and(|o| o == qualified))
+                }
                 "getInterfaces" if args.is_empty() => class_interfaces(&qualified),
                 "isInstance" if args.len() == 1 => Value::bool(value_is_a(&args[0], &qualified)),
                 "isAssignableFrom" if args.len() == 1 => {
@@ -13629,6 +13688,10 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         _ if as_iter(recv).is_some() => {
             let (_, left) = as_iter(recv).unwrap();
             match method {
+                "equals" if args.len() == 1 => Value::bool(matches!(
+                    (recv, &args[0]),
+                    (Value::Obj(a), Value::Obj(b)) if a == b
+                )),
                 "hasNext" => Value::bool(left > 0),
                 "next" => match iter_next(recv) {
                     Some(v) => v,
@@ -13931,6 +13994,12 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 ),
                 _ => raise_missing_method(vm, recv, method, args),
             }
+        }
+
+        // `Object.equals` for the values with no `equals` of their own above: a
+        // `Boolean`, a bare `Object`, a pattern, a class.
+        (_, "equals") if args.len() == 1 => {
+            Value::bool(checked_equal(vm, || java_equals(recv, &args[0])))
         }
 
         _ => raise_missing_method(vm, recv, method, args),
@@ -14630,6 +14699,14 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
             return raise_java_cast(vm, &glist(items), &ty_simple);
         }
         return raise_java_cast(vm, &v, &ty_simple);
+    }
+    if ty_simple == "Comparator" {
+        if let Value::Obj(id) = v {
+            if closure_meta(&v).is_some() {
+                COMPARATORS.with(|c| c.borrow_mut().insert(id));
+            }
+        }
+        return v;
     }
     match ty_simple.as_str() {
         // Integral targets truncate toward zero, as Java's narrowing casts do.
@@ -18718,6 +18795,11 @@ fn b_cmp(vm: &mut VM, _argc: u8) -> Value {
         (false, true) => return Value::int(1),
         _ => {}
     }
+    if let (Value::Obj(x), Value::Obj(y)) = (&a, &b) {
+        if x == y {
+            return Value::int(0);
+        }
+    }
     if is_incomparable(&a) || is_incomparable(&b) {
         let (sa, sb) = (java_to_string(vm, &a), java_to_string(vm, &b));
         let message = format!(
@@ -18744,7 +18826,41 @@ fn is_incomparable(v: &Value) -> bool {
     matches!(v, Value::Array(_) | Value::Hash(_))
         || as_list_raw(v).is_some()
         || as_omap(v).is_some()
+        || as_set(v).is_some()
         || as_range(v).is_some()
+}
+
+/// The order Groovy gives two values for `<`, `<=`, `>`, `>=` when one of them
+/// is `null`, a `Boolean` against a non-`Boolean`, or not `Comparable` at all.
+/// `None` when the pair is an ordinary one for the caller's own paths; `Some(Err)`
+/// carries the `IllegalArgumentException` text Groovy raises.
+fn operator_order(a: &Value, b: &Value) -> Option<Result<std::cmp::Ordering, String>> {
+    use std::cmp::Ordering;
+    if let (Value::Obj(x), Value::Obj(y)) = (a, b) {
+        if x == y {
+            return Some(Ok(Ordering::Equal));
+        }
+    }
+    match (matches!(a, Value::Undef), matches!(b, Value::Undef)) {
+        (true, true) => return Some(Ok(Ordering::Equal)),
+        (true, false) => return Some(Ok(Ordering::Less)),
+        (false, true) => return Some(Ok(Ordering::Greater)),
+        _ => {}
+    }
+    let mixed_bool = matches!(a, Value::Bool(_)) != matches!(b, Value::Bool(_));
+    if is_incomparable(a) || is_incomparable(b) || mixed_bool {
+        let message = with_vm(|vm| {
+            let (sa, sb) = (java_to_string(vm, a), java_to_string(vm, b));
+            format!(
+                "Cannot compare {} with value '{sa}' and {} with value '{sb}'",
+                java_class_name(a),
+                java_class_name(b),
+            )
+        })
+        .unwrap_or_else(|| "Cannot compare".to_string());
+        return Some(Err(message));
+    }
+    None
 }
 
 /// A value rendered the way *Java's* `toString` renders it, which is what the
@@ -20022,6 +20138,25 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
             return res;
         }
     }
+    if matches!(op, NumOp::Lt | NumOp::Le | NumOp::Gt | NumOp::Ge) {
+        match operator_order(a, b) {
+            Some(Ok(order)) => {
+                return Ok(Value::bool(match op {
+                    NumOp::Lt => order.is_lt(),
+                    NumOp::Le => order.is_le(),
+                    NumOp::Gt => order.is_gt(),
+                    _ => order.is_ge(),
+                }));
+            }
+            Some(Err(message)) => {
+                let raised = with_vm(|vm| raise(vm, "IllegalArgumentException", &message));
+                if raised.is_some() {
+                    return Ok(Value::Undef);
+                }
+            }
+            None => {}
+        }
+    }
     // Arithmetic whose LEFT operand is `null` is a `NullPointerException` in
     // Groovy, not a hard fault: the operator dispatches as a method call on
     // `null`. `+` gets its own wording (verified against Apache Groovy 5.0.8),
@@ -20067,6 +20202,14 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
         };
         let mismatched = (matches!(a, Value::Str(_)) && numeric(b))
             || (matches!(b, Value::Str(_)) && numeric(a));
+        // A `Boolean` is never `==` a number of any type.
+        let bool_vs_number = (matches!(a, Value::Bool(_))
+            && (matches!(b, Value::Float(_)) || is_dec_handle(b) || as_float_handle(b).is_some()))
+            || (matches!(b, Value::Bool(_))
+                && (matches!(a, Value::Float(_)) || is_dec_handle(a) || as_float_handle(a).is_some()));
+        if bool_vs_number {
+            return Ok(Value::bool(matches!(op, NumOp::Ne)));
+        }
         if mismatched {
             return Ok(Value::bool(matches!(op, NumOp::Ne)));
         }

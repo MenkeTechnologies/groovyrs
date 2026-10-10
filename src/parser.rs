@@ -4257,9 +4257,9 @@ fn qualify_nested_types(toks: &mut Vec<Token>) {
     }
     // A nested declaration's scope is its parent's body: the innermost body
     // range that contains its name token.
-    for d in 0..decls.len() {
-        let at = decls[d].name_at;
-        decls[d].scope = ranges
+    for (d, decl) in decls.iter_mut().enumerate() {
+        let at = decl.name_at;
+        decl.scope = ranges
             .iter()
             .enumerate()
             .filter(|(o, _)| *o != d)

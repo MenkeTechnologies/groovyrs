@@ -39,19 +39,19 @@ C\-style \fBfor (;;)\fR, the \fBfor (x in a..b)\fR range loop and the
 operand is a String.
 .SH OPTIONS
 .TP
-.B \-e \fISCRIPT\fR
+.BR \-e ", " \-\-eval " \fISCRIPT\fR"
 Run an inline script string instead of a file, then exit.
 .TP
-.B \-\-dump\-tokens
+.BI \-\-dump\-tokens " FILE"
 Print the lexer token stream for the script and exit.
 .TP
-.B \-\-dump\-ast
+.BI \-\-dump\-ast " FILE"
 Print the parsed AST for the script and exit.
 .TP
-.B \-\-tiers
+.BI \-\-tiers " FILE"
 Run it, then report which fusevm execution tier took each of its chunks.
 .TP
-.B \-\-disasm
+.BI \-\-disasm " FILE"
 Print a fusevm bytecode disassembly listing (with source line numbers) and exit.
 .TP
 .B \-\-lsp
@@ -62,10 +62,10 @@ parser, plus keyword / command completion and hover).
 Speak the Debug Adapter Protocol over stdio (source\-line breakpoints, stepping,
 and locals inspection on the single script frame).
 .TP
-.BR \-v ", " \-\-version
+.BR \-v ", " \-version ", " \-\-version
 Print the version banner and exit.
 .TP
-.BR \-h ", " \-\-help
+.BR \-h ", " \-help ", " \-? ", " \-\-help
 Print usage and exit.
 .SH EXIT STATUS
 .B 0

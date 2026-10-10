@@ -37,7 +37,11 @@ so you can grep with `/`:
 The program text is a
 .I .groovy
 file argument, or an inline string with
-.BR \-e .
+.BR \-e
+(long form
+.BR \-\-eval ).
+.BR \-\-tiers
+runs the script, then reports which fusevm tier took each chunk; \fB\-v\fR / \fB\-version\fR / \fB\-\-version\fR and \fB\-h\fR / \fB\-help\fR / \fB\-?\fR / \fB\-\-help\fR print the version banner and usage.
 Introspection flags
 .RB ( \-\-dump\-tokens ,
 .BR \-\-dump\-ast ,

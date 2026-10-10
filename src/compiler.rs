@@ -261,6 +261,9 @@ struct Compiler {
     /// keyed by its body's name-pool index and handed to the host as
     /// [`crate::host::set_closure_param_types`].
     closure_param_types: HashMap<u16, Vec<String>>,
+    /// The fewest arguments a closure literal that defaults trailing parameters
+    /// accepts, by body name-pool index. See [`crate::host::set_closure_min_params`].
+    closure_min_params: HashMap<u16, u8>,
     /// The names in the *current* scope that live in a boxed binding — a
     /// [`crate::host::GCELL_NEW`] cell — because some closure written in that
     /// scope captures them. Every read of one goes through
@@ -536,6 +539,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         obj_vars: HashSet::new(),
         wide_sites: HashSet::new(),
         closure_param_types: HashMap::new(),
+        closure_min_params: HashMap::new(),
         cells: boxed_names(&[], &prog.body),
         preloaded_lhs: false,
         ret_ty: None,
@@ -669,6 +673,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     }
     crate::host::set_wide_sites(std::mem::take(&mut c.wide_sites));
     crate::host::set_closure_param_types(std::mem::take(&mut c.closure_param_types));
+    crate::host::set_closure_min_params(std::mem::take(&mut c.closure_min_params));
     Ok(c.b.build())
 }
 
@@ -1586,7 +1591,13 @@ impl Compiler {
     /// A script-declared class of the same name, a local, or a field all win,
     /// which is Groovy's own resolution order.
     fn is_static_class_ref(&self, name: &str) -> bool {
-        crate::host::jdk_class_package(name).is_some()
+        // A primitive type name in value position (`x.asType(int)`) is its
+        // `Class`.
+        let primitive = matches!(
+            name,
+            "int" | "long" | "short" | "byte" | "double" | "float" | "char" | "boolean"
+        );
+        (primitive || crate::host::jdk_class_package(name).is_some())
             && !self.is_local(name)
             && !self.class_index.contains_key(name)
     }
@@ -3412,7 +3423,15 @@ impl Compiler {
                 explicit_params,
                 varargs,
                 param_types,
-            } => self.closure(params, body, *explicit_params, *varargs, param_types)?,
+                defaults,
+            } => self.closure(
+                params,
+                body,
+                *explicit_params,
+                *varargs,
+                param_types,
+                *defaults,
+            )?,
             Expr::Range {
                 start,
                 end,
@@ -3501,6 +3520,7 @@ impl Compiler {
         explicit_params: bool,
         varargs: bool,
         param_types: &[String],
+        defaults: usize,
     ) -> Result<(), String> {
         // No parameter list at all means Groovy's single implicit `it`; an
         // explicit list — even the empty `{ -> … }` — is taken as written.
@@ -3550,6 +3570,10 @@ impl Compiler {
         let id = self.closures_seen;
         self.closures_seen += 1;
         let name_idx = self.b.add_name(&format!("$closure_{id}"));
+        if defaults > 0 {
+            self.closure_min_params
+                .insert(name_idx, (effective.len() - defaults) as u8);
+        }
         if param_types.iter().any(|t| t != "def") {
             self.closure_param_types
                 .insert(name_idx, param_types.to_vec());

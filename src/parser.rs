@@ -2884,6 +2884,34 @@ impl Parser {
                 let rhs = Box::new(self.binary_from(operand, POWER_BP)?);
                 Ok(self.record(col, Expr::Unary { op, rhs }))
             }
+            // Unary `+x` is `x.positive()`; on a number literal it is the literal.
+            Tok::Plus => {
+                let col = self.col_at(0);
+                let line = self.line();
+                self.advance();
+                let operand = self.unary()?;
+                let operand = self.binary_from(operand, POWER_BP)?;
+                if matches!(
+                    operand,
+                    Expr::Int(..)
+                        | Expr::Float(_)
+                        | Expr::Dec(_)
+                        | Expr::BigInt(_)
+                        | Expr::Single(_)
+                ) {
+                    return Ok(operand);
+                }
+                Ok(self.record(
+                    col,
+                    Expr::MethodCall {
+                        recv: Box::new(operand),
+                        method: "positive".to_string(),
+                        args: Vec::new(),
+                        line,
+                        safe: false,
+                    },
+                ))
+            }
             Tok::PlusPlus | Tok::MinusMinus => {
                 let inc = matches!(self.peek(), Tok::PlusPlus);
                 self.advance();
@@ -3049,6 +3077,7 @@ impl Parser {
                         explicit_params: false,
                         varargs: false,
                         param_types: Vec::new(),
+                        defaults: 0,
                     }],
                     line,
                     // The spread is null-safe on its RECEIVER too:
@@ -3591,6 +3620,7 @@ impl Parser {
                     explicit_params,
                     varargs,
                     param_types,
+                    defaults: 0,
                 });
             }
             loop {
@@ -3651,6 +3681,7 @@ impl Parser {
         // Prepend `if (p == null) p = <default>` for each defaulted parameter.
         // (A call that passes an explicit `null` therefore takes the default,
         // where Groovy — which generates one overload per arity — keeps null.)
+        let default_count = defaults.len();
         for (name, value) in defaults.into_iter().rev() {
             let line = body.first().map(|s| s.line).unwrap_or(0);
             body.insert(
@@ -3682,6 +3713,7 @@ impl Parser {
             explicit_params,
             varargs,
             param_types,
+            defaults: default_count,
         })
     }
 
@@ -4211,6 +4243,7 @@ fn method_pointer(recv: Expr, name: String, line: u32) -> Expr {
         explicit_params: true,
         varargs: true,
         param_types: Vec::new(),
+        defaults: 0,
     };
     if matches!(recv, Expr::This) {
         return call(Expr::This);
@@ -4225,6 +4258,7 @@ fn method_pointer(recv: Expr, name: String, line: u32) -> Expr {
             explicit_params: true,
             varargs: false,
             param_types: Vec::new(),
+            defaults: 0,
         }),
         args: vec![recv],
         line,

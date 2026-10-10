@@ -673,6 +673,10 @@ thread_local! {
     /// inside a closure body is `this.call(…)` on the Closure itself, and a
     /// closure literal evaluated here has the innermost one as its `owner`.
     static CLOSURE_STACK: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
+    /// Set while a GDK method that adds its elements with `plus` through the
+    /// metaclass (`sum`, `average`) runs: a miss there is Groovy's
+    /// `MissingMethodExceptionNoStack`, not the call-site `MissingMethodException`.
+    static NO_STACK: Cell<bool> = const { Cell::new(false) };
 }
 
 // ── Integer width (`Integer` vs `Long`) ────────────────────────────────────
@@ -703,9 +707,21 @@ thread_local! {
 }
 
 thread_local! {
+    /// The fewest arguments each closure literal that defaults trailing
+    /// parameters accepts, by its body's name-pool index. Replaced on each
+    /// compile.
+    static CLOSURE_MIN_PARAMS: RefCell<HashMap<u16, u8>> = RefCell::new(HashMap::new());
+}
+
+thread_local! {
     /// The declared parameter types of each closure literal that types one,
     /// by its body's name-pool index. Replaced on each compile.
     static CLOSURE_PARAM_TYPES: RefCell<HashMap<u16, Vec<String>>> = RefCell::new(HashMap::new());
+}
+
+/// Publish the compiler's per-closure minimum argument counts for this chunk.
+pub fn set_closure_min_params(min: HashMap<u16, u8>) {
+    CLOSURE_MIN_PARAMS.with(|t| *t.borrow_mut() = min);
 }
 
 /// Publish the compiler's typed closure parameter lists for this chunk.
@@ -1015,9 +1031,14 @@ fn raise_missing_method_wide(
     }
     let payload_class = class.clone();
     let payload_args = args.to_vec();
+    let exc_class = if NO_STACK.with(Cell::get) {
+        "MissingMethodExceptionNoStack"
+    } else {
+        "MissingMethodException"
+    };
     raise_with(
         vm,
-        "MissingMethodException",
+        exc_class,
         Some(&format!(
             "No signature of {kind}: {method} for class: {class} \
              is applicable for argument types: ({types}) values: [{values}]"
@@ -2124,6 +2145,9 @@ struct ClosureMeta {
     /// argument from its position onward, and a call that stops short of it
     /// still binds it — to an empty list. See [`invoke_closure`].
     varargs: bool,
+    /// The fewest arguments a direct call may pass: the parameter count less
+    /// the trailing parameters that carry a default.
+    min_params: u8,
     /// `clo.owner` — the object the literal was written inside: the enclosing
     /// instance for a closure in a method, the enclosing closure for one nested
     /// in another, the script object otherwise. `None` for a derived closure.
@@ -2154,6 +2178,10 @@ enum Derived {
     /// `a >> b` (`a.andThen(b)`) and `a << b`: call `first` with the arguments,
     /// then `second` with that result.
     Composed { first: Value, second: Value },
+    /// `clo.trampoline(a…)`: calling it runs `base` with the bound arguments,
+    /// and as long as the result is itself a trampoline closure runs that one
+    /// in turn — recursion that does not grow the stack.
+    Trampoline { base: Value, bound: Vec<Value> },
     /// `clo.memoize()`: call `base` once per distinct argument list, keyed by the
     /// Groovy rendering of the arguments. The cache lives in [`MEMO`], keyed by
     /// this closure's own heap id, so it is shared by every holder of the handle.
@@ -3983,10 +4011,14 @@ fn b_make_closure(vm: &mut VM, _argc: u8) -> Value {
     // `GCELL_GET`, which answers the value — so marking here is what makes
     // `GCELL_RENEW`'s reuse sound.
     mark_captured_cells(&captures);
+    let min_params = CLOSURE_MIN_PARAMS
+        .with(|m| m.borrow().get(&name_idx).copied())
+        .unwrap_or(params);
     heap_push(HeapObj::Closure(ClosureMeta {
         name_idx,
         params,
         varargs,
+        min_params,
         delegate: None,
         resolve_strategy: 0,
         owner,
@@ -4011,11 +4043,22 @@ fn mark_captured_cells(captures: &[Value]) {
 }
 
 /// Build a derived-closure handle (see [`Derived`]) reporting `params` arity.
-fn derived_closure(params: u8, d: Derived) -> Value {
+fn derived_closure(params: u8, varargs: bool, d: Derived) -> Value {
+    // A derived closure takes the base's minimum, less whatever it binds.
+    let base_min = |base: &Value| closure_meta(base).map_or(params, |m| m.min_params);
+    let min_params = match &d {
+        Derived::Curried { base, bound, .. } | Derived::Trampoline { base, bound } => {
+            base_min(base).saturating_sub(bound.len() as u8)
+        }
+        Derived::Composed { first, .. } => base_min(first),
+        Derived::Memoized { base } => base_min(base),
+    }
+    .min(params);
     heap_push(HeapObj::Closure(ClosureMeta {
         name_idx: u16::MAX,
         params,
-        varargs: false,
+        varargs,
+        min_params,
         delegate: None,
         resolve_strategy: 0,
         owner: None,
@@ -4027,7 +4070,13 @@ fn derived_closure(params: u8, d: Derived) -> Value {
 
 /// Run a derived closure: splice in curried arguments, chain a composition, or
 /// answer a memoized call from [`MEMO`].
-fn invoke_derived(vm: &mut VM, this: &Value, d: &Derived, args: &[Value]) -> Result<Value, String> {
+fn invoke_derived(
+    vm: &mut VM,
+    this: &Value,
+    d: &Derived,
+    args: &[Value],
+    strict: bool,
+) -> Result<Value, String> {
     match d {
         Derived::Curried {
             base,
@@ -4046,23 +4095,40 @@ fn invoke_derived(vm: &mut VM, this: &Value, d: &Derived, args: &[Value]) -> Res
             for (i, v) in bound.iter().enumerate() {
                 call.insert(idx + i, v.clone());
             }
-            invoke_closure(vm, base, &call)
+            invoke_closure_with(vm, base, &call, strict)
         }
         Derived::Composed { first, second } => {
-            let mid = invoke_closure(vm, first, args)?;
-            invoke_closure(vm, second, std::slice::from_ref(&mid))
+            let mid = invoke_closure_with(vm, first, args, strict)?;
+            invoke_closure_with(vm, second, std::slice::from_ref(&mid), strict)
+        }
+        Derived::Trampoline { base, bound } => {
+            let (mut base, mut call) = (base.clone(), bound.clone());
+            call.extend_from_slice(args);
+            loop {
+                let out = invoke_closure_with(vm, &base, &call, strict)?;
+                match closure_meta(&out).and_then(|m| m.derived) {
+                    Some(d) => match *d {
+                        Derived::Trampoline { base: next, bound } => {
+                            base = next;
+                            call = bound;
+                        }
+                        _ => return Ok(out),
+                    },
+                    None => return Ok(out),
+                }
+            }
         }
         Derived::Memoized { base } => {
             let id = match this {
                 Value::Obj(id) => *id,
-                _ => return invoke_closure(vm, base, args),
+                _ => return invoke_closure_with(vm, base, args, strict),
             };
             let key: Vec<String> = args.iter().map(groovy_str).collect();
             let key = key.join("\u{1}");
             if let Some(hit) = MEMO.with(|m| m.borrow().get(&(id, key.clone())).cloned()) {
                 return Ok(hit);
             }
-            let out = invoke_closure(vm, base, args)?;
+            let out = invoke_closure_with(vm, base, args, strict)?;
             MEMO.with(|m| m.borrow_mut().insert((id, key), out.clone()));
             Ok(out)
         }
@@ -4082,6 +4148,7 @@ fn closure_combinator(
     Some(match method {
         "curry" => derived_closure(
             remaining(args.len()),
+            meta.varargs,
             Derived::Curried {
                 base: recv.clone(),
                 at: 0,
@@ -4091,6 +4158,7 @@ fn closure_combinator(
         ),
         "rcurry" => derived_closure(
             remaining(args.len()),
+            meta.varargs,
             Derived::Curried {
                 base: recv.clone(),
                 at: 0,
@@ -4103,6 +4171,7 @@ fn closure_combinator(
             let bound = args[1..].to_vec();
             derived_closure(
                 remaining(bound.len()),
+                meta.varargs,
                 Derived::Curried {
                     base: recv.clone(),
                     at: n,
@@ -4111,7 +4180,28 @@ fn closure_combinator(
                 },
             )
         }
-        "memoize" => derived_closure(meta.params, Derived::Memoized { base: recv.clone() }),
+        "trampoline" => {
+            let base = match &meta.derived {
+                Some(d) => match &**d {
+                    Derived::Trampoline { base, .. } => base.clone(),
+                    _ => recv.clone(),
+                },
+                None => recv.clone(),
+            };
+            derived_closure(
+                meta.params,
+                meta.varargs,
+                Derived::Trampoline {
+                    base,
+                    bound: args.to_vec(),
+                },
+            )
+        }
+        "memoize" => derived_closure(
+            meta.params,
+            meta.varargs,
+            Derived::Memoized { base: recv.clone() },
+        ),
         // `a >> b` and `a.andThen(b)` run the receiver first; `a << b` runs the
         // argument first. Both answer a closure of the *first* one's arity.
         "rightShift" | "andThen" => {
@@ -4119,6 +4209,7 @@ fn closure_combinator(
             closure_meta(&other)?;
             derived_closure(
                 meta.params,
+                meta.varargs,
                 Derived::Composed {
                     first: recv.clone(),
                     second: other,
@@ -4130,6 +4221,7 @@ fn closure_combinator(
             let om = closure_meta(&other)?;
             derived_closure(
                 om.params,
+                om.varargs,
                 Derived::Composed {
                     first: other,
                     second: recv.clone(),
@@ -4148,11 +4240,43 @@ fn closure_combinator(
 /// `ReturnValue` pops that frame. The interpreter's IP is saved and restored so
 /// the enclosing dispatch loop resumes where it left off.
 fn invoke_closure(vm: &mut VM, clo: &Value, args: &[Value]) -> Result<Value, String> {
+    invoke_closure_with(vm, clo, args, false)
+}
+
+/// [`invoke_closure`], optionally as a *direct call* (`f(args)`, `f.call(args)`):
+/// Groovy dispatches those on the closure's declared signature, so a call whose
+/// arguments fit no `doCall` overload is a `MissingMethodException` rather
+/// than the null-padding / dropping the iteration GDK gets.
+fn invoke_closure_with(
+    vm: &mut VM,
+    clo: &Value,
+    args: &[Value],
+    strict: bool,
+) -> Result<Value, String> {
     let meta = closure_meta(clo).ok_or_else(|| "groovyrs: value is not a closure".to_string())?;
     // A curried / composed / memoized closure has no body region of its own.
     if let Some(d) = &meta.derived {
-        return invoke_derived(vm, clo, d, args);
+        if strict && !closure_args_fit(&meta, args) {
+            raise_missing_method(vm, clo, "doCall", args);
+            return Ok(Value::Undef);
+        }
+        return invoke_derived(vm, clo, d, args, strict);
     }
+    let spread;
+    let args = if strict {
+        match strict_closure_args(&meta, args) {
+            Some(adjusted) => {
+                spread = adjusted;
+                &spread[..]
+            }
+            None => {
+                raise_missing_method(vm, clo, "doCall", args);
+                return Ok(Value::Undef);
+            }
+        }
+    } else {
+        args
+    };
     let entry = vm
         .chunk
         .find_sub(meta.name_idx)
@@ -4194,7 +4318,13 @@ fn invoke_closure(vm: &mut VM, clo: &Value, args: &[Value]) -> Result<Value, Str
         vm.stack.push(cap.clone());
     }
     CLOSURE_STACK.with(|s| s.borrow_mut().push(clo.clone()));
+    let no_stack = NO_STACK.replace(false);
     let out = run_sub(vm, entry, stack_base);
+    NO_STACK.set(no_stack);
+    // An exception leaving a closure body is rethrown by `Closure.call`, which
+    // gives it a stack: the `NoStack` flavour a GDK `plus` fold raised becomes
+    // the plain `MissingMethodException`.
+    downgrade_no_stack();
     CLOSURE_STACK.with(|s| {
         s.borrow_mut().pop();
     });
@@ -5111,9 +5241,16 @@ fn buffer_set(v: &Value, text: String) -> bool {
 /// Verified against Apache Groovy 5.0.8: `insert`/`deleteCharAt`/`setLength`/
 /// `replace`/`reverse` all answer the receiver, `charAt` a one-character
 /// `String`, and `indexOf` a character index.
-fn dispatch_buffer_method(recv: &Value, text: &str, method: &str, args: &[Value]) -> Option<Value> {
+fn dispatch_buffer_method(
+    vm: &mut VM,
+    recv: &Value,
+    text: &str,
+    method: &str,
+    args: &[Value],
+) -> Option<Value> {
     let chars: Vec<char> = text.chars().collect();
-    let idx = |i: usize| args.get(i).and_then(as_i64).unwrap_or(0).max(0) as usize;
+    let len = chars.len() as i64;
+    let num = |i: usize| args.get(i).and_then(as_i64);
     let arg_str = |i: usize| args.get(i).map(groovy_str).unwrap_or_default();
     // Every mutator rebuilds the whole text, which is what a `String`-backed
     // buffer can do without a rope.
@@ -5121,74 +5258,194 @@ fn dispatch_buffer_method(recv: &Value, text: &str, method: &str, args: &[Value]
         buffer_set(recv, next);
         recv.clone()
     };
-    Some(match method {
-        "append" | "leftShift" | "write" | "print" => mutate(format!("{text}{}", arg_str(0))),
+    let span = |from: usize, to: usize| -> String { chars[from..to].iter().collect() };
+    // The JDK's `StringIndexOutOfBoundsException` wording for each check.
+    let sioobe = |vm: &mut VM, msg: String| {
+        raise(vm, "StringIndexOutOfBoundsException", &msg);
+        Some(Value::Undef)
+    };
+    Some(match (method, args.len()) {
+        ("append" | "leftShift" | "write" | "print", 3) => {
+            // `append(CharSequence, start, end)`.
+            let (start, end) = (num(1)?, num(2)?);
+            let src: Vec<char> = arg_str(0).chars().collect();
+            if start < 0 || start > end || end > src.len() as i64 {
+                return sioobe(
+                    vm,
+                    format!("start {start}, end {end}, length {}", src.len()),
+                );
+            }
+            let piece: String = src[start as usize..end as usize].iter().collect();
+            mutate(format!("{text}{piece}"))
+        }
+        ("append" | "leftShift" | "write" | "print", _) => mutate(format!("{text}{}", arg_str(0))),
+        ("appendCodePoint", 1) => {
+            let cp = num(0)?;
+            let c = char::from_u32(cp as u32)?;
+            mutate(format!("{text}{c}"))
+        }
         // `StringBuffer` does not override `equals`, so it is `Object`'s —
         // reference identity. Two buffers holding the same characters are not
         // `equals`, even though `==` (which is `compareTo` on a `Comparable`)
         // answers true for them.
-        "equals" => Value::bool(match (recv, args.first()) {
+        ("equals", _) => Value::bool(match (recv, args.first()) {
             (Value::Obj(a), Some(Value::Obj(b))) => a == b,
             _ => false,
         }),
-        "toString" | "getText" => Value::str(text.to_string()),
-        "length" | "size" => Value::int(chars.len() as i64),
-        "isEmpty" => Value::bool(chars.is_empty()),
-        "charAt" => Value::str(chars.get(idx(0)).map(|c| c.to_string()).unwrap_or_default()),
-        "indexOf" => Value::int(
-            text.find(&arg_str(0))
-                .map(|b| text[..b].chars().count() as i64)
-                .unwrap_or(-1),
-        ),
-        "reverse" => mutate(chars.iter().rev().collect()),
-        "insert" => {
-            let at = idx(0).min(chars.len());
-            let (head, tail): (String, String) = (
-                chars[..at].iter().collect(),
-                chars[at..].iter().collect::<String>(),
-            );
-            mutate(format!("{head}{}{tail}", arg_str(1)))
+        ("toString" | "getText", 0) => Value::str(text.to_string()),
+        ("length" | "size", 0) => Value::int(len),
+        ("isEmpty", 0) => Value::bool(chars.is_empty()),
+        ("capacity", 0) => Value::int((len + 16).max(16)),
+        ("trimToSize" | "ensureCapacity", _) => Value::Undef,
+        ("charAt" | "codePointAt", 1) => {
+            let i = num(0)?;
+            if i < 0 || i >= len {
+                return sioobe(vm, format!("index {i},length {len}"));
+            }
+            let c = chars[i as usize];
+            if method == "codePointAt" {
+                Value::int(i64::from(c as u32))
+            } else {
+                Value::str(c.to_string())
+            }
         }
-        "deleteCharAt" => {
-            let at = idx(0);
-            mutate(
-                chars
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != at)
-                    .map(|(_, c)| *c)
-                    .collect(),
+        ("getAt", 1) if num(0).is_some() => {
+            let mut i = num(0)?;
+            if i < 0 {
+                i += len;
+            }
+            if i < 0 || i >= len {
+                return sioobe(vm, format!("index {i},length {len}"));
+            }
+            Value::str(chars[i as usize].to_string())
+        }
+        ("indexOf", 1 | 2) => {
+            let from = num(1).unwrap_or(0).clamp(0, len) as usize;
+            let tail: String = chars[from..].iter().collect();
+            Value::int(
+                tail.find(&arg_str(0))
+                    .map(|b| (from + tail[..b].chars().count()) as i64)
+                    .unwrap_or(-1),
             )
         }
-        "setLength" => {
-            let n = idx(0);
-            mutate(chars.iter().take(n).collect())
-        }
-        // `replace(start, end, text)` swaps the half-open character span.
-        "replace" => {
-            let (start, end) = (idx(0).min(chars.len()), idx(1).min(chars.len()));
-            let head: String = chars[..start].iter().collect();
-            let tail: String = chars[end.max(start)..].iter().collect();
-            mutate(format!("{head}{}{tail}", arg_str(2)))
-        }
-        "delete" => {
-            let (start, end) = (idx(0).min(chars.len()), idx(1).min(chars.len()));
-            let head: String = chars[..start].iter().collect();
-            let tail: String = chars[end.max(start)..].iter().collect();
-            mutate(format!("{head}{tail}"))
-        }
-        // `substring(start[, end])` READS a span — unlike every mutator above,
-        // it leaves the buffer alone and answers a `String`.
-        "substring" => {
-            let start = idx(0).min(chars.len());
-            let end = match args.len() {
-                0 | 1 => chars.len(),
-                _ => idx(1).clamp(start, chars.len()),
+        ("lastIndexOf", 1 | 2) => {
+            let needle = arg_str(0);
+            let limit = num(1).unwrap_or(len).clamp(-1, len);
+            let found = if limit < 0 {
+                None
+            } else {
+                // The match may START at `limit` at the latest.
+                let end = (limit as usize + needle.chars().count()).min(chars.len());
+                let hay: String = chars[..end].iter().collect();
+                hay.rfind(&needle).map(|b| hay[..b].chars().count() as i64)
             };
-            Value::str(chars[start..end].iter().collect::<String>())
+            Value::int(found.unwrap_or(-1))
+        }
+        ("reverse", 0) => mutate(chars.iter().rev().collect()),
+        ("insert", 2) => {
+            let at = num(0)?;
+            if at < 0 || at > len {
+                return sioobe(vm, format!("offset {at}, length {len}"));
+            }
+            let at = at as usize;
+            mutate(format!(
+                "{}{}{}",
+                span(0, at),
+                arg_str(1),
+                span(at, chars.len())
+            ))
+        }
+        ("deleteCharAt", 1) => {
+            let at = num(0)?;
+            if at < 0 || at >= len {
+                return sioobe(vm, format!("index {at},length {len}"));
+            }
+            let at = at as usize;
+            mutate(format!("{}{}", span(0, at), span(at + 1, chars.len())))
+        }
+        ("setCharAt", 2) => {
+            let at = num(0)?;
+            if at < 0 || at >= len {
+                return sioobe(vm, format!("index {at},length {len}"));
+            }
+            let mut next = chars.clone();
+            next[at as usize] = arg_str(1).chars().next().unwrap_or('\0');
+            buffer_set(recv, next.into_iter().collect());
+            Value::Undef
+        }
+        ("setLength", 1) => {
+            let n = num(0)?;
+            if n < 0 {
+                return sioobe(vm, format!("String index out of range: {n}"));
+            }
+            let mut next = chars.clone();
+            next.resize(n as usize, '\0');
+            buffer_set(recv, next.into_iter().collect());
+            Value::Undef
+        }
+        // `replace(start, end, text)` swaps the half-open character span; an
+        // `end` past the length is clamped, a `start` past it is refused.
+        ("replace", 3) => {
+            let (start, end) = (num(0)?, num(1)?);
+            if start < 0 || start > len || start > end.min(len).max(start) {
+                return sioobe(vm, format!("start {start}, end {end}, length {len}"));
+            }
+            let end = end.min(len) as usize;
+            let start = start as usize;
+            mutate(format!(
+                "{}{}{}",
+                span(0, start),
+                arg_str(2),
+                span(end, chars.len())
+            ))
+        }
+        ("delete", 2) => {
+            let (start, end) = (num(0)?, num(1)?);
+            let end = end.min(len);
+            if start < 0 || start > end {
+                return sioobe(vm, format!("start {start}, end {end}, length {len}"));
+            }
+            mutate(format!(
+                "{}{}",
+                span(0, start as usize),
+                span(end as usize, chars.len())
+            ))
+        }
+        // `substring(start[, end])` / `subSequence(start, end)` READ a span —
+        // unlike every mutator above, they leave the buffer alone.
+        ("substring" | "subSequence", 1 | 2) => {
+            let start = num(0)?;
+            let end = if args.len() == 2 { num(1)? } else { len };
+            if start < 0 || end > len || start > end {
+                return sioobe(vm, format!("start {start}, end {end}, length {len}"));
+            }
+            Value::str(span(start as usize, end as usize))
+        }
+        ("compareTo", 1) => {
+            let other = groovy_str(&args[0]);
+            Value::int(match utf16_cmp(text, &other) {
+                std::cmp::Ordering::Less => {
+                    // `String.compareTo`'s difference, not just its sign.
+                    java_string_compare(text, &other)
+                }
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => java_string_compare(text, &other),
+            })
         }
         _ => return None,
     })
+}
+
+/// `String.compareTo`: the difference of the first differing UTF-16 units, or
+/// of the two lengths when one is a prefix of the other.
+fn java_string_compare(a: &str, b: &str) -> i64 {
+    let (x, y): (Vec<u16>, Vec<u16>) = (a.encode_utf16().collect(), b.encode_utf16().collect());
+    for (p, q) in x.iter().zip(&y) {
+        if p != q {
+            return i64::from(*p) - i64::from(*q);
+        }
+    }
+    x.len() as i64 - y.len() as i64
 }
 
 /// `GNEW`: construct `new C(args)`. Stack: `argc` constructor args (deepest),
@@ -5950,7 +6207,7 @@ fn is_case(vm: &mut VM, label: &Value, subject: &Value) -> Value {
         return Value::bool(hit && !matches!(subject, Value::Undef));
     }
     if closure_meta(&label).is_some() {
-        return match invoke_closure(vm, &label, std::slice::from_ref(&subject)) {
+        return match invoke_closure_with(vm, &label, std::slice::from_ref(&subject), true) {
             Ok(v) => Value::bool(groovy_truthy(vm, &v)),
             Err(e) => {
                 fault(vm, e);
@@ -6761,6 +7018,21 @@ fn value_is_a(value: &Value, class: &str) -> bool {
             class.rsplit('.').next().unwrap_or(class),
             "GString" | "CharSequence" | "Object" | "GroovyObject" | "Comparable" | "Writable"
         );
+    }
+    if closure_meta(value).is_some() {
+        let short = class.rsplit('.').next().unwrap_or(class);
+        if matches!(
+            short,
+            "Closure"
+                | "Runnable"
+                | "Callable"
+                | "GroovyCallable"
+                | "GroovyObject"
+                | "Cloneable"
+                | "Serializable"
+        ) {
+            return true;
+        }
     }
     if let Some((ifaces, _)) = as_proxy(value) {
         if let Some(target) = resolve_class_name(class) {
@@ -7669,6 +7941,10 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
         _ => index,
     };
     let index = deref_list(&range_as_list(&index));
+    // `sb[1]` is `getAt` over the buffer's text.
+    if as_buffer(&recv).is_some() {
+        return dispatch_call(vm, recv, "getAt", vec![index]);
+    }
     // `m[0]` is `Matcher.getAt(0)` — the i-th match, as the matched text or as
     // `[whole, g1, …]` when the pattern has groups.
     if as_matcher(&recv).is_some() {
@@ -7949,7 +8225,7 @@ fn b_closure_call(vm: &mut VM, argc: u8) -> Value {
         fault(vm, format!("unresolved reference: {name}"));
         return Value::Undef;
     }
-    match invoke_closure(vm, &clo, &args) {
+    match invoke_closure_with(vm, &clo, &args, true) {
         Ok(v) => v,
         Err(e) => {
             fault(vm, e);
@@ -8502,6 +8778,16 @@ fn b_method_wide(vm: &mut VM, argc: u8) -> Value {
 /// (they re-enter the VM to run a closure body) and falling back to the pure GDK
 /// dispatch. Shared by [`b_method`] and [`b_method_safe`].
 fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
+    if matches!(method, "sum" | "average") {
+        let prev = NO_STACK.replace(true);
+        let out = dispatch_call_inner(vm, recv, method, args);
+        NO_STACK.set(prev);
+        return out;
+    }
+    dispatch_call_inner(vm, recv, method, args)
+}
+
+fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
     // `list.remove((Object) x)`: the compiler saw the cast that selects
     // `Collection.remove(Object)`, which on a list is the element removal.
     if method == REMOVE_OBJECT {
@@ -8862,8 +9148,115 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             }
         }
         if let Some((_, text)) = as_buffer(&recv) {
-            if let Some(v) = dispatch_buffer_method(&recv, &text, method, &args) {
+            if let Some(v) = dispatch_buffer_method(vm, &recv, &text, method, &args) {
                 return v;
+            }
+            // What `StringGroovyMethods` declares over any `CharSequence` is the
+            // `String`'s answer; the `Object` iteration methods see the buffer as
+            // one element; the members of the object itself stay with the buffer;
+            // anything else (`startsWith`, `toUpperCase`, …) is `String`'s own
+            // and a buffer has none.
+            const CHAR_SEQUENCE_GDK: &[&str] = &[
+                "take",
+                "drop",
+                "takeRight",
+                "dropRight",
+                "takeWhile",
+                "dropWhile",
+                "padLeft",
+                "padRight",
+                "center",
+                "contains",
+                "replaceAll",
+                "replaceFirst",
+                "toList",
+                "toSet",
+                "readLines",
+                "eachLine",
+                "lines",
+                "tokenize",
+                "tr",
+                "count",
+                "stripIndent",
+                "stripMargin",
+                "isNumber",
+                "isInteger",
+                "isDouble",
+                "isLong",
+                "isBigDecimal",
+                "isBigInteger",
+                "isAllWhitespace",
+                "toInteger",
+                "toLong",
+                "toDouble",
+                "toFloat",
+                "toBigDecimal",
+                "toBigInteger",
+                "toBoolean",
+                "toCharacter",
+                "expand",
+                "expandLine",
+                "unexpand",
+                "unexpandLine",
+                "normalize",
+                "denormalize",
+                "capitalize",
+                "uncapitalize",
+                "next",
+                "previous",
+                "plus",
+                "minus",
+                "multiply",
+                "eachMatch",
+                "getAt",
+            ];
+            const OBJECT_ITERATION: &[&str] = &[
+                "each",
+                "collect",
+                "findAll",
+                "find",
+                "any",
+                "every",
+                "inject",
+                "eachWithIndex",
+                "groupBy",
+                "countBy",
+                "collectEntries",
+                "findResult",
+                "sum",
+                "max",
+                "min",
+            ];
+            if CHAR_SEQUENCE_GDK.contains(&method) {
+                return dispatch_call(vm, Value::str(text), method, args);
+            }
+            if matches!(method, "chars" | "codePoints") && args.is_empty() {
+                return dispatch_call(vm, Value::str(text), method, args);
+            }
+            if method == "each" {
+                dispatch_call(vm, glist(vec![recv.clone()]), method, args);
+                return recv;
+            }
+            if OBJECT_ITERATION.contains(&method) {
+                return dispatch_call(vm, glist(vec![recv.clone()]), method, args);
+            }
+            if !matches!(
+                method,
+                "getClass"
+                    | "is"
+                    | "hashCode"
+                    | "with"
+                    | "tap"
+                    | "inspect"
+                    | "asType"
+                    | "identity"
+                    | "isCase"
+                    | "asBoolean"
+                    | "dump"
+                    | "toString"
+                    | "equals"
+            ) {
+                return raise_missing_method(vm, &recv, method, &args);
             }
         }
     }
@@ -8969,6 +9362,42 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         if method == "getMaximumNumberOfParameters" && args.is_empty() {
             return Value::int(i64::from(meta.params));
         }
+        if args.is_empty() {
+            match method {
+                "getOwner" => return closure_pseudo_property(&recv, "owner"),
+                "getDelegate" => return closure_pseudo_property(&recv, "delegate"),
+                "getThisObject" => return closure_pseudo_property(&recv, "thisObject"),
+                "getResolveStrategy" => return Value::int(meta.resolve_strategy),
+                "getDirective" => return Value::int(0),
+                _ => {}
+            }
+        }
+        if method == "equals" && args.len() == 1 {
+            return Value::bool(
+                matches!((&recv, &args[0]), (Value::Obj(a), Value::Obj(b)) if a == b),
+            );
+        }
+        let curried = match method {
+            "curry" | "rcurry" => Some((0, args.len())),
+            "ncurry" => args
+                .first()
+                .and_then(as_i64)
+                .map(|n| (n, args.len().saturating_sub(1))),
+            _ => None,
+        };
+        if let Some((at, count)) = curried {
+            let params = meta.params as i64;
+            if !meta.varargs && (at < 0 || at + count as i64 > params) {
+                raise(
+                    vm,
+                    "IllegalArgumentException",
+                    &format!(
+                        "Can't curry {count} arguments for a closure with {params} parameters."
+                    ),
+                );
+                return Value::Undef;
+            }
+        }
         if let Some(v) = closure_combinator(&recv, &meta, method, &args) {
             return v;
         }
@@ -9005,7 +9434,7 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
     }
     // `clo.call(args)` — invoke the receiver closure.
     if method == "call" && closure_meta(&recv).is_some() {
-        return match invoke_closure(vm, &recv, &args) {
+        return match invoke_closure_with(vm, &recv, &args, true) {
             Ok(v) => v,
             Err(e) => {
                 fault(vm, e);
@@ -11018,6 +11447,16 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // (see `dispatch_instance_method`), exactly as `if (obj)` consults it.
         (_, "asBoolean") if args.is_empty() => Value::bool(groovy_truthy(vm, recv)),
 
+        // `+x` is `x.positive()`: the number itself.
+        (_, "positive")
+            if args.is_empty()
+                && (is_number(recv)
+                    || as_dec(recv).is_some()
+                    || as_float_handle(recv).is_some()) =>
+        {
+            recv.clone()
+        }
+
         // `value.asType(Type)` is the method spelling of `value as Type`, so it
         // runs the one coercion rather than a second, drifting copy of it. The
         // argument is a `java.lang.Class`; `as` takes the name.
@@ -11294,6 +11733,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `String.multiply(n)` is the `"x" * n` operator. The count is the
         // argument's `intValue()` (`"ab" * 2.9` is `abab`, and a `Long` wraps),
         // and a negative one is refused rather than read as zero.
+        (Value::Str(_), "multiply") if !args.first().is_some_and(is_number) => {
+            raise_missing_method(vm, recv, method, args)
+        }
         (Value::Str(s), "multiply") => match args.first().map(count_int_value).unwrap_or(0) {
             n if n < 0 => {
                 let msg =
@@ -11423,9 +11865,19 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             s.chars().map(|c| Value::str(c.to_string())).collect(),
             ArrayElem::Char,
         ),
-        (Value::Str(s), "toList" | "chars") => {
+        (Value::Str(s), "toList") => {
             Value::array(s.chars().map(|c| Value::str(c.to_string())).collect())
         }
+        // `CharSequence.chars()` / `codePoints()` answer an `IntStream`; the
+        // element sequence stands in for it (`sum`, `toArray`, `boxed` all read
+        // through a list).
+        (Value::Str(s), "chars" | "codePoints") if args.is_empty() => {
+            Value::array(s.chars().map(|c| Value::int(i64::from(c as u32))).collect())
+        }
+        (Value::Str(s), "getChars") if args.is_empty() => garray(
+            s.chars().map(|c| Value::str(c.to_string())).collect(),
+            ArrayElem::Char,
+        ),
         // `s.bytes` / `s.getBytes()` — the UTF-8 encoding as *signed* bytes, so
         // a non-ASCII character's units print negative the way a Java `byte[]`
         // does.
@@ -11883,6 +12335,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `list * n` — the receiver repeated `n` times, `n` read through
         // `intValue()`. A negative count reaches `new ArrayList(size * n)`,
         // whose refusal is the error Groovy reports.
+        (Value::Array(_), "multiply") if !args.first().is_some_and(is_number) => {
+            raise_missing_method(vm, recv, method, args)
+        }
         (Value::Array(a), "multiply") => match args.first().map(count_int_value).unwrap_or(0) {
             n if n < 0 => {
                 raise(
@@ -12617,6 +13072,8 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `intValue()` is Java's narrowing conversion, so `3000000000L.intValue()`
         // is `-1294967296`.
         (Value::Int(n), "toInteger" | "intValue") => Value::int(i64::from(*n as i32)),
+        (Value::Int(n), "byteValue") if args.is_empty() => Value::int(i64::from(*n as i8)),
+        (Value::Int(n), "shortValue") if args.is_empty() => Value::int(i64::from(*n as i16)),
         (Value::Int(n), "toDouble" | "doubleValue" | "toFloat" | "floatValue") => {
             float_or_double(method, *n as f64)
         }
@@ -12667,6 +13124,14 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // casts *saturate* in Java, so `(1e10).intValue()` is `Integer.MAX_VALUE`
         // — reading both through `as i64` answered `10000000000`.
         (Value::Float(f), "toInteger" | "intValue") => Value::int(java_double_to_int(*f)),
+        // `Number.byteValue()` / `shortValue()` narrow the `int` the double
+        // truncates to.
+        (Value::Float(f), "byteValue") if args.is_empty() => {
+            Value::int(i64::from(java_double_to_int(*f) as i8))
+        }
+        (Value::Float(f), "shortValue") if args.is_empty() => {
+            Value::int(i64::from(java_double_to_int(*f) as i16))
+        }
         (Value::Float(f), "toLong" | "longValue") => Value::int(*f as i64),
         (Value::Float(f), "toDouble" | "doubleValue" | "toFloat" | "floatValue") => {
             float_or_double(method, *f)
@@ -12750,6 +13215,24 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         _ if as_dec(recv).is_some() => {
             let d = as_dec(recv).unwrap();
             match method {
+                // `BigInteger` has none of `BigDecimal`'s scale API.
+                "setScale"
+                | "toPlainString"
+                | "toEngineeringString"
+                | "precision"
+                | "scale"
+                | "unscaledValue"
+                | "round"
+                | "trunc"
+                | "movePointLeft"
+                | "movePointRight"
+                | "scaleByPowerOfTen"
+                | "ulp"
+                | "divideToIntegralValue"
+                    if as_bigint(recv).is_some() =>
+                {
+                    raise_missing_method(vm, recv, method, args)
+                }
                 // `BigInteger` really does have an instance `toString(int radix)`
                 // — unlike `Integer`, whose one-argument form is the static —
                 // so `255G.toString(16)` is `ff`. `BigDecimal` has no such
@@ -12850,6 +13333,10 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // an `i64` that saturates at the *long* bounds answered `0`.
                 "longValue" | "toLong" => Value::int(decimal::low_i64(&d)),
                 "intValue" | "toInteger" => Value::int(i64::from(decimal::low_i32(&d))),
+                "byteValue" if args.is_empty() => Value::int(i64::from(decimal::low_i32(&d) as i8)),
+                "shortValue" if args.is_empty() => {
+                    Value::int(i64::from(decimal::low_i32(&d) as i16))
+                }
                 // `compareTo` is scale-insensitive (`1.0G.compareTo(1.00G)` is
                 // `0`) and answers a sign, not a difference.
                 "compareTo" => {
@@ -13693,6 +14180,7 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
         let _ = la;
         return derived_closure(
             rb.params,
+            rb.varargs,
             Derived::Composed {
                 first: rhs,
                 second: lhs,
@@ -13906,6 +14394,7 @@ fn b_shr(vm: &mut VM, _argc: u8) -> Value {
     if let (Some(la), Some(_)) = (closure_meta(&lhs), closure_meta(&rhs)) {
         return derived_closure(
             la.params,
+            la.varargs,
             Derived::Composed {
                 first: lhs,
                 second: rhs,
@@ -17764,6 +18253,7 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
         return match name {
             "maximumNumberOfParameters" => Value::int(meta.params as i64),
             "owner" | "delegate" | "thisObject" => closure_pseudo_property(recv, name),
+            "directive" => Value::int(0),
             "resolveStrategy" => Value::int(meta.resolve_strategy),
             "parameterTypes" => closure_parameter_types(&meta),
             _ => raise_missing_property(vm, recv, name),
@@ -17922,6 +18412,13 @@ fn print_args(vm: &mut VM, argc: u8, newline: bool) -> Value {
 fn b_div(vm: &mut VM, _argc: u8) -> Value {
     let b = vm.stack.pop().unwrap_or(Value::Undef);
     let a = vm.stack.pop().unwrap_or(Value::Undef);
+    // `10 / [2]`: a number divided by a one-element list divides by the element.
+    let b = match (&a, deref_list(&b)) {
+        (x, Value::Array(items)) if (is_number(x) || is_dec_handle(x)) && items.len() == 1 => {
+            items[0].clone()
+        }
+        _ => b,
+    };
     divide_values(vm, a, b)
 }
 
@@ -18000,18 +18497,8 @@ fn divide_values(vm: &mut VM, a: Value, b: Value) -> Value {
                 Value::Undef
             }
         },
-        // A non-numeric operand: no Groovy meaning for `/`.
-        _ => {
-            fault(
-                vm,
-                format!(
-                    "groovyrs: operator `/` is not defined for operands `{}` and `{}`",
-                    groovy_str(&a),
-                    groovy_str(&b)
-                ),
-            );
-            Value::Undef
-        }
+        // A non-numeric operand: `div` has no signature for the pair.
+        _ => raise_operator_operand(vm, "div", &a, &b),
     }
 }
 
@@ -19375,7 +19862,10 @@ fn dispatch_operator_method(recv: &Value, method: &str, args: &[Value]) -> Resul
                 .and_then(|i| class_meta(i.class))
                 .map(|m| m.name)
                 .unwrap_or_else(|| "Object".to_string());
-            Err(format!("groovyrs: no such method `{method}` on {name}"))
+            let miss =
+                with_vm(|vm| raise_missing_method(vm, recv, method, args)).map(|_| Value::Undef);
+            let _ = name;
+            miss.ok_or_else(|| format!("groovyrs: no such method `{method}` on {name}"))
         }
         // No VM published — only possible if the hook fired outside a run.
         None => Err("groovyrs: operator overload dispatched with no active VM".to_string()),
@@ -19490,6 +19980,31 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // and the comparisons unaware that lists moved to the heap.
     if as_list(a).is_some() || as_list(b).is_some() {
         return numeric_hook(op, &deref_list(a), &deref_list(b));
+    }
+    // A number on the left of a one-element list reads the list as its element:
+    // `1 + [2]` is `3` and `2 * [3]` is `6`.
+    if matches!(
+        op,
+        NumOp::Add | NumOp::Sub | NumOp::Mul | NumOp::Mod | NumOp::Pow
+    ) && (is_number(a) || is_dec_handle(a))
+    {
+        if let Value::Array(items) = b {
+            if items.len() == 1 {
+                let name = match op {
+                    NumOp::Add => "plus",
+                    NumOp::Sub => "minus",
+                    NumOp::Mul => "multiply",
+                    NumOp::Mod => "remainder",
+                    _ => "power",
+                };
+                let (x, y) = (a.clone(), items[0].clone());
+                if let Some(v) =
+                    with_vm(|vm| dispatch_method(vm, &x, name, std::slice::from_ref(&y)))
+                {
+                    return Ok(v);
+                }
+            }
+        }
     }
     let string_plus = matches!(op, NumOp::Add) && matches!(a, Value::Str(_));
     if !string_plus && (as_range(a).is_some() || as_range(b).is_some()) {
@@ -19732,17 +20247,27 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
             with_vm(|vm| dispatch_method(vm, &x, "multiply", std::slice::from_ref(&y)))
                 .ok_or_else(|| "groovyrs: `*` dispatched with no active VM".to_string())
         }
-        // Arithmetic other than `+` on a non-numeric operand has no slice-1
-        // meaning (`String.minus`/`multiply` GDK overloads are not modeled yet).
-        NumOp::Sub | NumOp::Mul | NumOp::Div | NumOp::Mod | NumOp::Pow => Err(format!(
-            "groovyrs: operator `{op:?}` is not defined for operands `{}` and `{}`",
-            groovy_str(a),
-            groovy_str(b)
-        )),
-        NumOp::Neg => Err(format!(
-            "groovyrs: unary `-` is not defined for `{}`",
-            groovy_str(a)
-        )),
+        // Any other operator on operands that have no such method: the
+        // `MissingMethodException` for the operator's method name.
+        NumOp::Sub | NumOp::Mul | NumOp::Div | NumOp::Mod | NumOp::Pow => {
+            let name = match op {
+                NumOp::Sub => "minus",
+                NumOp::Mul => "multiply",
+                NumOp::Div => "div",
+                NumOp::Mod => "remainder",
+                _ => "power",
+            };
+            let (x, y) = (a.clone(), b.clone());
+            with_vm(|vm| raise_operator_operand(vm, name, &x, &y))
+                .map(|_| Value::Undef)
+                .ok_or_else(|| format!("groovyrs: `{name}` dispatched with no active VM"))
+        }
+        NumOp::Neg => {
+            let x = a.clone();
+            with_vm(|vm| raise_operator_operand(vm, "negative", &x, &x))
+                .map(|_| Value::Undef)
+                .ok_or_else(|| "groovyrs: `-` dispatched with no active VM".to_string())
+        }
     }
 }
 
@@ -20023,6 +20548,90 @@ fn class_is_case(vm: &mut VM, class: &str, subject: &Value) -> Option<Value> {
         Err(e) => {
             fault(vm, e);
             Some(Value::Undef)
+        }
+    }
+}
+
+/// Does a direct call with `args` fit the closure's declared signature? Only
+/// the argument count is asked: a derived closure has no declared types.
+fn closure_args_fit(meta: &ClosureMeta, args: &[Value]) -> bool {
+    if meta.varargs {
+        return args.len() + 1 >= meta.params as usize;
+    }
+    let (min, max) = (meta.min_params as usize, meta.params as usize);
+    (min..=max).contains(&args.len()) || (args.is_empty() && max == 1)
+}
+
+/// The arguments a direct call binds under Groovy's `doCall` selection: the
+/// call as written when its count fits, a lone list spread over a multi-
+/// parameter closure, and `None` — a `MissingMethodException` — otherwise. A
+/// parameter declared `String` / an integral type / `boolean` / `List` / `Map`
+/// also has to accept its argument.
+fn strict_closure_args(meta: &ClosureMeta, args: &[Value]) -> Option<Vec<Value>> {
+    let (min, max) = (meta.min_params as usize, meta.params as usize);
+    let fits = |c: usize| (min..=max).contains(&c);
+    let types = if meta.derived.is_none() {
+        CLOSURE_PARAM_TYPES.with(|t| t.borrow().get(&meta.name_idx).cloned())
+    } else {
+        None
+    };
+    let typed_ok = |given: &[Value]| {
+        types.as_ref().map_or(true, |tys| {
+            tys.iter().zip(given).all(|(ty, v)| closure_arg_fits(ty, v))
+        })
+    };
+    if meta.varargs {
+        return (args.len() + 1 >= max).then(|| args.to_vec());
+    }
+    if (fits(args.len()) || (args.is_empty() && max == 1)) && typed_ok(args) {
+        return Some(args.to_vec());
+    }
+    if let ([only], true) = (args, max >= 2) {
+        if let Some(items) = as_list_raw(only).or_else(|| match deref_list(only) {
+            Value::Array(a) => Some(a.to_vec()),
+            _ => None,
+        }) {
+            if fits(items.len()) && typed_ok(&items) {
+                return Some(items);
+            }
+        }
+    }
+    None
+}
+
+/// Whether an argument satisfies a closure parameter's declared type — decided
+/// only for the declared types a script commonly writes; the rest accept.
+fn closure_arg_fits(ty: &str, v: &Value) -> bool {
+    match ty {
+        "String" => matches!(v, Value::Undef | Value::Str(_)) || as_gstring(v).is_some(),
+        "int" | "Integer" | "long" | "Long" | "short" | "Short" | "byte" | "Byte" => {
+            matches!(v, Value::Int(_) | Value::Undef) || as_bigint(v).is_some()
+        }
+        "boolean" | "Boolean" => matches!(v, Value::Bool(_) | Value::Undef),
+        "List" => {
+            matches!(v, Value::Undef | Value::Array(_)) || is_list(v) || as_range(v).is_some()
+        }
+        "Map" => matches!(v, Value::Undef) || is_omap(v),
+        _ => true,
+    }
+}
+
+/// Turn a pending `MissingMethodExceptionNoStack` into the plain
+/// `MissingMethodException` (see [`invoke_closure_with`]).
+fn downgrade_no_stack() {
+    let pending = PENDING.with(|p| p.borrow().clone());
+    let Some(exc) = pending else { return };
+    let (Some(inst), Some(plain)) = (as_instance(&exc), find_class("MissingMethodException"))
+    else {
+        return;
+    };
+    if class_meta(inst.class).is_some_and(|m| m.name == "MissingMethodExceptionNoStack") {
+        if let Value::Obj(id) = exc {
+            HEAP.with(|h| {
+                if let Some(HeapObj::Instance(i)) = h.borrow_mut().get_mut(id as usize) {
+                    i.class = plain;
+                }
+            });
         }
     }
 }

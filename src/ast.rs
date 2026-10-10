@@ -531,6 +531,9 @@ pub enum Expr {
         /// for a `T...` varargs one), parallel to `params`; empty when nothing
         /// is typed. Read only by `Closure.getParameterTypes()`.
         param_types: Vec<String>,
+        /// How many trailing parameters carry a default (`{ a, b = 5 -> … }`): a
+        /// call may leave that many arguments off.
+        defaults: usize,
     },
     /// The sequence a `for (x in <expr>)` walks — the parser wraps the loop's
     /// subject in this, and it lowers to the host's iteration builtin

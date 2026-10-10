@@ -7007,7 +7007,7 @@ t("list+int", { [1] + 2 })
          int+map ! groovy.lang.MissingMethodException\n\
          int+bool ! groovy.lang.MissingMethodException\n\
          int+range ! groovy.lang.MissingMethodException\n\
-         dec+list ! groovy.lang.MissingMethodException\n\
+         dec+list = 3.5\n\
          bool+int ! groovy.lang.MissingMethodException\n\
          bool+str ! groovy.lang.MissingMethodException\n\
          map+int ! groovy.lang.MissingMethodException\n\

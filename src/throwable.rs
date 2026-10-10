@@ -140,6 +140,11 @@ const THROWABLES: &[(&str, &str, &str)] = &[
         "groovy.lang",
     ),
     (
+        "MissingMethodExceptionNoStack",
+        "MissingMethodException",
+        "org.codehaus.groovy.runtime.metaclass",
+    ),
+    (
         "MissingPropertyException",
         "GroovyRuntimeException",
         "groovy.lang",

@@ -301,7 +301,7 @@ impl Parser {
             }
             // `try`/`throw` are contextual keywords (the lexer emits them as
             // identifiers); a `try` is only a statement when a block follows.
-            Tok::Ident(w) if w == "try" && matches!(self.peek_at(1), Tok::LBrace) => {
+            Tok::Ident(w) if w == "try" && matches!(self.peek_at(1), Tok::LBrace | Tok::LParen) => {
                 self.try_stmt()?
             }
             Tok::Ident(w) if w == "throw" => {
@@ -1636,8 +1636,70 @@ impl Parser {
         let line = self.line();
         self.advance(); // `try`
         self.skip_newlines();
+        // `try (R a = …; R b = …) { … }`: each resource is declared, then closed
+        // in reverse order once the body (and everything nested inside it) is
+        // done, before any `catch` or `finally` of this statement runs.
+        let mut resources = Vec::new();
+        if self.is(&Tok::LParen) {
+            self.advance();
+            loop {
+                self.skip_newlines();
+                if self.is(&Tok::RParen) {
+                    break;
+                }
+                let stmt = self.simple_statement()?;
+                resources.push(stmt);
+                resources.append(&mut self.pending);
+                self.skip_newlines();
+                if self.is(&Tok::Semi) {
+                    self.advance();
+                }
+            }
+            self.eat(&Tok::RParen)?;
+            self.skip_newlines();
+        }
+        let has_resources = !resources.is_empty();
         self.eat(&Tok::LBrace)?;
-        let body = self.block()?;
+        let mut body = self.block()?;
+        for (i, res) in resources.into_iter().enumerate().rev() {
+            let name = match &res.kind {
+                StmtKind::Local { name, .. } => name.clone(),
+                StmtKind::Expr(Expr::Var(n)) => n.clone(),
+                _ => format!("$resource{i}"),
+            };
+            let mut stmts = Vec::new();
+            match res.kind {
+                StmtKind::Expr(Expr::Var(_)) => {}
+                StmtKind::Expr(e) => stmts.push(Stmt::new(
+                    res.line,
+                    StmtKind::Local {
+                        ty: "def".to_string(),
+                        name: name.clone(),
+                        init: Some(e),
+                    },
+                )),
+                kind => stmts.push(Stmt::new(res.line, kind)),
+            }
+            let close = Stmt::new(
+                res.line,
+                StmtKind::Expr(Expr::MethodCall {
+                    recv: Box::new(Expr::Var(name)),
+                    method: "close".to_string(),
+                    args: Vec::new(),
+                    line: res.line,
+                    safe: true,
+                }),
+            );
+            stmts.push(Stmt::new(
+                res.line,
+                StmtKind::Try {
+                    body,
+                    catches: Vec::new(),
+                    finally_body: vec![close],
+                },
+            ));
+            body = stmts;
+        }
         let mut catches = Vec::new();
         let mut finally_body = Vec::new();
         let mut saw_finally = false;
@@ -1698,7 +1760,7 @@ impl Parser {
                 }
             }
         }
-        if catches.is_empty() && !saw_finally {
+        if catches.is_empty() && !saw_finally && !has_resources {
             return Err(format!(
                 "groovyrs: `try` needs a `catch` or a `finally` on line {line}"
             ));
@@ -3003,6 +3065,37 @@ impl Parser {
                     args,
                     line,
                 };
+            } else if self.is(&Tok::Question)
+                && matches!(self.peek_at(1), Tok::LBracket)
+                && self.toks[self.pos + 1].offset == self.toks[self.pos].offset + 1
+            {
+                // Safe subscript `recv?[index]` — `recv?.getAt(index)`: `null`
+                // for a `null` receiver, the element otherwise.
+                let line = self.line();
+                self.advance();
+                self.advance();
+                self.skip_newlines();
+                let mut parts = vec![self.expression()?];
+                self.skip_newlines();
+                while self.is(&Tok::Comma) {
+                    self.advance();
+                    self.skip_newlines();
+                    parts.push(self.expression()?);
+                    self.skip_newlines();
+                }
+                self.eat(&Tok::RBracket)?;
+                let index = if parts.len() == 1 {
+                    parts.remove(0)
+                } else {
+                    Expr::List(parts)
+                };
+                e = Expr::MethodCall {
+                    recv: Box::new(e),
+                    method: "getAt".to_string(),
+                    args: vec![index],
+                    line,
+                    safe: true,
+                };
             } else if self.is(&Tok::LBracket) {
                 // Subscript `recv[index]`, recorded under the `[` column.
                 //
@@ -4142,6 +4235,10 @@ fn method_pointer(recv: Expr, name: String, line: u32) -> Expr {
 /// It runs the same lexer and expression grammar as the enclosing script, so an
 /// interpolation is not a second, weaker language.
 fn parse_interpolation(src: &str) -> Result<Expr, String> {
+    // `${-> expr}` is a closure literal whose braces are the placeholder's own.
+    if src.trim_start().starts_with("->") {
+        return parse_interpolation(&format!("{{ {src} }}"));
+    }
     let tokens = crate::lexer::lex(src)?;
     let mut p = Parser {
         toks: tokens,

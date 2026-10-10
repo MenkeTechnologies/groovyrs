@@ -127,6 +127,7 @@ const THROWABLES: &[(&str, &str, &str)] = &[
     ("IOException", "Exception", "java.io"),
     ("FileNotFoundException", "IOException", "java.io"),
     ("NoSuchElementException", "RuntimeException", "java.util"),
+    ("EmptyStackException", "RuntimeException", "java.util"),
     (
         "ConcurrentModificationException",
         "RuntimeException",

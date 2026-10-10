@@ -438,6 +438,12 @@ pub const GFIELD_SET: u16 = 777;
 /// type name.
 pub const GJCAST: u16 = 778;
 
+/// Builtin id that gives a list a call produced its own handle. A GDK method
+/// answers a transient element vector, which no second name can share; binding
+/// one to a variable adopts it into a real list so `def b = a` aliases and a
+/// static mutator (`Collections.sort(a)`) reaches it. Stack: the value.
+pub const GLIST_ADOPT: u16 = 779;
+
 /// The method name `list.remove((Object) x)` compiles to: the cast selects
 /// `Collection.remove(Object)` over `List.remove(int)`, which only the call
 /// site can see. Not an identifier, so no script can name it.
@@ -540,6 +546,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GIN, b_in);
     vm.register_builtin(GCAST, b_cast);
     vm.register_builtin(GJCAST, b_java_cast);
+    vm.register_builtin(GLIST_ADOPT, b_list_adopt);
     vm.register_builtin(GCLASSREF, b_classref);
     vm.register_builtin(GSETINDEX, b_setindex);
     vm.register_builtin(GRANGE, b_range);
@@ -662,6 +669,10 @@ thread_local! {
     /// dispatch writes them back into the slot here, which is what `tap` then
     /// answers.
     static DELEGATES: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
+    /// The closures whose bodies are running, innermost last. A bare `call(…)`
+    /// inside a closure body is `this.call(…)` on the Closure itself, and a
+    /// closure literal evaluated here has the innermost one as its `owner`.
+    static CLOSURE_STACK: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
 }
 
 // ── Integer width (`Integer` vs `Long`) ────────────────────────────────────
@@ -961,6 +972,15 @@ fn raise_missing_method_wide(
     args: &[Value],
     widths: u8,
 ) -> Value {
+    // A missing method on `null` is `NullObject`'s: a `NullPointerException`.
+    if matches!(recv, Value::Undef) && as_class_ref(recv).is_none() {
+        raise(
+            vm,
+            "NullPointerException",
+            &format!("Cannot invoke method {method}() on null object"),
+        );
+        return Value::Undef;
+    }
     let wide_at = |bit: u32| widths & (1 << bit) != 0;
     let types = args
         .iter()
@@ -1225,6 +1245,22 @@ fn raise_missing_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
 /// `MissingProperty` message. A script-declared class prints bare, the way
 /// Groovy prints a class with no package.
 fn java_class_name(v: &Value) -> String {
+    if as_gstring(v).is_some() {
+        return "org.codehaus.groovy.runtime.GStringImpl".to_string();
+    }
+    if let Some(class) = seq::class_of(v) {
+        return class.to_string();
+    }
+    if bignum::math_ctx(v).is_some() {
+        return "java.math.MathContext".to_string();
+    }
+    if matches!(v, Value::Obj(id) if HEAP.with(|h| matches!(h.borrow().get(*id as usize), Some(HeapObj::Random(_)))))
+    {
+        return "java.util.Random".to_string();
+    }
+    if is_script_this(v) {
+        return script_class();
+    }
     if let Some(inst) = as_instance(v) {
         if let Some(meta) = class_meta(inst.class) {
             return crate::throwable::qualified(&meta.name);
@@ -1409,6 +1445,21 @@ fn throwable_member(recv: &Value, method: &str, args: &[Value]) -> Option<Value>
     Some(match method {
         "toString" => Value::str(throwable_str(recv)),
         "getLocalizedMessage" => field("message"),
+        // The frames are not modeled; one stands in so `e.stackTrace.length`
+        // and `e.stackTrace[0]` have something to read.
+        "getStackTrace" => garray(
+            vec![Value::str(format!("{}.run({0}.groovy)", script_class()))],
+            ArrayElem::Object,
+        ),
+        "setStackTrace" | "fillInStackTrace" => recv.clone(),
+        "printStackTrace" => {
+            eprintln!(
+                "{}\n\tat {}.run({1}.groovy)",
+                throwable_str(recv),
+                script_class()
+            );
+            Value::Undef
+        }
         // `null` until something sets one — never absent, so a script printing
         // `e.getCause()` on an ordinary throwable prints `null`, as Groovy does.
         "getCause" => field("cause"),
@@ -1722,8 +1773,30 @@ fn interned_class_name(name: &str) -> &'static str {
     })
 }
 
+#[path = "host/bignum.rs"]
+mod bignum;
+#[path = "host/seq.rs"]
+mod seq;
+
 enum HeapObj {
     Closure(ClosureMeta),
+    /// The script object: `this` at the top level of a script, and the `owner`
+    /// of a closure written there. Its class is the script class.
+    ScriptThis,
+    /// A `GString` that holds a closure among its values: the closure runs when
+    /// the text is read, not when the string is built.
+    GString(Vec<Value>),
+    /// A `java.math.MathContext`.
+    MathCtx(bignum::MathCtx),
+    /// A `java.util.Random`.
+    Random(seq::RandomState),
+    /// A `java.lang.reflect.Proxy` over script or JDK interfaces: a closure
+    /// (every abstract method runs it) or a map (the method name selects a
+    /// closure).
+    Proxy {
+        ifaces: Vec<String>,
+        target: Value,
+    },
     /// A **boxed binding** — `groovy.lang.Reference`. Holds one local variable's
     /// current value for a local some closure captures.
     ///
@@ -2051,6 +2124,13 @@ struct ClosureMeta {
     /// argument from its position onward, and a call that stops short of it
     /// still binds it — to an empty list. See [`invoke_closure`].
     varargs: bool,
+    /// `clo.owner` — the object the literal was written inside: the enclosing
+    /// instance for a closure in a method, the enclosing closure for one nested
+    /// in another, the script object otherwise. `None` for a derived closure.
+    owner: Option<Value>,
+    /// `clo.thisObject` — the enclosing class instance (or the script object),
+    /// looked through any enclosing closures.
+    this_obj: Option<Value>,
     captures: Vec<Value>,
     /// Set when this closure has no body region of its own but wraps another
     /// callable — what `curry`, `>>`/`<<`, and `memoize` return. `name_idx` and
@@ -2164,6 +2244,7 @@ struct ClassMeta {
 /// Clear the object heap, class registry, and decimal-literal intern table
 /// (called from [`install`]).
 fn reset_heap() {
+    seq::reset();
     HEAP.with(|h| h.borrow_mut().clear());
     CLASSES.with(|c| c.borrow_mut().clear());
     DEC_LITERALS.with(|d| d.borrow_mut().clear());
@@ -2282,6 +2363,9 @@ fn as_list_raw(v: &Value) -> Option<Vec<Value>> {
 /// Groovy's 1.1 s, and each doubling of the count quadrupled it.
 fn list_push_root(v: &Value, value: Value) -> bool {
     let Value::Obj(id) = v else { return false };
+    if seq::write_refused(*id, true) {
+        return true;
+    }
     HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
         Some(HeapObj::ListVal {
             items, mod_count, ..
@@ -2320,6 +2404,9 @@ fn list_get_root(v: &Value, i: usize) -> Option<Value> {
 /// the end (where Groovy *grows* the list, which the general path handles).
 fn list_set_root(v: &Value, i: usize, value: Value) -> bool {
     let Value::Obj(id) = v else { return false };
+    if seq::write_refused(*id, false) {
+        return true;
+    }
     HEAP.with(|h| match h.borrow_mut().get_mut(*id as usize) {
         Some(HeapObj::ListVal { items, .. }) => match items.get_mut(i) {
             Some(slot) => {
@@ -2448,6 +2535,9 @@ fn list_store(id: u32, items: Vec<Value>, structural: bool) {
     let Some((root, offset, len)) = list_slot(&Value::Obj(id)) else {
         return;
     };
+    if seq::write_refused(root, items.len() != len) {
+        return;
+    }
     let structural = structural || items.len() != len;
     let new_len = items.len();
     HEAP.with(|h| {
@@ -3368,6 +3458,11 @@ fn b_gstring(vm: &mut VM, _argc: u8) -> Value {
         vals.push(vm.stack.pop().unwrap_or(Value::Undef));
     }
     vals.reverse();
+    // A closure among the values is evaluated when the text is read (`${-> x}`
+    // is the idiom), so the string stays a `GString` until then.
+    if vals.iter().any(|v| closure_meta(v).is_some()) {
+        return heap_push(HeapObj::GString(vals));
+    }
     let mut out = String::new();
     for v in &vals {
         // A range renders through its own `toString` here, as it does for
@@ -3706,19 +3801,24 @@ fn similar_map_kind(kind: MapKind) -> MapKind {
 /// `false` if `v` is not an ordered map.
 fn omap_set(v: &Value, key: String, val: Value) -> bool {
     match map_backing(v) {
-        Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(id as usize) {
-            Some(HeapObj::OrderedMap { entries, index, .. }) => {
-                match index.get(&key) {
-                    Some(i) => entries[*i].1 = val,
-                    None => {
-                        index.insert(key.clone(), entries.len());
-                        entries.push((key, val));
-                    }
-                }
-                true
+        Value::Obj(id) => {
+            if seq::write_refused(id, true) {
+                return true;
             }
-            _ => false,
-        }),
+            HEAP.with(|h| match h.borrow_mut().get_mut(id as usize) {
+                Some(HeapObj::OrderedMap { entries, index, .. }) => {
+                    match index.get(&key) {
+                        Some(i) => entries[*i].1 = val,
+                        None => {
+                            index.insert(key.clone(), entries.len());
+                            entries.push((key, val));
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            })
+        }
         _ => false,
     }
 }
@@ -3854,6 +3954,24 @@ fn b_make_closure(vm: &mut VM, _argc: u8) -> Value {
     let ncap = vm.stack.pop().unwrap_or(Value::Undef).to_int() as usize;
     let params = vm.stack.pop().unwrap_or(Value::Undef).to_int() as u8;
     let name_idx = vm.stack.pop().unwrap_or(Value::Undef).to_int() as u16;
+    // The compiler's owner tag: the enclosing instance, `true` for a literal
+    // nested in another closure, `null` at the top level of a script.
+    let tag = vm.stack.pop().unwrap_or(Value::Undef);
+    let enclosing = CLOSURE_STACK.with(|s| s.borrow().last().cloned());
+    let (owner, this_obj) = match tag {
+        Value::Bool(true) => {
+            let this_obj = enclosing
+                .as_ref()
+                .and_then(closure_meta)
+                .and_then(|m| m.this_obj);
+            (enclosing, this_obj)
+        }
+        Value::Undef => {
+            let script = heap_push(HeapObj::ScriptThis);
+            (Some(script.clone()), Some(script))
+        }
+        instance => (Some(instance.clone()), Some(instance)),
+    };
     let mut captures = Vec::with_capacity(ncap);
     for _ in 0..ncap {
         captures.push(vm.stack.pop().unwrap_or(Value::Undef));
@@ -3871,6 +3989,8 @@ fn b_make_closure(vm: &mut VM, _argc: u8) -> Value {
         varargs,
         delegate: None,
         resolve_strategy: 0,
+        owner,
+        this_obj,
         captures,
         derived: None,
     }))
@@ -3898,6 +4018,8 @@ fn derived_closure(params: u8, d: Derived) -> Value {
         varargs: false,
         delegate: None,
         resolve_strategy: 0,
+        owner: None,
+        this_obj: None,
         captures: Vec::new(),
         derived: Some(Box::new(d)),
     }))
@@ -4071,7 +4193,11 @@ fn invoke_closure(vm: &mut VM, clo: &Value, args: &[Value]) -> Result<Value, Str
     for cap in &meta.captures {
         vm.stack.push(cap.clone());
     }
+    CLOSURE_STACK.with(|s| s.borrow_mut().push(clo.clone()));
     let out = run_sub(vm, entry, stack_base);
+    CLOSURE_STACK.with(|s| {
+        s.borrow_mut().pop();
+    });
     if delegated.is_some() {
         DELEGATES.with(|s| {
             s.borrow_mut().pop();
@@ -4742,6 +4868,22 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
 fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
     let first = || args.first().cloned().unwrap_or(Value::Undef);
     let text = || args.first().map(groovy_str).unwrap_or_default();
+    // A negative capacity is `IllegalArgumentException`, each class in its own
+    // words.
+    if let Some(n) = args.first().and_then(as_i64).filter(|n| *n < 0) {
+        let simple = simple_name_of(class);
+        let what = match simple.as_str() {
+            "ArrayList" | "Vector" => Some("Illegal Capacity"),
+            "HashMap" | "HashSet" | "LinkedHashMap" | "LinkedHashSet" => {
+                Some("Illegal initial capacity")
+            }
+            _ => None,
+        };
+        if let Some(what) = what {
+            raise(vm, "IllegalArgumentException", &format!("{what}: {n}"));
+            return Some(Value::Undef);
+        }
+    }
     Some(match simple_name_of(class).as_str() {
         "StringBuilder" | "StringBuffer" | "StringWriter" => {
             let qualified = match simple_name_of(class).as_str() {
@@ -4760,10 +4902,17 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
                 text,
             })
         }
-        "ArrayList" | "LinkedList" | "Vector" => Value::array(match args.first() {
-            Some(v) => iteration_elements(v),
-            None => Vec::new(),
+        "ArrayList" => glist(match args.first() {
+            Some(v) if as_i64(v).is_none() || matches!(v, Value::Obj(_)) => iteration_elements(v),
+            _ => Vec::new(),
         }),
+        "LinkedList" | "Vector" | "Stack" | "ArrayDeque" | "PriorityQueue" => {
+            return seq::construct(vm, &simple_name_of(class), args);
+        }
+        "MathContext" => bignum::new_math_ctx(vm, args),
+        "Random" => heap_push(HeapObj::Random(seq::RandomState::new(
+            as_i64(&first()).unwrap_or_else(seq::fresh_seed),
+        ))),
         "HashSet" | "LinkedHashSet" | "TreeSet" => {
             let seed = args.first().map(iteration_elements).unwrap_or_default();
             let kind = match simple_name_of(class).as_str() {
@@ -4847,6 +4996,22 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
         "BigDecimal" | "BigInteger" => {
             let big = simple_name_of(class) == "BigInteger";
             let carry = |d: BigDecimal| if big { bigint_value(d) } else { dec_value(d) };
+            // `new BigInteger(text, radix)`.
+            if big && args.len() == 2 {
+                let radix = as_i64(&args[1]).unwrap_or(10) as u32;
+                let parsed = (2..=36)
+                    .contains(&radix)
+                    .then(|| bigdecimal::num_bigint::BigInt::parse_bytes(text().as_bytes(), radix))
+                    .flatten();
+                return Some(match parsed {
+                    Some(n) => bigint_value(BigDecimal::from_bigint(n, 0)),
+                    None => {
+                        let msg = format!("For input string: \"{}\"", text());
+                        raise(vm, "NumberFormatException", &msg);
+                        Value::Undef
+                    }
+                });
+            }
             match &first() {
                 Value::Int(n) => carry(decimal::from_i64(*n)),
                 Value::Float(f) => match decimal::from_f64_exact(*f) {
@@ -5738,6 +5903,9 @@ fn b_is_case_type(vm: &mut VM, _argc: u8) -> Value {
         .as_str_cow()
         .into_owned();
     let subject = vm.stack.pop().unwrap_or(Value::Undef);
+    if let Some(v) = class_is_case(vm, &class, &subject) {
+        return v;
+    }
     Value::bool(value_is_a(&subject, &class))
 }
 
@@ -5765,6 +5933,9 @@ fn b_is_case(vm: &mut VM, _argc: u8) -> Value {
 /// is an ordinary expression and arrives here as a `ClassRef`.
 fn is_case(vm: &mut VM, label: &Value, subject: &Value) -> Value {
     if let Some(class) = as_class_ref(label) {
+        if let Some(v) = class_is_case(vm, &class, subject) {
+            return v;
+        }
         return Value::bool(value_is_a(subject, &class));
     }
     // A `Range` label contains — `case 1..5:` and `x in 1..5` both ask that.
@@ -6123,6 +6294,14 @@ fn checked_equal(vm: &mut VM, eq: impl FnOnce() -> bool) -> bool {
 /// [`values_equal`] for one pair, its members compared through the guarded
 /// entry point.
 fn values_equal_shape(a: &Value, b: &Value) -> bool {
+    if let (Some(pa), Some(pb)) = (as_gstring(a), as_gstring(b)) {
+        return with_vm(|vm| gstring_text(vm, &pa) == gstring_text(vm, &pb)).unwrap_or(false);
+    }
+    if as_gstring(a).is_some() || as_gstring(b).is_some() {
+        let (x, y) = (groovy_str(a), groovy_str(b));
+        let other_is_text = matches!((a, b), (Value::Str(_), _) | (_, Value::Str(_)));
+        return other_is_text && x == y;
+    }
     // One handle is equal to itself before any element is read, as
     // `DefaultTypeTransformation.compareEqual` and `AbstractMap.equals` both
     // check first — which is what lets a map holding itself compare equal to
@@ -6577,6 +6756,20 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         // Named type is not a user class — fall through to built-in checks (an
         // instance is still an `Object`/`GroovyObject`).
     }
+    if as_gstring(value).is_some() {
+        return matches!(
+            class.rsplit('.').next().unwrap_or(class),
+            "GString" | "CharSequence" | "Object" | "GroovyObject" | "Comparable" | "Writable"
+        );
+    }
+    if let Some((ifaces, _)) = as_proxy(value) {
+        if let Some(target) = resolve_class_name(class) {
+            return ifaces
+                .iter()
+                .filter_map(|n| find_class(n))
+                .any(|id| id == target || interface_closure(id).contains(&target));
+        }
+    }
     // An array type — `x instanceof int[]`. Only an array satisfies one, and
     // only one of the same element type, so a `List` and an `int[]` are not
     // instances of each other whatever they contain.
@@ -6589,6 +6782,9 @@ fn value_is_a(value: &Value, class: &str) -> bool {
     }
     // Built-in Groovy/Java types (short or common fully-qualified names).
     let short = class.rsplit('.').next().unwrap_or(class);
+    if let Some(answer) = seq::is_a(value, short) {
+        return answer;
+    }
     match short {
         "Object" | "GroovyObject" => true,
         "String" | "GString" => matches!(value, Value::Str(_)),
@@ -7390,13 +7586,12 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
     if omap_set(&recv, name.clone(), value.clone()) {
         return value;
     }
-    // Groovy's property write on `null` surfaces the JDK's helpful
-    // `NullPointerException` from the receiver's own `getClass()` call.
+    // A property write on `null` is `NullObject`'s `NullPointerException`.
     if matches!(recv, Value::Undef) {
         raise(
             vm,
             "NullPointerException",
-            "Cannot invoke \"Object.getClass()\" because \"obj\" is null",
+            &format!("Cannot set property '{name}' on null object"),
         );
         return Value::Undef;
     }
@@ -7727,6 +7922,19 @@ fn b_closure_call(vm: &mut VM, argc: u8) -> Value {
         if bound && !matches!(clo, Value::Undef) {
             return dispatch_call(vm, clo, "call", args);
         }
+        // A bare `call(…)` in a closure body is `this.call(…)` on the closure
+        // itself — Groovy's way to recurse without a name.
+        if name == "call" {
+            if let Some(me) = CLOSURE_STACK.with(|s| s.borrow().last().cloned()) {
+                return match invoke_closure(vm, &me, &args) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        fault(vm, e);
+                        Value::Undef
+                    }
+                };
+            }
+        }
         // The owner (the script) has no such closure, so a `with`/`tap` delegate
         // is next in Groovy's `OWNER_FIRST` chain — innermost first.
         if let Some(v) = dispatch_on_delegate(vm, &name, &args) {
@@ -7947,6 +8155,17 @@ fn b_name_get(vm: &mut VM, _argc: u8) -> Value {
     let (gidx, name) = pop_name_site(vm);
     if owner_bound(vm, gidx) {
         return vm.globals[gidx].clone();
+    }
+    // `owner`, `thisObject` and `delegate` are the running closure's own
+    // pseudo-variables, resolved before any delegate is asked.
+    if matches!(name.as_str(), "owner" | "thisObject" | "delegate") {
+        if let Some(me) = CLOSURE_STACK.with(|s| s.borrow().last().cloned()) {
+            let assigned = closure_meta(&me).is_some_and(|m| m.delegate.is_some());
+            let chained = DELEGATES.with(|d| !d.borrow().is_empty());
+            if name != "delegate" || assigned || !chained {
+                return closure_pseudo_property(&me, &name);
+            }
+        }
     }
     let Some(recv) = DELEGATES.with(|d| d.borrow().last().cloned()) else {
         // The bare-name miss names the *script* class, so `e.getType()` answers
@@ -8340,6 +8559,21 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             }
         };
     }
+    // A lazy `GString` answers its own members and otherwise reads as the
+    // `String` it renders to.
+    if let Some(parts) = as_gstring(&recv) {
+        match method {
+            "getClass" if args.is_empty() => return class_ref_of(&recv),
+            "is" if args.len() == 1 => {
+                return Value::bool(
+                    matches!((&recv, &args[0]), (Value::Obj(a), Value::Obj(b)) if a == b),
+                );
+            }
+            _ => {}
+        }
+        let text = gstring_text(vm, &parts);
+        return dispatch_call(vm, Value::str(text), method, args);
+    }
     // A `List` rides a handle so two names can see one list. Every list method
     // is already written against the transient `Value::Array` form, so the call
     // runs against that and its effect is reconciled back through the handle
@@ -8353,6 +8587,28 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         if let Value::Obj(id) = recv {
             return Value::bool(matches!(args[0], Value::Obj(other) if other == id));
         }
+        // A boxed value: no identity to compare, so equal values of one type
+        // are the same object (the `Integer` cache and interned literals
+        // answer exactly that for what a script writes).
+        if matches!(
+            recv,
+            Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Str(_)
+        ) {
+            return Value::bool(
+                std::mem::discriminant(&recv) == std::mem::discriminant(&args[0])
+                    && java_equals(&recv, &args[0]),
+            );
+        }
+    }
+    if args.is_empty() && matches!(method, "asImmutable" | "asUnmodifiable") {
+        if let Some(v) = seq::unmodifiable_copy(&recv) {
+            return v;
+        }
+    }
+    // The methods a `LinkedList` / `ArrayDeque` / `Stack` / `PriorityQueue`
+    // declares beyond `List`.
+    if let Some(v) = seq::dispatch(vm, &recv, method, &args) {
+        return v;
     }
     // `IntRange.equals(IntRange)` compares the fields as written — endpoints and
     // both inclusivity flags — not the elements, so `(1<..4).equals(2..4)` and
@@ -8663,6 +8919,25 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
             return v;
         }
     }
+    if let Some(c) = bignum::math_ctx(&recv) {
+        if let Some(v) = bignum::math_ctx_method(&c, method, &args) {
+            return v;
+        }
+    }
+    if let Value::Obj(id) = &recv {
+        let is_random =
+            HEAP.with(|h| matches!(h.borrow().get(*id as usize), Some(HeapObj::Random(_))));
+        if is_random {
+            if let Some(v) = seq::random_method(vm, *id, method, &args) {
+                return v;
+            }
+        }
+    }
+    if let Some((ifaces, target)) = as_proxy(&recv) {
+        if let Some(v) = proxy_dispatch(vm, &recv, &ifaces, &target, method, &args) {
+            return v;
+        }
+    }
     // A method on a class instance: a user method (implicit `this`) or Groovy's
     // auto getter/setter over a field. Checked first — an instance handle is a
     // `Value::Obj`, the same tag closures use.
@@ -8697,6 +8972,36 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
         if let Some(v) = closure_combinator(&recv, &meta, method, &args) {
             return v;
         }
+    }
+    // `Closure implements Runnable`, and a closure coerced to a JDK functional
+    // interface (`Comparator c = { a, b -> … }`) answers that interface's one
+    // abstract method.
+    if closure_meta(&recv).is_some()
+        && matches!(
+            method,
+            "run"
+                | "compare"
+                | "apply"
+                | "accept"
+                | "test"
+                | "get"
+                | "applyAsInt"
+                | "applyAsLong"
+                | "applyAsDouble"
+                | "getAsInt"
+                | "getAsLong"
+                | "getAsDouble"
+                | "getAsBoolean"
+        )
+    {
+        return match invoke_closure(vm, &recv, &args) {
+            Ok(_) if method == "run" => Value::Undef,
+            Ok(v) => v,
+            Err(e) => {
+                fault(vm, e);
+                Value::Undef
+            }
+        };
     }
     // `clo.call(args)` — invoke the receiver closure.
     if method == "call" && closure_meta(&recv).is_some() {
@@ -12490,9 +12795,10 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // rather than a silent HALF_UP.
                 "setScale" if args.len() == 2 => {
                     let scale = args[0].to_int();
-                    match decimal::with_scale(&d, scale, &groovy_str(&args[1])) {
+                    let mode = bignum::rounding_name(&args[1]);
+                    match decimal::with_scale(&d, scale, &mode) {
                         Some(v) => dec_value(v),
-                        None if decimal::rounding_mode_exists(&groovy_str(&args[1])) => {
+                        None if decimal::rounding_mode_exists(&mode) => {
                             raise(vm, "ArithmeticException", "Rounding necessary");
                             Value::Undef
                         }
@@ -12557,6 +12863,12 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         None => raise_missing_method(vm, recv, method, args),
                     }
                 }
+                "round" if args.first().and_then(bignum::math_ctx).is_some() => {
+                    match bignum::extra_method(vm, recv, &d, false, method, args) {
+                        Some(v) => v,
+                        None => raise_missing_method(vm, recv, method, args),
+                    }
+                }
                 "round" if args.is_empty() => Value::int(decimal::round_to_i64(&d)),
                 // `round(n)` keeps `n` decimal places (half-up, Groovy's mode);
                 // `trunc(n)` cuts them off. Both stay `BigDecimal`s, except that
@@ -12608,7 +12920,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // Java's own arithmetic method names, which a script reaches
                 // past the operators. `pow` is `BigInteger`/`BigDecimal.pow`;
                 // Groovy's `**` is `power`, already above.
-                "add" | "subtract" | "multiply" | "pow" => {
+                "add" | "subtract" | "multiply" | "pow" if args.len() == 1 => {
                     let Some(y) = args
                         .first()
                         .and_then(as_exact_dec)
@@ -12650,6 +12962,14 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // `divide(divisor, scale, RoundingMode)` — the three-argument
                 // form that *always* terminates, unlike the one-argument one
                 // that raises on a non-terminating expansion.
+                "add" | "subtract" | "multiply" | "divide"
+                    if args.len() == 2 && as_bigint(recv).is_none() =>
+                {
+                    match bignum::extra_method(vm, recv, &d, false, method, args) {
+                        Some(v) => v,
+                        None => raise_missing_method(vm, recv, method, args),
+                    }
+                }
                 "divide" if args.len() == 3 && as_bigint(recv).is_none() => {
                     let Some(y) = args.first().and_then(as_exact_dec) else {
                         return raise_missing_method(vm, recv, method, args);
@@ -12662,7 +12982,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         return Value::Undef;
                     }
                     let scale = args[1].to_int();
-                    let mode = groovy_str(&args[2]);
+                    let mode = bignum::rounding_name(&args[2]);
                     // Divide to a few digits past the target scale and round
                     // there: the quotient itself may not terminate.
                     let wide = decimal::divide_to_scale(&d, &y, scale + 4);
@@ -12757,7 +13077,17 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         }
                     }
                 }
-                _ => raise_missing_method(vm, recv, method, args),
+                _ => match bignum::extra_method(
+                    vm,
+                    recv,
+                    &d,
+                    as_bigint(recv).is_some(),
+                    method,
+                    args,
+                ) {
+                    Some(v) => v,
+                    None => raise_missing_method(vm, recv, method, args),
+                },
             }
         }
 
@@ -12768,6 +13098,13 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 "getName" | "getTypeName" | "getCanonicalName" => Value::str(qualified),
                 "getSimpleName" => Value::str(simple_name_of(&qualified)),
                 "isInterface" if args.is_empty() => Value::bool(is_interface_class(&qualified)),
+                "getSuperclass" if args.is_empty() => class_superclass(&qualified),
+                "getInterfaces" if args.is_empty() => class_interfaces(&qualified),
+                "isInstance" if args.len() == 1 => Value::bool(value_is_a(&args[0], &qualified)),
+                "isAssignableFrom" if args.len() == 1 => {
+                    let other = as_class_ref(&args[0]).unwrap_or_default();
+                    Value::bool(class_assignable(&qualified, &other))
+                }
                 _ => match dispatch_static(vm, &simple_name_of(&qualified), method, args) {
                     Some(v) => v,
                     None => raise_missing_method(vm, recv, method, args),
@@ -13775,6 +14112,15 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
     // over a positional one (`[4] as V` is `new V(4)`), and anything else is a
     // `GroovyCastException`. A closure is left to the interface coercion.
     if let Some(cid) = resolve_class_name(ty).filter(|_| !ty.ends_with("[]")) {
+        let is_iface = class_meta(cid).is_some_and(|m| m.is_interface);
+        if is_iface && !value_is_a(&v, ty) && (closure_meta(&v).is_some() || as_omap(&v).is_some())
+        {
+            let name = class_meta(cid).map(|m| m.name).unwrap_or_default();
+            return heap_push(HeapObj::Proxy {
+                ifaces: vec![name],
+                target: v,
+            });
+        }
         if value_is_a(&v, ty) || closure_meta(&v).is_some() {
             return v;
         }
@@ -13963,6 +14309,14 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
             _ => v,
         },
         _ => v,
+    }
+}
+
+/// `GLIST_ADOPT`: allocate a handle for a transient list a call returned.
+fn b_list_adopt(vm: &mut VM, _argc: u8) -> Value {
+    match vm.stack.pop().unwrap_or(Value::Undef) {
+        Value::Array(items) => glist(items.to_vec()),
+        other => other,
     }
 }
 
@@ -14501,6 +14855,9 @@ fn java_parse_radix(text: &str, radix: i64) -> Option<i64> {
 /// Returns `None` when `class`/`method` is not one of them, so the caller falls
 /// through to `MissingMethodException`.
 fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Option<Value> {
+    if let Some(v) = seq::static_call(vm, class, method, args) {
+        return Some(v);
+    }
     let arg0 = args.first().cloned().unwrap_or(Value::Undef);
     let f0 = as_f64(&arg0);
     Some(match (class, method) {
@@ -14672,12 +15029,22 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         }
         // `BigDecimal.valueOf(double)` is `new BigDecimal(Double.toString(d))`
         // and `valueOf(long)` the integer at scale 0.
+        ("BigInteger" | "BigDecimal", "valueOf") if args.len() == 2 || class == "BigInteger" => {
+            bignum::value_of(class, args)?
+        }
+        ("RoundingMode", "values" | "valueOf") => bignum::rounding_mode_static(vm, method, args)?,
         ("BigDecimal", "valueOf") if args.len() == 1 => match &arg0 {
             Value::Float(f) => {
                 let text = decimal::format_double(*f);
                 float_text_to_decimal(vm, &text)
             }
             Value::Int(n) => dec_value(decimal::from_i64(*n)),
+            // A decimal literal argument selects `valueOf(double)`, so the
+            // scale of the literal is read back through `Double.toString`.
+            other if as_dec(other).is_some() => {
+                let text = decimal::format_double(decimal::to_f64(&as_dec(other)?));
+                float_text_to_decimal(vm, &text)
+            }
             _ => return None,
         },
         ("Double", "longBitsToDouble") => Value::float(f64::from_bits(as_i64(&arg0)? as u64)),
@@ -14914,7 +15281,13 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
             let id = list_id(&arg0)?;
             let mut items = iteration_elements(&arg0);
             if method == "sort" {
-                items = match sort_values(vm, &items, &OrderBy::Natural) {
+                // `Collections.sort(list, comparator)` takes a comparator
+                // closure, whatever its parameter count.
+                let order = match args.get(1).filter(|c| closure_meta(c).is_some()) {
+                    Some(c) => OrderBy::Comparator(c),
+                    None => OrderBy::Natural,
+                };
+                items = match sort_values(vm, &items, &order) {
                     Ok(sorted) => sorted,
                     Err(e) => {
                         fault(vm, e);
@@ -14957,6 +15330,54 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         ("Collections", "disjoint") => {
             let (a, b) = (iteration_elements(&arg0), iteration_elements(args.get(1)?));
             Value::bool(!a.iter().any(|x| b.iter().any(|y| values_equal(x, y))))
+        }
+        // `Collections.shuffle(list, rnd)`: the JDK walks down from the end,
+        // swapping each slot with a seeded draw.
+        ("Collections", "shuffle") if !args.is_empty() => {
+            let id = list_id(&arg0)?;
+            let mut items = iteration_elements(&arg0);
+            let rnd = match args.get(1) {
+                Some(Value::Obj(r)) => *r,
+                _ => match heap_push(HeapObj::Random(seq::RandomState::new(seq::fresh_seed()))) {
+                    Value::Obj(r) => r,
+                    _ => return None,
+                },
+            };
+            for i in (2..=items.len()).rev() {
+                let j = seq::random_method(vm, rnd, "nextInt", &[Value::int(i as i64)])?.to_int();
+                items.swap(i - 1, j as usize);
+            }
+            list_store(id, items, false);
+            Value::Undef
+        }
+        ("Collections", "rotate") if args.len() == 2 => {
+            let id = list_id(&arg0)?;
+            let mut items = iteration_elements(&arg0);
+            let n = items.len() as i64;
+            if n > 0 {
+                let d = as_i64(&args[1])?.rem_euclid(n) as usize;
+                items.rotate_right(d);
+            }
+            list_store(id, items, false);
+            Value::Undef
+        }
+        ("Collections", "fill") if args.len() == 2 => {
+            let id = list_id(&arg0)?;
+            let items = vec![args[1].clone(); iteration_elements(&arg0).len()];
+            list_store(id, items, false);
+            Value::Undef
+        }
+        ("Collections", "addAll") if !args.is_empty() => {
+            let id = list_id(&arg0)?;
+            let mut items = iteration_elements(&arg0);
+            let extra: Vec<Value> = match args.len() {
+                2 if as_list_raw(&args[1]).is_some() => iteration_elements(&args[1]),
+                _ => args[1..].to_vec(),
+            };
+            let changed = !extra.is_empty();
+            items.extend(extra);
+            list_store(id, items, true);
+            Value::bool(changed)
         }
         // `Collections.swap(list, i, j)` exchanges two elements through the
         // handle and answers `void`; an index outside the list is the
@@ -15197,6 +15618,12 @@ fn static_field(class: &str, name: &str) -> Option<Value> {
         ("Character", "MAX_RADIX") => Value::int(36),
         // `BigDecimal`'s constants keep scale 0, and `BigInteger`'s stay
         // `BigInteger`s — the two are distinct types in every later operation.
+        ("BigDecimal", _) if bignum::legacy_constant(name).is_some() => {
+            bignum::legacy_constant(name)?
+        }
+        ("MathContext", _) if bignum::math_ctx_constant(name).is_some() => {
+            bignum::math_ctx_constant(name)?
+        }
         ("BigDecimal", "ZERO") => dec_value(decimal::from_i64(0)),
         ("BigDecimal", "ONE") => dec_value(decimal::from_i64(1)),
         ("BigDecimal", "TWO") => dec_value(decimal::from_i64(2)),
@@ -16550,6 +16977,9 @@ fn set_len(v: &Value) -> Option<usize> {
 /// the element is absent — this does no membership test of its own.
 fn set_push(v: &Value, item: Value) {
     let Value::Obj(id) = v else { return };
+    if seq::write_refused(*id, true) {
+        return;
+    }
     HEAP.with(|h| {
         if let Some(HeapObj::SetVal { items, index, .. }) = h.borrow_mut().get_mut(*id as usize) {
             index.record(&item, items.len());
@@ -16566,6 +16996,9 @@ fn set_push(v: &Value, item: Value) {
 /// element vector, so every position an index entry names could have moved.
 fn set_store(v: &Value, items: Vec<Value>) {
     let Value::Obj(id) = v else { return };
+    if seq::write_refused(*id, true) {
+        return;
+    }
     HEAP.with(|h| {
         if let Some(HeapObj::SetVal {
             items: dst, index, ..
@@ -16596,7 +17029,7 @@ fn dispatch_set_method(
     let ordered = || set_elements(items, kind);
     let other = || args.first().map(iteration_elements).unwrap_or_default();
     Some(match method {
-        "getClass" => heap_push(HeapObj::ClassRef(set_class(kind).to_string())),
+        "getClass" => class_ref_of(recv),
         // `inspect()` is deliberately absent here: a set's is the quoted
         // rendering `([1, 'a'] as Set).inspect()` == `[1, 'a']`, which
         // `dispatch_method` answers for every value ahead of this table. It used
@@ -17152,23 +17585,27 @@ fn subsequences_of(items: &[Value]) -> Vec<Value> {
 /// through the handle (a map is shared, unlike a list).
 fn omap_retain(v: &Value, keep: impl Fn(&str) -> bool) -> bool {
     match map_backing(v) {
-        Value::Obj(id) => HEAP.with(|h| match h.borrow_mut().get_mut(id as usize) {
-            Some(HeapObj::OrderedMap {
-                entries: m, index, ..
-            }) => {
-                m.retain(|(k, _)| keep(k));
-                // Removing an entry shifts every later position, so the index
-                // is rebuilt rather than patched. This is the one mutator that
-                // has to, and it was already linear in the map's size.
-                *index = m
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (k, _))| (k.clone(), i))
-                    .collect();
-                true
+        Value::Obj(id) => {
+            if seq::write_refused(id, true) {
+                return true;
             }
-            _ => false,
-        }),
+            HEAP.with(|h| match h.borrow_mut().get_mut(id as usize) {
+                Some(HeapObj::OrderedMap {
+                    entries: m, index, ..
+                }) => {
+                    m.retain(|(k, _)| keep(k));
+                    // Removing an entry shifts every later position, so the index
+                    // is rebuilt rather than patched.
+                    *index = m
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (k, _))| (k.clone(), i))
+                        .collect();
+                    true
+                }
+                _ => false,
+            })
+        }
         _ => false,
     }
 }
@@ -17210,6 +17647,10 @@ fn parse_java_double(s: &str) -> Option<f64> {
 /// count properties on `String`/list/map; a map's `k` also reads entry `k`. An
 /// unmodeled property raises `groovy.lang.MissingPropertyException`.
 fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
+    if let Some(parts) = as_gstring(recv) {
+        let text = Value::str(gstring_text(vm, &parts));
+        return dispatch_property(vm, &text, name);
+    }
     // An `Expando` property is its map's entry, `null` when absent — except
     // `class`, which no property shadows until one is set.
     if let Some(props) = as_expando(recv) {
@@ -17322,10 +17763,7 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     if let Some(meta) = closure_meta(recv) {
         return match name {
             "maximumNumberOfParameters" => Value::int(meta.params as i64),
-            // An unassigned `delegate` is Groovy's *owner* — the script object —
-            // which groovyrs has no value for (see the script-`this` entry in
-            // BUGS.md), so it reads as `null` here.
-            "delegate" => meta.delegate.clone().unwrap_or(Value::Undef),
+            "owner" | "delegate" | "thisObject" => closure_pseudo_property(recv, name),
             "resolveStrategy" => Value::int(meta.resolve_strategy),
             "parameterTypes" => closure_parameter_types(&meta),
             _ => raise_missing_property(vm, recv, name),
@@ -18205,6 +18643,12 @@ thread_local! {
 /// [`render_value`] for one value, its members rendered through the
 /// cycle-tracking entry point.
 fn render_shape(vm: &mut VM, v: &Value) -> String {
+    if let Some(parts) = as_gstring(v) {
+        return gstring_text(vm, &parts);
+    }
+    if let Some(c) = bignum::math_ctx(v) {
+        return bignum::math_ctx_str(&c);
+    }
     if let Some((msb, lsb)) = as_uuid(v) {
         return uuid_str(msb, lsb);
     }
@@ -18317,6 +18761,9 @@ fn instance_default_str(v: &Value, inst: &Instance) -> String {
 /// fusevm's shell-flavoured `as_str_cow`): booleans as `true`/`false`, whole
 /// decimals with a trailing `.0`, `Undef`/`null` as `null`.
 pub fn groovy_str(v: &Value) -> String {
+    if let Some(parts) = as_gstring(v) {
+        return with_vm(|vm| gstring_text(vm, &parts)).unwrap_or_default();
+    }
     // A `Float` renders through `Float.toString` — 24-bit precision, so
     // `Math.max(2147483647, 2.5)` prints `2.1474836E9` where the double it
     // widens to would print `2.147483647E9`.
@@ -19359,5 +19806,223 @@ fn range_contains_within_bounds(r: &RangeVal, value: &Value) -> bool {
             above_lower && below_upper
         }
         _ => range_contains(r, value),
+    }
+}
+
+/// `clo.owner` / `clo.thisObject` / `clo.delegate`. An unassigned `delegate` is
+/// the owner, which is Groovy's default.
+fn closure_pseudo_property(clo: &Value, name: &str) -> Value {
+    let Some(meta) = closure_meta(clo) else {
+        return Value::Undef;
+    };
+    match name {
+        "owner" => meta.owner.unwrap_or(Value::Undef),
+        "thisObject" => meta.this_obj.unwrap_or(Value::Undef),
+        _ => meta.delegate.or(meta.owner).unwrap_or(Value::Undef),
+    }
+}
+
+/// Whether `v` is the script object ([`HeapObj::ScriptThis`]).
+fn is_script_this(v: &Value) -> bool {
+    match v {
+        Value::Obj(id) => {
+            HEAP.with(|h| matches!(h.borrow().get(*id as usize), Some(HeapObj::ScriptThis)))
+        }
+        _ => false,
+    }
+}
+
+/// The interfaces and the backing closure/map of a [`HeapObj::Proxy`].
+fn as_proxy(v: &Value) -> Option<(Vec<String>, Value)> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Proxy { ifaces, target }) => Some((ifaces.clone(), target.clone())),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// Call `method` on a proxy: a closure target runs for every abstract method; a
+/// map target runs the closure stored under the method's name. A `default`
+/// method the interface declares runs with the proxy as `this`.
+fn proxy_dispatch(
+    vm: &mut VM,
+    recv: &Value,
+    ifaces: &[String],
+    target: &Value,
+    method: &str,
+    args: &[Value],
+) -> Option<Value> {
+    let default = ifaces
+        .iter()
+        .filter_map(|n| find_class(n))
+        .find_map(|id| lookup_method_argc(id, method, args.len()));
+    let call = |vm: &mut VM, f: &Value, args: &[Value]| match invoke_closure(vm, f, args) {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    };
+    if closure_meta(target).is_some() {
+        if let Some(idx) = default {
+            let mut pushes = vec![recv.clone()];
+            pushes.extend_from_slice(args);
+            return Some(match invoke_sub(vm, idx, &pushes) {
+                Ok(v) => v,
+                Err(e) => {
+                    fault(vm, e);
+                    Value::Undef
+                }
+            });
+        }
+        if matches!(method, "toString" | "hashCode" | "equals" | "getClass") {
+            return None;
+        }
+        return Some(call(vm, target, args));
+    }
+    if let Some(Some(f)) = omap_get(target, method) {
+        if closure_meta(&f).is_some() {
+            return Some(call(vm, &f, args));
+        }
+    }
+    if let Some(idx) = default {
+        let mut pushes = vec![recv.clone()];
+        pushes.extend_from_slice(args);
+        return Some(match invoke_sub(vm, idx, &pushes) {
+            Ok(v) => v,
+            Err(e) => {
+                fault(vm, e);
+                Value::Undef
+            }
+        });
+    }
+    if matches!(method, "toString" | "hashCode" | "equals" | "getClass") {
+        return None;
+    }
+    raise(vm, "UnsupportedOperationException", method);
+    Some(Value::Undef)
+}
+
+/// The parts of a lazily-evaluated `GString` (see [`HeapObj::GString`]).
+fn as_gstring(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::GString(parts)) => Some(parts.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// `GStringImpl.toString`: each part written in order, a closure part evaluated
+/// now — a zero-parameter one answers the text, a one-parameter one is handed a
+/// writer.
+fn gstring_text(vm: &mut VM, parts: &[Value]) -> String {
+    let mut out = String::new();
+    for part in parts {
+        match closure_meta(part) {
+            Some(m) if m.params == 0 => match invoke_closure(vm, part, &[]) {
+                Ok(v) => out.push_str(&render_value(vm, &v)),
+                Err(e) => fault(vm, e),
+            },
+            Some(m) if m.params == 1 => {
+                let writer = heap_push(HeapObj::Buffer {
+                    class: "java.io.StringWriter",
+                    text: String::new(),
+                });
+                match invoke_closure(vm, part, std::slice::from_ref(&writer)) {
+                    Ok(_) => out.push_str(&groovy_str(&writer)),
+                    Err(e) => fault(vm, e),
+                }
+            }
+            _ => out.push_str(&render_value(vm, part)),
+        }
+    }
+    out
+}
+
+/// `Class.getSuperclass()`: a script class's declared parent (or `Object`), a
+/// JDK class's well-known parent; `null` for `Object`, an interface and a
+/// primitive.
+fn class_superclass(qualified: &str) -> Value {
+    if let Some(meta) = find_class(qualified).and_then(class_meta) {
+        if meta.is_interface {
+            return Value::Undef;
+        }
+        let parent = match meta.superclass.as_deref() {
+            Some(s) => crate::throwable::qualified(s),
+            None => "java.lang.Object".to_string(),
+        };
+        return heap_push(HeapObj::ClassRef(parent));
+    }
+    let parent = match qualified {
+        "java.lang.Object" | "int" | "long" | "double" | "boolean" | "char" => return Value::Undef,
+        "java.lang.Integer"
+        | "java.lang.Long"
+        | "java.lang.Double"
+        | "java.lang.Float"
+        | "java.lang.Short"
+        | "java.lang.Byte"
+        | "java.math.BigDecimal"
+        | "java.math.BigInteger" => "java.lang.Number",
+        "java.util.ArrayList" | "java.util.Vector" => "java.util.AbstractList",
+        "java.util.LinkedList" => "java.util.AbstractSequentialList",
+        "java.util.Stack" => "java.util.Vector",
+        "java.util.ArrayDeque" | "java.util.PriorityQueue" => "java.util.AbstractCollection",
+        "java.util.LinkedHashMap" => "java.util.HashMap",
+        "java.util.HashMap" | "java.util.TreeMap" => "java.util.AbstractMap",
+        "java.util.HashSet" | "java.util.TreeSet" => "java.util.AbstractSet",
+        "java.util.LinkedHashSet" => "java.util.HashSet",
+        _ => match crate::throwable::all().find(|(n, _, p)| format!("{p}.{n}") == qualified) {
+            Some((_, Some(sup), _)) => {
+                return heap_push(HeapObj::ClassRef(crate::throwable::qualified(sup)))
+            }
+            _ => "java.lang.Object",
+        },
+    };
+    heap_push(HeapObj::ClassRef(parent.to_string()))
+}
+
+/// `Class.getInterfaces()` of a script class: the types it names in
+/// `implements`, in declaration order.
+fn class_interfaces(qualified: &str) -> Value {
+    let names = find_class(qualified)
+        .and_then(class_meta)
+        .map(|m| m.interfaces)
+        .unwrap_or_default();
+    glist(
+        names
+            .iter()
+            .map(|n| heap_push(HeapObj::ClassRef(crate::throwable::qualified(n))))
+            .collect(),
+    )
+}
+
+/// `target.isAssignableFrom(source)` over script classes, and equality or
+/// `Object` for anything else.
+fn class_assignable(target: &str, source: &str) -> bool {
+    if target == source || target == "java.lang.Object" {
+        return true;
+    }
+    let (Some(t), Some(s)) = (find_class(target), find_class(source)) else {
+        return false;
+    };
+    class_chain(s).contains(&t) || interface_closure(s).contains(&t)
+}
+
+/// A script class used as a `case` label that declares a `static isCase(x)`:
+/// Groovy asks the class's own method before testing `instanceof`.
+fn class_is_case(vm: &mut VM, class: &str, subject: &Value) -> Option<Value> {
+    let cid = find_class(class)?;
+    let idx = lookup_overload_exact(cid, "isCase", 1)?;
+    let handle = heap_push(HeapObj::ClassRef(class.to_string()));
+    match invoke_sub(vm, idx, &[handle, subject.clone()]) {
+        Ok(v) => Some(Value::bool(groovy_truthy(vm, &v))),
+        Err(e) => {
+            fault(vm, e);
+            Some(Value::Undef)
+        }
     }
 }

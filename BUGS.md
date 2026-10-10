@@ -1101,11 +1101,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   rejects those as ordinary unexpected characters, with the same
   `Character … is neither a decimal digit number …` message Groovy gives for a
   genuinely invalid character.
-- **The `NullPointerException` for a property *write* on `null` carries the
-  JDK's helpful-NPE text** (`Cannot invoke "Object.getClass()" because "obj" is
-  null`) rather than a groovyrs-authored message, since that is what Groovy
-  surfaces. The wording is the JDK's, so it can change with the JVM version.
-
 - **`%` with a non-literal divisor costs its loop's trace eligibility.** Java's
   `%` throws `ArithmeticException` on a zero divisor where fusevm's native
   `Op::Mod` answers `0` — a silent wrong answer. The compiler therefore guards

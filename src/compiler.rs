@@ -1863,6 +1863,7 @@ impl Compiler {
                 let init = init.clone().or_else(|| primitive_zero(ty));
                 if let Some(e) = &init {
                     self.expr(e)?;
+                    self.emit_list_adopt(e)?;
                     self.emit_typed_coercion(ty, e)?;
                     self.note_var_width(ty, name, init.as_ref());
                     self.emit_decl_store(name, self.cur_line);
@@ -1909,6 +1910,7 @@ impl Compiler {
                 match op {
                     AssignOp::Assign => {
                         self.expr(value)?;
+                        self.emit_list_adopt(value)?;
                     }
                     AssignOp::Div => {
                         // `x /= e` → x = x / e, through the Groovy division builtin.
@@ -3314,12 +3316,22 @@ impl Compiler {
                 {
                     return self.call(method, args, *line);
                 }
-                if matches!(**recv, Expr::Super) {
+                // `Trait.super.m()` names the trait whose method is wanted.
+                let trait_super = match &**recv {
+                    Expr::Property { recv: t, name, .. } if name == "super" => match &**t {
+                        Expr::Var(t) => Some(t.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if matches!(**recv, Expr::Super) || trait_super.is_some() {
                     self.emit_this();
                     let argc = self.emit_args(args, *line)?;
                     let midx = self.b.add_constant(Value::str(method.clone()));
                     self.b.emit(Op::LoadConst(midx), *line);
-                    let sname = self.cur_class_super.clone().unwrap_or_default();
+                    let sname = trait_super
+                        .or_else(|| self.cur_class_super.clone())
+                        .unwrap_or_default();
                     let sidx = self.b.add_constant(Value::str(sname));
                     self.b.emit(Op::LoadConst(sidx), *line);
                     self.emit_call_builtin(crate::host::GSUPER_METHOD, argc, *line)?;
@@ -3557,6 +3569,16 @@ impl Compiler {
             class_fields: self.cur_class_fields.clone(),
             class_methods: self.cur_class_methods.clone(),
         });
+        // The owner tag `b_make_closure` reads: the enclosing instance for a
+        // literal written directly in a method, `true` for one nested in another
+        // closure, `null` at the top level of a script.
+        if self.closure_depth > 0 {
+            self.b.emit(Op::LoadTrue, self.cur_line);
+        } else if self.is_local("this") {
+            self.emit_this();
+        } else {
+            self.b.emit(Op::LoadUndef, self.cur_line);
+        }
         // Build the closure value: push its name index, parameter count, and
         // capture count, then register through the make-closure builtin (returns
         // a `Value::Obj`).
@@ -3951,6 +3973,16 @@ impl Compiler {
     /// width of its initializer, and re-binds the name either way — a
     /// declaration is a fresh variable, so `def a = 2000000000` after an earlier
     /// `def a = 5L` is an `Integer` again.
+    /// Give the list a call just produced its own handle (see
+    /// [`crate::host::GLIST_ADOPT`]) when the value being bound came from a call,
+    /// the only place a transient element vector can arrive from.
+    fn emit_list_adopt(&mut self, e: &Expr) -> Result<(), String> {
+        if matches!(e, Expr::MethodCall { .. } | Expr::Call { .. }) {
+            self.emit_call_builtin(crate::host::GLIST_ADOPT, 0, self.cur_line)?;
+        }
+        Ok(())
+    }
+
     /// Convert the value on the stack — the one the body is about to return —
     /// to the declared return type, as Groovy does: `double f() { 2 }` answers
     /// `2.0`, `String f() { 5 }` the `String` `"5"`, and a `void` method

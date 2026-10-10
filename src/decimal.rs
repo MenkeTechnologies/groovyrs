@@ -719,7 +719,7 @@ fn at_preferred_scale(mut unscaled: BigInt, mut scale: i64, preferred: i64) -> B
 /// `a.divide(b, new MathContext(precision))` (whose default rounding is
 /// HALF_UP). Done on the unscaled integers so the result is the correctly
 /// rounded quotient, never a doubly-rounded one.
-fn divide_to_precision(a: &BigDecimal, b: &BigDecimal, precision: u64) -> BigDecimal {
+pub fn divide_to_precision(a: &BigDecimal, b: &BigDecimal, precision: u64) -> BigDecimal {
     let (ua, sa) = a.as_bigint_and_exponent();
     let (ub, sb) = b.as_bigint_and_exponent();
     let negative = (ua.sign() == Sign::Minus) != (ub.sign() == Sign::Minus);

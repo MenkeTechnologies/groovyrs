@@ -444,7 +444,7 @@ impl Parser {
             // `def (a, b) = expr` — multiple assignment. The right side is
             // evaluated once into a temporary, then each name takes its element.
             if self.is(&Tok::LParen) {
-                return self.destructuring_decl(line);
+                return self.destructuring(line, true);
             }
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
@@ -482,17 +482,29 @@ impl Parser {
             if self.is(&Tok::LParen) {
                 return self.function_def(name, ty);
             }
-            let mut init = self.opt_initializer()?;
-            // An array-typed local converts its initializer the way `as` does:
-            // `int[] a = [1, 2]` holds an `int[]`, not the `ArrayList`.
-            if ty.ends_with("[]") {
-                init = init.map(|value| Expr::Cast {
-                    value: Box::new(value),
-                    ty: ty.clone(),
-                    java: false,
-                });
+            let init = self.typed_initializer(&ty)?;
+            // `int a = 1, b = 2` — each further declarator shares the type and
+            // becomes its own statement, as in the `def` form above.
+            while self.is(&Tok::Comma) {
+                self.advance();
+                self.skip_newlines();
+                let n = self.ident()?;
+                let i = self.typed_initializer(&ty)?;
+                self.pending.push(Stmt::new(
+                    line,
+                    StmtKind::Local {
+                        ty: ty.clone(),
+                        name: n,
+                        init: i,
+                    },
+                ));
             }
             return Ok(StmtKind::Local { ty, name, init });
+        }
+
+        // `(a, b) = expr` — multiple assignment to variables already in scope.
+        if self.looks_like_destructuring_assign() {
+            return self.destructuring(line, false);
         }
 
         // Assignment / post-inc-dec / expression statement.
@@ -590,11 +602,46 @@ impl Parser {
         Ok(StmtKind::Expr(lhs))
     }
 
-    /// `def (a, b) = expr` — Groovy's multiple assignment. Lowered to a hidden
-    /// temporary holding the right side (so it is evaluated exactly once)
-    /// followed by one declaration per name taking its positional element; a
-    /// name past the end of the right side is `null`, as Groovy's is.
-    fn destructuring_decl(&mut self, line: u32) -> Result<StmtKind, String> {
+    /// An optional initializer for a local of type `ty`. An array-typed local
+    /// converts its initializer the way `as` does: `int[] a = [1, 2]` holds an
+    /// `int[]`, not the `ArrayList`.
+    fn typed_initializer(&mut self, ty: &str) -> Result<Option<Expr>, String> {
+        let init = self.opt_initializer()?;
+        Ok(match init {
+            Some(value) if ty.ends_with("[]") => Some(Expr::Cast {
+                value: Box::new(value),
+                ty: ty.to_string(),
+                java: false,
+            }),
+            other => other,
+        })
+    }
+
+    /// Whether the tokens ahead are `(name, name, …) =` — a multiple assignment
+    /// to existing variables, as opposed to a parenthesised expression.
+    fn looks_like_destructuring_assign(&self) -> bool {
+        if !self.is(&Tok::LParen) {
+            return false;
+        }
+        let mut i = 1;
+        loop {
+            if !matches!(self.peek_at(i), Tok::Ident(_)) {
+                return false;
+            }
+            match self.peek_at(i + 1) {
+                Tok::Comma => i += 2,
+                Tok::RParen => return i > 1 && matches!(self.peek_at(i + 2), Tok::Assign),
+                _ => return false,
+            }
+        }
+    }
+
+    /// `def (a, b) = expr` (`declare`) or `(a, b) = expr` — Groovy's multiple
+    /// assignment. Lowered to a hidden temporary holding the right side (so it
+    /// is evaluated exactly once, which is what makes `(a, b) = [b, a]` a swap)
+    /// followed by one declaration or assignment per name taking its positional
+    /// element; a name past the end of the right side is `null`, as Groovy's is.
+    fn destructuring(&mut self, line: u32, declare: bool) -> Result<StmtKind, String> {
         self.eat(&Tok::LParen)?;
         let mut names = Vec::new();
         while !self.is(&Tok::RParen) {
@@ -614,18 +661,25 @@ impl Parser {
         let value = self.expression()?;
         let tmp = self.fresh_tmp("destructure");
         for (i, name) in names.into_iter().enumerate() {
-            self.pending.push(Stmt::new(
+            let element = Expr::Index {
+                recv: Box::new(Expr::Var(tmp.clone())),
+                index: Box::new(Expr::Int(i as i64, IntWidth::Int)),
                 line,
+            };
+            let kind = if declare {
                 StmtKind::Local {
                     ty: "def".into(),
                     name,
-                    init: Some(Expr::Index {
-                        recv: Box::new(Expr::Var(tmp.clone())),
-                        index: Box::new(Expr::Int(i as i64, IntWidth::Int)),
-                        line,
-                    }),
-                },
-            ));
+                    init: Some(element),
+                }
+            } else {
+                StmtKind::Assign {
+                    name,
+                    op: AssignOp::Assign,
+                    value: element,
+                }
+            };
+            self.pending.push(Stmt::new(line, kind));
         }
         Ok(StmtKind::Local {
             ty: "def".into(),

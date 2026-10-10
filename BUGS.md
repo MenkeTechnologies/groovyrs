@@ -1559,3 +1559,20 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   materialisation a range loop does. The elements and their order are Groovy's;
   what differs is interleaving: side effects in `next()` all happen before the
   loop body's, and an unbounded iterator never reaches a `break`.
+- **A closure coerced to a script interface, or a `Map` coerced to one, is not
+  a proxy.** `{ w -> … } as Greeter` and `[greet: { … }] as Greeter` fault
+  (`Greeter is an interface`) where Groovy builds a `java.lang.reflect.Proxy`
+  whose `greet` runs the closure; `Runnable r = { … } as Runnable; r.run()` is a
+  `MissingMethodException` because the closure is left a plain `Closure`. A
+  proxy needs a heap object that carries the interface and forwards its
+  abstract methods.
+- **A bare `call(…)` inside a closure does not reach the closure itself.**
+  `def f = { n -> n <= 1 ? 1 : n * call(n - 1) }` is Groovy's way to recurse
+  without a name; here the name is `unresolved reference: call` because the
+  running closure is not tracked, so `owner` / `delegate` / `thisObject` on a
+  closure are unmodeled too.
+- **`ArrayDeque`, `PriorityQueue`, `Stack` and a seeded `Random`** are not
+  modeled classes (`unable to resolve class`), and `LinkedList` is an
+  `ArrayList` — it lacks `addFirst` / `removeFirst` / `peek*` / `poll*` and
+  reports `java.util.ArrayList`. `Arrays.hashCode` and `Arrays.stream` are not
+  ported.

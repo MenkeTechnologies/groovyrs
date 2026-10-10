@@ -122,6 +122,8 @@ enum Mode {
     StrOps,
     ListOps,
     SafeNav,
+    Arrays,
+    MultiAssign,
     Floats,
     Mixed,
 }
@@ -153,6 +155,8 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::StrOps => "strops",
         Mode::ListOps => "listops",
         Mode::SafeNav => "safenav",
+        Mode::Arrays => "arrays",
+        Mode::MultiAssign => "multiassign",
         Mode::Floats => "floats",
         Mode::Mixed => "mixed",
     }
@@ -185,6 +189,8 @@ fn mode_from(s: &str) -> Option<Mode> {
         "strops" => Mode::StrOps,
         "listops" => Mode::ListOps,
         "safenav" => Mode::SafeNav,
+        "arrays" => Mode::Arrays,
+        "multiassign" => Mode::MultiAssign,
         "floats" => Mode::Floats,
         "mixed" => Mode::Mixed,
         _ => return None,
@@ -947,6 +953,98 @@ fn gen_safenav(rng: &mut Rng) -> Vec<String> {
     let n = rng.range_i(3, 6) as usize;
     for _ in 0..n {
         out.push(observe(pick(rng, SAFE_OPS)));
+    }
+    out
+}
+
+/// Array subjects for the `java.util.Arrays` mode, each with a value `fill`
+/// stores that the element type accepts.
+const ARRAY_SUBJECTS: &[(&str, &str)] = &[
+    ("[3, 1, 2] as int[]", "7"),
+    ("[5, 4, 9, 0] as long[]", "1L"),
+    ("[2.5d, 1.5d] as double[]", "0.5d"),
+    ("['b', 'c', 'a'] as String[]", "'z'"),
+    ("new int[3]", "-1"),
+    ("[] as int[]", "1"),
+];
+
+/// Operations on the array `a`. Each is an expression, so [`observe`] prints its
+/// value; the in-place ones run inside a closure and render the array after.
+const ARRAY_OPS: &[&str] = &[
+    "Arrays.toString(a)",
+    "Arrays.toString(Arrays.copyOf(a, 5))",
+    "Arrays.toString(Arrays.copyOf(a, 1))",
+    "Arrays.toString(Arrays.copyOf(a, 0))",
+    "Arrays.copyOf(a, 2).getClass().getName()",
+    "Arrays.toString(Arrays.copyOfRange(a, 1, 3))",
+    "Arrays.toString(Arrays.copyOfRange(a, 0, 6))",
+    "Arrays.toString(Arrays.copyOfRange(a, 2, 2))",
+    "Arrays.toString(Arrays.copyOfRange(a, 3, 1))",
+    "Arrays.toString(Arrays.copyOfRange(a, 9, 10))",
+    "Arrays.toString(Arrays.copyOf(a, -1))",
+    "Arrays.equals(a, Arrays.copyOf(a, a.length))",
+    "Arrays.equals(a, Arrays.copyOf(a, a.length + 1))",
+    "{ -> Arrays.sort(a); Arrays.toString(a) }()",
+    "{ -> Arrays.fill(a, FILL); Arrays.toString(a) }()",
+    "{ -> def b = Arrays.copyOf(a, a.length); Arrays.sort(b); Arrays.toString(a) + Arrays.toString(b) }()",
+];
+
+/// `java.util.Arrays` array statics and `Collections.swap` over typed arrays.
+fn gen_arrays(rng: &mut Rng) -> Vec<String> {
+    let (decl, fill) = *pick(rng, ARRAY_SUBJECTS);
+    let mut out = vec![format!("def a = {decl}"), "def l = [3, 1, 2]".to_string()];
+    let n = rng.range_i(3, 6) as usize;
+    for _ in 0..n {
+        out.push(match rng.below(5) {
+            0 => {
+                let (i, j) = (rng.range_i(-1, 3), rng.range_i(-1, 3));
+                observe(&format!("{{ -> Collections.swap(l, {i}, {j}); l }}()"))
+            }
+            _ => observe(&pick(rng, ARRAY_OPS).replace("FILL", fill)),
+        });
+    }
+    out
+}
+
+/// Multiple assignment and typed multi-declarators — `(a, b) = expr` onto
+/// variables already in scope, `def (a, b) = expr`, and `int a = 1, b = 2`.
+fn gen_multi_assign(rng: &mut Rng) -> Vec<String> {
+    let mut out = Vec::new();
+    match rng.below(4) {
+        // A swap through the temporary: the right side is read before any write.
+        0 => {
+            let (x, y) = (rng.range_i(-9, 9), rng.range_i(-9, 9));
+            out.push(format!("def a = {x}, b = {y}"));
+            for _ in 0..rng.range_i(1, 3) {
+                out.push("(a, b) = [b, a]".to_string());
+            }
+            out.push("println(\"$a $b\")".to_string());
+        }
+        // A Fibonacci step in a loop, mixing typed and untyped targets.
+        1 => {
+            let n = rng.range_i(1, 12);
+            out.push("long u = 0, v = 1".to_string());
+            out.push(format!("for (i in 1..{n}) {{ (u, v) = [v, u + v] }}"));
+            out.push("println(u)".to_string());
+            out.push("println(u.getClass().getName())".to_string());
+        }
+        // A short or long right side: the surplus is dropped, the shortfall null.
+        2 => {
+            let len = rng.range_i(0, 4);
+            let items: Vec<String> = (0..len).map(|i| format!("{}", i * 3 + 1)).collect();
+            out.push("def p, q".to_string());
+            out.push(format!("(p, q) = [{}]", items.join(", ")));
+            out.push("println(\"$p $q\")".to_string());
+        }
+        // Typed declarators sharing one type, converted on store.
+        _ => {
+            let ty = *pick(rng, &["int", "long", "double", "String", "def"]);
+            let v = if ty == "String" { "'s'" } else { "4" };
+            out.push(format!("{ty} m = {v}, n = {v}"));
+            out.push("println(m)".to_string());
+            out.push("println(n)".to_string());
+            out.push("println(n.getClass().getName())".to_string());
+        }
     }
     out
 }
@@ -2169,6 +2267,8 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::StrOps,
                 Mode::ListOps,
                 Mode::SafeNav,
+                Mode::Arrays,
+                Mode::MultiAssign,
                 Mode::Floats,
             ],
         )
@@ -2198,6 +2298,8 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
         Mode::StrOps => gen_strops(&mut rng),
         Mode::ListOps => gen_listops(&mut rng),
         Mode::SafeNav => gen_safenav(&mut rng),
+        Mode::Arrays => gen_arrays(&mut rng),
+        Mode::MultiAssign => gen_multi_assign(&mut rng),
         _ => {
             let n = rng.range_i(1, 5) as usize;
             (0..n)
@@ -2232,6 +2334,8 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         | Mode::StrOps
                         | Mode::ListOps
                         | Mode::SafeNav
+                        | Mode::Arrays
+                        | Mode::MultiAssign
                         | Mode::Floats
                         | Mode::Mixed => unreachable!(),
                     };
@@ -2704,7 +2808,7 @@ fn parse_args() -> Args {
                     mode = m;
                 } else {
                     eprintln!(
-                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|faults|switch|asserts|modzero|gdk|conversions|classes|ranges|aliasing|views|switchexpr|regex|numeric|strops|listops|safenav|floats|mixed)"
+                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|faults|switch|asserts|modzero|gdk|conversions|classes|ranges|aliasing|views|switchexpr|regex|numeric|strops|listops|safenav|arrays|multiassign|floats|mixed)"
                     );
                     std::process::exit(2);
                 }
@@ -2715,7 +2819,7 @@ fn parse_args() -> Args {
                      options:\n  \
                      -c, --count N        cases to run (default 1000)\n  \
                      -s, --seed N         base seed (default 1)\n  \
-                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|views|switchexpr|\n                       regex|numeric|strops|listops|safenav|floats|\n                       mixed\n                       (default mixed)\n  \
+                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|views|switchexpr|\n                       regex|numeric|strops|listops|safenav|arrays|multiassign|floats|\n                       mixed\n                       (default mixed)\n  \
                      -j, --jobs N         parallel workers (default = cores)\n  \
                      --once               replay a single --seed, minimize, dump both sides\n  \
                      --dump               print --count generated programs and exit\n  \

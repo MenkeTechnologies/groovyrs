@@ -2982,3 +2982,99 @@ def s = 'ab'; def u = s.&toUpperCase; s = 'zz'; println u(); def l = []; def a =
 ['x', 'y', 'z'].eachPermutation { print it.join('') + ' ' }; println(); [2, 2].eachPermutation { print it }; println()
 %%
 println([{ 1 } instanceof Closure, [1].toSet() instanceof Set, new TreeSet() instanceof SortedSet, (1..2) instanceof ArrayList, ([1] as int[]) instanceof List, 'a' instanceof Comparable, [a: 1] instanceof Cloneable, new StringWriter() instanceof CharSequence])
+%%
+# Collections.swap exchanges two elements through the handle.
+def l = [3, 1, 2]
+Collections.swap(l, 0, 2)
+println(l)
+Collections.swap(l, 1, 1)
+println(l)
+%%
+# Collections.swap with an index past the end raises IndexOutOfBoundsException.
+def l = [3, 1, 2]
+Collections.swap(l, 0, 3)
+%%
+# Arrays.sort sorts a typed array in place.
+def a = [3, 1, 2] as int[]
+Arrays.sort(a)
+println Arrays.toString(a)
+def s = ['b', 'c', 'a'] as String[]
+Arrays.sort(s)
+println Arrays.toString(s)
+%%
+# Arrays.equals compares typed arrays element-wise and by length.
+println Arrays.equals([1, 2] as int[], [1, 2] as int[])
+println Arrays.equals([1, 2] as int[], [1, 3] as int[])
+println Arrays.equals([1, 2] as int[], [1] as int[])
+%%
+# Arrays.fill writes every slot of a typed array.
+def b = new int[3]
+Arrays.fill(b, 7)
+println b
+println b.getClass().getName()
+%%
+# Arrays.copyOf keeps the element type and pads with its zero.
+def a = [1, 2, 3] as int[]
+def c = Arrays.copyOf(a, 5)
+println Arrays.toString(c)
+println c.getClass().getName()
+println Arrays.toString(Arrays.copyOf(a, 2))
+def s = ['x'] as String[]
+println Arrays.toString(Arrays.copyOf(s, 2))
+%%
+# Arrays.copyOfRange windows an array and pads past the end.
+def a = [1, 2, 3] as int[]
+println Arrays.toString(Arrays.copyOfRange(a, 1, 3))
+println Arrays.toString(Arrays.copyOfRange(a, 1, 5))
+println Arrays.toString(Arrays.copyOfRange(a, 3, 3))
+%%
+# Arrays.copyOfRange with from > to is an IllegalArgumentException.
+Arrays.copyOfRange([1, 2, 3] as int[], 2, 1)
+%%
+# Arrays.copyOf with a negative length is a NegativeArraySizeException.
+Arrays.copyOf([1, 2, 3] as int[], -1)
+%%
+# Multiple assignment to existing variables is a swap through a temporary.
+def a = 1
+def b = 2
+(a, b) = [b, a]
+println "$a $b"
+%%
+# Multiple assignment onto typed locals.
+int x, y
+(x, y) = [10, 20]
+println x + y
+%%
+# Multiple assignment from a split result; a short right side leaves null.
+def c, d, e
+(c, d, e) = 'p q'.split(' ')
+println "$c $d $e"
+%%
+# Multiple assignment inside a loop (Fibonacci step).
+def u = 0, v = 1
+for (i in 1..5) { (u, v) = [v, u + v] }
+println u
+%%
+# The right side of a multiple assignment is evaluated once.
+def n = 0
+def f = { n++; [n, n * 2] }
+def a, b
+(a, b) = f()
+println "$a $b $n"
+%%
+# Typed multi-declarators share the declared type.
+int p = 1, q = 2
+long r = 3, s = 4
+println p + q + r + s
+println r.getClass().getName()
+%%
+# Typed multi-declarators for String and double.
+String s1 = 'a', s2 = 'b'
+println s1 + s2
+double d1 = 1, d2 = 2
+println d1 / d2
+%%
+# Typed multi-declarators with array types convert each initializer.
+int[] arr = [1, 2], brr = [3]
+println arr.getClass().getName()
+println brr.getClass().getName()

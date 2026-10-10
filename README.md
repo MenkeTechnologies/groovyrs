@@ -259,9 +259,10 @@ Implemented and checked against Apache Groovy:
   permanently, and every later read or write through it raises
   `java.util.ConcurrentModificationException` — `getClass()` and `is()` still
   answer, because they read the reference rather than the elements.
-- **Declarations** — the multi-declarator `def a = 1, b = 2` and Groovy's
-  multiple assignment `def (a, b) = [1, 2]` (the right side is evaluated once;
-  a name past its end is `null`).
+- **Declarations** — the multi-declarator `def a = 1, b = 2` (and the typed
+  `int a = 1, b = 2`) and Groovy's multiple assignment `def (a, b) = [1, 2]`,
+  or `(a, b) = [b, a]` onto variables already in scope (the right side is
+  evaluated once, before any write; a name past its end is `null`).
 - **Classes** — `class C { fields; C(..){..}; def m(){..} }`, `new C(args)`,
   fields with initializers, arity-dispatched constructors, methods with an
   implicit `this`, property get/set with Groovy's auto `getX`/`setX`, a bare
@@ -432,7 +433,8 @@ Implemented and checked against Apache Groovy:
   `getNumericValue`, `MIN_RADIX` / `MAX_RADIX` — each with the `int` code-point
   overload), `Collections` (`emptyList` / `emptyMap` / `emptySet`,
   `singletonList`, `nCopies`, `unmodifiableList`, the in-place `sort` / `reverse`,
-  `max` / `min`, `frequency`, `disjoint`), `Arrays.asList`, `System`
+  `max` / `min`, `swap`, `frequency`, `disjoint`), `Arrays` (`asList`, `toString`,
+  and on typed arrays `sort`, `equals`, `fill`, `copyOf`, `copyOfRange`), `System`
   (`lineSeparator`, `getProperty` with and without a default, `getenv`), and
   `String.format` / `String.valueOf`, plus the script-scope `printf` / `sprintf`
   over `java.util.Formatter` (`%s %S %b %B %h %H %c %C %d %o %x %X %e %E %f %g
@@ -797,7 +799,7 @@ now that the `BigDecimal` model is exact. Modes:
 `arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
 `gstring`, `exceptions`, `faults`, `switch`, `asserts`, `modzero`, `gdk`,
 `conversions`, `classes`, `ranges`, `aliasing`, `views`, `switchexpr`, `regex`,
-`numeric`, `strops`, `listops`, `safenav`, `floats`, `mixed`. `--dump` prints the corpus a
+`numeric`, `strops`, `listops`, `safenav`, `arrays`, `multiassign`, `floats`, `mixed`. `--dump` prints the corpus a
 mode generates and runs nothing, which is how "does this fuzzer ever emit X"
 became a grep rather than a reading of the generator; `switchexpr`, `regex`,
 `numeric`, `strops`, `listops` and `safenav` were each added because that grep

@@ -9192,3 +9192,59 @@ int[] a = [3.9, 4]; println a; println Arrays.toString([1, 2])
     assert!(ok);
     assert_eq!(out, "[2, 3]\n[1.5, 2.0]\n[3, 4]\n[[1, 2]]\n");
 }
+
+#[test]
+fn multiple_assignment_to_existing_variables_swaps_through_a_temporary() {
+    let (out, ok) = run("def a = 1\ndef b = 2\n(a, b) = [b, a]\nprintln \"$a $b\"\n\
+         int x, y\n(x, y) = [10, 20]\nprintln x + y\n\
+         def p, q\n(p, q) = [7]\nprintln \"$p $q\"\n\
+         def u = 0, v = 1\nfor (i in 1..5) { (u, v) = [v, u + v] }\nprintln u\n");
+    assert!(ok);
+    assert_eq!(out, "2 1\n30\n7 null\n5\n");
+}
+
+#[test]
+fn parenthesised_expression_statement_is_not_a_destructuring() {
+    let (out, ok) = run("println (1 + 2) * 3\n");
+    assert!(!ok);
+    assert_eq!(out, "3\n");
+}
+
+#[test]
+fn typed_multi_declarators_share_the_declared_type() {
+    let (out, ok) = run("int p = 1, q = 2\nlong r = 3, s = 4\nprintln p + q + r + s\n\
+         println r.getClass().getName()\nint[] arr = [1, 2], brr = [3]\n\
+         println brr.getClass().getName()\nString s1 = 'a', s2 = 'b'\nprintln s1 + s2\n");
+    assert!(ok);
+    assert_eq!(out, "10\njava.lang.Long\n[I\nab\n");
+}
+
+#[test]
+fn collections_swap_and_arrays_statics_work_through_the_handle() {
+    let (out, ok) = run("def l = [3, 1, 2]\nCollections.swap(l, 0, 2)\nprintln l\n\
+         def a = [3, 1, 2] as int[]\nArrays.sort(a)\nprintln Arrays.toString(a)\n\
+         println Arrays.equals(a, [1, 2, 3] as int[])\n\
+         println Arrays.toString(Arrays.copyOf(a, 5))\n\
+         println Arrays.copyOf(a, 2).getClass().getName()\n\
+         println Arrays.toString(Arrays.copyOfRange(a, 1, 5))\n\
+         def b = new int[3]\nArrays.fill(b, 7)\nprintln Arrays.toString(b)\n");
+    assert!(ok);
+    assert_eq!(
+        out,
+        "[2, 1, 3]\n[1, 2, 3]\ntrue\n[1, 2, 3, 0, 0]\n[I\n[2, 3, 0, 0]\n[7, 7, 7]\n"
+    );
+}
+
+#[test]
+fn collections_swap_out_of_range_raises_index_out_of_bounds() {
+    let (out, err, ok) = run_full(
+        "try { Collections.swap([3, 1, 2], 0, 3) } catch (e) { println e.getClass().getName(); println e.message }\n\
+         try { Arrays.copyOfRange([1, 2] as int[], 2, 1) } catch (e) { println e.getClass().getName(); println e.message }\n",
+    );
+    assert!(ok, "{err}");
+    assert_eq!(
+        out,
+        "java.lang.IndexOutOfBoundsException\nIndex 3 out of bounds for length 3\n\
+         java.lang.IllegalArgumentException\n2 > 1\n"
+    );
+}

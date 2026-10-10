@@ -14958,6 +14958,90 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
             let (a, b) = (iteration_elements(&arg0), iteration_elements(args.get(1)?));
             Value::bool(!a.iter().any(|x| b.iter().any(|y| values_equal(x, y))))
         }
+        // `Collections.swap(list, i, j)` exchanges two elements through the
+        // handle and answers `void`; an index outside the list is the
+        // `IndexOutOfBoundsException` of the `List.set` it is written with.
+        ("Collections", "swap") if args.len() == 3 => {
+            let id = list_id(&arg0)?;
+            let mut items = iteration_elements(&arg0);
+            let (i, j) = (as_i64(args.get(1)?)?, as_i64(args.get(2)?)?);
+            for at in [i, j] {
+                if at < 0 || at as usize >= items.len() {
+                    raise(
+                        vm,
+                        "IndexOutOfBoundsException",
+                        &format!("Index {at} out of bounds for length {}", items.len()),
+                    );
+                    return Some(Value::Undef);
+                }
+            }
+            items.swap(i as usize, j as usize);
+            list_store(id, items, false);
+            Value::Undef
+        }
+        // The `java.util.Arrays` array statics. Each reads the array's own
+        // element type, so a copy keeps `int[]` and a padded slot is that type's
+        // zero rather than `null`.
+        ("Arrays", "sort") if args.len() == 1 && array_elem(&arg0).is_some() => {
+            let id = list_id(&arg0)?;
+            let sorted = match sort_values(vm, &iteration_elements(&arg0), &OrderBy::Natural) {
+                Ok(sorted) => sorted,
+                Err(e) => {
+                    fault(vm, e);
+                    return Some(Value::Undef);
+                }
+            };
+            list_store(id, sorted, false);
+            Value::Undef
+        }
+        ("Arrays", "equals") if args.len() == 2 => match (&arg0, &args[1]) {
+            (Value::Undef, Value::Undef) => Value::Bool(true),
+            (Value::Undef, _) | (_, Value::Undef) => Value::Bool(false),
+            (a, b) => {
+                let (a, b) = (iteration_elements(a), iteration_elements(b));
+                Value::Bool(
+                    a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| values_equal(x, y)),
+                )
+            }
+        },
+        ("Arrays", "fill") if args.len() == 2 && array_elem(&arg0).is_some() => {
+            let id = list_id(&arg0)?;
+            let len = iteration_elements(&arg0).len();
+            list_store(id, vec![args[1].clone(); len], false);
+            Value::Undef
+        }
+        ("Arrays", "copyOf") if args.len() == 2 => {
+            let elem = array_elem(&arg0)?;
+            let n = as_i64(&args[1])?;
+            if n < 0 {
+                raise(vm, "NegativeArraySizeException", &n.to_string());
+                return Some(Value::Undef);
+            }
+            let mut items = iteration_elements(&arg0);
+            items.resize(n as usize, elem.zero());
+            garray(items, elem)
+        }
+        ("Arrays", "copyOfRange") if args.len() == 3 => {
+            let elem = array_elem(&arg0)?;
+            let (from, to) = (as_i64(&args[1])?, as_i64(&args[2])?);
+            let mut items = iteration_elements(&arg0);
+            let len = items.len() as i64;
+            if from > to {
+                raise(vm, "IllegalArgumentException", &format!("{from} > {to}"));
+                return Some(Value::Undef);
+            }
+            if from < 0 || from > len {
+                raise(
+                    vm,
+                    "ArrayIndexOutOfBoundsException",
+                    &format!("Array index out of range: {from}"),
+                );
+                return Some(Value::Undef);
+            }
+            let mut window = items.split_off(from as usize);
+            window.resize((to - from) as usize, elem.zero());
+            garray(window, elem)
+        }
         // `Arrays.asList(a, b, c)` — the varargs form, the only one a Groovy
         // script without real arrays can write.
         ("Arrays", "asList") => Value::array(args.to_vec()),

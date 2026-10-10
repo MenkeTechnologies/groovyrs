@@ -807,7 +807,7 @@ pub(super) fn static_call(vm: &mut VM, class: &str, method: &str, args: &[Value]
             out
         }
         ("singletonMap", 2) if class == "Collections" => {
-            let out = gmap(vec![(groovy_str(&arg0), args[1].clone())]);
+            let out = gmap(vec![(mapkey::encode(&arg0), args[1].clone())]);
             set_flavor(&out, "java.util.Collections$SingletonMap", Writes::Frozen);
             out
         }
@@ -922,12 +922,12 @@ pub(super) fn static_call(vm: &mut VM, class: &str, method: &str, args: &[Value]
         ("of", n) if class == "Map" && n % 2 == 0 => {
             let mut entries: Vec<(String, Value)> = Vec::new();
             for pair in args.chunks(2) {
-                let key = groovy_str(&pair[0]);
+                let key = mapkey::encode(&pair[0]);
                 if entries.iter().any(|(k, _)| *k == key) {
                     raise(
                         vm,
                         "IllegalArgumentException",
-                        &format!("duplicate key: {key}"),
+                        &format!("duplicate key: {}", mapkey::text(&key)),
                     );
                     return Some(Value::Undef);
                 }

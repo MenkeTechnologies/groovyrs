@@ -3046,7 +3046,7 @@ impl Parser {
                     e = method_pointer(e, name, line);
                     continue;
                 }
-                let member = self.ident()?;
+                let member = self.member_name()?;
                 if self.is(&Tok::LParen) {
                     let mut args = self.call_args()?;
                     // A trailing closure after the parenthesised args:
@@ -3630,9 +3630,33 @@ impl Parser {
     /// otherwise it is an ordinary expression (string/number literal key). When
     /// the `[...]` turns out to be a list, this is just the first element.
     fn map_key(&mut self) -> Result<Expr, String> {
-        // A bare identifier immediately followed by `:` is a literal string key.
-        if let Tok::Ident(name) = self.peek().clone() {
-            if matches!(self.peek_at(1), Tok::Colon) {
+        // A bare identifier immediately followed by `:` is a literal string key
+        // — a keyword too: `[true: 1, if: 2, null: 3]` has the keys `'true'`,
+        // `'if'` and `'null'`.
+        if matches!(self.peek_at(1), Tok::Colon) {
+            let word = match self.peek() {
+                Tok::Ident(name) => Some(name.clone()),
+                Tok::Def => Some("def".to_string()),
+                Tok::If => Some("if".to_string()),
+                Tok::Else => Some("else".to_string()),
+                Tok::While => Some("while".to_string()),
+                Tok::Do => Some("do".to_string()),
+                Tok::For => Some("for".to_string()),
+                Tok::In => Some("in".to_string()),
+                Tok::Switch => Some("switch".to_string()),
+                Tok::Case => Some("case".to_string()),
+                Tok::Default => Some("default".to_string()),
+                Tok::Assert => Some("assert".to_string()),
+                Tok::Return => Some("return".to_string()),
+                Tok::Break => Some("break".to_string()),
+                Tok::Continue => Some("continue".to_string()),
+                Tok::True => Some("true".to_string()),
+                Tok::False => Some("false".to_string()),
+                Tok::Null => Some("null".to_string()),
+                Tok::New => Some("new".to_string()),
+                _ => None,
+            };
+            if let Some(name) = word {
                 self.advance();
                 return Ok(Expr::Str(name));
             }
@@ -3911,6 +3935,39 @@ impl Parser {
             ));
         }
         Ok(())
+    }
+
+    /// A member name after `.` / `?.`: an identifier, or a keyword — Groovy
+    /// reads `m.true`, `m.class` and `x.default` as property names.
+    fn member_name(&mut self) -> Result<String, String> {
+        let keyword = match self.peek() {
+            Tok::Def => Some("def"),
+            Tok::If => Some("if"),
+            Tok::Else => Some("else"),
+            Tok::While => Some("while"),
+            Tok::Do => Some("do"),
+            Tok::For => Some("for"),
+            Tok::In => Some("in"),
+            Tok::Switch => Some("switch"),
+            Tok::Case => Some("case"),
+            Tok::Default => Some("default"),
+            Tok::Assert => Some("assert"),
+            Tok::Return => Some("return"),
+            Tok::Break => Some("break"),
+            Tok::Continue => Some("continue"),
+            Tok::True => Some("true"),
+            Tok::False => Some("false"),
+            Tok::Null => Some("null"),
+            Tok::New => Some("new"),
+            _ => None,
+        };
+        match keyword {
+            Some(word) => {
+                self.advance();
+                Ok(word.to_string())
+            }
+            None => self.ident(),
+        }
     }
 
     fn ident(&mut self) -> Result<String, String> {

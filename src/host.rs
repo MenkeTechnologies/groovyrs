@@ -1322,6 +1322,9 @@ fn java_class_name(v: &Value) -> String {
     if as_class_ref(v).is_some() {
         return "java.lang.Class".to_string();
     }
+    if as_entry(v).is_some() {
+        return "java.util.LinkedHashMap$Entry".to_string();
+    }
     if as_expando(v).is_some() {
         return "groovy.util.Expando".to_string();
     }
@@ -1803,6 +1806,8 @@ fn interned_class_name(name: &str) -> &'static str {
 
 #[path = "host/bignum.rs"]
 mod bignum;
+#[path = "host/mapkey.rs"]
+mod mapkey;
 #[path = "host/seq.rs"]
 mod seq;
 
@@ -2280,6 +2285,7 @@ struct ClassMeta {
 /// (called from [`install`]).
 fn reset_heap() {
     seq::reset();
+    mapkey::reset();
     HEAP.with(|h| h.borrow_mut().clear());
     CLASSES.with(|c| c.borrow_mut().clear());
     DEC_LITERALS.with(|d| d.borrow_mut().clear());
@@ -3596,7 +3602,7 @@ fn map_order(entries: Vec<(String, Value)>, kind: MapKind) -> Vec<(String, Value
     match kind {
         MapKind::Linked => entries,
         MapKind::Hash { req } => {
-            let keys: Vec<Value> = entries.iter().map(|(k, _)| Value::str(k.clone())).collect();
+            let keys: Vec<Value> = entries.iter().map(|(k, _)| mapkey::decode(k)).collect();
             hash_order(&keys, req)
                 .into_iter()
                 .map(|i| entries[i].clone())
@@ -3604,7 +3610,7 @@ fn map_order(entries: Vec<(String, Value)>, kind: MapKind) -> Vec<(String, Value
         }
         MapKind::Tree => {
             let mut out = entries;
-            out.sort_by(|a, b| natural_order(&Value::str(a.0.clone()), &Value::str(b.0.clone())));
+            out.sort_by(|a, b| mapkey::cmp(&a.0, &b.0));
             out
         }
     }
@@ -3711,7 +3717,7 @@ fn dispatch_navigable_map(
     method: &str,
     args: &[Value],
 ) -> Option<Value> {
-    let key_arg = |i: usize| args.get(i).map(groovy_str).unwrap_or_default();
+    let key_arg = |i: usize| args.get(i).map(mapkey::encode).unwrap_or_default();
     let entry_at = |i: Option<usize>| match i {
         Some(i) => {
             let (k, v) = &entries[i];
@@ -3720,22 +3726,22 @@ fn dispatch_navigable_map(
         None => Value::Undef,
     };
     let key_at = |i: Option<usize>| match i {
-        Some(i) => Value::str(entries[i].0.clone()),
+        Some(i) => mapkey::decode(&entries[i].0),
         None => Value::Undef,
     };
     // The four neighbour searches, as indices into the sorted `entries`.
     let strictly_below = |k: &str| {
         (0..entries.len())
             .rev()
-            .find(|&i| entries[i].0.as_str() < k)
+            .find(|&i| mapkey::cmp(&entries[i].0, k).is_lt())
     };
     let at_or_below = |k: &str| {
         (0..entries.len())
             .rev()
-            .find(|&i| entries[i].0.as_str() <= k)
+            .find(|&i| mapkey::cmp(&entries[i].0, k).is_le())
     };
-    let at_or_above = |k: &str| (0..entries.len()).find(|&i| entries[i].0.as_str() >= k);
-    let strictly_above = |k: &str| (0..entries.len()).find(|&i| entries[i].0.as_str() > k);
+    let at_or_above = |k: &str| (0..entries.len()).find(|&i| mapkey::cmp(&entries[i].0, k).is_ge());
+    let strictly_above = |k: &str| (0..entries.len()).find(|&i| mapkey::cmp(&entries[i].0, k).is_gt());
     // A range view is materialised as a plain `TreeMap` of the selected entries.
     // The views' own class names (`TreeMap$AscendingSubMap`, `$DescendingSubMap`)
     // are not modeled — see the `TreeMap` entry in BUGS.md.
@@ -3779,24 +3785,39 @@ fn dispatch_navigable_map(
         "higherEntry" => entry_at(strictly_above(&key_arg(0))),
         "headMap" => {
             let (k, inc) = (key_arg(0), flag(1, false));
-            range(&|x: &str| if inc { x <= &k } else { x < &k })
+            range(&|x: &str| {
+                let o = mapkey::cmp(x, &k);
+                if inc {
+                    o.is_le()
+                } else {
+                    o.is_lt()
+                }
+            })
         }
         "tailMap" => {
             let (k, inc) = (key_arg(0), flag(1, true));
-            range(&|x: &str| if inc { x >= &k } else { x > &k })
+            range(&|x: &str| {
+                let o = mapkey::cmp(x, &k);
+                if inc {
+                    o.is_ge()
+                } else {
+                    o.is_gt()
+                }
+            })
         }
         // `subMap` is the one name that collides: on a `TreeMap` two or four
         // arguments are the `NavigableMap` *range*, but the single-argument
         // collection form is still the GDK's key selection, so it falls through.
         "subMap" if args.len() == 2 && !is_list(&args[0]) => {
             let (lo, hi) = (key_arg(0), key_arg(1));
-            range(&|x: &str| x >= &lo && x < &hi)
+            range(&|x: &str| mapkey::cmp(x, &lo).is_ge() && mapkey::cmp(x, &hi).is_lt())
         }
         "subMap" if args.len() == 4 => {
             let (lo, hi) = (key_arg(0), key_arg(2));
             let (li, hi_inc) = (flag(1, true), flag(3, false));
             range(&|x: &str| {
-                (if li { x >= &lo } else { x > &lo }) && (if hi_inc { x <= &hi } else { x < &hi })
+                let (a, b) = (mapkey::cmp(x, &lo), mapkey::cmp(x, &hi));
+                (if li { a.is_ge() } else { a.is_gt() }) && (if hi_inc { b.is_le() } else { b.is_lt() })
             })
         }
         "descendingMap" => {
@@ -3811,12 +3832,10 @@ fn dispatch_navigable_map(
             entries
                 .iter()
                 .rev()
-                .map(|(k, _)| Value::str(k.clone()))
+                .map(|(k, _)| mapkey::decode(k))
                 .collect(),
         ),
-        "navigableKeySet" => {
-            Value::array(entries.iter().map(|(k, _)| Value::str(k.clone())).collect())
-        }
+        "navigableKeySet" => Value::array(entries.iter().map(|(k, _)| mapkey::decode(k)).collect()),
         "comparator" => Value::Undef,
         _ => return None,
     })
@@ -3974,8 +3993,8 @@ fn b_make_map(vm: &mut VM, _argc: u8) -> Value {
     let mut entries: Vec<(String, Value)> = Vec::with_capacity(n);
     let mut i = 0;
     while i + 1 < flat.len() {
-        // Groovy-format the key so a decimal key reads `1.50`, not a raw handle.
-        let key = groovy_str(&flat[i]);
+        // The key keeps its type: `[1: x]` is an `Integer` key, `['1': x]` a `String` one.
+        let key = mapkey::encode(&flat[i]);
         let val = flat[i + 1].clone();
         match entries.iter_mut().find(|(k, _)| *k == key) {
             Some(slot) => slot.1 = val,
@@ -6241,7 +6260,7 @@ fn is_case(vm: &mut VM, label: &Value, subject: &Value) -> Value {
     // holds *and* whose value is Groovy-true (GROOVY-9848 guards the `get` with
     // `containsKey`), so `case [a: 1]:` matches `'a'` and not `[a: 1]`.
     if is_omap(&label) {
-        let hit = omap_get(&label, &groovy_str(&subject)).flatten();
+        let hit = omap_get(&label, &mapkey::encode(&subject)).flatten();
         return Value::bool(hit.is_some_and(|v| groovy_truthy(vm, &v)));
     }
     // `case null:` matches only null; otherwise Groovy's `equals`.
@@ -6489,7 +6508,13 @@ fn inspect_shape(v: &Value) -> String {
         }
         let items: Vec<String> = entries
             .iter()
-            .map(|(k, val)| format!("'{k}':{}", self_or(v, val, THIS_MAP, inspect_value)))
+            .map(|(k, val)| {
+                format!(
+                    "{}:{}",
+                    mapkey::inspect(k),
+                    self_or(v, val, THIS_MAP, inspect_value)
+                )
+            })
             .collect();
         return format!("[{}]", items.join(", "));
     }
@@ -6944,12 +6969,12 @@ fn shape_hash_code(v: &Value) -> i32 {
         // groovyrs map key is a `String`, so a non-string key hashes as its
         // rendering rather than as itself — see BUGS.md.
         return entries.iter().fold(0i32, |h, (k, val)| {
-            h.wrapping_add(string_hash(k) ^ object_hash_code(val))
+            h.wrapping_add(object_hash_code(&mapkey::decode(k)) ^ object_hash_code(val))
         });
     }
     if let Some((k, val)) = as_entry(v) {
         // `Map.Entry.hashCode()` is that same `keyHash ^ valueHash`.
-        return string_hash(&k) ^ object_hash_code(&val);
+        return object_hash_code(&mapkey::decode(&k)) ^ object_hash_code(&val);
     }
     if let Some((items, kind)) = as_set(v) {
         // `AbstractSet`: the *sum* of the elements', so it does not depend on
@@ -7968,6 +7993,27 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
             }
         }
     }
+    // A range receiver subscripted by a range indexes its ASCENDING form and
+    // reverses the answer when the receiver runs downwards: `(5..1)[1..2]` is
+    // `[3, 2]`. A reversed `ObjectRange` (`('e'..'a')`) answers only the last
+    // element of the slice, which is what `ObjectRange.getAt` does.
+    if let (Some(rr), Some(ri)) = (as_range(&recv), as_range(&index)) {
+        if range_is_reverse(&rr) && as_i64(&ri.from).is_some() {
+            let object_range = range_class(&rr) == "groovy.lang.ObjectRange";
+            let mut asc = range_elements(&rr);
+            if !object_range {
+                asc.reverse();
+            }
+            let out = index_read(vm, Value::array(asc), index);
+            return match out {
+                Value::Array(items) if object_range => {
+                    Value::array(items.last().cloned().into_iter().collect())
+                }
+                Value::Array(items) => Value::array(items.iter().rev().cloned().collect()),
+                other => other,
+            };
+        }
+    }
     // A range subscripts as the list it enumerates, on either side: `(1..5)[0]`
     // is `1`, and `list[1..2]` is the sublist at those positions. A list handle
     // reads through the same transient array form the arms below match on.
@@ -7978,6 +8024,24 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
     // 7, 6, … 0, -1 and read a character at each, answering "W ,olleHd" where
     // Groovy answers "World". Both-negative happened to agree because
     // `-5..-1` already ascends.
+    // `list[from..to]` is `list.subList(from, to + 1)`: a window that leaves the
+    // list is `IndexOutOfBoundsException`, with `subList`'s own wording.
+    if let (Value::Array(items), Some(r)) = (&recv, as_range(&index)) {
+        if let Some(Value::Array(idxs)) = normalize_range_index(&r, items.len()) {
+            let positions: Vec<i64> = idxs.iter().filter_map(as_i64).collect();
+            if let (Some(lo), Some(hi)) = (positions.iter().min(), positions.iter().max()) {
+                let len = items.len() as i64;
+                if *lo < 0 {
+                    raise(vm, "IndexOutOfBoundsException", &format!("fromIndex = {lo}"));
+                    return Value::Undef;
+                }
+                if hi + 1 > len {
+                    raise(vm, "IndexOutOfBoundsException", &format!("toIndex = {}", hi + 1));
+                    return Value::Undef;
+                }
+            }
+        }
+    }
     let index = match (subscript_len(&recv), as_range(&index)) {
         (Some(len), Some(r)) => normalize_range_index(&r, len).unwrap_or(index),
         _ => index,
@@ -8009,7 +8073,7 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
         // then looked up under the handle's debug form and read back `null`.
         // Every map key here is a `String` (BUGS.md), so the two spellings have
         // to agree on what that string is.
-        let k = groovy_str(&index);
+        let k = mapkey::encode(&index);
         return match omap_get(&recv, &k).flatten() {
             Some(v) => v,
             None => map_default(vm, &recv, &k, &index),
@@ -8142,7 +8206,7 @@ fn b_setindex(vm: &mut VM, _argc: u8) -> Value {
         return recv;
     }
     if is_omap(&recv) {
-        omap_set(&recv, groovy_str(&index), value);
+        omap_set(&recv, mapkey::encode(&index), value);
         return recv;
     }
     // `list[i] = v` over an existing element of a whole list: one slot, no copy.
@@ -10206,8 +10270,15 @@ fn dispatch_iteration(
                 [clo] if closure_meta(clo).is_some() => {
                     match items.first() {
                         Some(first) => (clo, first.clone(), 1),
-                        // Groovy: `[].inject(clo)` yields null.
-                        None => return Some(Ok(Value::Undef)),
+                        // `[].inject(clo)` has nothing to seed the fold with.
+                        None => {
+                            raise(
+                                vm,
+                                "NoSuchElementException",
+                                "Cannot call inject() on an empty iterable without passing an initial value.",
+                            );
+                            return Some(Ok(Value::Undef));
+                        }
                     }
                 }
                 _ => return None,
@@ -10340,7 +10411,7 @@ fn dispatch_iteration(
                 if pending_exc() {
                     return Some(Ok(Value::Undef));
                 }
-                let key = groovy_str(&key);
+                let key = mapkey::encode(&key);
                 match groups.iter_mut().find(|(k, _)| *k == key) {
                     Some(slot) => slot.1.push(it.clone()),
                     None => groups.push((key, vec![it.clone()])),
@@ -10361,7 +10432,7 @@ fn dispatch_iteration(
             let mut counts: Vec<(String, i64)> = Vec::new();
             for it in items {
                 let key = match invoke_closure(vm, clo, &item_args(clo, it)) {
-                    Ok(v) => groovy_str(&v),
+                    Ok(v) => mapkey::encode(&v),
                     Err(e) => return Some(Err(e)),
                 };
                 if pending_exc() {
@@ -10773,7 +10844,7 @@ fn entry_pairs(v: &Value) -> Vec<(String, Value)> {
     }
     // The `[key, value]` pair is a list handle; deref to read its two elements.
     match deref_list(v) {
-        Value::Array(a) if a.len() == 2 => vec![(groovy_str(&a[0]), a[1].clone())],
+        Value::Array(a) if a.len() == 2 => vec![(mapkey::encode(&a[0]), a[1].clone())],
         _ => Vec::new(),
     }
 }
@@ -10819,7 +10890,7 @@ fn dispatch_map_iteration(
                 let call = if method != "eachWithIndex" {
                     entry_args(clo, k, v)
                 } else if closure_meta(clo).map(|m| m.params).unwrap_or(1) >= 3 {
-                    vec![Value::str(k.clone()), v.clone(), Value::int(i as i64)]
+                    vec![mapkey::decode(k), v.clone(), Value::int(i as i64)]
                 } else {
                     vec![
                         heap_push(HeapObj::Entry(k.clone(), v.clone())),
@@ -11000,7 +11071,7 @@ fn dispatch_map_iteration(
             let mut groups: Vec<(String, Vec<(String, Value)>)> = Vec::new();
             for (k, v) in entries {
                 let key = match invoke_closure(vm, clo, &entry_args(clo, k, v)) {
-                    Ok(r) => groovy_str(&r),
+                    Ok(r) => mapkey::encode(&r),
                     Err(e) => return Some(Err(e)),
                 };
                 if pending_exc() {
@@ -11026,7 +11097,7 @@ fn dispatch_map_iteration(
                 // A three-parameter closure takes `(acc, key, value)`, else
                 // `(acc, entry)`.
                 let call = if closure_meta(clo).map(|m| m.params).unwrap_or(2) >= 3 {
-                    vec![acc, Value::str(k.clone()), v.clone()]
+                    vec![acc, mapkey::decode(k), v.clone()]
                 } else {
                     vec![acc, heap_push(HeapObj::Entry(k.clone(), v.clone()))]
                 };
@@ -11063,7 +11134,7 @@ fn dispatch_map_iteration(
             // have no natural order, so sort the keys and rebuild.
             if clo.is_none() {
                 let mut sorted = entries.to_vec();
-                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                sorted.sort_by(|a, b| mapkey::cmp(&a.0, &b.0));
                 // `sort(Map)` answers a `TreeMap` whatever it was called on —
                 // sorting by key *is* building one — while the closure form
                 // below answers a `LinkedHashMap` holding the closure's order,
@@ -11137,7 +11208,7 @@ fn dispatch_map_iteration(
             let mut counts: Vec<(String, i64)> = Vec::new();
             for (k, v) in entries {
                 let key = match invoke_closure(vm, clo, &entry_args(clo, k, v)) {
-                    Ok(r) => groovy_str(&r),
+                    Ok(r) => mapkey::encode(&r),
                     Err(e) => return Some(Err(e)),
                 };
                 if pending_exc() {
@@ -11177,7 +11248,7 @@ fn dispatch_map_iteration(
         // removes the key, as the JDK specifies.
         "computeIfAbsent" if args.len() == 2 => {
             let clo = clo?;
-            let key = groovy_str(&args[0]);
+            let key = mapkey::encode(&args[0]);
             if let Some(Some(v)) = omap_get(recv, &key).filter(|v| !matches!(v, Some(Value::Undef)))
             {
                 return Some(Ok(v));
@@ -11193,7 +11264,7 @@ fn dispatch_map_iteration(
         }
         "computeIfPresent" | "compute" | "merge" => {
             let clo = clo?;
-            let key = groovy_str(args.first()?);
+            let key = mapkey::encode(args.first()?);
             let old = omap_get(recv, &key)
                 .flatten()
                 .filter(|v| !matches!(v, Value::Undef));
@@ -11229,7 +11300,7 @@ fn dispatch_map_iteration(
             let mut drop: Vec<String> = Vec::new();
             for (k, v) in entries {
                 let call = match method {
-                    "forEach" | "replaceAll" => vec![Value::str(k.clone()), v.clone()],
+                    "forEach" | "replaceAll" => vec![mapkey::decode(k), v.clone()],
                     _ => entry_args(clo, k, v),
                 };
                 let r = match invoke_closure(vm, clo, &call) {
@@ -11287,7 +11358,7 @@ fn dispatch_map_iteration(
 /// which is how Groovy decides too.
 fn entry_args(clo: &Value, key: &str, value: &Value) -> Vec<Value> {
     if closure_meta(clo).map(|m| m.params).unwrap_or(1) >= 2 {
-        vec![Value::str(key.to_string()), value.clone()]
+        vec![mapkey::decode(key), value.clone()]
     } else {
         vec![heap_push(HeapObj::Entry(key.to_string(), value.clone()))]
     }
@@ -12565,7 +12636,10 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             gmap(
                 a.iter()
                     .enumerate()
-                    .map(|(i, v)| (base.wrapping_add(i as i32).to_string(), v.clone()))
+                    .map(|(i, v)| {
+                        let at = Value::int(i64::from(base.wrapping_add(i as i32)));
+                        (mapkey::encode(&at), v.clone())
+                    })
                     .collect(),
             )
         }
@@ -13678,7 +13752,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         _ if as_entry(recv).is_some() => {
             let (k, v) = as_entry(recv).unwrap();
             match method {
-                "getKey" => Value::str(k),
+                "getKey" => mapkey::decode(&k),
                 "getValue" => v,
                 _ => raise_missing_method(vm, recv, method, args),
             }
@@ -13710,7 +13784,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `get` cost a clone (and, for a `HashMap`/`TreeMap`, a re-order) of
         // every entry — filling a map with 16 000 `put`s took 42 s that way.
         (_, "put" | "putAt") if args.len() == 2 && is_omap(recv) => {
-            let key = groovy_str(&args[0]);
+            let key = mapkey::encode(&args[0]);
             let previous = omap_get(recv, &key).flatten();
             omap_set(recv, key, args[1].clone());
             // `put` answers the value it displaced; the GDK's `putAt(Map, K, V)`
@@ -13721,7 +13795,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
         }
         (_, "get" | "getAt") if args.len() == 1 && is_omap(recv) => {
-            let k = groovy_str(&args[0]);
+            let k = mapkey::encode(&args[0]);
             match omap_get(recv, &k).flatten() {
                 Some(v) => v,
                 // A missing key on a `withDefault` map runs the closure and
@@ -13734,7 +13808,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `putIfAbsent` stores only over an absent or `null` value and answers
         // the value that was there.
         (_, "putIfAbsent") if args.len() == 2 && is_omap(recv) => {
-            let key = groovy_str(&args[0]);
+            let key = mapkey::encode(&args[0]);
             match omap_get(recv, &key).flatten() {
                 Some(v) if !matches!(v, Value::Undef) => v,
                 _ => {
@@ -13744,7 +13818,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
         }
         (_, "containsKey") if args.len() == 1 && is_omap(recv) => {
-            Value::bool(omap_get(recv, &groovy_str(&args[0])).flatten().is_some())
+            Value::bool(omap_get(recv, &mapkey::encode(&args[0])).flatten().is_some())
         }
         (_, "isEmpty") if args.is_empty() && is_omap(recv) => {
             Value::bool(omap_len(recv) == Some(0))
@@ -13765,11 +13839,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             match method {
                 "isEmpty" => Value::bool(entries.is_empty()),
                 "containsKey" => {
-                    let k = args.first().map(groovy_str).unwrap_or_default();
+                    let k = args.first().map(mapkey::encode).unwrap_or_default();
                     Value::bool(entries.iter().any(|(ek, _)| *ek == k))
                 }
                 "get" => {
-                    let k = args.first().map(groovy_str).unwrap_or_default();
+                    let k = args.first().map(mapkey::encode).unwrap_or_default();
                     entries
                         .iter()
                         .find(|(ek, _)| *ek == k)
@@ -13784,7 +13858,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         })
                 }
                 "keySet" | "keys" => {
-                    Value::array(entries.iter().map(|(k, _)| Value::str(k.clone())).collect())
+                    Value::array(entries.iter().map(|(k, _)| mapkey::decode(k)).collect())
                 }
                 // The entry-at-an-end four are the GDK's, defined on *every* map —
                 // unlike `firstKey`/`lastKey`, which are `NavigableMap`'s and
@@ -13827,7 +13901,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // `TreeMap`. The two spellings really do differ in class.
                 "toSorted" if args.is_empty() => {
                     let mut sorted = entries;
-                    sorted.sort_by(|a, b| utf16_cmp(&a.0, &b.0));
+                    sorted.sort_by(|a, b| mapkey::cmp(&a.0, &b.0));
                     gmap(sorted)
                 }
                 // `map.subMap(keys)` — the entries for the listed keys, in the
@@ -13843,9 +13917,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 "subMap" => {
                     let wanted: Vec<String> = match args {
                         [one] if is_list(one) || as_range(one).is_some() => {
-                            iteration_elements(one).iter().map(groovy_str).collect()
+                            iteration_elements(one).iter().map(mapkey::encode).collect()
                         }
-                        rest => rest.iter().map(groovy_str).collect(),
+                        rest => rest.iter().map(mapkey::encode).collect(),
                     };
                     gmap(
                         wanted
@@ -13867,6 +13941,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 "plus" if args.len() == 1 => groovy_add(recv, &args[0]),
                 // `map - other` / `map.minus(other)` drops the entries the other
                 // map holds *identically* (same key and same value).
+                // `Map.minus` / `intersect` take a `Map`; anything else has no such
+                // overload.
+                "minus" | "intersect" if !args.first().is_some_and(is_omap) => {
+                    raise_missing_method(vm, recv, method, args)
+                }
                 "minus" => {
                     let drop: Vec<(String, Value)> =
                         args.first().map(entry_pairs).unwrap_or_default();
@@ -13911,7 +13990,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // `getOrDefault(k, d)` and the two-argument `get(k, d)` — the
                 // latter also *stores* the default, which is what Groovy's does.
                 "getOrDefault" => {
-                    let k = args.first().map(groovy_str).unwrap_or_default();
+                    let k = args.first().map(mapkey::encode).unwrap_or_default();
                     match entries
                         .iter()
                         .find(|(ek, _)| *ek == k)
@@ -13924,7 +14003,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         // `7` and leaves `[x:1, nope:7]` (measured). The
                         // supplied default only answers for an ordinary map.
                         None if is_map_with_default(recv) => {
-                            map_default(vm, recv, &k, &Value::str(k.clone()))
+                            map_default(vm, recv, &k, &mapkey::decode(&k))
                         }
                         None => args.get(1).cloned().unwrap_or(Value::Undef),
                     }
@@ -13936,7 +14015,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // A map is a heap handle, so its mutators write through it and
                 // need no compiler-emitted writeback.
                 "put" => {
-                    let k = args.first().map(groovy_str).unwrap_or_default();
+                    let k = args.first().map(mapkey::encode).unwrap_or_default();
                     let old = entries
                         .iter()
                         .find(|(ek, _)| *ek == k)
@@ -13949,7 +14028,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // `void` sibling, so it answers null where `put` answers the
                 // value it displaced.
                 "putAt" => {
-                    let k = args.first().map(groovy_str).unwrap_or_default();
+                    let k = args.first().map(mapkey::encode).unwrap_or_default();
                     omap_set(recv, k, args.get(1).cloned().unwrap_or(Value::Undef));
                     Value::Undef
                 }
@@ -13973,7 +14052,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                     recv.clone()
                 }
                 "remove" => {
-                    let k = args.first().map(groovy_str).unwrap_or_default();
+                    let k = args.first().map(mapkey::encode).unwrap_or_default();
                     let old = entries
                         .iter()
                         .find(|(ek, _)| *ek == k)
@@ -14566,7 +14645,7 @@ fn b_in(vm: &mut VM, _argc: u8) -> Value {
         return Value::bool(range_contains(&r, &needle));
     }
     let coll = deref_list(&raw);
-    if let Some(found) = omap_get(&coll, &groovy_str(&needle)) {
+    if let Some(found) = omap_get(&coll, &mapkey::encode(&needle)) {
         return Value::bool(found.is_some());
     }
     Value::bool(match &coll {
@@ -17007,9 +17086,30 @@ fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]
         }
         "toString" => Value::str(range_str(r)),
         "inspect" => Value::str(range_inspect(r)),
+        // `asList()` of a range is the range itself.
+        "asList" if args.is_empty() => heap_push(HeapObj::Range(r.clone())),
+        // An `IntRange` / `NumberRange` / `ObjectRange` is read-only: sorting it
+        // in place is refused unless there is nothing to reorder.
+        "sort" if !args.first().is_some_and(|a| matches!(a, Value::Bool(false))) => {
+            if range_elements(r).is_empty() {
+                heap_push(HeapObj::Range(r.clone()))
+            } else {
+                raise_opt(vm, "UnsupportedOperationException", None);
+                Value::Undef
+            }
+        }
+        "isCase" if args.len() == 1 => Value::bool(range_contains_within_bounds(r, &args[0])),
         "size" | "getSize" => Value::int(range_size(r)),
         "step" => {
             let n = args.first().and_then(as_i64).unwrap_or(1);
+            if n == 0 && range_elements(r).len() > 1 {
+                raise(
+                    vm,
+                    "GroovyRuntimeException",
+                    "Infinite loop detected due to step size of 0",
+                );
+                return Some(Value::Undef);
+            }
             Value::array(range_step(r, n))
         }
         "contains" => Value::bool(range_contains(
@@ -17169,7 +17269,23 @@ fn as_set(v: &Value) -> Option<(Vec<Value>, SetKind)> {
 /// is why the two are separate and this one stays narrower.
 fn java_hash(v: &Value) -> Option<i32> {
     match v {
-        Value::Int(_) | Value::Bool(_) | Value::Str(_) => Some(object_hash_code(v)),
+        Value::Int(_) | Value::Bool(_) | Value::Str(_) | Value::Float(_) => {
+            Some(object_hash_code(v))
+        }
+        // A value whose class hashes by content — a decimal, a `Float`, a
+        // collection, a range, a `UUID` — has a reproducible hash; a bare
+        // object or an instance hashes by identity and has none.
+        Value::Obj(_)
+            if as_dec(v).is_some()
+                || as_float_handle(v).is_some()
+                || as_list_raw(v).is_some()
+                || as_omap(v).is_some()
+                || as_set(v).is_some()
+                || as_range(v).is_some()
+                || as_uuid(v).is_some() =>
+        {
+            Some(object_hash_code(v))
+        }
         // `null` hashes to 0 both as a `HashMap` key and as a `List` element
         // (`Objects.hashCode(null)`), though a bare `null.hashCode()` throws.
         Value::Undef => Some(0),
@@ -18303,7 +18419,7 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     }
     if let Some((k, v)) = as_entry(recv) {
         return match name {
-            "key" => Value::str(k),
+            "key" => mapkey::decode(&k),
             "value" => v,
             _ => raise_missing_property(vm, recv, name),
         };
@@ -18877,7 +18993,7 @@ fn java_to_string(vm: &mut VM, v: &Value) -> String {
     if let Some(entries) = as_omap(v) {
         let items: Vec<String> = entries
             .iter()
-            .map(|(k, val)| format!("{k}={}", java_to_string(vm, val)))
+            .map(|(k, val)| format!("{}={}", mapkey::text(k), java_to_string(vm, val)))
             .collect();
         return format!("{{{}}}", items.join(", "));
     }
@@ -19276,7 +19392,13 @@ fn render_shape(vm: &mut VM, v: &Value) -> String {
         }
         let items: Vec<String> = entries
             .iter()
-            .map(|(k, val)| format!("{k}:{}", self_or(v, val, THIS_MAP, |e| render_value(vm, e))))
+            .map(|(k, val)| {
+                format!(
+                    "{}:{}",
+                    mapkey::text(k),
+                    self_or(v, val, THIS_MAP, |e| render_value(vm, e))
+                )
+            })
             .collect();
         return format!("[{}]", items.join(", "));
     }
@@ -19434,7 +19556,7 @@ pub fn groovy_str(v: &Value) -> String {
     }
     // `Map.Entry.toString` is `key=value`.
     if let Some((k, val)) = as_entry(v) {
-        return format!("{k}={}", groovy_str(&val));
+        return format!("{}={}", mapkey::text(&k), groovy_str(&val));
     }
     // A `char[]` is the one array that does not render like a list: Groovy
     // prints its characters run together, so `"abc".toCharArray()` prints `abc`
@@ -19470,7 +19592,13 @@ pub fn groovy_str(v: &Value) -> String {
         }
         let items: Vec<String> = entries
             .iter()
-            .map(|(k, val)| format!("{k}:{}", self_or(v, val, THIS_MAP, groovy_str)))
+            .map(|(k, val)| {
+                format!(
+                    "{}:{}",
+                    mapkey::text(k),
+                    self_or(v, val, THIS_MAP, groovy_str)
+                )
+            })
             .collect();
         return format!("[{}]", items.join(", "));
     }

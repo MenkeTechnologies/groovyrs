@@ -48,6 +48,9 @@
 //! Build:  cargo build --bin parity-fuzz
 //! Run:    ./target/debug/parity-fuzz --count 2000 --mode control
 
+#[path = "parity_fuzz/tables.rs"]
+mod tables;
+
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -125,6 +128,19 @@ enum Mode {
     Arrays,
     MultiAssign,
     Floats,
+    Bignum,
+    ClosureLib,
+    Truthis,
+    RangeOps,
+    MapOrder,
+    SeqOps,
+    Builder,
+    StrLib,
+    Immutables,
+    Queues,
+    Randoms,
+    SwitchClass,
+    SpreadSafe,
     Mixed,
 }
 
@@ -158,6 +174,19 @@ fn mode_name(m: Mode) -> &'static str {
         Mode::Arrays => "arrays",
         Mode::MultiAssign => "multiassign",
         Mode::Floats => "floats",
+        Mode::Bignum => "bignum",
+        Mode::ClosureLib => "closurelib",
+        Mode::Truthis => "truthis",
+        Mode::RangeOps => "rangeops",
+        Mode::MapOrder => "maporder",
+        Mode::SeqOps => "seqops",
+        Mode::Builder => "builder",
+        Mode::StrLib => "strlib",
+        Mode::Immutables => "immutables",
+        Mode::Queues => "queues",
+        Mode::Randoms => "randoms",
+        Mode::SwitchClass => "switchclass",
+        Mode::SpreadSafe => "spreadsafe",
         Mode::Mixed => "mixed",
     }
 }
@@ -192,6 +221,19 @@ fn mode_from(s: &str) -> Option<Mode> {
         "arrays" => Mode::Arrays,
         "multiassign" => Mode::MultiAssign,
         "floats" => Mode::Floats,
+        "bignum" => Mode::Bignum,
+        "closurelib" => Mode::ClosureLib,
+        "truthis" => Mode::Truthis,
+        "rangeops" => Mode::RangeOps,
+        "maporder" => Mode::MapOrder,
+        "seqops" => Mode::SeqOps,
+        "builder" => Mode::Builder,
+        "strlib" => Mode::StrLib,
+        "immutables" => Mode::Immutables,
+        "queues" => Mode::Queues,
+        "randoms" => Mode::Randoms,
+        "switchclass" => Mode::SwitchClass,
+        "spreadsafe" => Mode::SpreadSafe,
         "mixed" => Mode::Mixed,
         _ => return None,
     })
@@ -1002,6 +1044,17 @@ fn gen_arrays(rng: &mut Rng) -> Vec<String> {
             }
             _ => observe(&pick(rng, ARRAY_OPS).replace("FILL", fill)),
         });
+    }
+    out
+}
+
+/// A grid program shared by the round-2 modes: bind one subject to `a`, then
+/// observe several operations over it. The tables live in `tables.rs`.
+fn gen_grid(rng: &mut Rng, subjects: &[&str], ops: &[&str]) -> Vec<String> {
+    let mut out = vec![format!("def a = {}", pick(rng, subjects))];
+    let n = rng.range_i(3, 6) as usize;
+    for _ in 0..n {
+        out.push(observe(pick(rng, ops)));
     }
     out
 }
@@ -2270,6 +2323,19 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                 Mode::Arrays,
                 Mode::MultiAssign,
                 Mode::Floats,
+                Mode::Bignum,
+                Mode::ClosureLib,
+                Mode::Truthis,
+                Mode::RangeOps,
+                Mode::MapOrder,
+                Mode::SeqOps,
+                Mode::Builder,
+                Mode::StrLib,
+                Mode::Immutables,
+                Mode::Queues,
+                Mode::Randoms,
+                Mode::SwitchClass,
+                Mode::SpreadSafe,
             ],
         )
     } else {
@@ -2300,6 +2366,19 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
         Mode::SafeNav => gen_safenav(&mut rng),
         Mode::Arrays => gen_arrays(&mut rng),
         Mode::MultiAssign => gen_multi_assign(&mut rng),
+        Mode::Bignum => gen_grid(&mut rng, tables::BIG_SUBJECTS, tables::BIG_OPS),
+        Mode::ClosureLib => gen_grid(&mut rng, tables::CLOSURE_SUBJECTS, tables::CLOSURE_OPS),
+        Mode::Truthis => gen_grid(&mut rng, tables::TRUTH_SUBJECTS, tables::TRUTH_OPS),
+        Mode::RangeOps => gen_grid(&mut rng, tables::RANGE_SUBJECTS, tables::RANGE_OPS),
+        Mode::MapOrder => gen_grid(&mut rng, tables::COLL_SUBJECTS, tables::COLL_OPS),
+        Mode::SeqOps => gen_grid(&mut rng, tables::SEQ_SUBJECTS, tables::SEQ_OPS),
+        Mode::Builder => gen_grid(&mut rng, tables::BUILDER_SUBJECTS, tables::BUILDER_OPS),
+        Mode::StrLib => gen_grid(&mut rng, tables::STR_SUBJECTS, tables::STR_OPS),
+        Mode::Immutables => gen_grid(&mut rng, tables::IMM_SUBJECTS, tables::IMM_OPS),
+        Mode::Queues => gen_grid(&mut rng, tables::QUEUE_SUBJECTS, tables::QUEUE_OPS),
+        Mode::Randoms => gen_grid(&mut rng, tables::RAND_SUBJECTS, tables::RAND_OPS),
+        Mode::SwitchClass => gen_grid(&mut rng, tables::SWITCH_SUBJECTS, tables::SWITCH_OPS),
+        Mode::SpreadSafe => gen_grid(&mut rng, tables::SPREAD_SUBJECTS, tables::SPREAD_OPS),
         _ => {
             let n = rng.range_i(1, 5) as usize;
             (0..n)
@@ -2337,6 +2416,19 @@ fn gen_case(seed: u64, mode: Mode) -> Vec<String> {
                         | Mode::Arrays
                         | Mode::MultiAssign
                         | Mode::Floats
+                        | Mode::Bignum
+                        | Mode::ClosureLib
+                        | Mode::Truthis
+                        | Mode::RangeOps
+                        | Mode::MapOrder
+                        | Mode::SeqOps
+                        | Mode::Builder
+                        | Mode::StrLib
+                        | Mode::Immutables
+                        | Mode::Queues
+                        | Mode::Randoms
+                        | Mode::SwitchClass
+                        | Mode::SpreadSafe
                         | Mode::Mixed => unreachable!(),
                     };
                     println_of(expr)
@@ -2808,7 +2900,7 @@ fn parse_args() -> Args {
                     mode = m;
                 } else {
                     eprintln!(
-                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|faults|switch|asserts|modzero|gdk|conversions|classes|ranges|aliasing|views|switchexpr|regex|numeric|strops|listops|safenav|arrays|multiassign|floats|mixed)"
+                        "parity-fuzz: unknown --mode (arith|logic|strings|control|format|truth|closures|gstring|exceptions|faults|switch|asserts|modzero|gdk|conversions|classes|ranges|aliasing|views|switchexpr|regex|numeric|strops|listops|safenav|arrays|multiassign|floats|bignum|closurelib|truthis|rangeops|maporder|seqops|builder|strlib|immutables|queues|randoms|switchclass|spreadsafe|mixed)"
                     );
                     std::process::exit(2);
                 }
@@ -2819,7 +2911,7 @@ fn parse_args() -> Args {
                      options:\n  \
                      -c, --count N        cases to run (default 1000)\n  \
                      -s, --seed N         base seed (default 1)\n  \
-                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|views|switchexpr|\n                       regex|numeric|strops|listops|safenav|arrays|multiassign|floats|\n                       mixed\n                       (default mixed)\n  \
+                     -m, --mode M         arith|logic|strings|control|format|truth|closures|\n                       gstring|exceptions|faults|switch|asserts|modzero|gdk|\n                       conversions|classes|ranges|aliasing|views|switchexpr|\n                       regex|numeric|strops|listops|safenav|arrays|multiassign|floats|\n                       bignum|closurelib|truthis|rangeops|maporder|seqops|builder|strlib|immutables|queues|randoms|switchclass|spreadsafe|\n                       mixed\n                       (default mixed)\n  \
                      -j, --jobs N         parallel workers (default = cores)\n  \
                      --once               replay a single --seed, minimize, dump both sides\n  \
                      --dump               print --count generated programs and exit\n  \

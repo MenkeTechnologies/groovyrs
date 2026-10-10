@@ -86,12 +86,14 @@ pub(super) fn decode(k: &str) -> Value {
     let rest = chars.as_str();
     match tag {
         Some('i') => rest.parse::<i64>().map_or(Value::Undef, Value::int),
-        Some('f') => u64::from_str_radix(rest, 16)
-            .map_or(Value::Undef, |b| Value::float(f64::from_bits(b))),
+        Some('f') => {
+            u64::from_str_radix(rest, 16).map_or(Value::Undef, |b| Value::float(f64::from_bits(b)))
+        }
         Some('b') => Value::bool(rest == "1"),
         Some('n') => Value::Undef,
-        Some('F') => u32::from_str_radix(rest, 16)
-            .map_or(Value::Undef, |b| float_value(f32::from_bits(b))),
+        Some('F') => {
+            u32::from_str_radix(rest, 16).map_or(Value::Undef, |b| float_value(f32::from_bits(b)))
+        }
         Some('g') => decimal::parse_java(rest).map_or(Value::Undef, bigint_value),
         Some('d') => decimal::parse_java(rest).map_or(Value::Undef, dec_value),
         Some('h') => rest.parse::<u32>().map_or(Value::Undef, Value::Obj),

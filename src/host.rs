@@ -3741,7 +3741,8 @@ fn dispatch_navigable_map(
             .find(|&i| mapkey::cmp(&entries[i].0, k).is_le())
     };
     let at_or_above = |k: &str| (0..entries.len()).find(|&i| mapkey::cmp(&entries[i].0, k).is_ge());
-    let strictly_above = |k: &str| (0..entries.len()).find(|&i| mapkey::cmp(&entries[i].0, k).is_gt());
+    let strictly_above =
+        |k: &str| (0..entries.len()).find(|&i| mapkey::cmp(&entries[i].0, k).is_gt());
     // A range view is materialised as a plain `TreeMap` of the selected entries.
     // The views' own class names (`TreeMap$AscendingSubMap`, `$DescendingSubMap`)
     // are not modeled — see the `TreeMap` entry in BUGS.md.
@@ -3817,7 +3818,8 @@ fn dispatch_navigable_map(
             let (li, hi_inc) = (flag(1, true), flag(3, false));
             range(&|x: &str| {
                 let (a, b) = (mapkey::cmp(x, &lo), mapkey::cmp(x, &hi));
-                (if li { a.is_ge() } else { a.is_gt() }) && (if hi_inc { b.is_le() } else { b.is_lt() })
+                (if li { a.is_ge() } else { a.is_gt() })
+                    && (if hi_inc { b.is_le() } else { b.is_lt() })
             })
         }
         "descendingMap" => {
@@ -6148,7 +6150,21 @@ fn dispatch_matcher_method(
             let idx = if i < 0 { all.len() as i64 + i } else { i };
             match usize::try_from(idx).ok().and_then(|u| all.get(u)) {
                 Some(hit) => match_value(hit),
-                None => Value::Undef,
+                None => {
+                    let count = all.len() as i64;
+                    with_vm(|vm| {
+                        raise(
+                            vm,
+                            "IndexOutOfBoundsException",
+                            &format!(
+                                "index is out of range {}..{} (index = {i})",
+                                -count,
+                                count - 1
+                            ),
+                        )
+                    });
+                    Value::Undef
+                }
             }
         }
         _ => return None,
@@ -8024,6 +8040,34 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
     // 7, 6, … 0, -1 and read a character at each, answering "W ,olleHd" where
     // Groovy answers "World". Both-negative happened to agree because
     // `-5..-1` already ascends.
+    // `"text"[from..to]` is `substring(from, to + 1)` over the normalised
+    // borders, reversed when the range runs down: a window that leaves the
+    // string is `StringIndexOutOfBoundsException` with the JDK's range wording.
+    if let (Value::Str(s), Some(r)) = (&recv, as_range(&index)) {
+        let len = utf16_len(s);
+        if let Some(Value::Array(idxs)) = normalize_range_index(&r, len) {
+            let positions: Vec<i64> = idxs.iter().filter_map(as_i64).collect();
+            if let (Some(lo), Some(hi)) = (positions.iter().min(), positions.iter().max()) {
+                let (lo, end) = (*lo, hi + 1);
+                if lo < 0 || end > len as i64 {
+                    raise(
+                        vm,
+                        "StringIndexOutOfBoundsException",
+                        &format!("Range [{lo}, {end}) out of bounds for length {len}"),
+                    );
+                    return Value::Undef;
+                }
+                let text = utf16_slice(s, lo as usize, end as usize);
+                let descending = positions.first() > positions.last();
+                return Value::str(if descending {
+                    text.chars().rev().collect::<String>()
+                } else {
+                    text
+                });
+            }
+            return Value::str(String::new());
+        }
+    }
     // `list[from..to]` is `list.subList(from, to + 1)`: a window that leaves the
     // list is `IndexOutOfBoundsException`, with `subList`'s own wording.
     if let (Value::Array(items), Some(r)) = (&recv, as_range(&index)) {
@@ -8032,11 +8076,19 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
             if let (Some(lo), Some(hi)) = (positions.iter().min(), positions.iter().max()) {
                 let len = items.len() as i64;
                 if *lo < 0 {
-                    raise(vm, "IndexOutOfBoundsException", &format!("fromIndex = {lo}"));
+                    raise(
+                        vm,
+                        "IndexOutOfBoundsException",
+                        &format!("fromIndex = {lo}"),
+                    );
                     return Value::Undef;
                 }
                 if hi + 1 > len {
-                    raise(vm, "IndexOutOfBoundsException", &format!("toIndex = {}", hi + 1));
+                    raise(
+                        vm,
+                        "IndexOutOfBoundsException",
+                        &format!("toIndex = {}", hi + 1),
+                    );
                     return Value::Undef;
                 }
             }
@@ -8894,6 +8946,10 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
 }
 
 fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
+    // A `String` is not `Iterable`: `sum()` is not defined on it.
+    if method == "sum" && matches!(recv, Value::Str(_)) {
+        return raise_missing_method(vm, &recv, method, &args);
+    }
     // `list.sort(comparator)` with a `Comparator`-typed closure is the JDK's
     // `List.sort`, which sorts in place and answers `void`.
     if method == "sort" && args.len() == 1 {
@@ -12127,6 +12183,12 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         }
         // `readLines()` is `StringGroovyMethods.readLines` — the same line split
         // `eachLine` and `stripIndent` already use here, answered as a list.
+        (Value::Str(s), "lines") if args.is_empty() => {
+            Value::array(read_lines(s).into_iter().map(Value::str).collect())
+        }
+        (Value::Str(_), "intern") if args.is_empty() => recv.clone(),
+        (Value::Str(s), "next") if s.is_empty() && args.is_empty() => Value::str("\0".to_string()),
+        (Value::Str(_), "sum") => raise_missing_method(vm, recv, method, args),
         (Value::Str(s), "readLines") => {
             Value::array(read_lines(s).into_iter().map(Value::str).collect())
         }
@@ -13817,9 +13879,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 }
             }
         }
-        (_, "containsKey") if args.len() == 1 && is_omap(recv) => {
-            Value::bool(omap_get(recv, &mapkey::encode(&args[0])).flatten().is_some())
-        }
+        (_, "containsKey") if args.len() == 1 && is_omap(recv) => Value::bool(
+            omap_get(recv, &mapkey::encode(&args[0]))
+                .flatten()
+                .is_some(),
+        ),
         (_, "isEmpty") if args.is_empty() && is_omap(recv) => {
             Value::bool(omap_len(recv) == Some(0))
         }
@@ -17090,7 +17154,11 @@ fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]
         "asList" if args.is_empty() => heap_push(HeapObj::Range(r.clone())),
         // An `IntRange` / `NumberRange` / `ObjectRange` is read-only: sorting it
         // in place is refused unless there is nothing to reorder.
-        "sort" if !args.first().is_some_and(|a| matches!(a, Value::Bool(false))) => {
+        "sort"
+            if !args
+                .first()
+                .is_some_and(|a| matches!(a, Value::Bool(false))) =>
+        {
             if range_elements(r).is_empty() {
                 heap_push(HeapObj::Range(r.clone()))
             } else {
@@ -20222,6 +20290,13 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // transient array form. Rewriting the operands once here is the same trick
     // the range branch uses, and keeps `groovy_add`/`groovy_sub`/`groovy_mul`
     // and the comparisons unaware that lists moved to the heap.
+    // `"s" + chars` appends a `char[]`'s characters run together.
+    if matches!(op, NumOp::Add)
+        && matches!(a, Value::Str(_))
+        && array_elem(b) == Some(ArrayElem::Char)
+    {
+        return Ok(Value::str(format!("{}{}", groovy_str(a), groovy_str(b))));
+    }
     if as_list(a).is_some() || as_list(b).is_some() {
         return numeric_hook(op, &deref_list(a), &deref_list(b));
     }
@@ -20334,7 +20409,9 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
         let bool_vs_number = (matches!(a, Value::Bool(_))
             && (matches!(b, Value::Float(_)) || is_dec_handle(b) || as_float_handle(b).is_some()))
             || (matches!(b, Value::Bool(_))
-                && (matches!(a, Value::Float(_)) || is_dec_handle(a) || as_float_handle(a).is_some()));
+                && (matches!(a, Value::Float(_))
+                    || is_dec_handle(a)
+                    || as_float_handle(a).is_some()));
         if bool_vs_number {
             return Ok(Value::bool(matches!(op, NumOp::Ne)));
         }

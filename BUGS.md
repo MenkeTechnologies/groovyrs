@@ -725,9 +725,9 @@ GString/`inspect()` through a second collection, `==`/`equals`/`contains`/
 A hash set (`HashSet`, `LinkedHashSet`) hashes each element it is built from
 (`toSet()`, `as Set`, `new HashSet(a)`) and each one `add`/`<<`/`contains`/
 `remove` is asked about, so a self-holding element raises it there too.
-A map *key* that is the map itself is not modeled: map keys are stored as their
-rendered strings, so `m[m] = 1` keys the entry by the text the map had at that
-moment.
+A map *key* that is the map itself is not modeled: a collection key is stored by
+its content at insertion time, so `m[m] = 1` keys the entry by the text the map had
+at that moment.
 
 **Non-terminating where Groovy terminates.** `class A extends A {}` and a mutual
 `extends` cycle hang in class resolution (Groovy: a compile error). A `for (x in
@@ -1376,8 +1376,7 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   scale, `BigInteger`, `AbstractList`, `AbstractMap`, `AbstractSet`, `Map.Entry`,
   `IntRange`'s Cantor pairing and the other ranges' inherited `AbstractList`
   hash). What differs follows from types groovyrs does not model rather than
-  from the hashing: a `GString` is a `String`; a map key is always a `String`,
-  so `[(1): 'x'].hashCode()` hashes `"1"` rather than `1`; and a `Long` small
+  from the hashing: a `GString` is a `String`; a `Long` small
   enough to be an `Integer` is indistinguishable from one, so `(-1L).hashCode()`
   answers -1 where Java's `Long` folds the halves to 0. A value with no
   specified contract — a closure, a `StringBuilder`, a `Pattern`, a user
@@ -1385,15 +1384,11 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   identity hash: stable within a run and equal exactly when the references are,
   which is the contract, but not the number a JVM prints. A JVM's own identity
   hash varies run to run, so no value could match it.
-- **A map key does not consult a user class's `equals`/`hashCode`.** The lists
-  and sets do — `contains`, `indexOf`, `count`, `unique()`, `minus`, `==` between
-  two lists and `[new A(), new A()] as Set` all answer through the declared
-  `equals` (and `==`-style comparisons through `compareTo`), as Groovy's do. A
-  map's keys are `String`s (see the `hashCode` entry above), so an instance key is
-  stored under the handle's rendering and prints as `(obj:N)` rather than the
-  instance's `toString`. Rendering a `List` or `Set` element THROUGH the
-  instance's `toString` is modeled — `println([new A()])` prints `[A(1)]` — which
-  is the same question one layer out.
+- **A map key does not consult a user class's `equals`/`hashCode`.** A key that
+  is a class instance is stored by identity; two equal instances are two keys.
+  A `String` key is stored as itself and every other key under a type-tagged
+  encoding, so `[1: 'a']` and `['1': 'a']` are two maps, `[(1): 'x']` keeps an
+  `Integer` key, and a `TreeMap` or `sort()` orders numeric keys numerically.
 - **`args` is a `List`, not a `String[]`.** Every script's binding carries
   `args` — the launcher arguments after the script file, empty when there are
   none — but as the `List` groovyrs models rather than the array Groovy binds.
@@ -1428,15 +1423,9 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   The `Map` side no longer has this gap — `HeapObj::OrderedMap` carries a
   [`MapKind`], so a `TreeMap` sorts and a `HashMap` buckets — and neither does
   the `Set` side. What remains of it for maps is the three entries below.
-- **A `TreeMap` orders non-`String` keys as their rendered text.** A map key is
-  stored as `groovy_str` of the key, so the key's *type* is gone by the time
-  `MapKind::Tree` sorts. That is exactly `String.compareTo` and so is right for
-  every `String`-keyed `TreeMap`, but a numeric-keyed one sorts lexically:
-  `new TreeMap([10:'a', 9:'b', 100:'c'])` is `[9:b, 10:a, 100:c]` in Groovy and
-  `[10:a, 100:c, 9:b]` here. Fixing it means carrying the key `Value` alongside
-  its rendered form through every map construction site, not a change to the
-  ordering itself. The same stringification is why `[1:'a']` and `['1':'a']` are
-  one map here and two in Groovy.
+- **A `TreeMap` orders mixed-type keys by value, not by class.** Keys that are
+  all numbers or all strings sort as Java does; a `TreeMap` holding both raises
+  `ClassCastException` in Groovy and sorts here.
 
   What the stringification no longer costs is the READ. The subscript read used
   fusevm's own `as_str_cow` where the write used `groovy_str`, and those two
@@ -1554,20 +1543,17 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   materialisation a range loop does. The elements and their order are Groovy's;
   what differs is interleaving: side effects in `next()` all happen before the
   loop body's, and an unbounded iterator never reaches a `break`.
-- **A closure coerced to a script interface, or a `Map` coerced to one, is not
-  a proxy.** `{ w -> … } as Greeter` and `[greet: { … }] as Greeter` fault
-  (`Greeter is an interface`) where Groovy builds a `java.lang.reflect.Proxy`
-  whose `greet` runs the closure; `Runnable r = { … } as Runnable; r.run()` is a
-  `MissingMethodException` because the closure is left a plain `Closure`. A
-  proxy needs a heap object that carries the interface and forwards its
-  abstract methods.
-- **A bare `call(…)` inside a closure does not reach the closure itself.**
-  `def f = { n -> n <= 1 ? 1 : n * call(n - 1) }` is Groovy's way to recurse
-  without a name; here the name is `unresolved reference: call` because the
-  running closure is not tracked, so `owner` / `delegate` / `thisObject` on a
-  closure are unmodeled too.
-- **`ArrayDeque`, `PriorityQueue`, `Stack` and a seeded `Random`** are not
-  modeled classes (`unable to resolve class`), and `LinkedList` is an
-  `ArrayList` — it lacks `addFirst` / `removeFirst` / `peek*` / `poll*` and
-  reports `java.util.ArrayList`. `Arrays.hashCode` and `Arrays.stream` are not
-  ported.
+- **A `Map` coerced to a script interface answers an undeclared method with
+  `UnsupportedOperationException`.** Groovy raises `MissingMethodException`
+  there, because the proxy knows which methods the interface declares. A closure
+  or map coerced to a *JDK* functional interface (`Comparator`, `Runnable`,
+  `Callable`) stays a plain closure that also answers the interface's one method
+  (`run`, `compare`, `apply`, `accept`, `test`, `get`, ...) by name, so a plain
+  closure answers `c.compare(a, b)` where Groovy raises. A closure typed
+  `Comparator` is remembered, so `list.sort(cmp)` sorts in place and answers
+  `null` as the JDK's `List.sort` does.
+- **`Stream`s are not modeled.** `ArrayDeque`, `PriorityQueue` (in the JDK's
+  binary-heap order), `Stack`, `Vector` and a seeded `Random` are, but
+  `list.stream()` and `Arrays.stream` are not, `"s".chars()` answers the element
+  list, and `Collections.unmodifiableX`, `asUnmodifiable()` and `asImmutable()`
+  answer a *copy*, not a live view. `Arrays.hashCode` is not ported.

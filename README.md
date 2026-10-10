@@ -799,7 +799,12 @@ now that the `BigDecimal` model is exact. Modes:
 `arith`, `logic`, `strings`, `control`, `format`, `truth`, `closures`,
 `gstring`, `exceptions`, `faults`, `switch`, `asserts`, `modzero`, `gdk`,
 `conversions`, `classes`, `ranges`, `aliasing`, `views`, `switchexpr`, `regex`,
-`numeric`, `strops`, `listops`, `safenav`, `arrays`, `multiassign`, `floats`, `mixed`. `--dump` prints the corpus a
+`numeric`, `strops`, `listops`, `safenav`, `arrays`, `multiassign`, `floats`, `mixed`.
+The grid modes `bignum`, `closurelib`, `truthis`, `rangeops`, `maporder`, `seqops`,
+`builder`, `strlib`, `immutables`, `queues`, `randoms`, `switchclass` and
+`spreadsafe` bind one subject to `a` and observe several operations over it. Each
+case starts a JVM, so a campaign of a few hundred cases takes minutes: run it
+under a timeout long enough to reach the summary line. `--dump` prints the corpus a
 mode generates and runs nothing, which is how "does this fuzzer ever emit X"
 became a grep rather than a reading of the generator; `switchexpr`, `regex`,
 `numeric`, `strops`, `listops` and `safenav` were each added because that grep

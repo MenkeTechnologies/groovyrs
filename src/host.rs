@@ -11685,6 +11685,25 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             b_cast(vm, 0)
         }
 
+        // `Object.iterator()` for a value that is not a collection: the GDK
+        // walks `DefaultTypeTransformation.asCollection(value)`, which is
+        // `Collections.singletonList(value)` for a number, a `Boolean` or a
+        // plain object — so `42.iterator()` yields `42` once, and its class is
+        // the JDK's anonymous `Collections$1`.
+        (_, "iterator")
+            if args.is_empty()
+                && (matches!(recv, Value::Int(_) | Value::Float(_) | Value::Bool(_))
+                    || as_dec(recv).is_some()
+                    || as_float_handle(recv).is_some()
+                    || as_instance(recv).is_some()) =>
+        {
+            heap_push(HeapObj::Iter {
+                class: "java.util.Collections$1",
+                items: vec![recv.clone()],
+                pos: 0,
+            })
+        }
+
         // ── String ──
         (Value::Str(s), "length") => Value::int(utf16_len(s) as i64),
         (Value::Str(s), "toUpperCase") => Value::str(s.to_uppercase()),

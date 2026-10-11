@@ -1281,3 +1281,36 @@ false
 "####;
     check(src, expected);
 }
+
+#[test]
+fn object_iterator_walks_a_scalar_as_a_singleton_list() {
+    // Object.iterator() on a number, Boolean or plain object yields the value once
+    let src = r####"// Object.iterator(): a non-collection walks as Collections.singletonList(value)
+println 42.iterator().getClass().name
+println 1.5.iterator().toList()
+class P {}
+def p = new P()
+println p.iterator().next().is(p)
+println 42.iterator().toList()
+def i = 42.iterator(); i.next(); try { i.next() } catch (e) { println e.class.name }
+println([a:1, b:2].iterator().next())
+println((1..3).iterator().toList())
+println(([1,2] as Set).iterator().toList())
+println 'x'.iterator().toList()
+println 10G.iterator().toList()
+for (x in 42) print x; println()
+"####;
+    let expected = r####"java.util.Collections$1
+[1.5]
+true
+[42]
+java.util.NoSuchElementException
+a=1
+[1, 2, 3]
+[1, 2]
+[x]
+[10]
+42
+"####;
+    check(src, expected);
+}

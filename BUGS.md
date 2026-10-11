@@ -807,9 +807,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   the whole `Character` row of the `+` matrix concatenates where Groovy either
   adds or raises. The rest of the `plus` table is modeled (see above); this one
   row waits on the type.
-- **`42.iterator()`.** Groovy's `Object.iterator()` walks a non-collection as a
-  one-element sequence; the rest of that `Object`-level GDK is modeled (see
-  above) but the iterator itself is not.
 - **`MissingMethodException` carries no "Possible solutions:" line.** Groovy's
   message has a second line listing candidate methods; groovyrs's stops after
   the signature line. Only a program that prints `e.getMessage()` sees it.

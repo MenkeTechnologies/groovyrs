@@ -1166,3 +1166,84 @@ sum noStack = 3
 "####;
     check(src, expected);
 }
+
+#[test]
+fn range_by_builds_a_stepped_number_range() {
+    // Range.by(n): NumberRange.StepIterator walk, calcSize, toString suffix, by/subList/step rules
+    let src = r####"// Range.by(n): a NumberRange stepped by StepIterator, printed with its step
+def r = (1..10).by(3)
+println r.getClass().name
+println r
+println r.toList()
+println r.size()
+println([r.from, r.to, r.stepSize])
+println([4 in r, 5 in r, r.isCase(5), r.contains(7.0)])
+println r[-1]
+println r.subList(1, 3)
+println r.step(2)
+// IntRange.by uses the exclusion-adjusted bounds as an inclusive pair
+println((1..<10).by(3))
+println((10..1).by(3).toList())
+// a negative step walks down from the upper bound; calcSize is Groovy's arithmetic
+println((1..10).by(-3).toList())
+println((1..10).by(-3).size())
+// a NumberRange keeps its own end flags; a decimal step promotes the walk
+println((3.0..<1.0).by(0.5))
+println((3.0..<1.0).by(0.5).toList())
+println((1..10).by(2.5).toList())
+println((1..10).by(1))
+println((1..10).by(1.0))
+println((1..10).by(3) == [1, 4, 7, 10])
+def seen = []
+for (i in (0..6).by(2)) seen << i
+println seen
+try { (1..3).by(0).each { } } catch (e) { println e.message }
+try { r.by(2) } catch (e) { println e.getClass().name + ': ' + e.message }
+"####;
+    let expected = r####"groovy.lang.NumberRange
+1..10.by(3)
+[1, 4, 7, 10]
+4
+[1, 10, 3]
+[true, false, false, true]
+10
+4..7.by(3)
+[1, 7]
+1..9.by(3)
+[1, 4, 7, 10]
+[10, 7, 4, 1]
+-2
+1.0..<3.0.by(0.5)
+[1.0, 1.5, 2.0, 2.5]
+[1, 3.5, 6.0, 8.5]
+1..10
+1..10.by(1.0)
+true
+[0, 2, 4, 6]
+Infinite loop detected due to step size of 0
+java.lang.IllegalStateException: by only allowed on ranges with original stepSize = 1 but found 3
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn range_step_with_a_closure_runs_it_and_answers_null() {
+    // Range.step(n) { } calls the closure for every n-th value instead of answering the list
+    let src = r####"// Range.step(n) { } runs the closure over every n-th value and answers null
+def out = []
+println((1..10).step(3) { out << it })
+println out
+(10..1).step(4) { print it }
+println()
+('a'..'e').step(2) { print it }
+println()
+println((1..10).by(3).step(2) { print it })
+"####;
+    let expected = r####"null
+[1, 4, 7, 10]
+1062
+ace
+17null
+"####;
+    check(src, expected);
+}

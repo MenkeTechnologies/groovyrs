@@ -459,7 +459,11 @@ Implemented and checked against Apache Groovy:
   `getClass()` names `IntRange`/`ObjectRange`/`NumberRange`/`EmptyRange`, and
   `from`/`to`/`step(n)`/`reverse()`/`size()`/`contains(x)`/`isReverse()`/`containsWithinBounds(x)` and the `inclusiveLeft`/`inclusiveRight` flags are its
   own members — with `from`/`to` reporting the bounds of what is enumerated, so
-  `(4..0).from` is 0 and `(0..<4).to` is 3. The walk steps with `next`/`previous`
+  `(4..0).from` is 0 and `(0..<4).to` is 3. `step(n) { … }` runs the closure over
+  every `n`-th value and answers `null`. `by(n)` answers Groovy's stepped
+  `NumberRange` (`(1..10).by(3)` prints `1..10.by(3)` and walks `1, 4, 7, 10`;
+  a negative step walks down from the upper bound), with `NumberRange`'s own
+  `size()` arithmetic, `subList`, `stepSize` and re-stepping rule. The walk steps with `next`/`previous`
   and so keeps the element type (`1.5..4.0` is `[1.5, 2.5, 3.5]`). A `Long`
   endpoint makes a `NumberRange`, and membership (`contains`, `in`, `case`) is
   the class's own: an `IntRange` holds only integral values, so `1.0 in (1..5)`

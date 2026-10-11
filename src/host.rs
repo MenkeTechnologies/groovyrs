@@ -2136,6 +2136,11 @@ pub struct RangeVal {
     /// endpoints of an `ObjectRange` and into `EmptyRange` where Groovy's
     /// `createRange` does.
     excl_left: bool,
+    /// The `stepSize` of a `NumberRange` built by `Range.by(n)`; `None` for every
+    /// range literal, whose step is the implicit 1. A stepped range is always a
+    /// `NumberRange` held with `from <= to` (`by` builds it from the normalised
+    /// bounds), and it walks by Groovy's `NumberRange.StepIterator`.
+    step: Option<Value>,
 }
 
 /// A registered closure: the body's name-pool index, its parameter count, and
@@ -16797,6 +16802,7 @@ fn b_range(vm: &mut VM, _argc: u8) -> Value {
             inclusive,
             long,
             excl_left: false,
+            step: None,
         }
     };
     heap_push(HeapObj::Range(range))
@@ -16820,6 +16826,7 @@ fn exclusive_left_range(from: Value, to: Value, inclusive: bool, long: bool) -> 
         inclusive: false,
         long,
         excl_left: false,
+        step: None,
     };
     let equal = natural_order(&from, &to) == Ordering::Equal;
     if equal {
@@ -16847,6 +16854,7 @@ fn exclusive_left_range(from: Value, to: Value, inclusive: bool, long: bool) -> 
             inclusive,
             long,
             excl_left: true,
+            step: None,
         };
     }
     let mut to = to;
@@ -16862,6 +16870,7 @@ fn exclusive_left_range(from: Value, to: Value, inclusive: bool, long: bool) -> 
         inclusive: true,
         long,
         excl_left: false,
+        step: None,
     }
 }
 
@@ -16955,6 +16964,9 @@ fn range_end_i64(v: &Value) -> i64 {
 /// This is *not* always `range_elements(r).len()`, and the difference is
 /// Groovy's, not ours — see [`number_range_size`].
 fn range_size(r: &RangeVal) -> i64 {
+    if let Some(step) = &r.step {
+        return stepped_range_size(r, step);
+    }
     match range_class(r) {
         // `IntRange.size`: `max(getTo() - getFrom() + 1, 0)` over the bounds
         // the exclusions already adjusted.
@@ -17077,6 +17089,9 @@ fn successor(v: &Value, forward: bool) -> Option<Value> {
 /// walk finishes on.
 fn range_elements(r: &RangeVal) -> Vec<Value> {
     use std::cmp::Ordering;
+    if let Some(step) = &r.step {
+        return stepped_range_elements(r, step);
+    }
     let desc = range_is_reverse(r);
     let mut out = Vec::new();
     let mut cur = r.from.clone();
@@ -17120,7 +17135,27 @@ fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]
         // usually delegates to: `(1..5).subList(1, 3)` is `2..3`, and the empty
         // window is the `EmptyRange` `1..<1` — built from the range's *lower*
         // bound, not from the window's position.
-        "subList" => return range_sublist(vm, r, args),
+        "subList" => {
+            return Some(match &r.step {
+                Some(step) => stepped_range_sublist(vm, r, step, args),
+                None => return range_sublist(vm, r, args),
+            })
+        }
+        // `Range.by(n)` — a `NumberRange` over the same bounds, stepping by `n`.
+        // An `ObjectRange` has no `by`, and falls through to the miss.
+        "by" if args.len() == 1
+            && is_number(&args[0])
+            && matches!(
+                range_class(r),
+                "groovy.lang.IntRange" | "groovy.lang.NumberRange"
+            ) =>
+        {
+            range_by(vm, r, &args[0])
+        }
+        // `NumberRange.getStepSize` — 1 unless `by` set one.
+        "getStepSize" if args.is_empty() && range_class(r) == "groovy.lang.NumberRange" => {
+            r.step.clone().unwrap_or_else(|| Value::int(1))
+        }
         // Answered here rather than falling through, because the list a range
         // delegates to is an `ArrayList` and would name the wrong class.
         "getClass" => heap_push(HeapObj::ClassRef(range_class(r).to_string())),
@@ -17166,19 +17201,55 @@ fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]
                 Value::Undef
             }
         }
+        // A stepped range is a case only for a value its walk reaches:
+        // `(1..10).by(3).isCase(5)` is false though 5 lies within the bounds.
+        "isCase" if args.len() == 1 && r.step.is_some() => Value::bool(range_contains(r, &args[0])),
         "isCase" if args.len() == 1 => Value::bool(range_contains_within_bounds(r, &args[0])),
         "size" | "getSize" => Value::int(range_size(r)),
         "step" => {
             let n = args.first().and_then(as_i64).unwrap_or(1);
-            if n == 0 && range_elements(r).len() > 1 {
-                raise(
-                    vm,
-                    "GroovyRuntimeException",
-                    "Infinite loop detected due to step size of 0",
-                );
+            // `Range.step(n) { … }` runs the closure over the stepped values and
+            // answers `null`; `step(n)` alone answers them as a list.
+            let clo = args.get(1).filter(|c| closure_meta(c).is_some());
+            let picked = match &r.step {
+                // `NumberRange.step(n)` walks with `n * stepSize`; a zero product
+                // over equal bounds walks nothing.
+                Some(step) => {
+                    let by = range_number_op(NumOp::Mul, &Value::int(n), step);
+                    if n == 0 && natural_order(&r.from, &r.to) == std::cmp::Ordering::Equal {
+                        Vec::new()
+                    } else {
+                        stepped_range_elements(r, &by)
+                    }
+                }
+                None => {
+                    if n == 0 && range_elements(r).len() > 1 {
+                        raise(
+                            vm,
+                            "GroovyRuntimeException",
+                            "Infinite loop detected due to step size of 0",
+                        );
+                        return Some(Value::Undef);
+                    }
+                    range_step(r, n)
+                }
+            };
+            if pending_exc() || faulted() {
                 return Some(Value::Undef);
             }
-            Value::array(range_step(r, n))
+            let Some(clo) = clo else {
+                return Some(Value::array(picked));
+            };
+            for v in picked {
+                if let Err(e) = invoke_closure(vm, clo, &[v]) {
+                    fault(vm, e);
+                    return Some(Value::Undef);
+                }
+                if pending_exc() {
+                    break;
+                }
+            }
+            Value::Undef
         }
         "contains" => Value::bool(range_contains(
             r,
@@ -17207,6 +17278,12 @@ fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]
 /// `ObjectRange`) compares its elements with Groovy's coercing equality, so
 /// `2 in (1.0..3.0)` is true.
 fn range_contains(r: &RangeVal, needle: &Value) -> bool {
+    // `NumberRange.contains` walks its `StepIterator`, comparing with Groovy's
+    // coercing equality, and never contains `null`.
+    if r.step.is_some() {
+        return !matches!(needle, Value::Undef)
+            && range_elements(r).iter().any(|e| values_equal(e, needle));
+    }
     if range_class(r) == "groovy.lang.IntRange" {
         return match (needle, range_lower(r), range_upper(r)) {
             (Value::Int(n), Value::Int(lo), Value::Int(hi)) => lo <= *n && *n <= hi,
@@ -17269,6 +17346,7 @@ fn range_sublist(vm: &mut VM, r: &RangeVal, args: &[Value]) -> Option<Value> {
             inclusive: false,
             long: r.long,
             excl_left: false,
+            step: None,
         })));
     }
     let mut asc = range_elements(r);
@@ -17289,6 +17367,7 @@ fn range_sublist(vm: &mut VM, r: &RangeVal, args: &[Value]) -> Option<Value> {
         inclusive: true,
         long: r.long,
         excl_left: false,
+        step: None,
     })))
 }
 
@@ -17306,6 +17385,219 @@ fn range_step(r: &RangeVal, step: i64) -> Vec<Value> {
     seq.into_iter()
         .step_by(step.unsigned_abs() as usize)
         .collect()
+}
+
+/// `a + b` / `a - b` by Groovy's numeric tower — what `NumberRange`'s
+/// `increment`/`decrement` (`NumberMath.plus`/`minus`) answer, so an `Integer`
+/// range stepped by `2.5` walks `1, 3.5, 6.0, 8.5`.
+fn range_number_op(op: NumOp, a: &Value, b: &Value) -> Value {
+    // Two integers never reach the numeric hook (fusevm answers them natively),
+    // so they are combined here, wrapped at the operands' width as `+` does.
+    if let (Value::Int(x), Value::Int(y)) = (a, b) {
+        let wide = i32::try_from(*x).is_err() || i32::try_from(*y).is_err();
+        let n = match op {
+            NumOp::Sub => x.wrapping_sub(*y),
+            NumOp::Mul => x.wrapping_mul(*y),
+            _ => x.wrapping_add(*y),
+        };
+        return wrap_to_width(n, wide);
+    }
+    numeric_hook(op, a, b).unwrap_or(Value::Undef)
+}
+
+/// The values a stepped range (`Range.by(n)`) enumerates — a port of
+/// `NumberRange.StepIterator`.
+///
+/// The bounds are the normalised `from <= to` pair. A positive step walks up
+/// from the lower one when the range is written ascending and down from the
+/// upper one when it is written reversed; a negative step does the opposite,
+/// which is why `(1..10).by(-3)` is `[10, 7, 4, 1]`. An excluded left end skips
+/// the first value, and the right-end flag decides whether the far bound itself
+/// is reached — in *both* directions, exactly as Groovy's `hasNext` does.
+///
+/// A zero step raises `GroovyRuntimeException` when the bounds differ. With equal
+/// bounds Groovy's iterator never ends; groovyrs answers no elements rather than
+/// hanging.
+fn stepped_range_elements(r: &RangeVal, step: &Value) -> Vec<Value> {
+    use std::cmp::Ordering;
+    let zero = Value::int(0);
+    let (lower, upper) = (range_lower(r), range_upper(r));
+    let step_sign = natural_order(step, &zero);
+    if step_sign == Ordering::Equal {
+        if natural_order(&lower, &upper) != Ordering::Equal {
+            with_vm(|vm| {
+                raise(
+                    vm,
+                    "GroovyRuntimeException",
+                    "Infinite loop detected due to step size of 0",
+                )
+            });
+        }
+        return Vec::new();
+    }
+    let reverse = range_is_reverse(r);
+    let (delta, ascending) = if step_sign == Ordering::Less {
+        (range_number_op(NumOp::Mul, step, &Value::int(-1)), reverse)
+    } else {
+        (step.clone(), !reverse)
+    };
+    let advance = |v: &Value| {
+        let op = if ascending { NumOp::Add } else { NumOp::Sub };
+        range_number_op(op, v, &delta)
+    };
+    let mut next = if ascending {
+        lower.clone()
+    } else {
+        upper.clone()
+    };
+    if r.excl_left {
+        next = advance(&next);
+    }
+    let mut out = Vec::new();
+    loop {
+        let more = if ascending {
+            let ord = natural_order(&next, &upper);
+            ord == Ordering::Less || (r.inclusive && ord == Ordering::Equal)
+        } else {
+            let ord = natural_order(&next, &lower);
+            ord == Ordering::Greater || (r.inclusive && ord == Ordering::Equal)
+        };
+        if !more {
+            return out;
+        }
+        let following = advance(&next);
+        out.push(std::mem::replace(&mut next, following));
+    }
+}
+
+/// `NumberRange.calcSize` for a stepped range. An integral step over integral
+/// or decimal bounds is arithmetic — `(to - from) / step`, truncated, plus one,
+/// over the bounds the exclusions moved — so it can disagree with the walk
+/// exactly where Groovy's does: `(1..10).by(-3).size()` is `-2`. Any other step
+/// (or a `Double` bound) is counted by walking. A zero integral step divides by
+/// zero, as Groovy's does.
+fn stepped_range_size(r: &RangeVal, step: &Value) -> i64 {
+    let (lower, upper) = (range_lower(r), range_upper(r));
+    if r.excl_left && !r.inclusive && natural_order(&lower, &upper) == std::cmp::Ordering::Equal {
+        return 0;
+    }
+    let integral_step = as_exact_dec(step)
+        .filter(|d| decimal::cmp(d, &decimal::to_big_integer(d)) == std::cmp::Ordering::Equal);
+    let exact_bounds = |v: &Value| matches!(v, Value::Int(_)) || as_dec(v).is_some();
+    if let Some(step_dec) = integral_step {
+        if exact_bounds(&lower) && exact_bounds(&upper) {
+            let one = decimal::from_i64(1);
+            let (Some(lo), Some(hi)) = (as_exact_dec(&lower), as_exact_dec(&upper)) else {
+                return 0;
+            };
+            let from = if r.excl_left {
+                decimal::add(&lo, &one)
+            } else {
+                lo
+            };
+            let to = if r.inclusive {
+                hi
+            } else {
+                decimal::sub(&hi, &one)
+            };
+            let by = decimal::from_i64(decimal::truncate_to_i64(&step_dec));
+            if by.is_zero() {
+                with_vm(|vm| raise(vm, "ArithmeticException", "/ by zero"));
+                return 0;
+            }
+            let quotient = decimal::divide_to_integral(&decimal::sub(&to, &from), &by);
+            return (decimal::truncate_to_i64(&quotient) + 1).min(i64::from(i32::MAX));
+        }
+    }
+    stepped_range_elements(r, step).len() as i64
+}
+
+/// `NumberRange.by(stepSize)`: a new `NumberRange` over the receiver's
+/// normalised bounds with the given step. An `IntRange` passes its
+/// exclusion-adjusted `getFrom()`/`getTo()` as an inclusive pair (GROOVY-10496:
+/// `(1..<10).by(3)` is `1..9.by(3)`); a `NumberRange` keeps both of its end flags
+/// and refuses to be re-stepped unless its own step is `Integer` 1.
+fn range_by(vm: &mut VM, r: &RangeVal, step: &Value) -> Value {
+    if let Some(old) = r.step.as_ref().filter(|s| !matches!(s, Value::Int(1))) {
+        raise(
+            vm,
+            "IllegalStateException",
+            &format!(
+                "by only allowed on ranges with original stepSize = 1 but found {}",
+                groovy_str(old)
+            ),
+        );
+        return Value::Undef;
+    }
+    let int_range = range_class(r) == "groovy.lang.IntRange";
+    heap_push(HeapObj::Range(RangeVal {
+        from: range_lower(r),
+        to: range_upper(r),
+        inclusive: int_range || r.inclusive,
+        long: r.long,
+        excl_left: !int_range && r.excl_left,
+        step: Some(step.clone()),
+    }))
+}
+
+/// `NumberRange.subList` for a stepped range: the window's first and last
+/// values become the bounds of another range with the same step, so
+/// `(1..10).by(3).subList(1, 3)` is `4..7.by(3)`.
+fn stepped_range_sublist(vm: &mut VM, r: &RangeVal, step: &Value, args: &[Value]) -> Value {
+    let from = args.first().and_then(as_i64).unwrap_or(0);
+    let to = args.get(1).and_then(as_i64).unwrap_or(0);
+    if from < 0 {
+        raise(
+            vm,
+            "IndexOutOfBoundsException",
+            &format!("fromIndex = {from}"),
+        );
+        return Value::Undef;
+    }
+    if from > to {
+        raise(
+            vm,
+            "IllegalArgumentException",
+            &format!("fromIndex({from}) > toIndex({to})"),
+        );
+        return Value::Undef;
+    }
+    if from == to {
+        let at = range_lower(r);
+        return heap_push(HeapObj::Range(RangeVal {
+            from: at.clone(),
+            to: at,
+            inclusive: false,
+            long: r.long,
+            excl_left: false,
+            step: None,
+        }));
+    }
+    let items = stepped_range_elements(r, step);
+    // `StepIterator` is walked once: an empty walk fails its first `next()`,
+    // and otherwise the message names the last index it did reach.
+    let reach = items.len() as i64;
+    if reach == 0 {
+        raise_opt(vm, "NoSuchElementException", None);
+        return Value::Undef;
+    }
+    if from >= reach || to > reach {
+        let i = reach - 1;
+        raise(
+            vm,
+            "IndexOutOfBoundsException",
+            &format!("Index: {i} is too big for range: {}", range_str(r)),
+        );
+        return Value::Undef;
+    }
+    heap_push(HeapObj::Range(RangeVal {
+        from: items[from as usize].clone(),
+        to: items[to as usize - 1].clone(),
+        inclusive: true,
+        long: r.long,
+        excl_left: false,
+        step: Some(step.clone()),
+    }))
 }
 
 // ── `java.util.Set` ─────────────────────────────────────────────────────────
@@ -18000,8 +18292,14 @@ fn range_rendered(r: &RangeVal, render: impl Fn(&Value) -> String) -> String {
         };
         return format!("{}..{}", render(&r.from), render(&last));
     }
+    // `NumberRange.getToString` appends the step unless it is `Integer` 1, so
+    // `(1..10).by(1)` prints `1..10` and `(1..10).by(1.0)` prints `1..10.by(1.0)`.
+    let by = match &r.step {
+        Some(Value::Int(1)) | None => String::new(),
+        Some(step) => format!(".by({})", groovy_str(step)),
+    };
     format!(
-        "{}{}..{}{}",
+        "{}{}..{}{}{by}",
         render(&r.from),
         if r.excl_left { "<" } else { "" },
         if r.inclusive { "" } else { "<" },
@@ -18013,6 +18311,9 @@ fn range_rendered(r: &RangeVal, render: impl Fn(&Value) -> String) -> String {
 /// endpoints make an `IntRange`, single-character ones an `ObjectRange`, and a
 /// decimal or `Long` one a `NumberRange`.
 fn range_class(r: &RangeVal) -> &'static str {
+    if r.step.is_some() {
+        return "groovy.lang.NumberRange";
+    }
     // A range that enumerates nothing — an exclusive one with equal endpoints —
     // is its own class in Groovy, whatever the endpoints' type.
     if range_is_empty(r) {
@@ -18455,9 +18756,10 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
             "from" => range_lower(&r),
             "to" => range_upper(&r),
             // The boolean getters, read as properties: `r.reverse` is
-            // `isReverse()`, `r.inclusiveLeft` is `getInclusiveLeft()`.
+            // `isReverse()`, `r.inclusiveLeft` is `getInclusiveLeft()`, and a
+            // `NumberRange`'s `r.stepSize` is `getStepSize()`.
             "reverse" => Value::bool(range_reported_reverse(&r)),
-            "inclusiveLeft" | "inclusiveRight" | "inclusive" => {
+            "inclusiveLeft" | "inclusiveRight" | "inclusive" | "stepSize" => {
                 let getter = format!("get{}{}", name[..1].to_uppercase(), &name[1..]);
                 match dispatch_range_method(vm, &r, &getter, &[]) {
                     Some(v) => v,

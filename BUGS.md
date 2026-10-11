@@ -779,7 +779,7 @@ error.
 
 **Missing GDK methods** (`MissingMethodException` where Groovy answers):
 `String.lines`, `Map.toSpreadMap`, `shuffled`,
-`List.stream()`, `Range.by(n)`, `BigDecimal.step(to, step) { … }`. `Eval.me` raises
+`List.stream()`, `BigDecimal.step(to, step) { … }`. `Eval.me` raises
 `MissingPropertyException`.
 
 **Wrong values:**
@@ -923,6 +923,10 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
 
 ## Modeled with a documented simplification
 
+- **A zero `by` step over equal bounds walks nothing.** `(5..5).by(0)` never
+  stops iterating in Groovy (its `StepIterator` only refuses a zero step when
+  the bounds differ, which groovyrs raises identically); groovyrs answers an
+  empty walk instead of hanging.
 - **An empty comma-labelled section is a Groovy 5.1.1 defect, deliberately not
   reproduced.** A colon-form switch expression whose comma label list has an
   EMPTY body silently matches nothing at all: measured on Groovy 5.1.1 /

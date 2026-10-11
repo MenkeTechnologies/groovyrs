@@ -8555,6 +8555,36 @@ fn dispatch_map_method_exists(method: &str) -> bool {
     )
 }
 
+/// The heap id of a `java.util.Random`, if `v` is one.
+fn random_id(v: &Value) -> Option<u32> {
+    match v {
+        Value::Obj(id)
+            if HEAP.with(|h| matches!(h.borrow().get(*id as usize), Some(HeapObj::Random(_)))) =>
+        {
+            Some(*id)
+        }
+        _ => None,
+    }
+}
+
+/// `Collections.shuffle(list, rnd)`: the JDK walks down from the end, swapping
+/// each slot with `rnd.nextInt(i)`. With no `Random` it draws from a fresh,
+/// unseeded one, as `Collections.shuffle(list)` does.
+fn shuffle_items(vm: &mut VM, items: &mut [Value], rnd: Option<u32>) -> Option<()> {
+    let rnd = match rnd {
+        Some(r) => r,
+        None => match heap_push(HeapObj::Random(seq::RandomState::new(seq::fresh_seed()))) {
+            Value::Obj(r) => r,
+            _ => return None,
+        },
+    };
+    for i in (2..=items.len()).rev() {
+        let j = seq::random_method(vm, rnd, "nextInt", &[Value::int(i as i64)])?.to_int();
+        items.swap(i - 1, j as usize);
+    }
+    Some(())
+}
+
 /// Pop the `(global-index, name)` pair both bare-name builtins are handed.
 fn pop_name_site(vm: &mut VM) -> (usize, String) {
     let name = vm
@@ -12765,6 +12795,23 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             out.extend_from_slice(&a[at..]);
             Value::array(out)
         }
+        // `list.shuffle()` / `shuffle(rnd)` reorder the receiver in place and
+        // answer `void`; `shuffled()` / `shuffled(rnd)` answer a shuffled copy.
+        // Both are `Collections.shuffle`, so a seeded `Random` gives the JDK's
+        // exact permutation.
+        (Value::Array(a), "shuffle" | "shuffled")
+            if args.is_empty() || (args.len() == 1 && random_id(&args[0]).is_some()) =>
+        {
+            let mut items = a.to_vec();
+            if shuffle_items(vm, &mut items, args.first().and_then(random_id)).is_none() {
+                return Value::Undef;
+            }
+            if method == "shuffled" {
+                return Value::array(items);
+            }
+            set_mutated(Value::array(items));
+            Value::Undef
+        }
         // `list.swap(i, j)` exchanges two elements in place and answers the list.
         (Value::Array(a), "swap") => {
             let len = a.len();
@@ -16050,17 +16097,7 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         ("Collections", "shuffle") if !args.is_empty() => {
             let id = list_id(&arg0)?;
             let mut items = iteration_elements(&arg0);
-            let rnd = match args.get(1) {
-                Some(Value::Obj(r)) => *r,
-                _ => match heap_push(HeapObj::Random(seq::RandomState::new(seq::fresh_seed()))) {
-                    Value::Obj(r) => r,
-                    _ => return None,
-                },
-            };
-            for i in (2..=items.len()).rev() {
-                let j = seq::random_method(vm, rnd, "nextInt", &[Value::int(i as i64)])?.to_int();
-                items.swap(i - 1, j as usize);
-            }
+            shuffle_items(vm, &mut items, args.get(1).and_then(random_id))?;
             list_store(id, items, false);
             Value::Undef
         }

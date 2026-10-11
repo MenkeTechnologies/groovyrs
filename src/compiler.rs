@@ -4534,6 +4534,7 @@ impl Compiler {
                     | "pop"
                     | "removeLast"
                     | "swap"
+                    | "shuffle"
                     | "leftShift"
             );
         let Expr::Var(name) = recv else {

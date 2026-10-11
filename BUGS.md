@@ -778,25 +778,20 @@ this file.
 error.
 
 **Missing GDK methods** (`MissingMethodException` where Groovy answers):
-`String.lines`, `Map.toSpreadMap`, `shuffled`,
-`List.stream()`, `BigDecimal.step(to, step) { … }`. `Eval.me` raises
+`Map.toSpreadMap`, `List.stream()`, `BigDecimal.step(to, step) { … }`. `Eval.me` raises
 `MissingPropertyException`.
 
 **Wrong values:**
 
-- `[1, 2, 3].asImmutable()` does not refuse a later `<< 4` (Groovy raises
-  `UnsupportedOperationException`), and reports `java.util.ArrayList` /
-  `LinkedHashMap` instead of `Collections$UnmodifiableRandomAccessList` /
-  `UnmodifiableMap`.
 - `[1, 1.0].toSet().size()` is `1`; Groovy answers `2` — the hashed
   collections still equate two numbers of different classes, where `==`,
   `contains` and `count` no longer do. Their index narrows candidates by the
   coercing equality, so switching them to `Object.equals` needs an index that
   can answer more than one candidate per key.
-- `"abc".chars()` and `"a\nb".lines()` answer Java streams in Groovy
-  (`chars().toList()` is the code points `[97, 98, 99]`); groovyrs has no
-  stream values, so `chars()` answers the character list and `lines()` is a
-  `MissingMethodException`.
+- `"abc".chars()` and `"a\nb".lines()` answer Java streams in Groovy;
+  groovyrs has no stream values and answers an `ArrayList` (of the code points
+  and of the lines), so `.toList()` agrees with Groovy and `getClass()` does
+  not.
 
 **The probe corpus under 6.0.0.** Of the probes in `parity-scripts/probes.txt`
 that still miss under 6.0.0, two are the documented Java cast and GString
@@ -812,10 +807,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   the whole `Character` row of the `+` matrix concatenates where Groovy either
   adds or raises. The rest of the `plus` table is modeled (see above); this one
   row waits on the type.
-- **`String.collectReplacements`, `String.chars`.** Not dispatched —
-  `MissingMethodException` / `MissingPropertyException` where Groovy answers.
-  Found by a differential sweep of the string GDK in round 3 (`eachLine`, from
-  the same sweep, is now dispatched).
 - **`42.iterator()`.** Groovy's `Object.iterator()` walks a non-collection as a
   one-element sequence; the rest of that `Object`-level GDK is modeled (see
   above) but the iterator itself is not.
@@ -1471,9 +1462,10 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   and `nCopies` have the same name divergence (`Collections$EmptyList`,
   `$SingletonList`, `$CopiesList`) but no behaviour one, since nothing in the
   corpus mutates them.
-- **`"abc".chars()` is not modeled.** It answers an `IntStream`, which groovyrs
-  has no value for. (`toArray()`, `toCharArray()` and `String.bytes` no longer
-  share this gap — they answer real `Object[]` / `char[]` / `byte[]` arrays.)
+- **`"abc".chars()` is not an `IntStream`.** groovyrs has no stream value, so it
+  answers the code points as an `ArrayList` (see above). (`toArray()`,
+  `toCharArray()` and `String.bytes` answer real `Object[]` / `char[]` /
+  `byte[]` arrays.)
 - **A category is selected by arity, not by its first parameter's type.** Groovy
   applies `static int twice(Integer i)` only to an `Integer` receiver; groovyrs
   applies any method of an active category whose declared parameter count matches

@@ -244,7 +244,8 @@ Implemented and checked against Apache Groovy:
   while a `collect` copy is `false`. The same holds for a list reached through a
   map value, an element of another list, a closure parameter or a capture, and
   for every in-place mutator (`add`, `remove`, `set`, `clear`, `push`, `pop`,
-  `<<`, `sort`, `unique`, `removeAll`, `retainAll`, `swap`, `list[i] = v`).
+  `<<`, `sort`, `unique`, `removeAll`, `retainAll`, `swap`, `shuffle`,
+  `list[i] = v`).
   `removeAll`/`retainAll` take Groovy's *predicate closure* as well as a
   collection, and `push` inserts at the front — the end `pop` takes from.
   `addAll` answers whether the list changed (`[1, 2].addAll([])` is `false`) and
@@ -358,7 +359,8 @@ Implemented and checked against Apache Groovy:
   `andThen` / `compose` and the `>>` / `<<` operators, and `clone`, each
   answering another closure that reports the arity it still accepts.
 - **Pure GDK** — lists answer `take`, `drop`, `takeRight`, `dropRight`, `first`,
-  `head`, `last`, `tail`, `init`, `pop`, `removeLast`, `swap`, `getAt`,
+  `head`, `last`, `tail`, `init`, `pop`, `removeLast`, `swap`, `shuffle` /
+  `shuffled` (`Collections.shuffle`, so a seeded `Random` gives the JDK's permutation), `getAt`,
   `indexOf`, `flatten`, `intersect`, `minus`, `plus` (including the
   `plus(index, other)` splice), `disjoint`, `transpose`, `collate`,
   `combinations`, `permutations` and `subsequences` (both answering the

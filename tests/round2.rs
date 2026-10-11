@@ -1247,3 +1247,37 @@ ace
 "####;
     check(src, expected);
 }
+
+#[test]
+fn list_shuffle_and_shuffled_follow_collections_shuffle() {
+    // List.shuffle mutates through the handle and answers void; shuffled copies; both seeded like the JDK
+    let src = r####"// List.shuffle / shuffled are Collections.shuffle: a seeded Random gives the JDK's permutation
+def l = [1, 2, 3, 4, 5]
+def alias = l
+println l.shuffle(new Random(7))
+println alias
+def m = [1, 2, 3, 4, 5, 6, 7, 8]
+def s = m.shuffled(new Random(42))
+println s
+println m
+println s.is(m)
+def u = ['a', 'b', 'c']
+u.shuffle()
+println u.sort()
+def v = u.shuffled()
+println([v.size(), v.containsAll(u), v.is(u)])
+println([].shuffled(new Random(1)))
+Collections.shuffle(m, new Random(3)); println m
+"####;
+    let expected = r####"null
+[5, 4, 1, 3, 2]
+[3, 7, 4, 2, 5, 1, 8, 6]
+[1, 2, 3, 4, 5, 6, 7, 8]
+false
+[a, b, c]
+[3, true, false]
+[]
+[3, 5, 4, 7, 2, 1, 8, 6]
+"####;
+    check(src, expected);
+}

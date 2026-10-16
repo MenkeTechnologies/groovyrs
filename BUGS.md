@@ -1233,6 +1233,11 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   mantissa to three digits. The rounding is defined on the *hex* significand, a
   base the value model has no arithmetic for; every other float conversion
   (`%f`, `%e`, `%g`) honours its precision exactly.
+- **An assignment in value position is an immediately-invoked closure.**
+  `(x = f())` lowers to `{ -> x = f(); x }()`, so a `property` or subscript
+  target has its receiver evaluated twice (`(make().v = 1)` calls `make` two
+  times), and the closure frame is a cost per evaluation inside a hot loop.
+  `for` conditions and ternary branches do not take an assignment.
 - **A compound assignment to an unbound name raises the wrong throwable.**
   `counter += 1` with nothing bound reads `null` and then faults on the
   arithmetic, so it raises `NullPointerException` where Groovy raises

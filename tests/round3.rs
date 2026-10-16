@@ -165,3 +165,52 @@ null
 "####;
     check(src, expected);
 }
+
+#[test]
+fn assignment_in_value_position_yields_the_stored_value() {
+    let src = r####"def x; (x = 7); println x
+println((x = 8))
+def y = (x = 4) + 1; println y
+def z = null; z ?: (z = 7); println z
+if ((x = 3) > 2) println x
+def a, b; a = b = 4; println a + b
+def i = 0; while ((i += 1) < 3) {}; println i
+def l = []; def n; while ((n = l.size()) < 2) l << n; println l
+def it2 = [1, 2, 3].iterator(); def e
+while (it2.hasNext() && (e = it2.next()) != 3) print e
+println()
+def m = [:]
+println(m.k = 5)
+println(m)
+class K { int v; def set(n) { return (v = n) * 2 }; def bump() { (v += 1) } }
+def k = new K(); println k.set(4); println k.v; println k.bump()
+def arr = [0, 0]
+println(arr[1] = 9)
+println(arr)
+String line
+def lines = ['p', 'q'].iterator()
+while ((line = lines.hasNext() ? lines.next() : null) != null) println line
+if (x = 0) println 'no' else println 'falsy'
+"####;
+    let expected = r####"7
+8
+5
+7
+3
+8
+3
+[0, 1]
+12
+5
+[k:5]
+8
+4
+5
+9
+[0, 9]
+p
+q
+falsy
+"####;
+    check(src, expected);
+}

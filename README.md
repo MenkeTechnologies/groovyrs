@@ -156,6 +156,10 @@ Implemented and checked against Apache Groovy:
   a subscript or property target in statement position (`l[0]++`, `p.x--`). A
   compound assignment to a subscript evaluates its receiver and index once, so
   `m[key()] += 5` calls `key` a single time.
+  An assignment is also an expression where Groovy allows one — a parenthesised
+  group, an `if` / `while` condition, a call argument, or the right side of
+  another assignment (`(n = next()) != null`, `a = b = 0`) — and yields the
+  stored value.
 - **Functions** — `def f(a, b) { … }` (and typed `Type f(…) { … }`) compiled to
   fusevm subroutine regions over the native `Op::Call` frame ABI. Parameters and
   locals are frame slots, so recursion and mutual recursion are sound; `return

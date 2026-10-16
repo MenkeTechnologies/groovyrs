@@ -546,7 +546,7 @@ impl Parser {
                 self.advance(); // name
                 self.advance(); // op
                 self.skip_newlines();
-                let value = self.expression()?;
+                let value = self.expression_or_assign()?;
                 return Ok(StmtKind::Assign { name, op, value });
             }
             // `x ?= v` is `x = x ?: v`: the write happens only when `x` is
@@ -754,7 +754,7 @@ impl Parser {
         if self.is(&Tok::Assign) {
             self.advance();
             self.skip_newlines();
-            Ok(Some(self.expression()?))
+            Ok(Some(self.expression_or_assign()?))
         } else {
             Ok(None)
         }
@@ -1657,7 +1657,7 @@ impl Parser {
     fn if_stmt(&mut self) -> Result<StmtKind, String> {
         self.eat(&Tok::If)?;
         self.eat(&Tok::LParen)?;
-        let cond = self.expression()?;
+        let cond = self.expression_or_assign()?;
         self.eat(&Tok::RParen)?;
         let then = self.braced_or_single()?;
         // `else` may follow on the same line or after a newline.
@@ -1897,7 +1897,7 @@ impl Parser {
         self.skip_newlines();
         self.eat(&Tok::While)?;
         self.eat(&Tok::LParen)?;
-        let cond = self.expression()?;
+        let cond = self.expression_or_assign()?;
         self.eat(&Tok::RParen)?;
         Ok(StmtKind::DoWhile { body, cond })
     }
@@ -2537,6 +2537,65 @@ impl Parser {
     /// precedence-climbing `binary` operators.
     fn expression(&mut self) -> Result<Expr, String> {
         self.conditional()
+    }
+
+    /// An expression that may itself be an assignment: `(x = f())`, `a = b = 0`,
+    /// `while ((n = next()) != null)`. Groovy gives an assignment the value it
+    /// stored, but groovyrs assignments are statements, so one in value
+    /// position lowers to an immediately-invoked closure that runs the
+    /// assignment and then reads the target back:
+    /// `{ -> x = f(); x }()`. A closure shares the variables it names, so the
+    /// write lands on the enclosing `x`. A property or subscript target has its
+    /// receiver evaluated twice (once to write, once to read back).
+    ///
+    /// Only the right-associative chain is handled here; callers that already
+    /// treat `target = value` as a statement keep calling [`Self::expression`].
+    fn expression_or_assign(&mut self) -> Result<Expr, String> {
+        let line = self.line();
+        let lhs = self.expression()?;
+        let Some(op) = assign_op(self.peek()) else {
+            return Ok(lhs);
+        };
+        let mut target = &lhs;
+        while let Expr::Recorded { inner, .. } = target {
+            target = inner;
+        }
+        let target = target.clone();
+        if !matches!(
+            target,
+            Expr::Var(_) | Expr::Property { .. } | Expr::Index { .. }
+        ) {
+            return Ok(lhs);
+        }
+        self.advance();
+        self.skip_newlines();
+        let value = self.expression_or_assign()?;
+        let write = match &target {
+            Expr::Var(name) => StmtKind::Assign {
+                name: name.clone(),
+                op,
+                value,
+            },
+            _ => self.assign_to_target(target.clone(), op, value)?,
+        };
+        let body = vec![
+            Stmt::new(line, write),
+            Stmt::new(line, StmtKind::Expr(target)),
+        ];
+        Ok(Expr::MethodCall {
+            recv: Box::new(Expr::Closure {
+                params: Vec::new(),
+                body,
+                explicit_params: true,
+                varargs: false,
+                param_types: Vec::new(),
+                defaults: 0,
+            }),
+            method: "call".to_string(),
+            args: Vec::new(),
+            line,
+            safe: false,
+        })
     }
 
     /// The ternary `c ? t : e` and Elvis `c ?: e` operators — the lowest
@@ -3274,7 +3333,7 @@ impl Parser {
             }
             Tok::LParen => {
                 self.advance();
-                let e = self.expression()?;
+                let e = self.expression_or_assign()?;
                 self.eat(&Tok::RParen)?;
                 Ok(e)
             }
@@ -3414,7 +3473,7 @@ impl Parser {
             let arg = if self.is(&Tok::RParen) {
                 None
             } else {
-                Some(Box::new(self.expression()?))
+                Some(Box::new(self.expression_or_assign()?))
             };
             self.eat(&Tok::RParen)?;
             return Ok(Expr::Println { newline, arg });
@@ -3907,7 +3966,7 @@ impl Parser {
                     self.skip_newlines();
                     args.push(Expr::SpreadArg(Box::new(self.expression()?)));
                 } else {
-                    args.push(self.expression()?);
+                    args.push(self.expression_or_assign()?);
                 }
                 self.skip_newlines();
                 if self.is(&Tok::Comma) {

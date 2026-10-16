@@ -3289,6 +3289,19 @@ impl Parser {
                 // the same way `as`, `instanceof` and a `catch` clause read
                 // theirs; `host::b_new` resolves the package.
                 let class = self.type_name()?;
+                // Generic arguments (`new ArrayList<Integer>()`, the diamond `<>`) are
+                // erased: read past them.
+                if self.is(&Tok::Lt) {
+                    let end = self.generic_args_end(0).ok_or_else(|| {
+                        format!(
+                            "groovyrs: malformed generic type after `new` on line {}",
+                            self.line()
+                        )
+                    })?;
+                    for _ in 0..end {
+                        self.advance();
+                    }
+                }
                 // `new int[3]` — an array creation. The length is an expression,
                 // so it cannot ride in the type name; it becomes the single
                 // constructor argument of the array type, which is what

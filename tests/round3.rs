@@ -88,3 +88,22 @@ println h(1, 2, 3)
 "####;
     check(src, expected);
 }
+
+#[test]
+fn generic_arguments_after_new_are_erased() {
+    let src = r####"def s = new ArrayList<>(); s << 1; println s
+def m = new HashMap<String, List<Integer>>(); m.a = [1]; println m
+class Box<T> { List<T> items = []; void push(T t) { items << t }; T pop() { items.remove(items.size() - 1) } }
+def k = new Box<Integer>()
+k.push(4); println(k.pop())
+def t = new TreeMap<String, Map<String, Integer>>(); t.b = [x: 1]; println t
+println(new ArrayList<Integer>([3, 1]).sort())
+"####;
+    let expected = r####"[1]
+[a:[1]]
+4
+[b:[x:1]]
+[1, 3]
+"####;
+    check(src, expected);
+}

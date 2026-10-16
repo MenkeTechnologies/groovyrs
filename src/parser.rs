@@ -693,10 +693,27 @@ impl Parser {
         let value = self.expression()?;
         let tmp = self.fresh_tmp("destructure");
         for (i, name) in names.into_iter().enumerate() {
-            let element = Expr::Index {
-                recv: Box::new(Expr::Var(tmp.clone())),
-                index: Box::new(Expr::Int(i as i64, IntWidth::Int)),
-                line,
+            // A name past the end is `null`, so the read is guarded by the length:
+            // a Java array's subscript past its end raises instead.
+            let at = Expr::Int(i as i64, IntWidth::Int);
+            let element = Expr::Ternary {
+                cond: Box::new(Expr::Binary {
+                    op: BinOp::Lt,
+                    lhs: Box::new(at.clone()),
+                    rhs: Box::new(Expr::MethodCall {
+                        recv: Box::new(Expr::Var(tmp.clone())),
+                        method: "size".to_string(),
+                        args: Vec::new(),
+                        line,
+                        safe: false,
+                    }),
+                }),
+                then: Box::new(Expr::Index {
+                    recv: Box::new(Expr::Var(tmp.clone())),
+                    index: Box::new(at),
+                    line,
+                }),
+                els: Box::new(Expr::Null),
             };
             let kind = if declare {
                 StmtKind::Local {
@@ -3065,6 +3082,29 @@ impl Parser {
 
     /// The postfix run after an already-parsed atom: member calls, property
     /// reads, spread calls, call parentheses and subscripts.
+    /// Does the token under the cursor begin the argument of a paren-less call
+    /// (`sb.append 'x'`, `list.add 3`, `out.println it`)? Only a literal, a
+    /// name, `new` or `true`/`false`/`null` on the same line qualifies: an
+    /// operator, a bracket or the word operators `as`/`instanceof` keep reading
+    /// as a continuation of the member access.
+    fn command_arg_ahead(&self) -> bool {
+        match self.peek() {
+            Tok::Str(_)
+            | Tok::GStr(_)
+            | Tok::Int(..)
+            | Tok::Float(_)
+            | Tok::Single(_)
+            | Tok::Dec(_)
+            | Tok::BigInt(_)
+            | Tok::True
+            | Tok::False
+            | Tok::Null
+            | Tok::New => true,
+            Tok::Ident(w) => !matches!(w.as_str(), "as" | "instanceof" | "extends" | "implements"),
+            _ => false,
+        }
+    }
+
     fn postfix_chain(&mut self, mut e: Expr) -> Result<Expr, String> {
         loop {
             if self.is(&Tok::Dot) || self.is(&Tok::QuestionDot) {
@@ -3132,6 +3172,26 @@ impl Parser {
                             recv: Box::new(e),
                             method: member,
                             args: vec![clo],
+                            line,
+                            safe,
+                        },
+                    );
+                } else if self.command_arg_ahead() {
+                    // Command expression `recv.method arg, arg`: a call whose
+                    // parentheses are left off. Every argument runs to the next
+                    // comma at the top level.
+                    let mut args = vec![self.expression()?];
+                    while self.is(&Tok::Comma) {
+                        self.advance();
+                        self.skip_newlines();
+                        args.push(self.expression()?);
+                    }
+                    e = self.record(
+                        col,
+                        Expr::MethodCall {
+                            recv: Box::new(e),
+                            method: member,
+                            args,
                             line,
                             safe,
                         },
@@ -4486,6 +4546,10 @@ fn parse_interpolation(src: &str) -> Result<Expr, String> {
         switch_exprs: 0,
     };
     p.skip_newlines();
+    // `${}` holds no expression: Groovy reads it as `null`.
+    if p.is(&Tok::Eof) {
+        return Ok(Expr::Null);
+    }
     let e = p.expression()?;
     p.skip_newlines();
     if !p.is(&Tok::Eof) {

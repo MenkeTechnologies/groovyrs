@@ -260,3 +260,70 @@ false
 "####;
     check(src, expected);
 }
+
+#[test]
+fn system_out_print_stream_and_receiver_command_calls() {
+    let src = r####"System.out.println([1, 2])
+System.out.println(null)
+System.out.println("a${1}")
+System.out.print(1.5)
+System.out.println()
+System.out.format("%05d|%s%n", 42, [1])
+System.out.printf("%d%n", 7)
+println(System.out.getClass().name)
+def out = System.out
+out.println 'cmd'
+System.out.append('x').append('y')
+System.out.println()
+System.out << 'a' << 1 << "\n"
+def sb = new StringBuilder()
+sb.append 'x'
+sb.append 1
+println sb
+def l = []
+l.add 3
+l.add 'q'
+println l
+def m = [:]
+m.put 'k', 'v'
+println m
+l.each { out.println it }
+"####;
+    let expected = r####"[1, 2]
+null
+a1
+1.5
+00042|[1]
+7
+java.io.PrintStream
+cmd
+xy
+a1
+x1
+[3, q]
+[k:v]
+3
+q
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn destructuring_a_short_array_pads_with_null() {
+    let src = r####"def c, d, e
+(c, d, e) = 'p q'.split(' ')
+println "$c $d $e"
+def (x, y) = [1]
+println "$x $y"
+def (p, q) = 'ab'
+println "$p $q"
+(x, y) = [y, x]
+println "$x $y"
+"####;
+    let expected = r####"p q null
+1 null
+a b
+null 1
+"####;
+    check(src, expected);
+}

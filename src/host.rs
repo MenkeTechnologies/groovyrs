@@ -1279,6 +1279,9 @@ fn java_class_name(v: &Value) -> String {
     if bignum::math_ctx(v).is_some() {
         return "java.math.MathContext".to_string();
     }
+    if as_print_stream(v).is_some() {
+        return "java.io.PrintStream".to_string();
+    }
     if matches!(v, Value::Obj(id) if HEAP.with(|h| matches!(h.borrow().get(*id as usize), Some(HeapObj::Random(_)))))
     {
         return "java.util.Random".to_string();
@@ -1821,6 +1824,8 @@ enum HeapObj {
     GString(Vec<Value>),
     /// A `java.math.MathContext`.
     MathCtx(bignum::MathCtx),
+    /// `System.out` (`err: false`) or `System.err` — a `java.io.PrintStream`.
+    PrintStream { err: bool },
     /// A `java.util.Random`.
     Random(seq::RandomState),
     /// A `java.lang.reflect.Proxy` over script or JDK interfaces: a closure
@@ -9560,6 +9565,11 @@ fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
             return v;
         }
     }
+    if let Some(err) = as_print_stream(&recv) {
+        if let Some(v) = print_stream_method(vm, err, &recv, method, &args) {
+            return v;
+        }
+    }
     if let Value::Obj(id) = &recv {
         let is_random =
             HEAP.with(|h| matches!(h.borrow().get(*id as usize), Some(HeapObj::Random(_))));
@@ -14477,6 +14487,9 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
     if list_id(&lhs).is_some() {
         return dispatch_call(vm, lhs, "leftShift", vec![rhs]);
     }
+    if as_print_stream(&lhs).is_some() {
+        return dispatch_call(vm, lhs, "leftShift", vec![rhs]);
+    }
     // `map << other` is `Map.leftShift` — a `putAll` that answers the receiver,
     // so it chains. Same reason as the list above: one implementation, reached
     // through the ordinary dispatch.
@@ -16354,6 +16367,10 @@ fn static_field(class: &str, name: &str) -> Option<Value> {
         ("Closure", "OWNER_FIRST") => Value::int(0),
         ("Closure", "DELEGATE_FIRST") => Value::int(1),
         ("Closure", "OWNER_ONLY") => Value::int(2),
+        // `System.out` / `System.err`: a fresh handle per read, as every handle is
+        // interchangeable (they all write to the same descriptor).
+        ("System", "out") => heap_push(HeapObj::PrintStream { err: false }),
+        ("System", "err") => heap_push(HeapObj::PrintStream { err: true }),
         ("Closure", "DELEGATE_ONLY") => Value::int(3),
         ("Integer", "MAX_VALUE") => Value::int(i32::MAX as i64),
         ("Integer", "MIN_VALUE") => Value::int(i32::MIN as i64),
@@ -18425,6 +18442,74 @@ fn range_class(r: &RangeVal) -> &'static str {
         (Value::Int(_), Value::Int(_)) if !r.long => "groovy.lang.IntRange",
         _ => "groovy.lang.NumberRange",
     }
+}
+
+/// Whether `v` is a `System.out` (`Some(false)`) or `System.err` (`Some(true)`) handle.
+fn as_print_stream(v: &Value) -> Option<bool> {
+    let Value::Obj(id) = v else { return None };
+    HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::PrintStream { err }) => Some(*err),
+        _ => None,
+    })
+}
+
+/// The `java.io.PrintStream` methods a script calls on `System.out` / `System.err`:
+/// `print`, `println`, `printf` / `format`, `append`, `write`, `flush`, `close`
+/// and the `<<` operator. `None` for any other method name.
+fn print_stream_method(
+    vm: &mut VM,
+    err: bool,
+    recv: &Value,
+    method: &str,
+    args: &[Value],
+) -> Option<Value> {
+    use std::io::Write;
+    let text = match (method, args) {
+        ("println", []) => "\n".to_string(),
+        ("println", [one]) => format!("{}\n", render_value(vm, one)),
+        ("print" | "append" | "leftShift", [one]) => render_value(vm, one),
+        ("printf" | "format", [spec, rest @ ..]) => {
+            let rest: Vec<Value> = match rest {
+                [Value::Array(a)] => a.to_vec(),
+                [only] => as_list(only).unwrap_or_else(|| vec![only.clone()]),
+                other => other.to_vec(),
+            };
+            java_format(vm, &groovy_str(spec), &rest)
+        }
+        // `write(int)` emits the low byte.
+        ("write", [byte]) if as_i64(byte).is_some() => {
+            let b = [byte.to_int() as u8];
+            let _ = if err {
+                std::io::stderr().write_all(&b)
+            } else {
+                std::io::stdout().write_all(&b)
+            };
+            return Some(Value::Undef);
+        }
+        ("flush" | "close", []) => {
+            let _ = if err {
+                std::io::stderr().flush()
+            } else {
+                std::io::stdout().flush()
+            };
+            return Some(Value::Undef);
+        }
+        _ => return None,
+    };
+    if faulted() || pending_exc() {
+        return Some(Value::Undef);
+    }
+    let _ = if err {
+        std::io::stderr().write_all(text.as_bytes())
+    } else {
+        std::io::stdout().write_all(text.as_bytes())
+    };
+    // `printf`, `format`, `append` and `<<` answer the stream; the rest are `void`.
+    Some(if matches!(method, "printf" | "format" | "append" | "leftShift") {
+        recv.clone()
+    } else {
+        Value::Undef
+    })
 }
 
 /// `GPRINTF` / `GSPRINTF`: Groovy's script-scope `printf`/`sprintf`. The

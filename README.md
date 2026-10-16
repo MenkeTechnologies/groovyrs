@@ -441,7 +441,9 @@ Implemented and checked against Apache Groovy:
   `singletonList`, `nCopies`, `unmodifiableList`, the in-place `sort` / `reverse`,
   `max` / `min`, `swap`, `frequency`, `disjoint`), `Arrays` (`asList`, `toString`,
   and on typed arrays `sort`, `equals`, `fill`, `copyOf`, `copyOfRange`), `System`
-  (`lineSeparator`, `getProperty` with and without a default, `getenv`), and
+  (`lineSeparator`, `getProperty` with and without a default, `getenv`, and the
+  `out` / `err` print streams: `print`, `println`, `printf` / `format`, `append`,
+  `write`, `flush`, `<<`), and
   `String.format` / `String.valueOf`, plus the script-scope `printf` / `sprintf`
   over `java.util.Formatter` (`%s %S %b %B %h %H %c %C %d %o %x %X %e %E %f %g
   %G %a %A %n %%`, the `-` `#` `+` `,` `(` `0` and space flags, width,
@@ -739,8 +741,9 @@ Next waves, in priority order:
    rather than live views, and `getClass()` names `java.util.ArrayList` where
    Groovy names `java.util.TreeMap$KeySet`. A `Map.Entry` carries no class
    either.
-5. **Command-argument chains beyond one argument** — `println a, b` and
-   `foo bar baz` do not parse; the parenthesised call always does.
+5. **Command-argument chains** — `println a, b` and `foo bar baz` do not parse;
+   only a member call with its parentheses left off does (`sb.append 'x'`),
+   and the parenthesised call always parses.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
 

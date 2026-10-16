@@ -907,7 +907,9 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   Groovy's `next`/`previous`. Call `x.next()` / `x.previous()` explicitly for
   those.
 - **`import`/`package`** are tolerated (skipped) but do nothing.
-- **Command-argument chains beyond one arg** (`println a, b`, `foo bar baz`).
+- **Command-argument chains** (`println a, b`, `foo bar baz`). Only a member call
+  with its parentheses left off parses (`sb.append 'x'`, `m.put 'k', 1`); the
+  argument must start with a literal, a name, `new`, `true`, `false` or `null`.
 
 ## Modeled with a documented simplification
 

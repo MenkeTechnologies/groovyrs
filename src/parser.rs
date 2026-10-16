@@ -3851,6 +3851,11 @@ impl Parser {
                     loop {
                         match self.toks.get(j).map(|t| &t.kind) {
                             Some(Tok::LParen | Tok::LBracket | Tok::LBrace) => depth += 1,
+                            // A closer with nothing open ends the closure body
+                            // itself: `{ x = 5 }` is a body, not a default.
+                            Some(Tok::RParen | Tok::RBracket | Tok::RBrace) if depth == 0 => {
+                                return false
+                            }
                             Some(Tok::RParen | Tok::RBracket | Tok::RBrace) => depth -= 1,
                             Some(Tok::Comma | Tok::Arrow) if depth == 0 => break,
                             None | Some(Tok::Nl | Tok::Semi | Tok::Eof) if depth == 0 => {

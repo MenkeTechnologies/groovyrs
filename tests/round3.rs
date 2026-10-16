@@ -107,3 +107,27 @@ println(new ArrayList<Integer>([3, 1]).sort())
 "####;
     check(src, expected);
 }
+
+#[test]
+fn closure_body_starting_with_assignment_is_not_a_default_parameter() {
+    let src = r####"def m = [x: 1]
+m.with { x = 5 }
+println(m)
+def v = 0
+def c = { v = 9 }
+c()
+println(v)
+def d = { a = 3 -> a * 2 }
+println(d())
+println(d(4))
+def e = { a, b = [1, 2] -> a + b }
+println(e([0]))
+"####;
+    let expected = r####"[x:5]
+9
+6
+8
+[0, 1, 2]
+"####;
+    check(src, expected);
+}

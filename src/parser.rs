@@ -772,14 +772,14 @@ impl Parser {
         let body = self.block()?;
         // Queued only now: the body's own statement list drains `pending`.
         for (kept, prelude) in overloads {
-            let body = forward_body(&name, &params, prelude, line);
+            let body = forward_body(&name, &params, varargs.as_deref(), prelude, line);
             self.pending.push(Stmt::new(
                 line,
                 StmtKind::Function {
                     name: name.clone(),
                     params: kept,
                     body,
-                    varargs: None,
+                    varargs: varargs.clone(),
                     ret_ty: "def".to_string(),
                 },
             ));
@@ -1378,7 +1378,7 @@ impl Parser {
                 let params = self.param_list()?;
                 let line = self.line();
                 for (kept, supply) in self.default_overloads(&params) {
-                    let body = forward_body(&name, &params, supply, line);
+                    let body = forward_body(&name, &params, None, supply, line);
                     methods.push(Method {
                         name: name.clone(),
                         params: kept,
@@ -1431,7 +1431,7 @@ impl Parser {
                 let params = self.param_list()?;
                 let line = self.line();
                 for (kept, supply) in self.default_overloads(&params) {
-                    let body = forward_body(&name, &params, supply, line);
+                    let body = forward_body(&name, &params, None, supply, line);
                     methods.push(Method {
                         name: name.clone(),
                         params: kept,
@@ -4306,8 +4306,25 @@ fn qualified_type(name: &str) -> String {
 /// The body of a default-argument overload: its `prelude` (the dropped
 /// parameters' defaults as locals), then a call of the full signature with every
 /// parameter, whose result it returns.
-fn forward_body(name: &str, params: &[String], mut prelude: Vec<Stmt>, line: u32) -> Vec<Stmt> {
-    let args = params.iter().map(|p| Expr::Var(p.clone())).collect();
+fn forward_body(
+    name: &str,
+    params: &[String],
+    varargs: Option<&str>,
+    mut prelude: Vec<Stmt>,
+    line: u32,
+) -> Vec<Stmt> {
+    let mut args: Vec<Expr> = params.iter().map(|p| Expr::Var(p.clone())).collect();
+    // The variadic array is already collected: cast it so the forwarded call
+    // passes it through instead of wrapping it a second time.
+    if let Some(ty) = varargs {
+        if let Some(last) = args.pop() {
+            args.push(Expr::Cast {
+                value: Box::new(last),
+                ty: ty.to_string(),
+                java: false,
+            });
+        }
+    }
     prelude.push(Stmt::new(
         line,
         StmtKind::Return {

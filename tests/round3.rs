@@ -62,3 +62,29 @@ java.util.LinkedHashMap
 "####;
     check(src, expected);
 }
+
+#[test]
+fn default_arguments_combined_with_variadic_parameter() {
+    let src = r####"def f(int a, String b = 'x', Object... rest) { "$a $b $rest" }
+println(f(1))
+println(f(1, 'y'))
+println(f(1, 'y', 3, 4))
+def g(String... s) { s.length }
+println g()
+println g('a')
+def h(a = 5, int... r) { "$a $r" }
+println h()
+println h(1)
+println h(1, 2, 3)
+"####;
+    let expected = r####"1 x []
+1 y []
+1 y [3, 4]
+0
+1
+5 []
+1 []
+1 [2, 3]
+"####;
+    check(src, expected);
+}

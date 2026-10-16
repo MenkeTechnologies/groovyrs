@@ -135,9 +135,11 @@ struct Compiler {
     /// The arities each user function name is declared at, so a call can pick
     /// the body matching its argument count.
     fn_arities: HashMap<String, HashSet<usize>>,
-    /// The user functions whose last parameter is variadic: the declared arity
-    /// and the array type the trailing arguments are collected into.
-    fn_varargs: HashMap<String, (usize, String)>,
+    /// The user functions whose last parameter is variadic: each variadic
+    /// declaration's arity and the array type the trailing arguments are
+    /// collected into. More than one when default arguments generate shorter
+    /// variadic overloads.
+    fn_varargs: HashMap<String, Vec<(usize, String)>>,
     /// The subset of [`Compiler::fn_names`] that can reach itself through the
     /// static call graph. Each of these gets a [`crate::host::GDEPTH`] check in
     /// its prologue, so runaway native recursion raises a catchable
@@ -443,7 +445,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     // Which arities each function name is declared at. A same-named function of
     // a different arity is a *different* function, so its body needs a name of
     // its own — see `Compiler::fn_sub_name`.
-    let mut fn_varargs: HashMap<String, (usize, String)> = HashMap::new();
+    let mut fn_varargs: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     let mut fn_arities: HashMap<String, HashSet<usize>> = HashMap::new();
     for stmt in &prog.body {
         if let StmtKind::Function { name, params, .. } = &stmt.kind {
@@ -451,7 +453,10 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
                 varargs: Some(ty), ..
             } = &stmt.kind
             {
-                fn_varargs.insert(name.clone(), (params.len(), ty.clone()));
+                fn_varargs
+                    .entry(name.clone())
+                    .or_default()
+                    .push((params.len(), ty.clone()));
             }
             fn_names.insert(name.clone());
             fn_arities
@@ -1173,15 +1178,21 @@ impl Compiler {
     /// otherwise; only those two shapes are recognised statically, so a
     /// variable holding an array is wrapped (see BUGS.md).
     fn varargs_args(&self, name: &str, args: &[Expr]) -> Option<Vec<Expr>> {
-        let (arity, ty) = self.fn_varargs.get(name)?;
+        let decls = self.fn_varargs.get(name)?;
+        // Default arguments can generate several variadic overloads; the longest
+        // one the call can still fill (leaving the array empty) wins.
+        let (arity, ty) = decls
+            .iter()
+            .filter(|(arity, _)| args.len() + 1 >= *arity)
+            .max_by_key(|(arity, _)| *arity)?;
         let fixed = arity - 1;
-        if args.len() < fixed
-            || (args.len() != *arity
-                && self
-                    .fn_arities
-                    .get(name)
-                    .is_some_and(|a| a.contains(&args.len())))
-        {
+        let exact_plain_overload = args.len() != *arity
+            && !decls.iter().any(|(a, _)| *a == args.len())
+            && self
+                .fn_arities
+                .get(name)
+                .is_some_and(|a| a.contains(&args.len()));
+        if exact_plain_overload {
             return None;
         }
         if args.len() == *arity {

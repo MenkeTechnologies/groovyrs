@@ -1534,6 +1534,10 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   neither side names a decimal — keeps the native lowering, which reads the
   heap handle as `0`. Naming either operand's decimal-ness anywhere in the
   expression is enough to route it correctly.
+  The same test spots a `Boolean` operand (a `true`/`false` literal, a
+  comparison, `!`, a name declared `boolean` or bound to one), so `a < b & c`
+  answers a `Boolean`; an untyped closure parameter or `def` bound to a call
+  result keeps the native lowering and answers `1`/`0`.
 - **A user iterable is walked eagerly.** `for (x in obj)` and the iteration
   GDK (`each`, `collect`, …) on an object that iterates through its own
   `iterator()` — or an `implements Iterator` class's `hasNext()`/`next()` —

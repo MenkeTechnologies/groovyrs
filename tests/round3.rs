@@ -214,3 +214,49 @@ falsy
 "####;
     check(src, expected);
 }
+
+#[test]
+fn bitwise_operators_on_booleans_answer_booleans() {
+    let src = r####"def t = true, f = false
+println(t ^ f)
+println(t & f)
+println(t | f)
+println((t & t).class.name)
+boolean b = true
+b &= false
+println b
+b |= true
+println b
+b ^= true
+println b
+println(true.and(false))
+println(true.or(false))
+println(true.xor(true))
+println(!true ^ true)
+println(5 > 3 & 2 > 1)
+println(5 > 3 | 2 > 9)
+println(5 > 3 ^ 2 > 1)
+println(6 & 3)
+println(6 | 3)
+println(6 ^ 3)
+"####;
+    let expected = r####"true
+false
+true
+java.lang.Boolean
+false
+true
+false
+false
+true
+false
+true
+true
+true
+false
+2
+7
+5
+"####;
+    check(src, expected);
+}

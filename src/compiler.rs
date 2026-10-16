@@ -4144,7 +4144,7 @@ impl Compiler {
         // `bit_operand_is_object`, not `shr_receiver_is_object`: a name bound to
         // a decimal (`def a = 1G`) is also a handle, and `a & 3G` / `a >> 1`
         // read it as `0` on the native lowering.
-        let is_obj = matches!(ty, "Closure") || init.is_some_and(|e| self.bit_operand_is_object(e));
+        let is_obj = matches!(ty, "Closure" | "boolean" | "Boolean") || init.is_some_and(|e| self.bit_operand_is_object(e));
         if is_obj {
             self.obj_vars.insert(name.to_string());
         } else {
@@ -4204,6 +4204,24 @@ impl Compiler {
             Expr::Float(_) | Expr::Single(_) => true,
             Expr::Var(name) => self.obj_vars.contains(name),
             Expr::Recorded { inner, .. } => self.bit_operand_is_object(inner),
+            // A `Boolean` is no integer either: native `Op::BitAnd` would answer
+            // `1`/`0` for `true & false`, where Groovy answers a `Boolean`.
+            Expr::Bool(_) | Expr::InstanceOf { .. } => true,
+            Expr::Unary { op: UnOp::Not, .. } => true,
+            Expr::Binary {
+                op:
+                    BinOp::Eq
+                    | BinOp::Ne
+                    | BinOp::Lt
+                    | BinOp::Gt
+                    | BinOp::Le
+                    | BinOp::Ge
+                    | BinOp::And
+                    | BinOp::Or
+                    | BinOp::In
+                    | BinOp::MatchFull,
+                ..
+            } => true,
             Expr::Unary { rhs, .. } => self.bit_operand_is_object(rhs),
             Expr::Binary { lhs, rhs, .. } => {
                 self.bit_operand_is_object(lhs) || self.bit_operand_is_object(rhs)

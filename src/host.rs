@@ -13358,6 +13358,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // The mask *methods* — `5.and(3)` is `5 & 3`. Unlike the shifts these
         // need no width: `&`, `|` and `^` of two sign-extended 32-bit values
         // give the same 64-bit pattern either way, and so does `~`.
+        (Value::Bool(_), "and" | "or" | "xor") if args.len() == 1 => {
+            bit_op_values(vm, method, recv, &args[0])
+        }
         (Value::Int(n), "and" | "or" | "xor") => {
             match args.first().and_then(as_i64).filter(|_| args.len() == 1) {
                 Some(b) => Value::int(match method {
@@ -14557,6 +14560,14 @@ fn b_bitop(vm: &mut VM, _argc: u8) -> Value {
 
 /// The body of [`b_bitop`], shared with the `a.and(b)` method spellings.
 fn bit_op_values(vm: &mut VM, op: &str, lhs: &Value, rhs: &Value) -> Value {
+    // `Boolean.and/or/xor(Boolean)` — what `&`, `|` and `^` are on two booleans.
+    if let (Value::Bool(a), Value::Bool(b)) = (lhs, rhs) {
+        return Value::bool(match op {
+            "and" => *a & *b,
+            "or" => *a | *b,
+            _ => *a ^ *b,
+        });
+    }
     if let (Some(a), Some(b)) = (plain_int(lhs), plain_int(rhs)) {
         return Value::int(match op {
             "and" => a & b,

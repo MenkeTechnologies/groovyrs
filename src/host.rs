@@ -9934,7 +9934,7 @@ fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
     // point with a copy in hand is what made every ordinary `m.put(k, v)` cost
     // a clone (twice: `as_omap` and `omap_kind` each built one) plus, for a
     // `HashMap`/`TreeMap`, a re-ordering of every entry.
-    let map_iteration = matches!(method, "sort" | "grep")
+    let map_iteration = matches!(method, "sort" | "grep" | "toSorted")
         // …plus the no-closure spellings of the four predicates, whose answer
         // is decided by the entries alone (a `Map.Entry` is always Groovy-true,
         // so only emptiness distinguishes them).
@@ -11202,9 +11202,11 @@ fn dispatch_map_iteration(
             }
             Some(Ok(acc))
         }
+        // `map.toSorted(…)` is the same ordering but answers a `LinkedHashMap`
+        // even without a closure (`sort()` answers a `TreeMap` there).
         // `map.sort()` orders by key and yields a *new* map (Groovy does not
         // mutate the receiver here, unlike `List.sort`).
-        "sort" => {
+        "sort" | "toSorted" => {
             let handles: Vec<Value> = entries
                 .iter()
                 .map(|(k, v)| heap_push(HeapObj::Entry(k.clone(), v.clone())))
@@ -11223,7 +11225,13 @@ fn dispatch_map_iteration(
             };
             // With no closure Groovy orders by key; the entry handles themselves
             // have no natural order, so sort the keys and rebuild.
-            if clo.is_none() {
+            // `toSorted()` has no key ordering: Groovy compares the entries by value.
+            let order = if method == "toSorted" && clo.is_none() {
+                OrderBy::EntryValue
+            } else {
+                order
+            };
+            if clo.is_none() && method == "sort" {
                 let mut sorted = entries.to_vec();
                 sorted.sort_by(|a, b| mapkey::cmp(&a.0, &b.0));
                 // `sort(Map)` answers a `TreeMap` whatever it was called on —
@@ -11953,7 +11961,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // for `Double.toString` does not see a string frozen inside the
         // implementation. The sibling subscript path (`"ab"[9]`) already emitted
         // the current form, so the two contradicted each other.
-        (Value::Str(s), "substring") => {
+        (Value::Str(s), "substring" | "subSequence") => {
             let len = utf16_len(s) as i64;
             let from = args.first().and_then(as_i64).unwrap_or(0);
             let to = args.get(1).and_then(as_i64).unwrap_or(len);
@@ -14030,14 +14038,6 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         _ => entries.into_iter().skip(n).collect(),
                     };
                     gmap_kind(kept, similar_map_kind(kind))
-                }
-                // `map.toSorted()` orders by key like `sort()` but — unlike it —
-                // answers a `LinkedHashMap` *holding* that order rather than a
-                // `TreeMap`. The two spellings really do differ in class.
-                "toSorted" if args.is_empty() => {
-                    let mut sorted = entries;
-                    sorted.sort_by(|a, b| mapkey::cmp(&a.0, &b.0));
-                    gmap(sorted)
                 }
                 // `map.subMap(keys)` — the entries for the listed keys, in the
                 // ***argument's*** order; a key the map does not hold is dropped.
@@ -19519,6 +19519,8 @@ enum OrderBy<'a> {
     /// A two-parameter closure: a *comparator* returning a negative / zero /
     /// positive `int` (`list.sort { a, b -> b <=> a }`).
     Comparator(&'a Value),
+    /// `Map.toSorted()` with no closure: map entries order by their *value*.
+    EntryValue,
 }
 
 impl<'a> OrderBy<'a> {
@@ -19537,6 +19539,10 @@ impl<'a> OrderBy<'a> {
     fn apply(&self, vm: &mut VM, a: &Value, b: &Value) -> Result<std::cmp::Ordering, String> {
         match self {
             OrderBy::Natural => compare_values(vm, a, b),
+            OrderBy::EntryValue => match (as_entry(a), as_entry(b)) {
+                (Some((_, x)), Some((_, y))) => compare_values(vm, &x, &y),
+                _ => compare_values(vm, a, b),
+            },
             OrderBy::Key(clo) => {
                 let ka = invoke_closure(vm, clo, std::slice::from_ref(a))?;
                 let kb = invoke_closure(vm, clo, std::slice::from_ref(b))?;

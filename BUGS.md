@@ -577,7 +577,7 @@ reported as parse or compile errors, never silently mis-run.
   `java.lang.IndexOutOfBoundsException` (`list.get(i)` past either end),
   `java.lang.StringIndexOutOfBoundsException` (a `String` subscript past the
   end), `java.lang.ArrayIndexOutOfBoundsException` (a negative subscript larger
-  than the receiver), and `java.lang.NumberFormatException` (`toInteger` /
+  than the receiver, or any subscript at or past the end of a Java array), and `java.lang.NumberFormatException` (`toInteger` /
   `toLong` / `toDouble` / `toFloat` on text that does not parse, including an
   `int`-overflowing literal). The reads Groovy does *not* fault on stay
   non-faulting: a list subscript past the end and a missing map key are `null`.

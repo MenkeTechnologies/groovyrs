@@ -131,3 +131,37 @@ println(e([0]))
 "####;
     check(src, expected);
 }
+
+#[test]
+fn java_array_subscript_past_the_end_raises() {
+    let src = r####"def a = new int[3]
+a[0] = 1; a[2] += 5; a[1]++
+println(a)
+try { a[3] } catch (e) { println e.class.simpleName + ' ' + e.message }
+try { a[3] = 1 } catch (e) { println e.message }
+try { a[3]++ } catch (e) { println e.message }
+try { a.getAt(7) } catch (e) { println e.message }
+println(a[-1])
+def s = 'a b'.split()
+try { s[2] } catch (e) { println e.message }
+def g = new int[2][2]
+g[1][1] = 4
+try { g[2][0] } catch (e) { println e.message }
+def l = [1, 2]
+println(l[5])
+l[4] = 9
+println(l)
+"####;
+    let expected = r####"[1, 1, 5]
+ArrayIndexOutOfBoundsException Index 3 out of bounds for length 3
+Index 3 out of bounds for length 3
+Index 3 out of bounds for length 3
+Index 7 out of bounds for length 3
+5
+Index 2 out of bounds for length 2
+Index 2 out of bounds for length 2
+null
+[1, 2, null, null, 9]
+"####;
+    check(src, expected);
+}

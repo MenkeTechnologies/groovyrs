@@ -7996,6 +7996,9 @@ fn map_default(vm: &mut VM, map: &Value, key: &str, subject: &Value) -> Value {
 /// `recv[index]`, shared by the `[…]` subscript builtin and by the `getAt(…)`
 /// method — Groovy defines the subscript *as* `getAt`, so both are one path.
 fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
+    if array_index_past_end(vm, &recv, &index) {
+        return Value::Undef;
+    }
     // `e['k']` on an `Expando` is the property read (`DefaultGroovyMethods
     // .getAt(Object, String)`).
     if as_expando(&recv).is_some() {
@@ -8247,6 +8250,29 @@ fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
     }
 }
 
+/// A Java array has a fixed length: a scalar subscript at or past the end raises
+/// `ArrayIndexOutOfBoundsException` on both read and write, where a list reads
+/// `null` and grows. Answers whether it raised. A negative subscript is left to
+/// the callers, which wrap it against the length and report it themselves.
+fn array_index_past_end(vm: &mut VM, recv: &Value, index: &Value) -> bool {
+    if array_elem(recv).is_none() || !matches!(index, Value::Int(_)) {
+        return false;
+    }
+    let Some((_, _, len)) = list_slot(recv) else {
+        return false;
+    };
+    let i = i64::from(index.to_int() as i32);
+    if i < len as i64 {
+        return false;
+    }
+    raise(
+        vm,
+        "ArrayIndexOutOfBoundsException",
+        &format!("Index {i} out of bounds for length {len}"),
+    );
+    true
+}
+
 /// `GSETINDEX`: `recv[index] = value`, Groovy's `putAt`. A map writes through
 /// its handle; a list is a fusevm *value*, so the new contents are pushed for
 /// the caller to store back over a variable receiver. Assigning past the end of
@@ -8255,6 +8281,9 @@ fn b_setindex(vm: &mut VM, _argc: u8) -> Value {
     let value = vm.stack.pop().unwrap_or(Value::Undef);
     let index = vm.stack.pop().unwrap_or(Value::Undef);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    if array_index_past_end(vm, &recv, &index) {
+        return Value::Undef;
+    }
     if as_instance(&recv).is_some() {
         if let Some(Err(e)) = dispatch_instance_method_or_miss(vm, &recv, "putAt", &[index, value])
         {
@@ -9240,6 +9269,9 @@ fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
                 }
             }
             if matches!(method, "get" | "getAt") && args.len() == 1 {
+                if method == "getAt" && array_index_past_end(vm, &recv, &args[0]) {
+                    return Value::Undef;
+                }
                 // Only the plain in-range index: a negative one counts from the
                 // end for `getAt` and raises for `get`, and both diagnostics
                 // stay in the general path rather than being restated here.

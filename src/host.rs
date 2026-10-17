@@ -17344,13 +17344,7 @@ fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]
         }
         // `Range.by(n)` — a `NumberRange` over the same bounds, stepping by `n`.
         // An `ObjectRange` has no `by`, and falls through to the miss.
-        "by" if args.len() == 1
-            && is_number(&args[0])
-            && matches!(
-                range_class(r),
-                "groovy.lang.IntRange" | "groovy.lang.NumberRange"
-            ) =>
-        {
+        "by" if args.len() == 1 && is_number(&args[0]) && has_numeric_bounds(r) => {
             range_by(vm, r, &args[0])
         }
         // `NumberRange.getStepSize` — 1 unless `by` set one.
@@ -17372,11 +17366,7 @@ fn dispatch_range_method(vm: &mut VM, r: &RangeVal, method: &str, args: &[Value]
         // The inclusivity flags an `IntRange` / `NumberRange` built from a
         // literal carries (`getInclusive` is the right one).
         "getInclusiveLeft" | "getInclusiveRight" | "getInclusive"
-            if args.is_empty()
-                && matches!(
-                    range_class(r),
-                    "groovy.lang.IntRange" | "groovy.lang.NumberRange"
-                ) =>
+            if args.is_empty() && has_numeric_bounds(r) =>
         {
             Value::bool(if method == "getInclusiveLeft" {
                 !r.excl_left
@@ -18505,6 +18495,15 @@ fn range_rendered(r: &RangeVal, render: impl Fn(&Value) -> String) -> String {
         if r.excl_left { "<" } else { "" },
         if r.inclusive { "" } else { "<" },
         render(&r.to)
+    )
+}
+
+/// Whether the range is an `IntRange` or `NumberRange`, the two classes that carry
+/// numeric bounds, a step and the inclusivity flags.
+fn has_numeric_bounds(r: &RangeVal) -> bool {
+    matches!(
+        range_class(r),
+        "groovy.lang.IntRange" | "groovy.lang.NumberRange"
     )
 }
 

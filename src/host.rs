@@ -1825,7 +1825,9 @@ enum HeapObj {
     /// A `java.math.MathContext`.
     MathCtx(bignum::MathCtx),
     /// `System.out` (`err: false`) or `System.err` — a `java.io.PrintStream`.
-    PrintStream { err: bool },
+    PrintStream {
+        err: bool,
+    },
     /// A `java.util.Random`.
     Random(seq::RandomState),
     /// A `java.lang.reflect.Proxy` over script or JDK interfaces: a closure
@@ -18505,11 +18507,13 @@ fn print_stream_method(
         std::io::stdout().write_all(text.as_bytes())
     };
     // `printf`, `format`, `append` and `<<` answer the stream; the rest are `void`.
-    Some(if matches!(method, "printf" | "format" | "append" | "leftShift") {
-        recv.clone()
-    } else {
-        Value::Undef
-    })
+    Some(
+        if matches!(method, "printf" | "format" | "append" | "leftShift") {
+            recv.clone()
+        } else {
+            Value::Undef
+        },
+    )
 }
 
 /// `GPRINTF` / `GSPRINTF`: Groovy's script-scope `printf`/`sprintf`. The

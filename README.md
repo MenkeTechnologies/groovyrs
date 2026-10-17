@@ -528,9 +528,13 @@ Implemented and checked against Apache Groovy:
   levels down. A `null` element is skipped; a missing map key still contributes
   `null`; a property the collection really has (`empty`, `class`) answers instead
   of spreading.
-- **The AST-transform annotations** — `@ToString` (with `includeNames`),
-  `@EqualsAndHashCode`, `@TupleConstructor`, and `@Canonical` (the three
-  together). A declared member always wins over the generated one. The generated
+- **The AST-transform annotations** — `@ToString` (with `includeNames`,
+  `includes`, `excludes`), `@EqualsAndHashCode` (with `includes`, `excludes`),
+  `@TupleConstructor`, `@Canonical` (the three together), `@Immutable` / `@Value`
+  (`@Canonical` plus read-only properties: a write raises
+  `ReadOnlyPropertyException`), `@Singleton` (a static `instance` property), and
+  a field-level `@Delegate` (calls the class does not answer forward to the
+  field; with several delegate fields, the first one takes them all). A declared member always wins over the generated one. The generated
   `hashCode` is Groovy's own number, not merely a self-consistent one.
 - **Named arguments and the map constructor** — `f(a: 1, 9)` gathers the named
   arguments into one map passed first, and `new P(a: 1, b: 2)` sets those

@@ -1540,6 +1540,9 @@ fn register_throwables() {
                 is_interface: false,
                 is_trait: false,
                 generated: 0,
+                to_string_skip: Vec::new(),
+                equals_skip: Vec::new(),
+                delegates: Vec::new(),
                 field_types: std::collections::HashMap::new(),
                 field_names: if superclass.is_none() {
                     vec!["message".to_string()]
@@ -2238,12 +2241,18 @@ struct ClassMeta {
     /// What the class's annotations asked the compiler to generate — the bit
     /// set `Compiler::register_class` builds from `ast::Generated`: bit 0
     /// `toString`, bit 1 its `includeNames` form, bit 2 `equals`/`hashCode`,
-    /// bit 3 a positional constructor.
+    /// bit 3 a positional constructor, bit 4 read-only properties.
     ///
     /// The *declaration* is a compile-time decision, so it arrives as a flag;
     /// the *behaviour* lives here, because that is where an instance's fields,
     /// its rendering and its equality already live.
     generated: u8,
+    /// Properties `@ToString(includes/excludes)` leaves out of the rendering.
+    to_string_skip: Vec<String>,
+    /// Properties `@EqualsAndHashCode(includes/excludes)` leaves out of `equals`/`hashCode`.
+    equals_skip: Vec<String>,
+    /// Fields annotated `@Delegate`, in declaration order.
+    delegates: Vec<String>,
     /// Declared field type by name — read only to decide an uninitialised
     /// *primitive* field's starting value (`int a` is `0`, not `null`).
     field_types: std::collections::HashMap<String, String>,
@@ -4566,6 +4575,8 @@ const GEN_INCLUDE_NAMES: u8 = 2;
 const GEN_EQUALS_HASH: u8 = 4;
 /// Bit 3 — a generated positional constructor.
 const GEN_TUPLE_CTOR: u8 = 8;
+/// Bit 4 – read-only properties (`@Immutable`).
+const GEN_IMMUTABLE: u8 = 16;
 
 /// Does `class` — or any class it descends from — carry the generated `what`?
 fn class_generates(class: u32, what: u8) -> bool {
@@ -4592,11 +4603,33 @@ fn generated_field_order(class: u32) -> Vec<String> {
     out
 }
 
+/// `generated_field_order` minus what `@ToString` (`for_string`) or
+/// `@EqualsAndHashCode` leaves out through `includes` / `excludes`.
+fn generated_member_fields(class: u32, for_string: bool) -> Vec<String> {
+    let chain: Vec<ClassMeta> = class_chain(class)
+        .into_iter()
+        .filter_map(class_meta)
+        .collect();
+    generated_field_order(class)
+        .into_iter()
+        .filter(|f| {
+            !chain.iter().any(|m| {
+                let skip = if for_string {
+                    &m.to_string_skip
+                } else {
+                    &m.equals_skip
+                };
+                skip.contains(f)
+            })
+        })
+        .collect()
+}
+
 /// The `toString` `@ToString` generates: `ClassName(v1, v2)`, or
 /// `ClassName(a:1, b:x)` under `includeNames`.
 fn generated_to_string(inst: &Instance) -> String {
     let names = class_generates(inst.class, GEN_INCLUDE_NAMES);
-    let shown: Vec<String> = generated_field_order(inst.class)
+    let shown: Vec<String> = generated_member_fields(inst.class, true)
         .into_iter()
         .map(|f| {
             let v = inst.fields.get(&f).cloned().unwrap_or(Value::Undef);
@@ -4621,7 +4654,7 @@ fn generated_to_string(inst: &Instance) -> String {
 /// from the docs, so the *number* matches, not merely its consistency.
 fn generated_hash_code(inst: &Instance) -> i32 {
     let mut h: i32 = 127;
-    for f in generated_field_order(inst.class) {
+    for f in generated_member_fields(inst.class, false) {
         let v = inst.fields.get(&f).cloned().unwrap_or(Value::Undef);
         let fh = if matches!(v, Value::Undef) {
             0
@@ -4642,11 +4675,13 @@ fn generated_equals(a: &Instance, b: &Value) -> bool {
     if other.class != a.class {
         return false;
     }
-    generated_field_order(a.class).into_iter().all(|f| {
-        let x = a.fields.get(&f).cloned().unwrap_or(Value::Undef);
-        let y = other.fields.get(&f).cloned().unwrap_or(Value::Undef);
-        values_equal(&x, &y)
-    })
+    generated_member_fields(a.class, false)
+        .into_iter()
+        .all(|f| {
+            let x = a.fields.get(&f).cloned().unwrap_or(Value::Undef);
+            let y = other.fields.get(&f).cloned().unwrap_or(Value::Undef);
+            values_equal(&x, &y)
+        })
 }
 
 /// The traits `class` implements, transitively — the subset of its interface
@@ -4930,27 +4965,31 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
     // field, then `:field` for a plain (non-property) field (see
     // `Compiler::register_class`).
     let mut static_fields: Vec<String> = Vec::new();
+    let mut to_string_skip: Vec<String> = Vec::new();
+    let mut equals_skip: Vec<String> = Vec::new();
+    let mut delegates: Vec<String> = Vec::new();
     let mut plain_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
     let declared: Vec<(String, String)> = match fields_a {
         Value::Array(a) => a
             .iter()
             .map(|v| {
                 let text = v.as_str_cow().into_owned();
-                let (n, t) = text.split_once(':').unwrap_or((&text, "def"));
-                let t = match t.strip_suffix(":field") {
-                    Some(t) => {
-                        plain_fields.insert(n.to_string());
-                        t
+                let mut parts = text.split(':');
+                let n = parts.next().unwrap_or_default();
+                let t = parts.next().unwrap_or("def");
+                for flag in parts {
+                    match flag {
+                        "field" => {
+                            plain_fields.insert(n.to_string());
+                        }
+                        "static" => static_fields.push(n.to_string()),
+                        "nostr" => to_string_skip.push(n.to_string()),
+                        "noeq" => equals_skip.push(n.to_string()),
+                        "delegate" => delegates.push(n.to_string()),
+                        _ => {}
                     }
-                    None => t,
-                };
-                match t.strip_suffix(":static") {
-                    Some(t) => {
-                        static_fields.push(n.to_string());
-                        (n.to_string(), t.to_string())
-                    }
-                    None => (n.to_string(), t.to_string()),
                 }
+                (n.to_string(), t.to_string())
             })
             .collect(),
         _ => Vec::new(),
@@ -5019,6 +5058,9 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
             is_interface,
             is_trait,
             generated,
+            to_string_skip,
+            equals_skip,
+            delegates,
             field_names,
             field_types,
             field_inits,
@@ -7375,6 +7417,21 @@ fn dispatch_instance_method(
             return Some(Ok(v));
         }
     }
+    // `@Delegate`: a call the class does not answer goes to the annotated field,
+    // except for the `Object` members every class already has.
+    if !matches!(
+        method,
+        "toString" | "equals" | "hashCode" | "getClass" | "with" | "is" | "tap" | "identity"
+    ) {
+        let target = class_chain(inst.class)
+            .into_iter()
+            .filter_map(class_meta)
+            .flat_map(|m| m.delegates)
+            .find_map(|f| inst.fields.get(&f).cloned());
+        if let Some(target) = target {
+            return Some(Ok(dispatch_call_inner(vm, target, method, args.to_vec())));
+        }
+    }
     // Nothing on the class answered. The caller decides what happens next: from
     // `dispatch_call` the GDK still gets its turn (`obj.with { … }` is a GDK
     // method on any object, not something the class declares), and only when
@@ -7907,6 +7964,15 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
                     }
                 };
             }
+        }
+        if inst.fields.contains_key(&name) && class_generates(inst.class, GEN_IMMUTABLE) {
+            let class = java_class_name(&recv);
+            raise(
+                vm,
+                "ReadOnlyPropertyException",
+                &format!("Cannot set read-only property: {name} for class: {class}"),
+            );
+            return Value::Undef;
         }
         // A `static` field, reached through the instance.
         if !inst.fields.contains_key(&name) {
@@ -10939,6 +11005,17 @@ fn dispatch_number_iteration(
             }
             (from, to, if up { 1 } else { -1 })
         }
+        // A non-integral bound or step (`1.step(2, 0.5)`) walks the receiver up
+        // by the step in `BigDecimal` / `double` arithmetic, first value as the
+        // receiver wrote it, and stops short of the bound.
+        "step"
+            if args.len() == 3
+                && (as_i64(&args[0]).is_none() || as_i64(&args[1]).is_none())
+                && as_num(&args[0]).is_some()
+                && as_num(&args[1]).is_some() =>
+        {
+            return Some(step_fractional(vm, recv, &args[0], &args[1], clo));
+        }
         // `step` excludes its bound, so pull the limit in by one step.
         _ => {
             let to = as_i64(args.first()?)?;
@@ -13395,6 +13472,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         (Value::Int(n), "toDouble" | "doubleValue" | "toFloat" | "floatValue") => {
             float_or_double(method, *n as f64)
         }
+        // Narrowing conversions keep the low bits, as Java's do.
+        (Value::Int(n), "byteValue") => Value::int(i64::from(*n as i8)),
+        (Value::Int(n), "shortValue") => Value::int(i64::from(*n as i16)),
         (Value::Int(n), "toBigDecimal") => dec_value(BigDecimal::from(*n)),
         (Value::Int(n), "toBigInteger") => bigint_value(BigDecimal::from(*n)),
         // `Integer.equals(Object)` is `false` for anything that is not an
@@ -13649,6 +13729,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // — it does not saturate the way a `double`'s `(int)` cast does.
                 // `(1e30G).intValue()` is `1073741824`, and reading it through
                 // an `i64` that saturates at the *long* bounds answered `0`.
+                "bitLength" if args.is_empty() && as_bigint(recv).is_some() => {
+                    Value::int(decimal::bit_length(&d).unwrap_or(0))
+                }
                 "longValue" | "toLong" => Value::int(decimal::low_i64(&d)),
                 "intValue" | "toInteger" => Value::int(i64::from(decimal::low_i32(&d))),
                 "byteValue" if args.is_empty() => Value::int(i64::from(decimal::low_i32(&d) as i8)),
@@ -19022,6 +19105,7 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
         }
         // Groovy's property-for-getter rule: `s.bytes` is `s.getBytes()`.
         (Value::Str(_), "bytes") => dispatch_method(vm, recv, "getBytes", &[]),
+        (Value::Str(_), "chars") => dispatch_method(vm, recv, "getChars", &[]),
         // `empty` is a real property of a collection and a `String` (the
         // `isEmpty()` getter), so it answers rather than spreading. A map's is
         // still the key read handled above, which is why `[a:1].empty` is null.
@@ -21477,5 +21561,44 @@ fn downgrade_no_stack() {
                 }
             });
         }
+    }
+}
+
+/// `a.step(to, by) { … }` with a non-integral `to` or `by`: the receiver is
+/// advanced by `by` through `+` (so a `BigDecimal` step stays exact and a
+/// `double` one widens to `double`) while it is short of `to`. A zero step is
+/// rejected the way the integral form rejects it.
+fn step_fractional(
+    vm: &mut VM,
+    from: &Value,
+    to: &Value,
+    by: &Value,
+    clo: &Value,
+) -> Result<Value, String> {
+    let up = match natural_order(by, &Value::int(0)) {
+        std::cmp::Ordering::Equal => {
+            return Err("groovyrs: step size cannot be zero".to_string());
+        }
+        o => o == std::cmp::Ordering::Greater,
+    };
+    let mut cur = from.clone();
+    loop {
+        let more = natural_order(&cur, to);
+        if if up {
+            more != std::cmp::Ordering::Less
+        } else {
+            more != std::cmp::Ordering::Greater
+        } {
+            return Ok(Value::Undef);
+        }
+        invoke_closure(vm, clo, &[cur.clone()])?;
+        if pending_exc() {
+            return Ok(Value::Undef);
+        }
+        cur = match decimal_operator(NumOp::Add, &cur, by) {
+            Some(Ok(v)) => v,
+            Some(Err(e)) => return Err(e),
+            None => Value::float(as_f64(&cur) + as_f64(by)),
+        };
     }
 }

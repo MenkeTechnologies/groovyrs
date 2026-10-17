@@ -417,6 +417,14 @@ pub fn bit_not(a: &BigDecimal) -> Option<BigDecimal> {
     Some(BigDecimal::from(!integer_part(a)?))
 }
 
+/// `BigInteger.bitLength()`: the minimal two's-complement width excluding the
+/// sign bit — `255G` is 8 and `-256G` is 8. `None` for a fraction part.
+pub fn bit_length(a: &BigDecimal) -> Option<i64> {
+    let x = integer_part(a)?;
+    let magnitude = if x.sign() == Sign::Minus { -x - 1 } else { x };
+    Some(magnitude.bits() as i64)
+}
+
 /// `a << n` / `a >> n` on a `BigInteger`, which — unlike the `Integer` and
 /// `Long` shifts — has no width to mask the count against and no bits to lose:
 /// `1G << 100` is the full 31-digit power of two. A negative count shifts the

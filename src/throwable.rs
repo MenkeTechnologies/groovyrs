@@ -155,6 +155,11 @@ const THROWABLES: &[(&str, &str, &str)] = &[
         "groovy.lang",
     ),
     (
+        "ReadOnlyPropertyException",
+        "MissingPropertyException",
+        "groovy.lang",
+    ),
+    (
         "PowerAssertionError",
         "AssertionError",
         "org.codehaus.groovy.runtime.powerassert",

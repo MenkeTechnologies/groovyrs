@@ -589,7 +589,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
                 interfaces,
                 *is_interface,
                 *is_trait,
-                *generated,
+                generated,
                 fields,
                 ctors,
                 methods,
@@ -1253,7 +1253,7 @@ impl Compiler {
         interfaces: &[String],
         is_interface: bool,
         is_trait: bool,
-        generated: Generated,
+        generated: &Generated,
         fields: &[Field],
         ctors: &[Ctor],
         methods: &[Method],
@@ -1277,7 +1277,8 @@ impl Compiler {
         let gbits = (generated.to_string as i64)
             | ((generated.include_names as i64) << 1)
             | ((generated.equals_hash as i64) << 2)
-            | ((generated.tuple_ctor as i64) << 3);
+            | ((generated.tuple_ctor as i64) << 3)
+            | ((generated.immutable as i64) << 4);
         self.b.emit(Op::LoadInt(gbits), line);
         for i in interfaces {
             let c = self.b.add_constant(Value::str(i.clone()));
@@ -1295,11 +1296,27 @@ impl Compiler {
         // explicit `public`/`private`/`protected`, so not a property) a
         // trailing `:field` after that.
         for f in fields {
+            let skip = |inc: &Option<Vec<String>>, exc: &[String]| {
+                !f.is_static
+                    && (exc.contains(&f.name) || inc.as_ref().is_some_and(|i| !i.contains(&f.name)))
+            };
+            let no_str = if skip(&generated.to_string_includes, &generated.to_string_excludes) {
+                ":nostr"
+            } else {
+                ""
+            };
+            let delegate = if f.is_delegate { ":delegate" } else { "" };
+            let no_eq = if skip(&generated.equals_includes, &generated.equals_excludes) {
+                ":noeq"
+            } else {
+                ""
+            };
             let marker = if f.is_static { ":static" } else { "" };
             let plain = if f.is_property { "" } else { ":field" };
-            let c = self
-                .b
-                .add_constant(Value::str(format!("{}:{}{marker}{plain}", f.name, f.ty)));
+            let c = self.b.add_constant(Value::str(format!(
+                "{}:{}{marker}{plain}{no_str}{no_eq}{delegate}",
+                f.name, f.ty
+            )));
             self.b.emit(Op::LoadConst(c), line);
         }
         self.b.emit(Op::MakeArray(fields.len() as u16), line);
@@ -3017,6 +3034,18 @@ impl Compiler {
         self.b.emit(Op::LoadInt(1), self.cur_line);
         self.b
             .emit(if inc { Op::Add } else { Op::Sub }, self.cur_line);
+        // `byte`/`short` wrap on the store (`byte b = 127; b++` is `-128`), as
+        // `b += 1` already does through the typed-store coercion.
+        if let Some(ty) = self
+            .typed_vars
+            .get(name)
+            .filter(|t| matches!(t.as_str(), "byte" | "short" | "Byte" | "Short"))
+            .cloned()
+        {
+            let tidx = self.b.add_constant(Value::str(ty));
+            self.b.emit(Op::LoadConst(tidx), self.cur_line);
+            self.emit_call_builtin(crate::host::GJCAST, 0, self.cur_line)?;
+        }
         self.emit_name_store(name, self.cur_line)
     }
 

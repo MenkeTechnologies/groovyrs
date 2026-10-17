@@ -900,6 +900,8 @@ impl Parser {
                 name = self.ident()?;
             }
             let mut args = String::new();
+            let mut opts: Vec<(String, String)> = Vec::new();
+            let mut key = String::new();
             if self.is(&Tok::LParen) {
                 let mut depth = 0;
                 loop {
@@ -914,22 +916,54 @@ impl Parser {
                             continue;
                         }
                         Tok::Eof => break,
-                        Tok::Ident(w) => args.push_str(w),
+                        Tok::Ident(w) => {
+                            args.push_str(w);
+                            if matches!(self.peek_at(1), Tok::Assign) {
+                                key = w.clone();
+                            }
+                        }
+                        Tok::Str(s) => opts.push((key.clone(), s.clone())),
                         Tok::True => args.push_str("true"),
                         _ => {}
                     }
                     self.advance();
                 }
             }
+            // `includes`/`excludes` take a list of names or one comma-separated string.
+            let names_for = |k: &str| -> Option<Vec<String>> {
+                let mut found = None;
+                for (_, v) in opts.iter().filter(|(key, _)| key == k) {
+                    found.get_or_insert_with(Vec::new).extend(
+                        v.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()),
+                    );
+                }
+                found
+            };
             match name.as_str() {
                 "ToString" => {
                     gen.to_string = true;
+                    gen.to_string_includes = names_for("includes");
+                    gen.to_string_excludes = names_for("excludes").unwrap_or_default();
                     // Only `includeNames` changes the rendering; the rest of the
                     // attribute set is accepted and ignored (see BUGS.md).
                     gen.include_names |= args.contains("includeNames") && args.contains("true");
                 }
-                "EqualsAndHashCode" => gen.equals_hash = true,
+                "EqualsAndHashCode" => {
+                    gen.equals_hash = true;
+                    gen.equals_includes = names_for("includes");
+                    gen.equals_excludes = names_for("excludes").unwrap_or_default();
+                }
                 "TupleConstructor" => gen.tuple_ctor = true,
+                // `@Immutable` and `@Value` are `@Canonical` plus read-only properties.
+                "Singleton" => gen.singleton = true,
+                "Immutable" | "Value" => {
+                    gen.to_string = true;
+                    gen.equals_hash = true;
+                    gen.tuple_ctor = true;
+                    gen.immutable = true;
+                }
                 // `@Canonical` is exactly the three together.
                 "Canonical" => {
                     gen.to_string = true;
@@ -1027,6 +1061,20 @@ impl Parser {
             self.skip_terminators();
         }
         self.eat(&Tok::RBrace)?;
+        if generated.singleton {
+            fields.push(Field {
+                name: "instance".to_string(),
+                ty: name.clone(),
+                init: Some(Expr::New {
+                    class: name.clone(),
+                    args: Vec::new(),
+                    line: self.line(),
+                }),
+                is_static: true,
+                is_property: true,
+                is_delegate: false,
+            });
+        }
         Ok(StmtKind::Class {
             name,
             superclass,
@@ -1218,6 +1266,7 @@ impl Parser {
                     }),
                     is_static: true,
                     is_property: false,
+                    is_delegate: false,
                 }
             })
             .collect();
@@ -1229,6 +1278,7 @@ impl Parser {
                     init: Some(Expr::Var(cname.to_string())),
                     is_static: true,
                     is_property: false,
+                    is_delegate: false,
                 });
             }
         }
@@ -1281,6 +1331,7 @@ impl Parser {
                 init,
                 is_static,
                 is_property,
+                is_delegate: false,
             });
             if !self.is(&Tok::Comma) {
                 return Ok(());
@@ -1298,6 +1349,39 @@ impl Parser {
     /// body — that abstract declaration binds nothing and is dropped, leaving
     /// dispatch to the implementing class.
     fn class_member(
+        &mut self,
+        class_name: &str,
+        in_interface: bool,
+        fields: &mut Vec<Field>,
+        ctors: &mut Vec<Ctor>,
+        methods: &mut Vec<Method>,
+        abstract_methods: &mut Vec<String>,
+    ) -> Result<(), String> {
+        // `@Delegate` is the one member annotation with a runtime effect.
+        let mut at = 0;
+        let mut delegate = false;
+        while matches!(self.peek_at(at), Tok::At) {
+            delegate |= matches!(self.peek_at(at + 1), Tok::Ident(w) if w == "Delegate");
+            at += 2;
+        }
+        let fields_before = fields.len();
+        self.class_member_inner(
+            class_name,
+            in_interface,
+            fields,
+            ctors,
+            methods,
+            abstract_methods,
+        )?;
+        if delegate {
+            for f in &mut fields[fields_before..] {
+                f.is_delegate = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn class_member_inner(
         &mut self,
         class_name: &str,
         in_interface: bool,

@@ -293,6 +293,8 @@ pub struct Field {
     /// field: it still reads and writes as a property, but `hasProperty`
     /// answers a `CachedField` for it rather than a `MetaBeanProperty`.
     pub is_property: bool,
+    /// Annotated `@Delegate`: calls the class does not answer forward to it.
+    pub is_delegate: bool,
 }
 
 /// A class constructor `C(params) { body }`. Overloads are distinguished by
@@ -339,7 +341,7 @@ pub enum AssignOp {
 ///
 /// `@Canonical` is exactly the three together, which is why this is a set of
 /// what to generate rather than a list of annotation names.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Generated {
     /// `@ToString` — a `toString()` of the field values in declaration order,
     /// `ClassName(v1, v2)`.
@@ -350,12 +352,28 @@ pub struct Generated {
     pub equals_hash: bool,
     /// `@TupleConstructor` — a constructor taking the fields positionally.
     pub tuple_ctor: bool,
+    /// `@Immutable` / `@Value` — every property is read-only once constructed.
+    pub immutable: bool,
+    /// `@Singleton` — a `static` `instance` property holding the one instance.
+    pub singleton: bool,
+    /// `@ToString(includes = …)` — render only these properties (when set).
+    pub to_string_includes: Option<Vec<String>>,
+    /// `@ToString(excludes = …)` — properties left out of the rendering.
+    pub to_string_excludes: Vec<String>,
+    /// `@EqualsAndHashCode(includes = …)` — compare and hash only these.
+    pub equals_includes: Option<Vec<String>>,
+    /// `@EqualsAndHashCode(excludes = …)` — properties left out of both.
+    pub equals_excludes: Vec<String>,
 }
 
 impl Generated {
     /// Nothing generated — the ordinary case.
-    pub fn is_empty(self) -> bool {
-        !self.to_string && !self.equals_hash && !self.tuple_ctor
+    pub fn is_empty(&self) -> bool {
+        !self.to_string
+            && !self.equals_hash
+            && !self.tuple_ctor
+            && !self.immutable
+            && !self.singleton
     }
 }
 

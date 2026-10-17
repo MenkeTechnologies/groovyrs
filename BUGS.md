@@ -1561,3 +1561,9 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   `list.stream()` and `Arrays.stream` are not, `"s".chars()` answers the element
   list, and `Collections.unmodifiableX`, `asUnmodifiable()` and `asImmutable()`
   answer a *copy*, not a live view. `Arrays.hashCode` is not ported.
+- **`@Immutable` does not copy or freeze its collection properties.** Property
+  writes raise `ReadOnlyPropertyException`, but a `List`/`Map` property stays
+  mutable in place where Groovy wraps it unmodifiable. `@Singleton` does not make
+  the constructor private, and `@Delegate` ignores its attributes and forwards to
+  the first delegate field only. `@Category`/`use(Cat)` on a script class,
+  `@Lazy`, `@Memoized` and `@Builder` are not modeled.

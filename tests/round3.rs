@@ -327,3 +327,45 @@ null 1
 "####;
     check(src, expected);
 }
+
+#[test]
+fn ast_transform_immutable_singleton_delegate_and_member_selection() {
+    let src = r####"import groovy.transform.*
+@Immutable class V { int x; String s }
+def v = new V(1, 'a')
+println v
+println v == new V(x: 1, s: 'a')
+try { v.x = 5 } catch (ReadOnlyPropertyException e) { println e.message }
+println v.x
+@Singleton class Sg { def n = 3 }
+println Sg.instance.n
+println Sg.instance.is(Sg.instance)
+@EqualsAndHashCode(includes='a') class EH { int a; int b }
+println new EH(a: 1, b: 2) == new EH(a: 1, b: 3)
+println new EH(a: 1, b: 2).hashCode() == new EH(a: 1, b: 9).hashCode()
+@EqualsAndHashCode(excludes=['b']) class EX { int a; int b }
+println new EX(a: 1, b: 2) == new EX(a: 1, b: 3)
+@ToString(excludes='b') class TS { int a; int b; int c }
+println new TS(a: 1, b: 2, c: 3)
+@ToString(includes='b,c') class TI { int a; int b; int c }
+println new TI(a: 1, b: 2, c: 3)
+class Z { @Delegate List l = [1, 2] }
+println new Z().size()
+println new Z().contains(2)
+"####;
+    let expected = r####"V(1, a)
+true
+Cannot set read-only property: x for class: V
+1
+3
+true
+true
+true
+true
+TS(1, 3)
+TI(2, 3)
+2
+true
+"####;
+    check(src, expected);
+}

@@ -2073,6 +2073,33 @@ impl Compiler {
                 self.b.emit(Op::Pop, self.cur_line);
                 Ok(())
             }
+            StmtKind::SetDynProperty {
+                recv,
+                name,
+                op,
+                value,
+            } => {
+                // `recv."$name" = value` — `SetProperty` with the name evaluated
+                // where the constant would be loaded. The receiver runs once; the
+                // name runs once per read and write, as Groovy's does.
+                self.expr(recv)?;
+                if !matches!(op, AssignOp::Assign) {
+                    self.b.emit(Op::Dup, self.cur_line);
+                    self.expr(name)?;
+                    self.emit_call_builtin(crate::host::GPROP, 0, self.cur_line)?;
+                }
+                let target = Expr::DynProperty {
+                    recv: Box::new(recv.clone()),
+                    name: Box::new(name.clone()),
+                    line: self.cur_line,
+                    safe: false,
+                };
+                self.emit_compound_value(*op, &target, value)?;
+                self.expr(name)?;
+                self.emit_call_builtin(crate::host::GSETPROP, 0, self.cur_line)?;
+                self.b.emit(Op::Pop, self.cur_line);
+                Ok(())
+            }
             StmtKind::SetIndex {
                 recv,
                 index,
@@ -3472,6 +3499,47 @@ impl Compiler {
                     crate::host::GPROP
                 };
                 self.emit_call_builtin(id, 0, *line)?;
+            }
+            Expr::DynProperty {
+                recv,
+                name,
+                line,
+                safe,
+            } => {
+                // The same builtin as `Property`, reading the name it pops from
+                // the evaluated `GString` rather than a constant. Nothing static
+                // applies: a run-time name is never a package, a `.class` on a
+                // `Long`, or an own field read directly.
+                self.expr(recv)?;
+                self.expr(name)?;
+                let id = if *safe {
+                    crate::host::GPROP_SAFE
+                } else {
+                    crate::host::GPROP
+                };
+                self.emit_call_builtin(id, 0, *line)?;
+            }
+            Expr::DynMethodCall {
+                recv,
+                name,
+                args,
+                line,
+                safe,
+            } => {
+                // Stack: [recv, arg0..argN-1, methodname], as for `MethodCall`,
+                // the name evaluated in place of the constant. The static
+                // rewrites a `MethodCall` gets (`Long` widths, `super`, the
+                // `remove((Object) x)` rename, the list write-back) all key on a
+                // name the compiler can read, which this one cannot be.
+                self.expr(recv)?;
+                let argc = self.emit_args(args, *line)?;
+                self.expr(name)?;
+                let id = if *safe {
+                    crate::host::GMETHOD_SAFE
+                } else {
+                    crate::host::GMETHOD
+                };
+                self.emit_call_builtin(id, argc, *line)?;
             }
             Expr::Closure {
                 params,
@@ -4933,6 +5001,13 @@ fn free_in_stmt(s: &Stmt, bound: &HashSet<String>, cx: &mut FreeCtx) {
             free_in_expr(recv, bound, cx);
             free_in_expr(value, bound, cx);
         }
+        StmtKind::SetDynProperty {
+            recv, name, value, ..
+        } => {
+            free_in_expr(recv, bound, cx);
+            free_in_expr(name, bound, cx);
+            free_in_expr(value, bound, cx);
+        }
         StmtKind::SetIndex {
             recv, index, value, ..
         } => {
@@ -5048,6 +5123,19 @@ fn free_in_expr(e: &Expr, bound: &HashSet<String>, cx: &mut FreeCtx) {
             }
         }
         Expr::Property { recv, .. } => free_in_expr(recv, bound, cx),
+        Expr::DynProperty { recv, name, .. } => {
+            free_in_expr(recv, bound, cx);
+            free_in_expr(name, bound, cx);
+        }
+        Expr::DynMethodCall {
+            recv, name, args, ..
+        } => {
+            free_in_expr(recv, bound, cx);
+            free_in_expr(name, bound, cx);
+            for a in args {
+                free_in_expr(a, bound, cx);
+            }
+        }
         Expr::Index { recv, index, .. } => {
             free_in_expr(recv, bound, cx);
             free_in_expr(index, bound, cx);
@@ -5231,6 +5319,11 @@ fn body_uses_exceptions(body: &[Stmt]) -> bool {
         StmtKind::SetProperty { recv, value, .. } => {
             expr_uses_exceptions(recv) || expr_uses_exceptions(value)
         }
+        StmtKind::SetDynProperty {
+            recv, name, value, ..
+        } => {
+            expr_uses_exceptions(recv) || expr_uses_exceptions(name) || expr_uses_exceptions(value)
+        }
         StmtKind::SetIndex {
             recv, index, value, ..
         } => {
@@ -5296,6 +5389,16 @@ fn expr_uses_exceptions(e: &Expr) -> bool {
         Expr::Property { recv, .. } | Expr::InstanceOf { value: recv, .. } => {
             expr_uses_exceptions(recv)
         }
+        Expr::DynProperty { recv, name, .. } => {
+            expr_uses_exceptions(recv) || expr_uses_exceptions(name)
+        }
+        Expr::DynMethodCall {
+            recv, name, args, ..
+        } => {
+            expr_uses_exceptions(recv)
+                || expr_uses_exceptions(name)
+                || args.iter().any(expr_uses_exceptions)
+        }
         Expr::Index { recv, index, .. } => {
             expr_uses_exceptions(recv) || expr_uses_exceptions(index)
         }
@@ -5349,6 +5452,9 @@ fn body_any(body: &[Stmt], f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         StmtKind::Return { value } => value.as_ref().is_some_and(|e| expr_any(e, f)),
         StmtKind::Function { body, .. } => body_any(body, f),
         StmtKind::SetProperty { recv, value, .. } => expr_any(recv, f) || expr_any(value, f),
+        StmtKind::SetDynProperty {
+            recv, name, value, ..
+        } => expr_any(recv, f) || expr_any(name, f) || expr_any(value, f),
         StmtKind::SetIndex {
             recv, index, value, ..
         } => expr_any(recv, f) || expr_any(index, f) || expr_any(value, f),
@@ -5417,6 +5523,10 @@ fn expr_any(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
             expr_any(recv, f) || args.iter().any(|a| expr_any(a, f))
         }
         Expr::Property { recv, .. } => expr_any(recv, f),
+        Expr::DynProperty { recv, name, .. } => expr_any(recv, f) || expr_any(name, f),
+        Expr::DynMethodCall {
+            recv, name, args, ..
+        } => expr_any(recv, f) || expr_any(name, f) || args.iter().any(|a| expr_any(a, f)),
         Expr::Closure { body, .. } => body_any(body, f),
         Expr::Range { start, end, .. } => expr_any(start, f) || expr_any(end, f),
         Expr::GString(parts) => parts.iter().any(|p| match p {

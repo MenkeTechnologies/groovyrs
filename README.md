@@ -303,7 +303,12 @@ Implemented and checked against Apache Groovy:
   unknown member raises a catchable `MissingMethodException` /
   `MissingPropertyException`, and so does a bare *name* nothing binds
   (`println zork`), naming the script class Groovy names — the file's stem, or
-  `script_from_command_line` under `-e`.
+  `script_from_command_line` under `-e`. A member may be spelled as a string:
+  `obj."name"` / `obj.'name'` is `obj.name`, and an interpolated
+  `obj."$prop"` / `obj."$method"(args)` names the member at run time —
+  reading through a getter or a map key, writing (`obj."$p" = v`,
+  `obj."$p" += 1`), calling, and under `?.` and `*.` alike. Groovy's
+  compound forms evaluate the name once per read and write, and so do these.
 - **`hashCode()`** — Java's specified rule per type, not an approximation:
   `String` over UTF-16 code units, `Integer` versus `Long`, `Double` over
   `doubleToLongBits`, `BigDecimal` carrying its scale, `BigInteger` over its

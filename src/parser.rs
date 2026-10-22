@@ -588,24 +588,7 @@ impl Parser {
                 lhs: Box::new(lhs.clone()),
                 rhs: Box::new(value),
             };
-            return match lhs {
-                Expr::Property { recv, name, .. } => Ok(StmtKind::SetProperty {
-                    recv: *recv,
-                    name,
-                    op: AssignOp::Assign,
-                    value: guarded,
-                }),
-                Expr::Index { recv, index, .. } => Ok(StmtKind::SetIndex {
-                    recv: *recv,
-                    index: *index,
-                    op: AssignOp::Assign,
-                    value: guarded,
-                }),
-                _ => Err(format!(
-                    "groovyrs: invalid assignment target on line {}",
-                    self.line()
-                )),
-            };
+            return self.assign_to_target(lhs, AssignOp::Assign, guarded);
         }
         // `recv.name <op>= value` / `recv[index] <op>= value`, plain `=` included.
         // The compound forms are not rewritten to `t = t <op> v` here: Groovy
@@ -621,7 +604,10 @@ impl Parser {
         // `<target> += 1` / `-= 1`. Only as a statement: the postfix value a
         // Groovy expression sees is the *old* one, and nothing here reads it.
         if matches!(self.peek(), Tok::PlusPlus | Tok::MinusMinus)
-            && matches!(lhs, Expr::Property { .. } | Expr::Index { .. })
+            && matches!(
+                lhs,
+                Expr::Property { .. } | Expr::DynProperty { .. } | Expr::Index { .. }
+            )
         {
             let op = if matches!(self.peek(), Tok::PlusPlus) {
                 AssignOp::Add
@@ -749,6 +735,13 @@ impl Parser {
             Expr::Property { recv, name, .. } => Ok(StmtKind::SetProperty {
                 recv: *recv,
                 name,
+                op,
+                value,
+            }),
+            // `recv."$name" = value` — the property named at run time.
+            Expr::DynProperty { recv, name, .. } => Ok(StmtKind::SetDynProperty {
+                recv: *recv,
+                name: *name,
                 op,
                 value,
             }),
@@ -3206,7 +3199,7 @@ impl Parser {
                         return Err(format!("groovyrs: `?.@` is not supported on line {line}"));
                     }
                     self.advance();
-                    let field = self.ident()?;
+                    let field = self.ident_or_string()?;
                     e = self.record(
                         col,
                         Expr::Property {
@@ -3225,11 +3218,20 @@ impl Parser {
                         return Err(format!("groovyrs: `?.&` is not supported on line {line}"));
                     }
                     self.advance();
-                    let name = self.ident()?;
+                    let name = self.ident_or_string()?;
                     e = method_pointer(e, name, line);
                     continue;
                 }
-                let member = self.member_name()?;
+                // A member spelled as a string: `obj."name"` is `obj.name`, and
+                // `obj."$prop"` names the member at run time.
+                let member = match self.quoted_member()? {
+                    Some(Member::Dynamic(name)) => {
+                        e = self.dynamic_member(e, name, line, safe, col)?;
+                        continue;
+                    }
+                    Some(Member::Static(name)) => name,
+                    None => self.member_name()?,
+                };
                 if self.is(&Tok::LParen) {
                     let mut args = self.call_args()?;
                     // A trailing closure after the parenthesised args:
@@ -3262,14 +3264,8 @@ impl Parser {
                     );
                 } else if self.command_arg_ahead() {
                     // Command expression `recv.method arg, arg`: a call whose
-                    // parentheses are left off. Every argument runs to the next
-                    // comma at the top level.
-                    let mut args = vec![self.expression()?];
-                    while self.is(&Tok::Comma) {
-                        self.advance();
-                        self.skip_newlines();
-                        args.push(self.expression()?);
-                    }
+                    // parentheses are left off.
+                    let args = self.command_args()?;
                     e = self.record(
                         col,
                         Expr::MethodCall {
@@ -3299,10 +3295,20 @@ impl Parser {
                 // which is why a `null` element spreads to `null`.
                 let line = self.line();
                 self.advance();
-                let member = self.ident()?;
+                let col = self.col_at(0);
+                let element = Expr::Var("it".to_string());
+                let member = match self.quoted_member()? {
+                    Some(Member::Dynamic(name)) => {
+                        let inner = self.dynamic_member(element, name, line, true, col)?;
+                        e = spread_collect(e, inner, line);
+                        continue;
+                    }
+                    Some(Member::Static(name)) => name,
+                    None => self.ident()?,
+                };
                 let inner = if self.is(&Tok::LParen) {
                     Expr::MethodCall {
-                        recv: Box::new(Expr::Var("it".to_string())),
+                        recv: Box::new(element),
                         method: member,
                         args: self.call_args()?,
                         line,
@@ -3310,29 +3316,13 @@ impl Parser {
                     }
                 } else {
                     Expr::Property {
-                        recv: Box::new(Expr::Var("it".to_string())),
+                        recv: Box::new(element),
                         name: member,
                         line,
                         safe: true,
                     }
                 };
-                e = Expr::MethodCall {
-                    recv: Box::new(e),
-                    method: "collect".to_string(),
-                    args: vec![Expr::Closure {
-                        params: vec!["it".to_string()],
-                        body: vec![Stmt::new(line, StmtKind::Expr(inner))],
-                        explicit_params: false,
-                        varargs: false,
-                        param_types: Vec::new(),
-                        defaults: 0,
-                    }],
-                    line,
-                    // The spread is null-safe on its RECEIVER too:
-                    // `null*.toString()` is `null` in Groovy, not the
-                    // `NullPointerException` an unsafe `collect` would raise.
-                    safe: true,
-                };
+                e = spread_collect(e, inner, line);
             } else if self.is(&Tok::LParen) {
                 // Postfix call-application on a value: `f(a)(b)`, `getFn()(x)`.
                 let line = self.line();
@@ -3454,14 +3444,7 @@ impl Parser {
             // text, re-parsed here through the ordinary expression grammar.
             Tok::GStr(parts) => {
                 self.advance();
-                let mut out = Vec::with_capacity(parts.len());
-                for part in &parts {
-                    out.push(match part {
-                        GPart::Text(t) => GStringPart::Text(t.clone()),
-                        GPart::Expr(src) => GStringPart::Expr(parse_interpolation(src)?),
-                    });
-                }
-                Ok(Expr::GString(out))
+                gstring_expr(&parts)
             }
             Tok::True => {
                 self.advance();
@@ -4199,6 +4182,134 @@ impl Parser {
                 self.line()
             )),
         }
+    }
+
+    /// An identifier, or the string literal Groovy accepts in its place after
+    /// `.@` and `.&` (`obj.@"field"`, `obj.&'method'`).
+    fn ident_or_string(&mut self) -> Result<String, String> {
+        match self.peek() {
+            Tok::Str(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
+            }
+            _ => self.ident(),
+        }
+    }
+
+    /// The member after `.`, `?.` or `*.` when it is spelled as a string:
+    /// `obj."name"`, `obj.'name'`, `obj."$prop"`. Groovy's parser reads a
+    /// constant string as the identifier it spells, so the first two are the
+    /// member `name`; an interpolated string is computed at run time. `None`
+    /// (nothing consumed) when the next token is not a string.
+    fn quoted_member(&mut self) -> Result<Option<Member>, String> {
+        let member = match self.peek() {
+            Tok::Str(s) => Member::Static(s.clone()),
+            // The lexer folds a `"…"` with no interpolation to `Tok::Str`, so a
+            // `GStr` always carries at least one embedded expression.
+            Tok::GStr(parts) => Member::Dynamic(gstring_expr(parts)?),
+            _ => return Ok(None),
+        };
+        self.advance();
+        Ok(Some(member))
+    }
+
+    /// The postfix after an interpolated member name `recv."$name"`: a method
+    /// call when parentheses, a trailing closure or a command argument
+    /// (`recv."$m" 'x'`) follow, otherwise a property read — the same shapes
+    /// an identifier member takes.
+    fn dynamic_member(
+        &mut self,
+        recv: Expr,
+        name: Expr,
+        line: u32,
+        safe: bool,
+        col: u32,
+    ) -> Result<Expr, String> {
+        let recv = Box::new(recv);
+        let name = Box::new(name);
+        let args = if self.is(&Tok::LParen) {
+            let mut args = self.call_args()?;
+            if self.is(&Tok::LBrace) {
+                args.push(self.closure_literal()?);
+            }
+            Some(args)
+        } else if self.is(&Tok::LBrace) {
+            Some(vec![self.closure_literal()?])
+        } else if self.command_arg_ahead() {
+            Some(self.command_args()?)
+        } else {
+            None
+        };
+        let e = match args {
+            Some(args) => Expr::DynMethodCall {
+                recv,
+                name,
+                args,
+                line,
+                safe,
+            },
+            None => Expr::DynProperty {
+                recv,
+                name,
+                line,
+                safe,
+            },
+        };
+        Ok(self.record(col, e))
+    }
+
+    /// The arguments of a command expression (`recv.method arg, arg`): every
+    /// argument runs to the next comma at the top level.
+    fn command_args(&mut self) -> Result<Vec<Expr>, String> {
+        let mut args = vec![self.expression()?];
+        while self.is(&Tok::Comma) {
+            self.advance();
+            self.skip_newlines();
+            args.push(self.expression()?);
+        }
+        Ok(args)
+    }
+}
+
+/// A member name after `.`: known at parse time, or computed from an
+/// interpolated string at run time — see [`Parser::quoted_member`].
+enum Member {
+    Static(String),
+    Dynamic(Expr),
+}
+
+/// The [`Expr::GString`] for a lexed `GStr` token: each embedded expression's
+/// source text is parsed with the ordinary expression grammar.
+fn gstring_expr(parts: &[GPart]) -> Result<Expr, String> {
+    let mut out = Vec::with_capacity(parts.len());
+    for part in parts {
+        out.push(match part {
+            GPart::Text(t) => GStringPart::Text(t.clone()),
+            GPart::Expr(src) => GStringPart::Expr(parse_interpolation(src)?),
+        });
+    }
+    Ok(Expr::GString(out))
+}
+
+/// The spread operator `recv*.member` as Groovy defines it:
+/// `recv.collect { it?.member }`, with `inner` the member access on `it`. The
+/// `collect` is null-safe on its receiver too — `null*.toString()` is `null`
+/// in Groovy, not the `NullPointerException` an unsafe `collect` would raise.
+fn spread_collect(recv: Expr, inner: Expr, line: u32) -> Expr {
+    Expr::MethodCall {
+        recv: Box::new(recv),
+        method: "collect".to_string(),
+        args: vec![Expr::Closure {
+            params: vec!["it".to_string()],
+            body: vec![Stmt::new(line, StmtKind::Expr(inner))],
+            explicit_params: false,
+            varargs: false,
+            param_types: Vec::new(),
+            defaults: 0,
+        }],
+        line,
+        safe: true,
     }
 }
 

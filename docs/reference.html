@@ -687,9 +687,11 @@ println(x)   // =&gt; 1</code></pre>
         </article>
         <article class="doc-entry" id="doc-operators-33">
           <h3><a class="doc-anchor" href="#doc-operators-33">#</a> <code>.</code></h3>
-          <pre><code class="lang-groovy">recv.member | recv.method(args)</code></pre>
-          <p>Member access. A call routes through the `GMETHOD` builtin and a read through `GPROP`; on a class instance a read prefers a user `getX()` getter over the raw field. Inside a method or constructor of the class that declares the field, a bare `x` and `this.x` read and write the field directly instead, as Groovy compiles them.</p>
-          <pre><code class="lang-groovy">println("abc".size())   // =&gt; 3</code></pre>
+          <pre><code class="lang-groovy">recv.member | recv.method(args) | recv."$name"</code></pre>
+          <p>Member access. A call routes through the `GMETHOD` builtin and a read through `GPROP`; on a class instance a read prefers a user `getX()` getter over the raw field. Inside a method or constructor of the class that declares the field, a bare `x` and `this.x` read and write the field directly instead, as Groovy compiles them. The member may be spelled as a string: a constant one (`recv."name"`, `recv.'name'`) is the identifier it spells, and an interpolated one (`recv."$name"`, `recv."$name"(args)`) names the property or method at run time, read or written through the same builtins with the evaluated text as the name.</p>
+          <pre><code class="lang-groovy">def p = [k: 1]
+def name = 'k'
+println(p."$name")   // =&gt; 1</code></pre>
         </article>
         <article class="doc-entry" id="doc-operators-34">
           <h3><a class="doc-anchor" href="#doc-operators-34">#</a> <code>.@</code></h3>

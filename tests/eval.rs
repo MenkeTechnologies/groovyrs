@@ -9250,3 +9250,86 @@ fn collections_swap_out_of_range_raises_index_out_of_bounds() {
          java.lang.IllegalArgumentException\n2 > 1\n"
     );
 }
+
+#[test]
+fn quoted_constant_member_is_the_identifier_it_spells() {
+    // Groovy's parser reads `obj."name"` / `obj.'name'` as `obj.name`: a getter,
+    // a map key, a method call, a direct field read and a method pointer all
+    // resolve exactly as the bare identifier would.
+    let (out, ok) = run(
+        "class A { def x = 1; def getY() { 'getter' }; def hi(a) { \"hi $a\" } }\n\
+         def a = new A()\n\
+         println a.\"x\"\nprintln a.'y'\nprintln a.'hi'('v')\n\
+         println a.@\"x\"\nprintln a.&\"hi\"(\"q\")\n\
+         println([k: 1].\"k\")\nprintln([a: [b: 2]].\"a\".\"b\")\n\
+         println \"str\".\"length\"()\nprintln([1, 2, 3].\"size\"())\n\
+         println([size: 9].\"size\")\nprintln([1]*.\"toString\"())\n",
+    );
+    assert!(ok);
+    assert_eq!(
+        out,
+        "1\ngetter\nhi v\n1\nhi q\n1\n2\n3\n3\n9\n[1]\n"
+    );
+}
+
+#[test]
+fn interpolated_member_names_property_and_method_at_run_time() {
+    // `obj."$p"` goes through the same property resolution as `obj.p` (a user
+    // getter here), `obj."$m"(args)` dispatches the method, the paren-less
+    // command form and a trailing closure call it too, and `?.` / `*.` carry
+    // their null-safety over a run-time name.
+    let (out, ok) = run(
+        "class A { def x = 1; def getY() { 'getter' }; def hi(a) { \"hi $a\" } }\n\
+         def a = new A()\ndef p = 'y'\ndef mn = 'hi'\n\
+         println a.\"$p\"\nprintln a.\"$mn\"('z')\nprintln a.\"${mn}\"('y')\n\
+         def sb = new StringBuilder()\ndef ap = 'append'\n\
+         sb.\"$ap\" 'x'\nsb.\"$ap\"('y')\nprintln sb\n\
+         println([1, 2, 3].\"${'col' + 'lect'}\" { it * 2 })\n\
+         def s = 'ab'\ndef m = 'size'\nprintln s?.\"$m\"()\n\
+         def q = null\nprintln q?.\"$m\"()\nprintln q?.\"$p\"\n\
+         println([a, a]*.\"x\")\ndef l = [[k: 1], [k: 2]]\ndef kk = 'k'\n\
+         println l*.\"$kk\"\nprintln l.\"$kk\"\n",
+    );
+    assert!(ok);
+    assert_eq!(
+        out,
+        "getter\nhi z\nhi y\nxy\n[2, 4, 6]\n2\nnull\nnull\n[1, 1]\n[1, 2]\n[1, 2]\n"
+    );
+}
+
+#[test]
+fn interpolated_member_assignment_evaluates_the_name_each_time() {
+    // Groovy evaluates the receiver of a compound property assignment once but
+    // the interpolated name at each read and write: `m."${f()}" += 1` calls `f`
+    // twice. A plain write reaches a user setter, and `++` / `?=` on the
+    // run-time name behave as they do on an identifier.
+    let (out, ok) = run(
+        "n = 0\ndef f() { n++; 'x' }\ndef m = [x: 1]\nm.\"${f()}\" += 1\nprintln \"$m $n\"\n\
+         class A { def x = 1; def setY(v) { println \"set $v\" } }\n\
+         def a = new A()\ndef p = 'y'\na.\"$p\" = 3\n\
+         a.\"x\"++\nprintln a.x\na.\"x\" += 10\nprintln a.x\n\
+         def k = 'k'\ndef mm = [k: 1]\nmm.\"$k\" = 5\nmm.\"$k\" += 1\nmm.\"$k\"++\n\
+         println mm\nmm.\"$k\" ?= 9\nmm.\"z\" ?= 7\nprintln mm\n",
+    );
+    assert!(ok);
+    assert_eq!(out, "[x:2] 2\nset 3\n2\n12\n[k:7]\n[k:7, z:7]\n");
+}
+
+#[test]
+fn interpolated_member_misses_raise_groovys_exceptions() {
+    // A run-time name nothing answers raises the same catchable exceptions, with
+    // the evaluated text as the member name in the message.
+    let (out, err, ok) = run_full(
+        "class A { def hi(a) { \"hi $a\" } }\ndef a = new A()\ndef mn = 'zz'\n\
+         try { println 'x'.\"${1 + 1}\" } catch (MissingPropertyException e) { println e.message }\n\
+         try { a.\"$mn\"(1) } catch (MissingMethodException e) { println e.message.readLines()[0] }\n\
+         try { a.\"$mn\" = 1 } catch (MissingPropertyException e) { println e.message }\n",
+    );
+    assert!(ok, "{err}");
+    assert_eq!(
+        out,
+        "No such property: 2 for class: java.lang.String\n\
+         No signature of method: zz for class: A is applicable for argument types: (Integer) values: [1]\n\
+         No such property: zz for class: A\n"
+    );
+}

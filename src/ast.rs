@@ -202,6 +202,16 @@ pub enum StmtKind {
         op: AssignOp,
         value: Expr,
     },
+    /// [`StmtKind::SetProperty`] whose name is computed at run time:
+    /// `recv."$name" = value` (see [`Expr::DynProperty`]). The receiver is
+    /// evaluated once; the name expression is evaluated at each read and write
+    /// the statement makes, as Groovy's is — `m."${f()}" += 1` calls `f` twice.
+    SetDynProperty {
+        recv: Expr,
+        name: Expr,
+        op: AssignOp,
+        value: Expr,
+    },
     /// `try { … } catch (T e) { … }* [finally { … }]`. At least one `catch` or a
     /// `finally` is required (Groovy rejects a bare `try`). See
     /// `compiler::try_stmt` for the lowering — fusevm has no unwind opcode, so an
@@ -517,6 +527,30 @@ pub enum Expr {
     Property {
         recv: Box<Expr>,
         name: String,
+        line: u32,
+        safe: bool,
+    },
+    /// A property read whose name is an interpolated string: `recv."$name"`,
+    /// `recv?."${k}"`. Groovy's dynamic member access — the `GString` is
+    /// evaluated and its text is the property name, so `obj."$p"` reads the same
+    /// property `obj.p` would (getter, map key, field), and a name no property
+    /// answers raises `MissingPropertyException`. A *constant* quoted member
+    /// (`obj."name"`, `obj.'name'`) is parsed straight to [`Expr::Property`],
+    /// as Groovy's own parser does. Lowered with the same host builtin as
+    /// `Property`, the name pushed as a value instead of a constant.
+    DynProperty {
+        recv: Box<Expr>,
+        name: Box<Expr>,
+        line: u32,
+        safe: bool,
+    },
+    /// A method call whose name is an interpolated string: `recv."$m"(args)`,
+    /// `recv."$m" { … }`. The [`Expr::MethodCall`] counterpart of
+    /// [`Expr::DynProperty`]; `safe` is `?.`.
+    DynMethodCall {
+        recv: Box<Expr>,
+        name: Box<Expr>,
+        args: Vec<Expr>,
         line: u32,
         safe: bool,
     },

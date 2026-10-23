@@ -122,6 +122,18 @@ pub(super) fn text(k: &str) -> String {
     }
 }
 
+/// How a stored key renders where a VM is at hand: like [`text`], but a key
+/// that is a class instance (an enum constant, an object with its own
+/// `toString`) renders through its `toString`, as Groovy's map rendering does
+/// (`[(S.A): 1]` prints `[A:1]`).
+pub(super) fn render(vm: &mut VM, k: &str) -> String {
+    if k.starts_with(MARK) {
+        render_value(vm, &decode(k))
+    } else {
+        k.to_string()
+    }
+}
+
 /// How `inspect()` renders a stored key: a `String` quoted, anything else bare.
 pub(super) fn inspect(k: &str) -> String {
     if k.starts_with(MARK) {

@@ -106,15 +106,15 @@ println(g_sq(9))
 }
 
 #[test]
-fn unknown_call_without_a_rust_block_is_an_unresolved_reference() {
-    // Gating check: with NO `rust { ... }` block present, an unknown callee must
-    // stay a compile-time unresolved-reference error, not silently route to FFI.
+fn unknown_call_without_a_rust_block_is_a_missing_method() {
+    // Gating check: with NO `rust { ... }` block present, an unknown callee is
+    // Groovy's `MissingMethodException` on the script class, not an FFI route.
     let cache = cache_dir("noffi");
     let (out, err, ok) = run("println(nope(1))\n", &cache);
     let _ = std::fs::remove_dir_all(&cache);
     assert!(!ok, "expected failure, got stdout={out:?}");
     assert!(
-        err.contains("unresolved reference: nope"),
+        err.contains("groovy.lang.MissingMethodException: No signature of method: nope for class: "),
         "unexpected stderr: {err}"
     );
 }

@@ -4635,7 +4635,13 @@ impl Compiler {
         }
         // A bare call to a sibling method inside a class body is an implicit
         // `this.method(args)` (a local variable of the same name would shadow it).
-        if self.is_method(name) && !self.is_local(name) {
+        // So is a name nothing binds, written directly in a member body: Groovy
+        // resolves it on the instance at run time, which finds a method the
+        // implementing class declares for a trait, answers through
+        // `methodMissing`, or raises `MissingMethodException` naming the class.
+        let unbound_member_call =
+            self.closure_depth == 0 && self.is_local("this") && self.nothing_binds(name);
+        if (self.is_method(name) || unbound_member_call) && !self.is_local(name) {
             self.emit_this(); // this (receiver)
             let argc = self.emit_args(args, line)?;
             let midx = self.b.add_constant(Value::str(name.to_string()));

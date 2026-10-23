@@ -2924,3 +2924,72 @@ println w3
 "####;
     check(src, expected);
 }
+
+#[test]
+fn instance_map_keys_render_through_to_string() {
+    // An enum constant or an object with its own `toString` as a map key (and
+    // inside `inspect()`) renders through `toString`, not as a heap handle.
+    let src = r####"enum S { A, B, C }
+def m = [(S.A): 1, (S.B): 2]
+println m
+println "m=$m"
+println String.format("%s", m)
+println m.entrySet().toList()[0]
+println m.inspect()
+println([S.A, S.C].inspect())
+class P { int v; String toString() { "P$v" } }
+println([(new P(v: 1)): 'x'])
+println([new P(v: 2)].inspect())
+println([(S.C): [(S.A): 1]])
+println new TreeMap([(S.B): 1, (S.A): 2])
+"####;
+    let expected = r####"[A:1, B:2]
+m=[A:1, B:2]
+{A=1, B=2}
+A=1
+[A:1, B:2]
+[A, C]
+[P1:x]
+[P2]
+[C:[A:1]]
+[A:2, B:1]
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn unresolved_bare_call_is_missing_method_exception() {
+    // A bare call nothing binds is a catchable `MissingMethodException`: on the
+    // script class at the top level and in its closures, on the instance in a
+    // class member (so a trait reaches the implementing class and
+    // `methodMissing` answers), on a `with` delegate inside `with`.
+    let src = r####"try { foo(1) } catch (MissingMethodException e) { println e.message.readLines()[0].replace(getClass().name, "Script"); println e.method; println e.arguments.toList() }
+try { bar() } catch (MissingMethodException e) { println e.message.readLines()[0].replace(getClass().name, "Script") }
+def c = { qux(2, 'a') }
+try { c() } catch (MissingMethodException e) { println e.message.readLines()[0].replace(getClass().name, "Script") }
+try { [a: 1].with { yy(1) } } catch (MissingMethodException e) { println e.message.readLines()[0].replace(getClass().name, "Script") }
+class K { def m() { nope(3) } }
+try { new K().m() } catch (MissingMethodException e) { println e.message.readLines()[0].replace(getClass().name, "Script") }
+class W { def m() { [1].collect { inner(it) } } }
+try { new W().m() } catch (MissingMethodException e) { println e.message.readLines()[0].replace(getClass().name, "Script") }
+trait T { def greet() { "hi " + name() } }
+class U implements T { def name() { 'u' } }
+println new U().greet()
+class M { def methodMissing(String n, args) { "mm:$n$args" }; def go() { zork(1) } }
+println new M().go()
+println "after"
+"####;
+    let expected = r####"No signature of method: foo for class: Script is applicable for argument types: (Integer) values: [1]
+foo
+[1]
+No signature of method: bar for class: Script is applicable for argument types: () values: []
+No signature of method: qux for class: Script is applicable for argument types: (Integer, String) values: [2, a]
+No signature of method: yy for class: java.util.LinkedHashMap is applicable for argument types: (Integer) values: [1]
+No signature of method: nope for class: K is applicable for argument types: (Integer) values: [3]
+No signature of method: inner for class: W is applicable for argument types: (Integer) values: [1]
+hi u
+mm:zork[1]
+after
+"####;
+    check(src, expected);
+}

@@ -7660,6 +7660,14 @@ fn inspect_value(v: &Value) -> String {
 /// [`inspect_value`] for one value, its members rendered through the
 /// cycle-tracking entry point.
 fn inspect_shape(v: &Value) -> String {
+    // An instance (an enum constant, an object with its own `toString`) is
+    // inspected through its `toString`, as `InvokerHelper.inspect` does; that
+    // needs the running VM, which a builtin call always has published.
+    if as_instance(v).is_some() {
+        if let Some(s) = with_vm(|vm| render_value(vm, v)) {
+            return s;
+        }
+    }
     if let Some(entries) = as_omap(v) {
         if entries.is_empty() {
             return "[:]".to_string();
@@ -9744,7 +9752,8 @@ fn raise_negative_index(vm: &mut VM, index: i64, len: usize) -> Value {
 /// Groovy compiles `f(args)` on a variable to `f.call(args)`, so a bound value
 /// that is not a closure answers its own `call` (a class declaring `call(x)`),
 /// and raises the `MissingMethodException` / `NullPointerException` that call
-/// does. A name nothing binds still faults `unresolved reference`.
+/// does. A name nothing answers raises `MissingMethodException` on the script
+/// class.
 fn b_closure_call(vm: &mut VM, argc: u8) -> Value {
     let name = vm
         .stack
@@ -9783,10 +9792,19 @@ fn b_closure_call(vm: &mut VM, argc: u8) -> Value {
         if bound {
             return dispatch_call(vm, clo, "call", args);
         }
-        // Groovy raises `MissingMethodException` naming the script class here;
-        // groovyrs keeps the `unresolved reference` fault its tests pin (see
-        // BUGS.md).
-        fault(vm, format!("unresolved reference: {name}"));
+        // A closure written in a class member resolves the name on its
+        // `thisObject` — the instance — as the member body itself does.
+        let this_obj = CLOSURE_STACK
+            .with(|s| s.borrow().last().cloned())
+            .and_then(|me| closure_meta(&me))
+            .and_then(|m| m.this_obj)
+            .filter(|t| as_instance(t).is_some());
+        if let Some(t) = this_obj {
+            return dispatch_call(vm, t, &name, args);
+        }
+        // Nothing answers the name: Groovy's `MissingMethodException`, naming
+        // the script class (`No signature of method: foo for class: p1 …`).
+        raise_missing_method_on(vm, &script_class(), &name, &args);
         return Value::Undef;
     }
     match invoke_closure_with(vm, &clo, &args, true) {
@@ -21775,7 +21793,7 @@ fn java_to_string(vm: &mut VM, v: &Value) -> String {
     if let Some(entries) = as_omap(v) {
         let items: Vec<String> = entries
             .iter()
-            .map(|(k, val)| format!("{}={}", mapkey::text(k), java_to_string(vm, val)))
+            .map(|(k, val)| format!("{}={}", mapkey::render(vm, k), java_to_string(vm, val)))
             .collect();
         return format!("{{{}}}", items.join(", "));
     }
@@ -22175,6 +22193,11 @@ fn render_shape(vm: &mut VM, v: &Value) -> String {
             None => "Optional.empty".to_string(),
         };
     }
+    // `Map.Entry.toString` is `key=value`, both through `toString`.
+    if let Some((k, val)) = as_entry(v) {
+        let key = mapkey::render(vm, &k);
+        return format!("{key}={}", render_value(vm, &val));
+    }
     if let Some(inst) = as_instance(v) {
         return instance_to_string(vm, v).unwrap_or_else(|| instance_default_str(v, &inst));
     }
@@ -22187,7 +22210,7 @@ fn render_shape(vm: &mut VM, v: &Value) -> String {
             .map(|(k, val)| {
                 format!(
                     "{}:{}",
-                    mapkey::text(k),
+                    mapkey::render(vm, k),
                     self_or(v, val, THIS_MAP, |e| render_value(vm, e))
                 )
             })

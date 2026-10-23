@@ -467,12 +467,23 @@ fn safe_navigation_short_circuits_on_null() {
 
 #[test]
 fn unresolved_call_still_faults() {
-    // A call through an undefined name (not a closure) remains an error, and
-    // the diagnostic names the unresolved name rather than any other failure.
+    // A call through a name nothing binds raises Groovy's
+    // `MissingMethodException` naming the script class (Groovy 6.0.0:
+    // `No signature of method: foo for class: p1 is applicable for argument
+    // types: (Integer) values: [1]`); uncaught, it ends the run.
     let (out, err, ok) = run_full("println foo(1)");
     assert!(!ok, "calling an undefined non-closure must fault");
     assert_eq!(out, "");
-    assert_eq!(err, "groovyrs: unresolved reference: foo\n");
+    assert!(
+        err.starts_with(
+            "groovyrs: groovy.lang.MissingMethodException: No signature of method: foo for class: groovyrs_test_"
+        ),
+        "unexpected stderr: {err}"
+    );
+    assert!(
+        err.ends_with(" is applicable for argument types: (Integer) values: [1]\n"),
+        "unexpected stderr: {err}"
+    );
 }
 
 // ── Nested-closure upvalue capture ──────────────────────────────────────────

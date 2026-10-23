@@ -285,6 +285,18 @@ reported as parse or compile errors, never silently mis-run.
 - **`groovy.lang.Tuple`.** `new Tuple2(a, b)` … `Tuple16`, `new Tuple(…)` and
   `Tuple.tuple(…)` build an unmodifiable list of the fixed-arity class, with
   `v1` … `vN` / `getV1()` and `Tuple2`/`Tuple3`'s `first`/`second`/`third`.
+- **A bare call nothing binds is `MissingMethodException`.** `foo(1)` with no
+  `foo` anywhere raises the catchable exception Groovy does, naming the script
+  class (`No signature of method: foo for class: p1 is applicable for argument
+  types: (Integer) values: [1]`); inside a `with`/`tap` the delegate is asked
+  first and named on a miss. Written in a class member — or a closure inside
+  one — the name resolves on the instance, so a trait method reaches a method
+  only the implementing class declares, `methodMissing` answers, and a miss
+  names the class.
+- **Instance map keys render through `toString`.** An enum constant or an
+  object with its own `toString` used as a map key prints as Groovy prints it
+  (`[(S.A): 1]` is `[A:1]`), in `toString`, `"$m"`, `String.format`, a
+  `Map.Entry` and `inspect()`; `inspect()` of an instance is its `toString`.
 - **`List.withDefault` / `withLazyDefault` / `withEagerDefault`.** A read past
   the end grows the list (with `null`s and the default at the index, or with
   the default at every new index when eager), a lazy list also fills a `null`
@@ -904,6 +916,11 @@ the `break` is never reached. A `BigDecimal` with an extreme scale
 in Groovy too, and `while (true) { try { return 1 } finally { continue } }` is an
 infinite loop on both sides.
 
+Stale entries removed after re-running them against 6.0.0: `Class.getSuperclass()`
+(`new B().getClass().getSuperclass().getName()` is `A`, `42`'s is
+`java.lang.Number`), a lazy `"${-> x}"` GString (re-reads `x` each render) and
+`List.withDefault` (an out-of-range read grows the list) all answer as Groovy does.
+
 ## Found by a differential sweep against Groovy 6.0.0 — open
 
 Measured against Apache Groovy 6.0.0 on JVM 21.0.12 (`JAVA_HOME` pinned to
@@ -912,9 +929,8 @@ this file.
 
 **Declarations that do not parse or do not resolve:**
 
-- An `enum` constant with a class body (`A { … }`) is a parse error, a range of
-  enum constants (`S.A..S.C`) does not enumerate, and an enum constant used as
-  a map key prints as `(obj:N)` (see the map-key entry below).
+- An `enum` constant with a class body (`A { … }`) is a parse error, and a range
+  of enum constants (`S.A..S.C`) does not enumerate.
 - Method references `Integer::sum` are parse errors. Method *pointers*
   (`this.&sq`, `Math.&abs`, `obj.&m`) work, except a class receiver naming an
   *instance* method (`String.&toUpperCase`, whose first argument becomes the
@@ -925,17 +941,6 @@ this file.
   fields, then the getter properties sorted by name (an inherited `def`
   property among them), then an inherited `static` property; an inherited
   `private` field is absent. A class with no superclass matches exactly.
-- A bare call no binding answers (`foo(1)` with no `foo` anywhere) faults with
-  the uncatchable `unresolved reference: foo`; Groovy raises a catchable
-  `MissingMethodException` naming the script class. `tests/eval.rs`
-  (`unresolved_call_still_faults`) and `tests/ffi.rs` pin the fault, so the
-  change needs those expectations revisited. A *bound* non-closure value is
-  called through its own `call` method, as Groovy's is.
-- A trait method calling a method only the implementing class declares
-  (`trait T { def greet() { name() } }`) is `unresolved reference`.
-
-**Operators and literals:** `"${-> x}"` (a lazy GString closure) is a parse
-error.
 
 **Missing GDK methods** (`MissingMethodException` where Groovy answers):
 `Map.toSpreadMap`, `List.stream()`, `BigDecimal.step(to, step) { … }`. `Eval.me` raises
@@ -1077,16 +1082,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   implementation they name — a `TreeMap` sorts, a `HashMap` buckets — as the
   three `Set` names do. The three `List` names all build the one implementation:
   see **A `List` is always an `ArrayList`** below.
-- **`List.withDefault { … }`.** Only the `Map` spelling is modeled. Groovy's
-  `groovy.util.ListWithDefault` answers the closure for an out-of-range read
-  (`[1, 2].withDefault { 0 }[5]` is `0`) and grows the list to reach it;
-  groovyrs raises `MissingMethodException`.
-- **`Class.getSuperclass()`.** Not dispatched — `MissingMethodException` where
-  Groovy walks the hierarchy (`new B().getClass().getSuperclass().getName()` is
-  `A` for `class B extends A`, and `42`'s is `java.lang.Number`). A declared
-  class's superclass IS known (`ClassMeta::superclass` drives inheritance and
-  virtual dispatch); what is missing is the JDK half, which would be a table of
-  built-in class parents rather than something groovyrs can derive.
 - **`Closure.trampoline()`.** Not dispatched — `MissingMethodException` where
   Groovy answers a trampolined closure, so a recursion written to be
   stack-flattened runs as an ordinary one until it hits the frame limit. The

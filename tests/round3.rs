@@ -1872,3 +1872,454 @@ fn method_assigning_a_final_field_is_a_compile_error() {
         assert_eq!(out, "");
     }
 }
+
+#[test]
+fn single_declaration_function_is_type_checked() {
+    let src = r####"SN = this.getClass().name
+def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)?.replace(SN, 'Script')}" } }
+def k(String s) { "k$s" }
+def i(int n) { n * 2 }
+def d(double x) { x }
+def l(List x) { x.size() }
+def two(String a, int b) { a * b }
+t(1) { k(5) }
+t(2) { k('a') }
+t(3) { def v = 5; k(v) }
+t(4) { i('x') }
+t(5) { i(3) }
+t(6) { def v = 'q'; i(v) }
+t(7) { d(2) }
+t(8) { l([1, 2]) }
+t(9) { l('s') }
+t(10) { two('ab', 2) }
+t(11) { two(2, 'ab') }
+t(12) { k(null) }
+t(13) { i(null) }
+t(14) { k("g${1}") }
+int fib(int n) { n < 2 ? n : fib(n - 1) + fib(n - 2) }
+t(15) { fib(20) }
+t(16) { def s = 'x'; [k(s)] }
+"####;
+    let expected = r####"1: groovy.lang.MissingMethodException No signature of method: k for class: Script is applicable for argument types: (Integer) values: [5]
+2: ka
+3: groovy.lang.MissingMethodException No signature of method: k for class: Script is applicable for argument types: (Integer) values: [5]
+4: groovy.lang.MissingMethodException No signature of method: i for class: Script is applicable for argument types: (String) values: [x]
+5: 6
+6: groovy.lang.MissingMethodException No signature of method: i for class: Script is applicable for argument types: (String) values: [q]
+7: 2.0
+8: 2
+9: groovy.lang.MissingMethodException No signature of method: l for class: Script is applicable for argument types: (String) values: [s]
+10: abab
+11: groovy.lang.MissingMethodException No signature of method: two for class: Script is applicable for argument types: (Integer, String) values: [2, ab]
+12: knull
+13: groovy.lang.MissingMethodException No signature of method: i for class: Script is applicable for argument types: (null) values: [null]
+14: kg1
+15: 6765
+16: [kx]
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn ambiguous_no_argument_call() {
+    let src = r####"class S { def v; S(String s) { v = 1 }; S(Integer i) { v = 2 } }
+class T { def m(String s) { 1 }; def m(List l) { 2 } }
+class U { def v; U(String s) { v = 'u' } }
+def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message.readLines()[0]} (${e.message.readLines().size()} lines)" } }
+t(1) { new S() }
+t(2) { new T().m() }
+t(3) { new U().v }
+class B { def m(String s) { 'b' } }
+class C extends B { def m(String s) { 'c' } }
+t(4) { new C().m() }
+"####;
+    let expected = r####"1: org.codehaus.groovy.runtime.metaclass.MethodSelectionException Could not find which method <init>() to invoke from this list: (3 lines)
+2: org.codehaus.groovy.runtime.metaclass.MethodSelectionException Could not find which method m() to invoke from this list: (3 lines)
+3: u
+4: c
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn tree_set_ordered_by_a_comparator() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+Comparator c = { a, b -> b <=> a }
+def s = new TreeSet(c); s << 1 << 3 << 2
+t(1) { s }
+t(2) { s.first() }
+t(3) { s.contains(2) }
+t(4) { s.remove(3); s }
+t(5) { def ci = new TreeSet(String.CASE_INSENSITIVE_ORDER); ci << 'b' << 'A' << 'a' << 'C'; ci }
+t(6) { def ci = new TreeSet(String.CASE_INSENSITIVE_ORDER); ci.addAll(['x', 'X', 'y']); [ci, ci.size()] }
+t(7) { s.getClass().name }
+t(8) { s.collect { it * 10 } }
+t(9) { def ci = new TreeSet(String.CASE_INSENSITIVE_ORDER); ci.add('q'); [ci.add('Q'), ci.contains('Q')] }
+t(10) { s.size() }
+t(11) { s.toList() }
+t(12) { (s as List).join('-') }
+"####;
+    let expected = r####"1: [3, 2, 1]
+2: 3
+3: true
+4: [2, 1]
+5: [A, b, C]
+6: [[x, y], 2]
+7: java.util.TreeSet
+8: [20, 10]
+9: [false, true]
+10: 2
+11: [2, 1]
+12: 2-1
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn closure_class_names() {
+    let src = r####"SN = this.getClass().name
+def a = { 1 }
+println((a.getClass().name).toString().replace(SN, "S"))
+def b = { -> { -> { -> 3 } } }
+println((b.getClass().name).toString().replace(SN, "S"))
+println((b().getClass().name).toString().replace(SN, "S"))
+println((b()().getClass().name).toString().replace(SN, "S"))
+def c = { [{ 1 }, { 2 }] }
+println((c().collect { it.getClass().name }).toString().replace(SN, "S"))
+def f() { { -> 5 } }
+println((f().getClass().name).toString().replace(SN, "S"))
+def g() { [{ 5 }, { -> { -> 6 } }] }
+println((g()*.getClass()*.name).toString().replace(SN, "S"))
+println((g()[1]().getClass().name).toString().replace(SN, "S"))
+class K { def m() { { -> 7 } }; def n = { 8 }; static s() { { -> 9 } }; def w() { { -> { -> 1 } } } }
+println((new K().m().getClass().name).toString().replace(SN, "S"))
+println((new K().n.getClass().name).toString().replace(SN, "S"))
+println((K.s().getClass().name).toString().replace(SN, "S"))
+println((new K().w()().getClass().name).toString().replace(SN, "S"))
+println([1].collect { it }.getClass().name)
+def d = { 4 }
+println((d.getClass().name).toString().replace(SN, "S"))
+println(d.getClass().simpleName)
+def t2(n, Closure c) { try { println "$n: " + c().toString().replace(SN, "S") } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)?.replaceAll(/@[0-9a-f]+/, "@H")?.replace(SN, "S")}" } }
+def up = 'abc'.&toUpperCase
+t2(1) { up.getClass().name }
+t2(2) { String.CASE_INSENSITIVE_ORDER.getClass().name }
+t2(3) { 5.zork({ 1 }) }
+t2(4) { { -> 2 }.getClass().simpleName }
+t2(5) { [1, 2]*.toString().getClass().name }
+t2(6) { def x; def f = (x = { 3 }); f.getClass().name }
+t2(7) { this.&t.getClass().name }
+"####;
+    let expected = r####"S$_run_closure1
+S$_run_closure2
+S$_run_closure2$_closure17
+S$_run_closure2$_closure17$_closure18
+[S$_run_closure3$_closure19, S$_run_closure3$_closure20]
+S$_f_closure14
+[S$_g_closure15, S$_g_closure16]
+S$_g_closure16$_closure24
+K$_m_closure2
+K$_closure1
+K$_s_closure3
+K$_w_closure4$_closure5
+java.util.ArrayList
+S$_run_closure6
+_run_closure6
+1: org.codehaus.groovy.runtime.MethodClosure
+2: java.lang.String$CaseInsensitiveComparator
+3: groovy.lang.MissingMethodException No signature of method: zork for class: java.lang.Integer is applicable for argument types: (S$_run_closure9$_closure21) values: [S$_run_closure9$_closure21@H]
+4: _closure22
+5: java.util.ArrayList
+6: S$_run_closure12$_closure23
+7: org.codehaus.groovy.runtime.MethodClosure
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn missing_property_possible_solutions() {
+    let src = r####"class Pt { int zeta, alpha, beta; def getGamma() { 1 } }
+class Sub extends Pt { def own }
+def t(n, Closure c) { try { c() } catch (e) { println "$n: ${e.message.replace('\n', ' / ')}" } }
+t(1) { Pt p = [q: 1]; p }
+t(2) { Pt p = [zetaa: 1]; p }
+t(3) { Pt p = [Alpha: 1]; p }
+t(4) { Pt p = [clas: 1]; p }
+t(5) { Sub s = [ow: 1]; s }
+t(6) { Sub s = [qqqqqq: 1]; s }
+t(7) { new Pt().zzz }
+t(8) { new Pt().zet }
+t(9) { new Pt(gama: 1) }
+t(10) { Pt p = [eta: 1]; p }
+class R { def xbcd; def abcd }
+try { new R().bacd } catch (e) { println e.message.replace("\n", " / ") }
+"####;
+    let expected = r####"1: Cannot cast object '{q=1}' with class 'java.util.LinkedHashMap' to class 'Pt' due to: org.codehaus.groovy.runtime.metaclass.MissingPropertyExceptionNoStack: No such property: q for class: Pt
+2: Cannot cast object '{zetaa=1}' with class 'java.util.LinkedHashMap' to class 'Pt' due to: org.codehaus.groovy.runtime.metaclass.MissingPropertyExceptionNoStack: No such property: zetaa for class: Pt / Possible solutions: zeta, beta
+3: Cannot cast object '{Alpha=1}' with class 'java.util.LinkedHashMap' to class 'Pt' due to: org.codehaus.groovy.runtime.metaclass.MissingPropertyExceptionNoStack: No such property: Alpha for class: Pt / Possible solutions: alpha
+4: Cannot cast object '{clas=1}' with class 'java.util.LinkedHashMap' to class 'Pt' due to: org.codehaus.groovy.runtime.metaclass.MissingPropertyExceptionNoStack: No such property: clas for class: Pt / Possible solutions: class
+5: Cannot cast object '{ow=1}' with class 'java.util.LinkedHashMap' to class 'Sub' due to: org.codehaus.groovy.runtime.metaclass.MissingPropertyExceptionNoStack: No such property: ow for class: Sub / Possible solutions: own
+6: Cannot cast object '{qqqqqq=1}' with class 'java.util.LinkedHashMap' to class 'Sub' due to: org.codehaus.groovy.runtime.metaclass.MissingPropertyExceptionNoStack: No such property: qqqqqq for class: Sub
+7: No such property: zzz for class: Pt / Possible solutions: zeta
+8: No such property: zet for class: Pt / Possible solutions: zeta, beta
+9: No such property: gama for class: Pt / Possible solutions: gamma, zeta, beta
+10: Cannot cast object '{eta=1}' with class 'java.util.LinkedHashMap' to class 'Pt' due to: org.codehaus.groovy.runtime.metaclass.MissingPropertyExceptionNoStack: No such property: eta for class: Pt / Possible solutions: zeta, beta
+No such property: bacd for class: R / Possible solutions: abcd, xbcd
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn map_as_class_proxy_class() {
+    let src = r####"class Pt { int x; String toString() { "Pt($x)" } }
+def p = [x: 1, z: 2] as Pt
+println p
+println p.getClass().name
+println p instanceof Pt
+println(([x: 3] as Pt).getClass().name)
+"####;
+    let expected = r####"Pt(0)
+Pt1_groovyProxy
+true
+Pt
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn record_compact_constructor_and_this_call() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+record P(int x, String s) {
+  P {
+    if (x < 0) throw new IllegalArgumentException('neg')
+    s = s.toUpperCase()
+  }
+}
+t(1) { new P(1, 'a') }
+t(2) { new P(-1, 'a') }
+t(3) { new P(1, 'b').properties }
+t(4) { P.serialVersionUID }
+record Q(int a) { Q(String s) { this(s.size()) } }
+t(5) { new Q('abc') }
+record Q2(int a) { Q2(String s) { this(s.size()) } }
+println new Q2(5)
+class A { def v; A() { this(3) }; A(x) { v = x }; String toString() { "A$v" } }
+println new A()
+"####;
+    let expected = r####"1: P[x=1, s=A]
+2: java.lang.IllegalArgumentException neg
+3: [x:1, s:B, serialVersionUID:0, class:class P]
+4: 0
+5: Q[a=3]
+Q2[a=5]
+A3
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn array_typed_closure_parameter_is_variadic() {
+    let src = r####"def a = { Object[] xs -> xs.length }
+println a(1, 2, 3)
+println a()
+println a(1)
+def b = { String s, int[] ns -> "$s ${ns.toList()}" }
+println b('x', 1, 2)
+println b('y')
+println a.maximumNumberOfParameters
+def c = { Object[] xs -> "c${xs?.toList()}" } as Runnable
+"####;
+    let expected = r####"3
+0
+1
+x [1, 2]
+y []
+1
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn expando_meta_class_injection() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+String.metaClass.shout = { -> delegate.toUpperCase() + '!' }
+t(1) { 'hi'.shout() }
+t(2) { "g${1}".shout() }
+String.metaClass.wrap = { String l, String r -> l + delegate + r }
+t(3) { 'x'.wrap('[', ']') }
+Integer.metaClass.twice = { -> delegate * 2 }
+t(4) { 5.twice() }
+class P { def x = 1; def own() { 'own' } }
+class Q extends P {}
+P.metaClass.greet = { "hi ${delegate.x}" }
+t(5) { new P().greet() }
+t(6) { new Q().greet() }
+def p = new P(); p.metaClass.solo = { -> 'only me' }
+t(7) { p.solo() }
+t(8) { new P().solo() }
+P.metaClass.static.make = { -> new P(x: 9) }
+t(9) { P.make().x }
+P.metaClass.getY = { -> delegate.x + 41 }
+t(10) { new P().y }
+P.metaClass.own = { -> 'replaced' }
+t(11) { new P().own() }
+Object.metaClass.anyone = { -> 'everyone' }
+t(12) { 3.anyone() + ' ' + [].anyone() }
+t(13) { new P().metaClass.getClass().simpleName }
+t(14) { String.metaClass.getClass().simpleName }
+String.metaClass.toUpperCase = { -> 'nope' }
+t(15) { 'abc'.toUpperCase() }
+"####;
+    let expected = r####"1: HI!
+2: G1!
+3: [x]
+4: 10
+5: hi 1
+6: hi 1
+7: only me
+8: groovy.lang.MissingMethodException No signature of method: solo for class: P is applicable for argument types: () values: []
+9: 9
+10: 42
+11: replaced
+12: everyone everyone
+13: HandleMetaClass
+14: ExpandoMetaClass
+15: nope
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn annotated_category() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+class StrCat { static String shout(String s) { s.toUpperCase() + '!' }; static int twice(Integer i) { i * 2 } }
+t(1) { use(StrCat) { 'a'.shout() + 3.twice() } }
+t(2) { use(StrCat) { [1, 2].collect { it.twice() } } }
+t(3) { 'a'.shout() }
+t(4) { use(StrCat) { use(StrCat) { 'n'.shout() } } }
+@Category(String) class Rev { String rev() { this.reverse() } }
+t(5) { use(Rev) { 'abc'.rev() } }
+t(6) { def sb = new StringBuilder(); sb << 'a' << 1 << [2]; sb.toString() }
+t(7) { def w = new StringWriter(); w << 'x'; w.write('y'); w.toString() }
+t(8) { 'a b c'.split(' ').collectEntries { [it, it.toUpperCase()] } }
+"####;
+    let expected = r####"1: A!6
+2: [2, 4]
+3: groovy.lang.MissingMethodException No signature of method: shout for class: java.lang.String is applicable for argument types: () values: []
+4: N!
+5: cba
+6: a1[2]
+7: xy
+8: [a:A, b:B, c:C]
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn json_output_and_slurper() {
+    let src = r####"import groovy.json.*
+println JsonOutput.toJson([1, 'a', null, [x: [y: 'z']], 1.5d, 2.50, 10L, 1e20d, 'é\u0001\t/'])
+println JsonOutput.toJson('s')
+println JsonOutput.toJson(null)
+println JsonOutput.toJson([:])
+println JsonOutput.toJson([])
+class P { int x = 1; String n = 'q'; def getZ() { 3 } }
+println JsonOutput.toJson(new P())
+println JsonOutput.toJson(['a', 'b'] as Set)
+println JsonOutput.toJson(1..3)
+println JsonOutput.toJson([k: "g${1}"])
+println JsonOutput.prettyPrint('{"a":{},"b":[],"c":[{"d":"x, y"}],"e":"a\\"b"}')
+println JsonOutput.toJson(3.0f)
+println JsonOutput.toJson(123456789012345678901234567890)
+def s = new JsonSlurper()
+def r = s.parseText('{"i":1,"l":12345678901,"b":123456789012345678901234567890,"d":1.25,"e":1e3,"n":null,"t":true,"s":"a\\u0041\\n","a":[],"o":{}}')
+println r
+println r.collect { k, v -> "$k:${v?.getClass()?.simpleName}" }
+println r.getClass().name
+println s.parseText('[1, [2, [3]]]')
+println s.parseText('"str"')
+println s.parseText('42')
+try { s.parseText('{bad') } catch (e) { println e.getClass().name }
+println s.parseText('{"a":-0.5,"b":-3}')
+"####;
+    let expected = r####"[1,"a",null,{"x":{"y":"z"}},1.5,2.50,10,1.0E20,"\u00e9\u0001\t/"]
+"s"
+null
+{}
+[]
+{"x":1,"n":"q","z":3}
+["a","b"]
+[1,2,3]
+{"k":"g1"}
+{
+    "a": {
+        
+    },
+    "b": [
+        
+    ],
+    "c": [
+        {
+            "d": "x, y"
+        }
+    ],
+    "e": "a\"b"
+}
+3.0
+123456789012345678901234567890
+[i:1, l:12345678901, b:123456789012345678901234567890, d:1.25, e:1E+3, n:null, t:true, s:aA
+, a:[], o:[:]]
+[i:Integer, l:Long, b:BigInteger, d:BigDecimal, e:BigDecimal, n:null, t:Boolean, s:String, a:ArrayList, o:LazyMap]
+org.apache.groovy.json.internal.LazyMap
+[1, [2, [3]]]
+str
+42
+groovy.json.JsonException
+[a:-0.5, b:-3]
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn json_builder() {
+    let src = r####"import groovy.json.*
+def j = new JsonBuilder()
+j { name 'x'; n 1 }
+println j.toString()
+def k = new JsonBuilder()
+k.person { name 'Ann'; age 30; tags 'a', 'b'; address { city 'X' }; empty() }
+println k
+println k.toPrettyString()
+def m = new JsonBuilder([1, [a: 2]])
+println m.toString()
+def q = new JsonBuilder()
+q.root(id: 7) { inner true }
+println q
+println q.content
+println j.getClass().name
+"####;
+    let expected = r####"{"name":"x","n":1}
+{"person":{"name":"Ann","age":30,"tags":["a","b"],"address":{"city":"X"},"empty":[]}}
+{
+    "person": {
+        "name": "Ann",
+        "age": 30,
+        "tags": [
+            "a",
+            "b"
+        ],
+        "address": {
+            "city": "X"
+        },
+        "empty": [
+            
+        ]
+    }
+}
+[1,{"a":2}]
+{"root":{"id":7,"inner":true}}
+[root:[id:7, inner:true]]
+groovy.json.JsonBuilder
+"####;
+    check(src, expected);
+}

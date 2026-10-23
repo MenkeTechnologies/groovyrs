@@ -290,6 +290,46 @@ reported as parse or compile errors, never silently mis-run.
   the default at every new index when eager), a lazy list also fills a `null`
   it holds, and a negative index reaching before the start is
   `IndexOutOfBoundsException`.
+- **Closure classes.** A closure literal is an instance of the class Groovy
+  generates for it — `Script$_run_closure1`, `Script$_f_closure7` in function
+  `f`, `K$_m_closure2` in method `m` of `K`, `K$_closure1` in a field
+  initializer, `Script$_run_closure2$_closure10` inside another — numbered per
+  class the way Groovy numbers them (every closure written directly in a
+  method first, then the nested ones depth first), and it prints as
+  `class@hash`. A method pointer is an
+  `org.codehaus.groovy.runtime.MethodClosure`.
+- **Type-checked calls of script functions.** A call to a function declared
+  once whose argument the compiler cannot prove fits a typed parameter is
+  checked at the call (`k(5)` against `k(String s)` is
+  `MissingMethodException`); a typed parameter is a typed variable in the body,
+  so `fib(n - 1)` against `int fib(int n)` needs no check.
+- **`MethodSelectionException`** for a no-argument call two or more
+  single-parameter declarations could take (`new S()` beside `S(String)` and
+  `S(Integer)`), listing them as `public S#<init>(java.lang.String)`.
+- **`Possible solutions:`** — a missing property of a script class instance
+  (and a map key a `castToType` cannot set) lists the class's properties
+  closest to the name, ranked by Groovy's `MethodRankHelper` distance.
+- **`new TreeSet(comparator)`** orders by the comparator, and two elements it
+  calls equal are one (`String.CASE_INSENSITIVE_ORDER` keeps the first
+  spelling).
+- **`record` compact constructors** (`P { … }` before the components are
+  stored), `serialVersionUID`, and **`this(…)`** constructor delegation in any
+  class.
+- **`{ Object[] xs -> … }`** — an array-typed last closure parameter collects
+  the call's trailing arguments, as `Object... xs` does.
+- **`ExpandoMetaClass`.** `String.metaClass.shout = { -> … }`,
+  `P.metaClass.static.make = { … }`, `P.metaClass.getY = { … }` and
+  `obj.metaClass.m = { … }` inject methods (overriding the class's own) that
+  run with the receiver as `delegate`, along the superclass chain and through
+  `Object`.
+- **`@Category(T)` classes** under `use`: their instance methods run with the
+  receiver as `this`.
+- **`groovy.json`.** `JsonOutput.toJson` (Groovy's escapes and number
+  renderings, a script instance as its properties), `JsonOutput.prettyPrint`,
+  `new JsonSlurper().parseText` (`LazyMap`s, `Integer`/`Long`/`BigInteger`,
+  `BigDecimal`, `JsonException`) and `JsonBuilder` (`builder { k v }`,
+  `builder.root { … }`, nested closures, `toString` / `toPrettyString` /
+  `content`).
 - **`final` direct writes.** `obj.@f = v` on a `final` field raises
   `GroovyRuntimeException: Cannot set the property 'f' because the backing field
   is final.`; a method (not a constructor) assigning its class's `final` field
@@ -852,9 +892,8 @@ this file.
 - Method references `Integer::sum` are parse errors. Method *pointers*
   (`this.&sq`, `Math.&abs`, `obj.&m`) work, except a class receiver naming an
   *instance* method (`String.&toUpperCase`, whose first argument becomes the
-  receiver): it is tried as a static call. A pointer's `getClass()` is
-  `groovy.lang.Closure`, not `org.codehaus.groovy.runtime.MethodClosure`, and
-  its `maximumNumberOfParameters` is that of a varargs closure.
+  receiver): it is tried as a static call. A pointer's
+  `maximumNumberOfParameters` is that of a varargs closure.
 - `obj.properties` on a *subclass* lists the whole chain's fields first, root
   first. Groovy lists an inherited public field first, then the class's own
   fields, then the getter properties sorted by name (an inherited `def`
@@ -896,24 +935,35 @@ JVM 21.0.12):
   method or constructor; a top-level script *function* still binds it and
   misses inside the body. The refusal names the argument's type `Closure`
   where Groovy names the closure's generated class.
-- `{ … } as C` for a concrete class answers every method `C` declares and its
-  property getters through the closure; its class reports `C1_groovyProxy`,
-  but a closure written with a `T[]`/`T...` parameter does not collect the
-  call's arguments, and a closure returning a `GString` from `toString()` is
-  not the `ClassCastException` Groovy raises.
-- `[x: 1, z: 2] as Pt` builds `Pt` by its no-argument constructor, as Groovy's
-  proxy fallback does, but the result is a plain `Pt` where Groovy's is a
-  `Pt1_groovyProxy`. The `GroovyCastException` for `Pt p = [x: 1, z: 2]` has no
-  second `Possible solutions: x, y` line.
-- `new TreeSet(comparator)` takes the comparator as an element to copy rather
-  than as the ordering.
-- A `record`'s `properties` lack `serialVersionUID`; a compact canonical
-  constructor (`P { … }`) does not parse.
+- `{ … } as C` for a concrete class: a closure returning a `GString` from
+  `toString()` is not the `ClassCastException` Groovy raises.
+- `[x: 1, z: 2] as Pt` is the no-argument instance reporting
+  `Pt1_groovyProxy`, but the map's entries are not its method overrides.
+- A `TreeSet` ordered by a comparator answers `add`, `<<`, `contains`,
+  `remove` and `addAll` by the comparator; its other set operations (`+`,
+  `retainAll`, `removeAll`, `intersect`) compare elements with `equals`.
+- Groovy lists the candidates of a `MethodSelectionException` in the JVM's
+  reflection order, which varies between runs; groovyrs lists them in
+  declaration order.
+- `ExpandoMetaClass` injection covers methods, static methods, property
+  getters (`getX`) and per-instance methods, assigned with `=`; `<<`,
+  `respondsTo`, `hasProperty`, constructors (`metaClass.constructor`),
+  `invokeMethod`/`methodMissing` on the metaclass and `GroovySystem
+  .metaClassRegistry` are not modeled.
+- `@Category(T)` applies its methods to every receiver inside `use`, not
+  only to `T`'s.
+- `JsonSlurper` parses text only (`parseText`); `parse(File/Reader/URL)`,
+  `JsonSlurperClassic`, `JsonGenerator` and `StreamingJsonBuilder` are not
+  modeled, and `JsonOutput.toJson` renders a `Date` or other JDK object
+  through its `toString`.
 - `withDefault` on a list registers the default on that list itself, so `l.withDefault { … }.is(l)` is `true` (Groovy
   answers a separate `ListWithDefault` over it) and the original reference
   defaults too.
-- `MissingMethodException`'s `values: […]` renders a closure argument as
-  `(obj:N)`; Groovy prints the closure's generated class and identity hash.
+- A closure's identity hash (`Script$_run_closure1@1a2b3c`) is derived from
+  its handle, so it is stable where Groovy's differs per run. A user closure
+  written inside a compiler-made closure (the `*.` spread's, an assignment used
+  as a value) is numbered when that closure body is lowered, which can differ
+  from Groovy's number.
 - `BigDecimal.sqrt(MathContext)` follows JDK 21 (the pinned oracle): an exact
   root's preferred scale is `scale / 2`, so `4.0G.sqrt(mc)` is `2`. JDK 27
   changed it to the ceiling and prints `2.0` (and words the unlimited-precision
@@ -921,10 +971,6 @@ JVM 21.0.12):
 - `Integer.equals(Long)` is `false` only where the compiler sees the `Long`
   (a `L` literal, a `long`/`Long`-typed or `L`-initialised variable); a `Long`
   that only the run time produces is one `Value::Int` with an `Integer`.
-- Two constructors a no-argument `new` could both reach with a `null`
-  (`S(String)` beside `S(Integer)`) raise `GroovyRuntimeException: Could not
-  find matching constructor`; Groovy raises `MethodSelectionException` listing
-  them.
 - A compound write or `++`/`--` on a *property* evaluates its receiver once
   (`f().x += 1`, `f().x++`, `++f().x` call `f` one time); Groovy 6 evaluates
   it twice, once to read and once to write. A subscript target
@@ -1016,16 +1062,10 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
 - **A `GString` is a `String`.** An interpolated literal produces a plain
   `java.lang.String`, so `"$s".getClass()` reports `java.lang.String` where
   Groovy reports `org.codehaus.groovy.runtime.GStringImpl`.
-- **A closure's `getClass()` names `groovy.lang.Closure`.** Groovy reports the
-  synthetic per-closure class (`Script1$_run_closure1`), whose name depends on
-  the enclosing script's name and the closure's position; groovyrs has no such
-  class to name.
-- **A script function declared once is not type-checked at the call.** A
-  name declared at one arity compiles to a direct call, so `def k(String s)`
-  called as `k(5)` runs the body with `5` where Groovy raises
-  `MissingMethodException`, and a lone list argument is not spread into its
-  parameters. Declarations sharing an arity, methods and constructors are
-  selected (and refused) by type.
+- **A lone list argument to a script function declared once is not spread.**
+  `def f(int a)` called as `f([7])` raises `MissingMethodException` where
+  Groovy runs `f(7)`; methods, constructors and overloaded script functions do
+  spread it.
 - **A `BigInteger` argument where the JDK overload wants an `int`.**
   `255.toString(16G)` answers `16` in Groovy — the `BigInteger` coerces to the
   `int` the static `Integer.toString(int)` wants — where groovyrs raises

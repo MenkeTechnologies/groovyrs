@@ -160,6 +160,10 @@ pub(super) enum Selection {
     Found(u16, Vec<Value>),
     /// The name is declared, and the call fits no declaration of it.
     NoFit,
+    /// A call with no arguments that two or more single-parameter
+    /// declarations could take with a `null`: Groovy's
+    /// `MethodSelectionException`, listing them (their subs, in order).
+    Ambiguous(Vec<u16>),
     /// Nothing declared the name with types to weigh.
     NoCandidates,
 }
@@ -220,13 +224,105 @@ pub(super) fn select_call(vm: &mut VM, decls: &[(Vec<String>, u16)], args: &[Val
         return Selection::Found(idx, packed);
     }
     if args.is_empty() {
-        let single: Vec<&(Vec<String>, u16)> = decls
-            .iter()
-            .filter(|(types, _)| types.len() == 1 && !is_primitive(bare_type(&types[0])))
-            .collect();
-        if let [(_, idx)] = single.as_slice() {
-            return Selection::Found(*idx, vec![Value::Undef]);
+        // One entry per signature: an override hides what it overrides.
+        let mut single: Vec<&(Vec<String>, u16)> = Vec::new();
+        for decl in decls {
+            let (types, _) = decl;
+            if types.len() == 1
+                && !types[0].ends_with("[]")
+                && !single.iter().any(|(seen, _)| seen == types)
+            {
+                single.push(decl);
+            }
+        }
+        if let [(types, idx)] = single.as_slice() {
+            if !is_primitive(bare_type(&types[0])) {
+                return Selection::Found(*idx, vec![Value::Undef]);
+            }
+        }
+        if single.len() > 1 {
+            return Selection::Ambiguous(single.iter().map(|(_, idx)| *idx).collect());
         }
     }
     Selection::NoFit
+}
+
+/// `MethodRankHelper.delDistance`, ported: a Damerau–Levenshtein distance in
+/// tenths, where inserting, deleting or substituting a character costs 10, a
+/// substitution that only changes case 5, and an adjacent transposition 5
+/// (plus 5 for each case change it makes). Over UTF-16 units, as Java's
+/// `CharSequence` is.
+pub(super) fn del_distance(s: &str, t: &str) -> i32 {
+    let s: Vec<u16> = s.encode_utf16().collect();
+    let t: Vec<u16> = t.encode_utf16().collect();
+    let (n, m) = (s.len(), t.len());
+    if n == 0 {
+        return m as i32;
+    }
+    if m == 0 {
+        return n as i32;
+    }
+    let lower = |c: u16| char::from_u32(u32::from(c)).is_some_and(char::is_lowercase);
+    let caseless = |a: u16, b: u16| {
+        let fold = |c: u16| {
+            char::from_u32(u32::from(c))
+                .map(|ch| ch.to_lowercase().next().unwrap_or(ch))
+                .unwrap_or('\0')
+        };
+        fold(a) == fold(b)
+    };
+    let mut vals = vec![vec![0i32; n + 1]; 3];
+    for (i, v) in vals[1].iter_mut().enumerate() {
+        *v = i as i32 * 10;
+    }
+    for j in 1..=m {
+        let tj = t[j - 1];
+        vals[0][0] = j as i32 * 10;
+        for i in 1..=n {
+            let si = s[i - 1];
+            let cost = if lower(si) != lower(tj) {
+                if caseless(si, tj) {
+                    5
+                } else {
+                    10
+                }
+            } else if si == tj {
+                0
+            } else {
+                10
+            };
+            vals[0][i] = (vals[0][i - 1] + 10)
+                .min(vals[1][i] + 10)
+                .min(vals[1][i - 1] + cost);
+            if i > 1 && j > 1 {
+                let mut swap = if lower(si) != lower(t[j - 2]) { 5 } else { 0 };
+                if lower(s[i - 2]) != lower(tj) {
+                    swap += 5;
+                }
+                if caseless(si, t[j - 2]) && caseless(s[i - 2], tj) {
+                    vals[0][i] = vals[0][i].min(vals[2][i - 2] + 5 + swap);
+                }
+            }
+        }
+        vals.rotate_right(1);
+    }
+    vals[1][n]
+}
+
+/// `MethodRankHelper.getPropertySuggestionString`: the candidates within
+/// distance 1–30 of `name`, closest first (the given order on a tie), at most
+/// five, as `\nPossible solutions: a, b` — or nothing.
+pub(super) fn property_suggestions(name: &str, candidates: &[String]) -> String {
+    let mut ranked: Vec<(i32, &String)> = candidates
+        .iter()
+        .map(|c| (del_distance(name, c), c))
+        .filter(|(d, _)| (1..=30).contains(d))
+        .collect();
+    ranked.sort_by_key(|(d, _)| *d);
+    let names: Vec<&str> = ranked.iter().take(5).map(|(_, c)| c.as_str()).collect();
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!("\nPossible solutions: {}", names.join(", "))
+    }
 }

@@ -388,6 +388,9 @@ pub struct Generated {
     /// A `record` declaration: its components are read-only properties read
     /// through `x()` (no `getX()`), and it renders `Name[x=1, y=2]`.
     pub record: bool,
+    /// `@Category(T)` — the class's instance methods are category methods
+    /// on `T`, with the receiver as `this`.
+    pub category: bool,
     /// `@ToString(includes = …)` — render only these properties (when set).
     pub to_string_includes: Option<Vec<String>>,
     /// `@ToString(excludes = …)` — properties left out of the rendering.
@@ -624,6 +627,13 @@ pub enum Expr {
         /// How many trailing parameters carry a default (`{ a, b = 5 -> … }`): a
         /// call may leave that many arguments off.
         defaults: usize,
+        /// A closure the parser or compiler wrote for a construct that is not
+        /// a closure literal in the source (`*.`, `.&`, an assignment used as a
+        /// value): Groovy generates no closure class for it, so it takes no
+        /// number. `Some(class)` names the class its value reports instead
+        /// (`org.codehaus.groovy.runtime.MethodClosure`); `Some("")` keeps
+        /// `groovy.lang.Closure`.
+        synthetic: Option<&'static str>,
     },
     /// The sequence a `for (x in <expr>)` walks — the parser wraps the loop's
     /// subject in this, and it lowers to the host's iteration builtin
@@ -675,6 +685,9 @@ pub enum Expr {
     SuperCtor {
         args: Vec<Expr>,
         line: u32,
+        /// `this(args)` — another constructor of the class itself, rather
+        /// than one of the superclass's.
+        own: bool,
     },
     /// A type test `value instanceof Class` — true when `value`'s class is `Class`
     /// or a subclass, or matches a built-in type name. Yields a `Boolean`.

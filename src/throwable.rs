@@ -136,10 +136,17 @@ const THROWABLES: &[(&str, &str, &str)] = &[
         "java.util",
     ),
     ("GroovyRuntimeException", "RuntimeException", "groovy.lang"),
+    // A `JsonSlurper` given malformed text.
+    ("JsonException", "RuntimeException", "groovy.json"),
     (
         "MissingMethodException",
         "GroovyRuntimeException",
         "groovy.lang",
+    ),
+    (
+        "MethodSelectionException",
+        "GroovyRuntimeException",
+        "org.codehaus.groovy.runtime.metaclass",
     ),
     (
         "MissingMethodExceptionNoStack",

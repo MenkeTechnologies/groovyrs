@@ -526,7 +526,14 @@ Implemented and checked against Apache Groovy:
   named-argument constructors, `x()` accessors, `P[x=1, y=2]`, record
   `equals`/`hashCode`, `toList()`/`toMap()`), and `Tuple2` … `Tuple16` /
   `Tuple.tuple(…)` with `v1` … `vN`. `List.withDefault` / `withLazyDefault` /
-  `withEagerDefault` grow the list on a read past its end.
+  `withEagerDefault` grow the list on a read past its end. Records take a
+  compact constructor (`P { … }`), and any class `this(…)` delegation.
+- **Metaprogramming** — `ExpandoMetaClass` injection (`String.metaClass.m =
+  { … }`, `.static`, getters, per-instance `obj.metaClass`), `@Category(T)`
+  classes under `use`, and closures that are instances of the classes Groovy
+  generates for them (`Script$_run_closure1`).
+- **`groovy.json`** — `JsonOutput.toJson` / `prettyPrint`,
+  `JsonSlurper.parseText` and `JsonBuilder`.
 - **Closure coercion at a typed parameter** — a closure passed where a
   function, method, constructor or closure parameter is declared as one of the
   script's single-abstract-method interfaces or abstract classes is coerced to

@@ -51,6 +51,8 @@ pub fn parse(src: &str) -> Result<Program, String> {
         param_defaults: Vec::new(),
         param_varargs: None,
         param_types: Vec::new(),
+        record: None,
+        compact_ctor: None,
         depth: 0,
         switch_exprs: 0,
     };
@@ -87,6 +89,11 @@ struct Parser {
     /// The declared type of each parameter of the last parameter list parsed
     /// (`def` when untyped), read by a class method declaration.
     param_types: Vec<String>,
+    /// The name of the `record` whose body is being parsed, if one is: inside
+    /// it, `Name { … }` is the compact canonical constructor.
+    record: Option<String>,
+    /// The body of the record's compact canonical constructor, once parsed.
+    compact_ctor: Option<Vec<Stmt>>,
     /// How deep the AST being built is at this point, bounded by
     /// [`MAX_NESTING`]. Maintained at the three places source nesting becomes
     /// tree depth: [`Parser::unary`] (every parenthesised, bracketed, braced or
@@ -976,6 +983,7 @@ impl Parser {
                     gen.equals_excludes = names_for("excludes").unwrap_or_default();
                 }
                 "TupleConstructor" => gen.tuple_ctor = true,
+                "Category" => gen.category = true,
                 // `@Immutable` and `@Value` are `@Canonical` plus read-only properties.
                 "Singleton" => gen.singleton = true,
                 "Immutable" | "Value" => {
@@ -1156,8 +1164,11 @@ impl Parser {
             }
             self.skip_newlines();
         }
-        let (body_fields, mut ctors, mut methods, abstract_methods) =
-            self.class_body(&name, false)?;
+        let prev_record = self.record.replace(name.clone());
+        let body = self.class_body(&name, false);
+        self.record = prev_record;
+        let (body_fields, mut ctors, mut methods, abstract_methods) = body?;
+        let compact = self.compact_ctor.take().unwrap_or_default();
         let mut fields: Vec<Field> = components
             .iter()
             .zip(&types)
@@ -1172,8 +1183,21 @@ impl Parser {
             })
             .collect();
         fields.extend(body_fields);
-        if !ctors.iter().any(|c| c.params.len() == components.len()) {
-            let body = components
+        // Every record is `Serializable`, with the generated
+        // `static final long serialVersionUID = 0`.
+        fields.push(Field {
+            name: "serialVersionUID".to_string(),
+            ty: "long".to_string(),
+            init: Some(Expr::Int(0, IntWidth::Long)),
+            is_static: true,
+            is_property: true,
+            is_delegate: false,
+            is_final: true,
+        });
+        // The canonical constructor, unless the body declares one of the same
+        // signature.
+        if !ctors.iter().any(|c| c.param_types == types) {
+            let stores: Vec<Stmt> = components
                 .iter()
                 .map(|c| {
                     Stmt::new(
@@ -1187,6 +1211,8 @@ impl Parser {
                     )
                 })
                 .collect();
+            let mut body = compact;
+            body.extend(stores);
             ctors.push(Ctor {
                 params: components.clone(),
                 param_types: types.clone(),
@@ -1653,6 +1679,16 @@ impl Parser {
             } else {
                 self.field_decls(name, &ty, is_static, !has_visibility, is_final, fields)?;
             }
+            return Ok(());
+        }
+        // A record's compact canonical constructor `Name { .. }`: a body run on
+        // the component parameters before they are stored.
+        if self.record.as_deref() == Some(class_name)
+            && matches!(self.peek(), Tok::Ident(n) if n == class_name)
+            && matches!(self.peek_at(1), Tok::LBrace)
+        {
+            self.advance();
+            self.compact_ctor = Some(self.member_body()?);
             return Ok(());
         }
         // A constructor `ClassName(params) { .. }` — a bare name (matching the
@@ -2867,6 +2903,7 @@ impl Parser {
                 varargs: false,
                 param_types: Vec::new(),
                 defaults: 0,
+                synthetic: Some(""),
             }),
             method: "call".to_string(),
             args: Vec::new(),
@@ -3728,7 +3765,18 @@ impl Parser {
                 }
                 // `this` is the current instance inside a method/constructor.
                 if name == "this" {
+                    let line = self.line();
                     self.advance();
+                    // `this(args)` in a constructor: another constructor of the
+                    // same class.
+                    if self.is(&Tok::LParen) {
+                        let args = self.call_args()?;
+                        return Ok(Expr::SuperCtor {
+                            args,
+                            line,
+                            own: true,
+                        });
+                    }
                     return Ok(Expr::This);
                 }
                 // `super` — either a super-constructor call `super(args)` or the
@@ -3738,7 +3786,11 @@ impl Parser {
                     self.advance();
                     if self.is(&Tok::LParen) {
                         let args = self.call_args()?;
-                        return Ok(Expr::SuperCtor { args, line });
+                        return Ok(Expr::SuperCtor {
+                            args,
+                            line,
+                            own: false,
+                        });
                     }
                     return Ok(Expr::Super);
                 }
@@ -4092,6 +4144,7 @@ impl Parser {
                     varargs,
                     param_types,
                     defaults: 0,
+                    synthetic: None,
                 });
             }
             loop {
@@ -4142,6 +4195,9 @@ impl Parser {
                 }
                 break;
             }
+            // An array-typed last parameter (`Object[] xs`) collects the call's
+            // trailing arguments exactly as `Object... xs` does.
+            varargs |= param_types.last().is_some_and(|t| t.ends_with("[]"));
             self.eat(&Tok::Arrow)?;
             self.skip_newlines();
             params
@@ -4185,6 +4241,7 @@ impl Parser {
             varargs,
             param_types,
             defaults: default_count,
+            synthetic: None,
         })
     }
 
@@ -4539,6 +4596,7 @@ fn spread_collect(recv: Expr, inner: Expr, line: u32) -> Expr {
             varargs: false,
             param_types: Vec::new(),
             defaults: 0,
+            synthetic: Some(""),
         }],
         line,
         safe: true,
@@ -4958,6 +5016,7 @@ fn method_pointer(recv: Expr, name: String, line: u32) -> Expr {
         varargs: true,
         param_types: Vec::new(),
         defaults: 0,
+        synthetic: Some("org.codehaus.groovy.runtime.MethodClosure"),
     };
     if matches!(recv, Expr::This) {
         return call(Expr::This);
@@ -4973,6 +5032,7 @@ fn method_pointer(recv: Expr, name: String, line: u32) -> Expr {
             varargs: false,
             param_types: Vec::new(),
             defaults: 0,
+            synthetic: Some(""),
         }),
         args: vec![recv],
         line,
@@ -5001,6 +5061,8 @@ fn parse_interpolation(src: &str) -> Result<Expr, String> {
         param_defaults: Vec::new(),
         param_varargs: None,
         param_types: Vec::new(),
+        record: None,
+        compact_ctor: None,
         depth: 0,
         switch_exprs: 0,
     };

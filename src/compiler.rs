@@ -221,6 +221,19 @@ struct Compiler {
     pending_closures: VecDeque<PendingClosure>,
     /// Monotonic id for synthetic closure names (`$closure_0`, `$closure_1`, …).
     closures_seen: u32,
+    /// Where a closure literal is being lowered, for the class Groovy
+    /// generates for it: the enclosing class (`""` for the script), and the
+    /// method (`None` for a field initializer or constructor).
+    closure_site: (String, Option<String>),
+    /// The generated class of the closure whose body is being lowered, when
+    /// one is: a closure inside it is named after it.
+    closure_parent: Option<String>,
+    /// The next closure number of each class (`""` for the script).
+    closure_counters: HashMap<String, u32>,
+    /// Each closure literal's generated class name, by its body's name-pool
+    /// index; a script closure's starts at `$` and is prefixed with the
+    /// script's class at run time. See [`Compiler::closure_class_name`].
+    closure_class_names: HashMap<u16, String>,
     /// Nesting depth of the closure body being lowered; 0 outside one. A bare
     /// name only reaches a `with`/`tap` delegate from inside a closure, so this
     /// is what keeps script and function bodies on their native variable ops.
@@ -494,6 +507,9 @@ fn function_sub_names(
     (subs, table)
 }
 
+/// The `groovy.json` classes `import groovy.json.*` brings into scope.
+const GROOVY_JSON_CLASSES: &[&str] = &["JsonOutput", "JsonSlurper", "JsonBuilder"];
+
 /// The parameter types whose declaration converts a number passed to them:
 /// `def d(double x)` called with `3` sees the `Double` `3.0`.
 const CONVERTED_PARAM_TYPES: &[&str] = &[
@@ -590,6 +606,13 @@ struct WidthScope {
 /// inside a method so a bare field name still resolves to `this.field`.
 struct PendingClosure {
     name_idx: u16,
+    /// What a closure literal inside this one is named after: this one's
+    /// generated class, or for a compiler-written closure the enclosing one's
+    /// (see [`Compiler::closure_class_name`]).
+    nested_parent: Option<String>,
+    /// The [`Compiler::closure_site`] it was written at, which its own
+    /// nested closures are numbered against.
+    site: (String, Option<String>),
     params: Vec<String>,
     captures: Vec<String>,
     /// The subset of `captures` that arrive as boxed bindings (cells). The body
@@ -774,6 +797,10 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         class_index,
         pending_closures: VecDeque::new(),
         closures_seen: 0,
+        closure_site: (String::new(), Some("run".to_string())),
+        closure_parent: None,
+        closure_counters: HashMap::new(),
+        closure_class_names: HashMap::new(),
         closure_depth: 0,
         script_vars: {
             let mut v = HashSet::new();
@@ -811,6 +838,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             .iter()
             .flat_map(|i| match i.strip_suffix(".*") {
                 Some("java.math") => vec!["RoundingMode".to_string(), "MathContext".to_string()],
+                Some("groovy.json") => GROOVY_JSON_CLASSES.iter().map(|c| c.to_string()).collect(),
                 Some(_) => Vec::new(),
                 None => vec![i.clone()],
             })
@@ -935,9 +963,18 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     // Emit queued closure bodies as subroutine regions. Draining may enqueue
     // further closures (a closure nested inside another closure), so loop until
     // the queue is empty.
+    // A closure's own nested closures are lowered (and so numbered) right
+    // after it, before its siblings — the depth-first order Groovy generates
+    // closure classes in.
     while let Some(pc) = c.pending_closures.pop_front() {
+        let before = c.pending_closures.len();
         c.emit_closure(pc)?;
+        let nested: Vec<PendingClosure> = c.pending_closures.drain(before..).collect();
+        for n in nested.into_iter().rev() {
+            c.pending_closures.push_front(n);
+        }
     }
+    crate::host::set_closure_class_names(std::mem::take(&mut c.closure_class_names));
     let end = c.b.current_pos();
     c.b.patch_jump(skip, end);
     // Patch any script-level `break`/`return` to the final position.
@@ -962,6 +999,16 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     crate::host::set_closure_min_params(std::mem::take(&mut c.closure_min_params));
     crate::host::set_fn_typed(std::mem::take(&mut c.fn_typed));
     crate::host::set_sam_types(c.sam_types.clone());
+    crate::host::set_fn_sigs(
+        c.fn_param_types
+            .iter()
+            .flat_map(|(name, decls)| {
+                decls
+                    .iter()
+                    .map(move |t| (format!("{name}/{}", t.len()), t.clone()))
+            })
+            .collect(),
+    );
     Ok(c.b.build())
 }
 
@@ -1179,6 +1226,13 @@ impl Compiler {
         // parameters arrive with no width the compiler can see, so they start
         // narrow whatever the enclosing scope calls that name.
         let prev_widths = self.enter_width_scope(params);
+        // A typed parameter is a typed variable inside the body: `int n` gives
+        // `n - 1` a static `int` type, as a declared local would.
+        for (p, ty) in params.iter().zip(param_types) {
+            if ty != "def" {
+                self.note_var_width(ty, p, None);
+            }
+        }
         self.cur_line = line;
 
         // Prologue: the caller pushed args left-to-right (param0 deepest,
@@ -1201,7 +1255,12 @@ impl Compiler {
 
         let prev_cells = self.enter_cell_scope(params, body, &HashSet::new(), line);
         let prev_ret = self.ret_ty.replace(ret_ty.to_string());
+        let prev_site = std::mem::replace(
+            &mut self.closure_site,
+            (String::new(), Some(name.to_string())),
+        );
         self.fn_body(body)?;
+        self.closure_site = prev_site;
         self.ret_ty = prev_ret;
         self.exit_cell_scope(prev_cells);
 
@@ -1400,6 +1459,8 @@ impl Compiler {
             vars,
             next_slot: total as u16,
         });
+        let prev_parent = std::mem::replace(&mut self.closure_parent, pc.nested_parent.clone());
+        let prev_site = std::mem::replace(&mut self.closure_site, pc.site.clone());
         let prev_fields = std::mem::replace(&mut self.cur_class_fields, pc.class_fields);
         // A closure reads even its own class's fields through the accessors.
         let prev_own = self.cur_class_own_fields.take();
@@ -1433,6 +1494,8 @@ impl Compiler {
         self.b.emit(Op::ReturnValue, self.cur_line);
 
         self.scope = prev;
+        self.closure_parent = prev_parent;
+        self.closure_site = prev_site;
         self.cur_class_fields = prev_fields;
         self.cur_class_own_fields = prev_own;
         self.cur_class_methods = prev_methods;
@@ -1485,6 +1548,47 @@ impl Compiler {
             java: false,
         });
         Some(out)
+    }
+
+    /// Whether a call of script function `name` with `args` needs the run-time
+    /// type check: its one declaration at that arity types a parameter that an
+    /// argument is not statically known to fit.
+    fn call_needs_check(&self, name: &str, args: &[Expr]) -> bool {
+        let Some(decls) = self.fn_param_types.get(name) else {
+            return false;
+        };
+        let mut at_arity = decls.iter().filter(|t| t.len() == args.len());
+        let (Some(types), None) = (at_arity.next(), at_arity.next()) else {
+            return false;
+        };
+        types
+            .iter()
+            .zip(args)
+            .any(|(ty, a)| !self.arg_statically_fits(ty, a))
+    }
+
+    /// Whether `e` certainly fits a parameter declared `ty`, from what the
+    /// compiler can see: an untyped parameter, a literal of a fitting kind, or
+    /// a variable or arithmetic of a fitting static type.
+    fn arg_statically_fits(&self, ty: &str, e: &Expr) -> bool {
+        if let Expr::Var(n) = e {
+            if self.typed_vars.get(n).is_some_and(|t| t == ty) {
+                return true;
+            }
+        }
+        let kind = self.static_num_kind(e);
+        match ty {
+            "def" | "Object" | "java.lang.Object" => true,
+            "int" | "Integer" | "short" | "Short" | "byte" | "Byte" => kind == Some(NumKind::Int),
+            "long" | "Long" => matches!(kind, Some(NumKind::Int | NumKind::Long)),
+            "double" | "Double" | "Number" => {
+                kind.is_some() || matches!(e, Expr::Dec(_) | Expr::Single(_))
+            }
+            "BigDecimal" => kind.is_some() || matches!(e, Expr::Dec(_)),
+            "String" | "CharSequence" => matches!(e, Expr::Str(_) | Expr::GString(_)),
+            "boolean" | "Boolean" => matches!(e, Expr::Bool(_)),
+            _ => false,
+        }
     }
 
     /// Whether `name()` with no arguments may run `name`'s single-parameter
@@ -1618,7 +1722,8 @@ impl Compiler {
             | ((generated.tuple_ctor as i64) << 3)
             | ((generated.immutable as i64) << 4)
             | ((is_abstract as i64) << 5)
-            | ((generated.record as i64) << 6);
+            | ((generated.record as i64) << 6)
+            | ((generated.category as i64) << 7);
         self.b.emit(Op::LoadInt(gbits), line);
         for i in interfaces {
             let c = self.b.add_constant(Value::str(i.clone()));
@@ -1800,6 +1905,7 @@ impl Compiler {
         let prev_own = self.cur_class_own_fields.take();
         // Field-initializer thunks (subs of the instance that compute the
         // initial value).
+        let prev_site = std::mem::replace(&mut self.closure_site, (name.to_string(), None));
         for f in fields {
             if let Some(init) = &f.init {
                 self.emit_field_init(line, name, &f.name, init, &field_set, &method_set)?;
@@ -1834,6 +1940,7 @@ impl Compiler {
         self.in_ctor = false;
         for (m, sub) in methods.iter().zip(Self::method_sub_names(name, methods)) {
             self.ret_ty = Some(m.ret_ty.clone());
+            self.closure_site = (name.to_string(), Some(m.name.clone()));
             self.emit_member(
                 line,
                 &sub,
@@ -1848,6 +1955,7 @@ impl Compiler {
         self.cur_class_super = prev_super;
         self.cur_class_own_fields = prev_own;
         self.cur_class_final_fields = prev_final;
+        self.closure_site = prev_site;
         Ok(())
     }
 
@@ -3698,12 +3806,17 @@ impl Compiler {
             Expr::Super => {
                 self.emit_this();
             }
-            Expr::SuperCtor { args, line } => {
+            Expr::SuperCtor { args, line, own } => {
                 // `super(args)`: run the superclass's arity-matched constructor on
                 // the current instance (stack: [this, args, superclassname]).
+                // `this(args)` names the class itself.
                 self.emit_this();
                 let argc = self.emit_args(args, *line)?;
-                let sname = self.cur_class_super.clone().unwrap_or_default();
+                let sname = if *own {
+                    self.closure_site.0.clone()
+                } else {
+                    self.cur_class_super.clone().unwrap_or_default()
+                };
                 let sidx = self.b.add_constant(Value::str(sname));
                 self.b.emit(Op::LoadConst(sidx), *line);
                 self.emit_call_builtin(crate::host::GSUPER_CTOR, argc, *line)?;
@@ -3978,6 +4091,7 @@ impl Compiler {
                             varargs: false,
                             param_types: Vec::new(),
                             defaults: 0,
+                            synthetic: Some("java.lang.String$CaseInsensitiveComparator"),
                         }),
                         ty: "Comparator".to_string(),
                         java: false,
@@ -4054,6 +4168,7 @@ impl Compiler {
                 varargs,
                 param_types,
                 defaults,
+                synthetic,
             } => self.closure(
                 params,
                 body,
@@ -4061,6 +4176,7 @@ impl Compiler {
                 *varargs,
                 param_types,
                 *defaults,
+                *synthetic,
             )?,
             Expr::Range {
                 start,
@@ -4143,6 +4259,26 @@ impl Compiler {
     /// handle carries the synthetic name-pool index (which resolves to the body
     /// entry via `Chunk::find_sub` at call time) and the parameter count. An
     /// implicit-`it` closure (no explicit parameters) has one parameter, `it`.
+    /// The class Groovy generates for the next closure literal: numbered per
+    /// enclosing class in the order its closures are generated — every
+    /// closure written directly in a method first (the script's `run`, then
+    /// its functions; a class's field initializers, constructors, then
+    /// methods), then the closures inside each of those, depth first — and
+    /// named `C$_m_closureN` after its method, `C$_closureN` outside one, and
+    /// `Outer$_closureN` inside another closure.
+    fn closure_class_name(&mut self) -> String {
+        let (class, method) = self.closure_site.clone();
+        let n = self.closure_counters.entry(class.clone()).or_insert(0);
+        *n += 1;
+        let n = *n;
+        match (&self.closure_parent, method) {
+            (Some(parent), _) => format!("{parent}$_closure{n}"),
+            (None, Some(m)) => format!("{class}$_{m}_closure{n}"),
+            (None, None) => format!("{class}$_closure{n}"),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn closure(
         &mut self,
         params: &[String],
@@ -4151,6 +4287,7 @@ impl Compiler {
         varargs: bool,
         param_types: &[String],
         defaults: usize,
+        synthetic: Option<&'static str>,
     ) -> Result<(), String> {
         // No parameter list at all means Groovy's single implicit `it`; an
         // explicit list — even the empty `{ -> … }` — is taken as written.
@@ -4213,8 +4350,24 @@ impl Compiler {
             .filter(|n| self.cells.contains(*n))
             .cloned()
             .collect();
+        // A literal gets its generated class; a closure the compiler wrote
+        // takes no number, and its nested literals are named as though it
+        // were not there.
+        let (class_name, nested_parent) = match synthetic {
+            None => {
+                let name = self.closure_class_name();
+                (name.clone(), Some(name))
+            }
+            Some(class) => (class.to_string(), self.closure_parent.clone()),
+        };
+        if !class_name.is_empty() {
+            self.closure_class_names
+                .insert(name_idx, class_name.clone());
+        }
         self.pending_closures.push_back(PendingClosure {
             name_idx,
+            nested_parent,
+            site: self.closure_site.clone(),
             params: effective.clone(),
             captures: captures.clone(),
             cell_captures,
@@ -4363,6 +4516,27 @@ impl Compiler {
             // Declarations sharing this arity are told apart by the
             // arguments' types, which only the run time knows.
             let key = format!("{name}/{}", args.len());
+            // A single declaration with typed parameters: an argument the
+            // compiler cannot prove fits is checked at the call, so `k(5)`
+            // against `k(String s)` is the `MissingMethodException` Groovy
+            // raises rather than a run of the body with an `Integer`.
+            if !self.fn_typed.contains_key(&key) && self.call_needs_check(name, args) {
+                let nidx = self.b.add_name(&self.fn_sub_name(name, args.len()));
+                for a in args {
+                    self.expr(a)?;
+                }
+                let k = self.b.add_constant(Value::str(key));
+                self.b.emit(Op::LoadConst(k), line);
+                self.b.emit(
+                    Op::CallBuiltin(crate::host::GFN_CHECK, args.len() as u8),
+                    line,
+                );
+                self.b.emit(Op::Pop, line);
+                self.emit_exc_check(line)?;
+                self.b.emit(Op::Call(nidx, args.len() as u8), line);
+                self.emit_exc_check(line)?;
+                return Ok(());
+            }
             if self.fn_typed.contains_key(&key) {
                 for a in args {
                     self.expr(a)?;

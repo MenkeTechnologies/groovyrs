@@ -474,6 +474,12 @@ pub const GCAST_ASSIGN: u16 = 784;
 /// Builtin id for `this` outside any class: the script object.
 pub const GSCRIPT_THIS: u16 = 785;
 
+/// Builtin id for the run-time type check of a call to a script function
+/// declared once at the call's arity. Stack: the arguments (left in place),
+/// then the `name/arity` key, which it pops; it pushes `null` and raises
+/// `MissingMethodException` when an argument fits no declared type.
+pub const GFN_CHECK: u16 = 786;
+
 /// The method name `list.remove((Object) x)` compiles to: the cast selects
 /// `Collection.remove(Object)` over `List.remove(int)`, which only the call
 /// site can see. Not an identifier, so no script can name it.
@@ -581,6 +587,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GFIELD_INIT, b_field_init);
     vm.register_builtin(GCAST_ASSIGN, b_cast_assign);
     vm.register_builtin(GSCRIPT_THIS, b_script_this);
+    vm.register_builtin(GFN_CHECK, b_fn_check);
     vm.register_builtin(GJCAST, b_java_cast);
     vm.register_builtin(GLIST_ADOPT, b_list_adopt);
     vm.register_builtin(GCLASSREF, b_classref);
@@ -697,6 +704,19 @@ thread_local! {
     /// (`false`) or `withEagerDefault` (`true`), keyed by its heap id: see
     /// [`list_default_get`].
     static LIST_DEFAULTS: RefCell<HashMap<u32, (Value, bool)>> = RefCell::new(HashMap::new());
+    /// `ExpandoMetaClass` injections: the closure behind each method a script
+    /// added, by `(class, method)`, `(class, method)` for static ones, and
+    /// `(instance id, method)` for one object's own.
+    static EMC_METHODS: RefCell<HashMap<(String, String), Value>> = RefCell::new(HashMap::new());
+    static EMC_STATICS: RefCell<HashMap<(String, String), Value>> = RefCell::new(HashMap::new());
+    static EMC_INSTANCE: RefCell<HashMap<(u32, String), Value>> = RefCell::new(HashMap::new());
+    /// Set once any injection exists, so dispatch pays one flag read without.
+    static ANY_EMC: Cell<bool> = const { Cell::new(false) };
+    /// Set once a `JsonSlurper` or `JsonBuilder` exists.
+    static ANY_JSON: Cell<bool> = const { Cell::new(false) };
+    /// The instances `map as C` built through its proxy fallback (a key `C`
+    /// has no property for): they report the generated `C1_groovyProxy`.
+    static MAP_PROXIES: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
     /// The `with`/`tap` receivers whose closures are currently running, innermost
     /// last — Groovy's closure *delegate* chain. A bare call inside the closure
     /// that the owner (the script) cannot resolve is dispatched against the
@@ -802,9 +822,74 @@ fn is_sam_type(name: &str) -> bool {
     SAM_TYPES.with(|t| t.borrow().contains(name))
 }
 
+thread_local! {
+    /// Every script function declaration's parameter types, by `name/arity`
+    /// (a later declaration of the same key replaces an earlier one; such a
+    /// key is type-selected through [`FN_TYPED`] instead).
+    static FN_SIGS: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
+}
+
+/// Publish every script function's declared parameter types.
+pub fn set_fn_sigs(sigs: HashMap<String, Vec<String>>) {
+    FN_SIGS.with(|t| *t.borrow_mut() = sigs);
+}
+
+/// `GFN_CHECK`: raise `MissingMethodException` on the script when the `argc`
+/// arguments on the stack fit no declared parameter type of the function the
+/// key names (see [`params::param_fit`]).
+fn b_fn_check(vm: &mut VM, argc: u8) -> Value {
+    let key = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let Some(types) = FN_SIGS.with(|t| t.borrow().get(&key).cloned()) else {
+        return Value::Undef;
+    };
+    let n = argc as usize;
+    let args: Vec<Value> = vm.stack[vm.stack.len().saturating_sub(n)..].to_vec();
+    if types
+        .iter()
+        .zip(&args)
+        .all(|(ty, v)| params::param_fit(ty, v).is_some())
+    {
+        return Value::Undef;
+    }
+    let name = key.split('/').next().unwrap_or(&key).to_string();
+    let script = b_script_this(vm, 0);
+    raise_missing_method(vm, &script, &name, &args)
+}
+
 /// Publish the compiler's type-selected script function overloads.
 pub fn set_fn_typed(table: FnOverloads) {
     FN_TYPED.with(|t| *t.borrow_mut() = table);
+}
+
+thread_local! {
+    /// Each closure literal's generated class name, by its body's name-pool
+    /// index (a script closure's starts at `$`, after the script's name).
+    static CLOSURE_CLASSES: RefCell<HashMap<u16, String>> = RefCell::new(HashMap::new());
+}
+
+/// Publish the compiler's closure class names.
+pub fn set_closure_class_names(names: HashMap<u16, String>) {
+    CLOSURE_CLASSES.with(|t| *t.borrow_mut() = names);
+}
+
+/// The class Groovy generated for a closure literal (`script$_run_closure1`,
+/// `K$_m_closure2`, `script$_run_closure2$_closure10`), or `None` for a
+/// closure a combinator derived.
+fn closure_class_name(meta: &ClosureMeta) -> Option<String> {
+    if meta.derived.is_some() {
+        return None;
+    }
+    let name = CLOSURE_CLASSES.with(|t| t.borrow().get(&meta.name_idx).cloned())?;
+    Some(if name.starts_with('$') {
+        format!("{}{name}", script_class())
+    } else {
+        name
+    })
 }
 
 /// Publish the compiler's typed closure parameter lists for this chunk.
@@ -1408,6 +1493,20 @@ fn wrap_gpath_miss(vm: &mut VM, coll: &Value, name: &str) {
     );
 }
 
+/// The `Possible solutions:` line Groovy appends to a missing property of a
+/// script class: its properties (fields, then bean properties, as
+/// `getProperties()` lists them) closest to `name`.
+fn class_property_suggestions(cid: u32, name: &str) -> String {
+    let names: Vec<String> = class_properties(cid).into_iter().map(|p| p.name).collect();
+    params::property_suggestions(name, &names)
+}
+
+/// [`class_property_suggestions`] for a script class instance; nothing for
+/// any other receiver.
+fn instance_property_suggestions(recv: &Value, name: &str) -> String {
+    as_instance(recv).map_or_else(String::new, |i| class_property_suggestions(i.class, name))
+}
+
 /// Raise `groovy.lang.MissingPropertyException` for an unresolved `recv.name`.
 fn raise_missing_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     let class = java_class_name(recv);
@@ -1415,7 +1514,10 @@ fn raise_missing_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     raise_with(
         vm,
         "MissingPropertyException",
-        Some(&format!("No such property: {name} for class: {class}")),
+        Some(&format!(
+            "No such property: {name} for class: {class}{}",
+            instance_property_suggestions(recv, name)
+        )),
         // `getProperty()` and `getType()` — what Groovy's own
         // `MissingPropertyException` exposes to a handler.
         || {
@@ -1444,6 +1546,25 @@ fn java_class_name(v: &Value) -> String {
     if as_print_stream(v).is_some() {
         return "java.io.PrintStream".to_string();
     }
+    if is_json_slurper(v) {
+        return "groovy.json.JsonSlurper".to_string();
+    }
+    if json_builder(v).is_some() {
+        return "groovy.json.JsonBuilder".to_string();
+    }
+    // `obj.metaClass` is a `HandleMetaClass` over the object's own; a class's
+    // is the `ExpandoMetaClass` its injections live in.
+    if let Some((_, instance, _)) = as_meta_class(v) {
+        return if instance.is_some() {
+            "org.codehaus.groovy.runtime.HandleMetaClass".to_string()
+        } else {
+            "groovy.lang.ExpandoMetaClass".to_string()
+        };
+    }
+    // A closure literal is an instance of the class Groovy generates for it.
+    if let Some(name) = closure_meta(v).as_ref().and_then(closure_class_name) {
+        return name;
+    }
     // The subclass `ProxyGenerator` builds for `{ … } as C`.
     if let Some(class) = concrete_closure_proxy(v) {
         let name = class_meta(class).map(|m| m.name).unwrap_or_default();
@@ -1458,6 +1579,9 @@ fn java_class_name(v: &Value) -> String {
     }
     if let Some(inst) = as_instance(v) {
         if let Some(meta) = class_meta(inst.class) {
+            if matches!(v, Value::Obj(id) if MAP_PROXIES.with(|p| p.borrow().contains(id))) {
+                return format!("{}1_groovyProxy", meta.name);
+            }
             return crate::throwable::qualified(&meta.name);
         }
     }
@@ -2053,6 +2177,8 @@ fn interned_class_name(name: &str) -> &'static str {
 mod bignum;
 #[path = "host/digest.rs"]
 mod digest;
+#[path = "host/json.rs"]
+mod json;
 #[path = "host/mapkey.rs"]
 mod mapkey;
 #[path = "host/params.rs"]
@@ -2183,6 +2309,24 @@ enum HeapObj {
     /// Holds the fully-qualified class name (a script-declared class has no
     /// package, so its qualified and simple names coincide).
     ClassRef(String),
+    /// A `groovy.json.JsonSlurper`: stateless, so a unit.
+    JsonSlurper,
+    /// A `groovy.json.JsonBuilder` and the content it has built so far.
+    JsonBuilder(Box<Value>),
+    /// The delegate a `JsonBuilder` closure runs against: every call made on
+    /// it adds an entry to this map.
+    JsonCollector(Box<Value>),
+    /// `X.metaClass` / `obj.metaClass` (and its `.static` view): what a
+    /// closure assigned to one of its properties is injected into — see
+    /// [`emc_register`].
+    MetaClass {
+        /// The qualified class the methods are added to.
+        class: String,
+        /// The one instance they are added to, for `obj.metaClass`.
+        instance: Option<u32>,
+        /// The `.static` view: the methods are static ones.
+        statics: bool,
+    },
     /// A `groovy.lang.MetaProperty` that `hasProperty` answers: `class` is the
     /// concrete class Groovy uses (`MetaBeanProperty` or `CachedField`), `ty`
     /// the declared type as written.
@@ -2376,6 +2520,10 @@ enum SetKind {
     Hash { req: usize },
     /// `java.util.TreeSet` — ascending natural order.
     Tree,
+    /// `java.util.TreeSet` built over a `Comparator` (the heap id of the
+    /// comparator closure): ordered by it, and two elements it calls equal
+    /// (`0`) are one element.
+    TreeBy(u32),
 }
 
 /// A Groovy range: its endpoints as written, and whether the upper one is
@@ -2575,6 +2723,11 @@ fn reset_heap() {
     STATICS.with(|s| s.borrow_mut().clear());
     MAP_DEFAULTS.with(|m| m.borrow_mut().clear());
     LIST_DEFAULTS.with(|m| m.borrow_mut().clear());
+    EMC_METHODS.with(|m| m.borrow_mut().clear());
+    EMC_STATICS.with(|m| m.borrow_mut().clear());
+    EMC_INSTANCE.with(|m| m.borrow_mut().clear());
+    ANY_EMC.with(|a| a.set(false));
+    MAP_PROXIES.with(|m| m.borrow_mut().clear());
     SCRIPT_THIS.with(|s| s.borrow_mut().take());
     PENDING.with(|p| *p.borrow_mut() = None);
     EXC_ARMED.with(|a| a.set(false));
@@ -3230,6 +3383,156 @@ fn as_uuid(v: &Value) -> Option<(i64, i64)> {
             _ => None,
         }),
         _ => None,
+    }
+}
+
+/// The map a `JsonBuilder` closure's delegate collects into.
+fn json_collector(v: &Value) -> Option<Value> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::JsonCollector(map)) => Some((**map).clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// A `JsonBuilder`'s content.
+fn json_builder(v: &Value) -> Option<Value> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::JsonBuilder(content)) => Some((**content).clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// Replace a `JsonBuilder`'s content.
+fn set_json_builder(v: &Value, content: Value) {
+    if let Value::Obj(id) = v {
+        HEAP.with(|h| {
+            if let Some(HeapObj::JsonBuilder(slot)) = h.borrow_mut().get_mut(*id as usize) {
+                **slot = content;
+            }
+        });
+    }
+}
+
+/// Whether `v` is a `JsonSlurper`.
+fn is_json_slurper(v: &Value) -> bool {
+    matches!(v, Value::Obj(id) if HEAP.with(|h| matches!(h.borrow().get(*id as usize), Some(HeapObj::JsonSlurper))))
+}
+
+/// The fields of a [`HeapObj::MetaClass`] handle.
+fn as_meta_class(v: &Value) -> Option<(String, Option<u32>, bool)> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::MetaClass {
+                class,
+                instance,
+                statics,
+            }) => Some((class.clone(), *instance, *statics)),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// `recv.metaClass`: the class's metaclass for a class reference or a JDK
+/// value, the object's own for a script class instance.
+fn meta_class_of(recv: &Value) -> Value {
+    let (class, instance) = match as_class_ref(recv) {
+        Some(name) => (name, None),
+        None => {
+            let own = matches!(recv, Value::Obj(_)) && as_instance(recv).is_some();
+            let id = match recv {
+                Value::Obj(id) if own => Some(*id),
+                _ => None,
+            };
+            (java_class_name(recv), id)
+        }
+    };
+    heap_push(HeapObj::MetaClass {
+        class,
+        instance,
+        statics: false,
+    })
+}
+
+/// `mc.name = closure`: inject `name` into what the metaclass handle `mc`
+/// stands for — one instance, a class's instances, or (through `.static`) the
+/// class itself.
+fn emc_register(mc: &Value, name: &str, clo: Value) {
+    let Some((class, instance, statics)) = as_meta_class(mc) else {
+        return;
+    };
+    match (instance, statics) {
+        (_, true) => EMC_STATICS.with(|m| m.borrow_mut().insert((class, name.to_string()), clo)),
+        (Some(id), false) => {
+            EMC_INSTANCE.with(|m| m.borrow_mut().insert((id, name.to_string()), clo))
+        }
+        (None, false) => {
+            EMC_METHODS.with(|m| m.borrow_mut().insert((class, name.to_string()), clo))
+        }
+    };
+    ANY_EMC.with(|a| a.set(true));
+}
+
+/// The injected closure `recv.method` reaches: the object's own, then its
+/// class's and each superclass's (a JDK value's class, then `Object`); for a
+/// class reference, the class's static ones.
+fn emc_lookup(recv: &Value, method: &str) -> Option<Value> {
+    if let Some(class) = as_class_ref(recv) {
+        return EMC_STATICS.with(|m| m.borrow().get(&(class, method.to_string())).cloned());
+    }
+    if let Value::Obj(id) = recv {
+        if let Some(c) = EMC_INSTANCE.with(|m| m.borrow().get(&(*id, method.to_string())).cloned())
+        {
+            return Some(c);
+        }
+    }
+    let classes: Vec<String> = match as_instance(recv) {
+        Some(inst) => class_chain(inst.class)
+            .into_iter()
+            .rev()
+            .filter_map(class_meta)
+            .map(|m| m.name)
+            .collect(),
+        None => vec![java_class_name(recv)],
+    };
+    classes
+        .into_iter()
+        .chain(std::iter::once("java.lang.Object".to_string()))
+        .find_map(|c| EMC_METHODS.with(|m| m.borrow().get(&(c, method.to_string())).cloned()))
+}
+
+/// Run an injected closure on `recv`: the receiver is its `delegate` (and the
+/// `with`-style resolution target for its bare names) for the call.
+fn emc_invoke(vm: &mut VM, clo: &Value, recv: &Value, args: &[Value]) -> Value {
+    let prev = closure_meta(clo).and_then(|m| m.delegate);
+    set_closure_delegate(clo, Some(recv.clone()));
+    DELEGATES.with(|d| d.borrow_mut().push(recv.clone()));
+    let out = invoke_closure(vm, clo, args);
+    DELEGATES.with(|d| d.borrow_mut().pop());
+    set_closure_delegate(clo, prev);
+    match out {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    }
+}
+
+/// Point closure `clo`'s `delegate` at `to` (`None` restores the default).
+fn set_closure_delegate(clo: &Value, to: Option<Value>) {
+    if let Value::Obj(id) = clo {
+        HEAP.with(|h| {
+            if let Some(HeapObj::Closure(meta)) = h.borrow_mut().get_mut(*id as usize) {
+                meta.delegate = to;
+            }
+        });
     }
 }
 
@@ -4848,6 +5151,11 @@ fn resolve_method_call(
     }
     match params::select_call(vm, &decls, args) {
         params::Selection::Found(idx, args) => Some((idx, args)),
+        params::Selection::Ambiguous(subs) => {
+            raise_method_selection(vm, class, method, &subs);
+            // The raise is pending; the empty call never runs a body.
+            None
+        }
         params::Selection::NoCandidates => {
             lookup_method_argc(class, method, args.len()).map(|idx| (idx, args.to_vec()))
         }
@@ -4879,6 +5187,50 @@ fn select_ctor(vm: &mut VM, meta: &ClassMeta, args: &[Value]) -> params::Selecti
         decls.extend(meta.typed_overloads[k].iter().cloned());
     }
     params::select_call(vm, &decls, args)
+}
+
+/// Groovy's `MethodSelectionException` for a no-argument call two or more
+/// single-parameter declarations could take: `Could not find which method
+/// m() to invoke from this list:` and one `public …` line per candidate — its
+/// qualified return type for a method, its declaring class, its name (`<init>`
+/// for a constructor) and its qualified parameter types.
+fn raise_method_selection(vm: &mut VM, class: u32, method: &str, subs: &[u16]) {
+    let qualified =
+        |ty: &str| as_class_ref(&declared_type_class(ty)).unwrap_or_else(|| ty.to_string());
+    let mut lines = Vec::new();
+    for sub in subs {
+        let found = class_chain(class).into_iter().rev().find_map(|id| {
+            let meta = class_meta(id)?;
+            meta.typed_overloads.iter().find_map(|(key, decls)| {
+                let (types, _) = decls.iter().find(|(_, idx)| idx == sub)?;
+                Some((
+                    meta.name.clone(),
+                    key.clone(),
+                    types.clone(),
+                    meta.ret_types.get(key).cloned(),
+                ))
+            })
+        });
+        let Some((owner, key, types, ret)) = found else {
+            continue;
+        };
+        let params: Vec<String> = types.iter().map(|t| qualified(t)).collect();
+        let head = if key.starts_with("<init>/") {
+            format!("public {owner}#<init>")
+        } else {
+            let ret = qualified(ret.as_deref().unwrap_or("def"));
+            format!("public {ret} {owner}#{method}")
+        };
+        lines.push(format!("  {head}({})", params.join(", ")));
+    }
+    raise(
+        vm,
+        "MethodSelectionException",
+        &format!(
+            "Could not find which method {method}() to invoke from this list:\n{}",
+            lines.join("\n")
+        ),
+    );
 }
 
 /// Groovy's refusal of a `new` no declared constructor takes:
@@ -4991,6 +5343,8 @@ const GEN_TUPLE_CTOR: u8 = 8;
 const GEN_IMMUTABLE: u8 = 16;
 /// A `record`: `Name[x=1, y=2]`, component accessors and no `getX()`.
 const GEN_RECORD: u8 = 64;
+/// `@Category(T)`: instance methods applied by `use` with the receiver as `this`.
+const GEN_CATEGORY: u8 = 128;
 
 /// Does `class` — or any class it descends from — carry the generated `what`?
 fn class_generates(class: u32, what: u8) -> bool {
@@ -5592,6 +5946,14 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
         "Random" => heap_push(HeapObj::Random(seq::RandomState::new(
             as_i64(&first()).unwrap_or_else(seq::fresh_seed),
         ))),
+        // `new TreeSet(comparator)`: an empty set ordered by it.
+        "TreeSet" if matches!(args, [Value::Obj(id)] if COMPARATORS.with(|c| c.borrow().contains(id))) =>
+        {
+            let Some(Value::Obj(id)) = args.first() else {
+                unreachable!()
+            };
+            make_set(Vec::new(), SetKind::TreeBy(*id))
+        }
         "HashSet" | "LinkedHashSet" | "TreeSet" => {
             let seed = args.first().map(iteration_elements).unwrap_or_default();
             let kind = match simple_name_of(class).as_str() {
@@ -5627,6 +5989,14 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
             gmap_kind(entries, kind)
         }
         tuple if tuple.starts_with("Tuple") => return seq::new_tuple(tuple, args),
+        "JsonSlurper" if args.is_empty() => {
+            ANY_JSON.with(|a| a.set(true));
+            heap_push(HeapObj::JsonSlurper)
+        }
+        "JsonBuilder" if args.len() <= 1 => {
+            ANY_JSON.with(|a| a.set(true));
+            heap_push(HeapObj::JsonBuilder(Box::new(first())))
+        }
         "UUID" if args.len() == 2 => heap_push(HeapObj::Uuid(
             as_i64(&args[0]).unwrap_or(0),
             as_i64(&args[1]).unwrap_or(0),
@@ -6168,6 +6538,10 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
         && (meta.ctors.contains_key(&0) || class_generates(cid, GEN_RECORD));
     if matches!(selection, params::Selection::NoFit) && !named_args {
         return raise_no_matching_ctor(vm, &meta.name, &args);
+    }
+    if let params::Selection::Ambiguous(subs) = &selection {
+        raise_method_selection(vm, cid, "<init>", subs);
+        return Value::Undef;
     }
     if let params::Selection::Found(ctor_idx, args) = selection {
         let mut pushes = Vec::with_capacity(args.len() + 1);
@@ -7758,7 +8132,7 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         ),
         "LinkedHashSet" => matches!(as_set(value), Some((_, SetKind::Linked))),
         "TreeSet" | "SortedSet" | "NavigableSet" => {
-            matches!(as_set(value), Some((_, SetKind::Tree)))
+            matches!(as_set(value), Some((_, SetKind::Tree | SetKind::TreeBy(_))))
         }
         "Closure" => closure_meta(value).is_some(),
         "Pattern" => regex_source(value).is_some(),
@@ -7852,7 +8226,9 @@ fn dispatch_instance_method(
         if method == "hasProperty" && args.len() == 1 && lookup_method(cid, method).is_none() {
             return Some(Ok(has_property(cid, &groovy_str(&args[0]))));
         }
-        let (idx, args) = resolve_method_call(vm, cid, method, args)?;
+        let Some((idx, args)) = resolve_method_call(vm, cid, method, args) else {
+            return pending_exc().then_some(Ok(Value::Undef));
+        };
         if let Err(e) = ensure_static_init(vm, cid) {
             return Some(Err(e));
         }
@@ -7875,6 +8251,10 @@ fn dispatch_instance_method(
         pushes.push(recv.clone());
         pushes.extend(args);
         return Some(invoke_sub(vm, idx, &pushes));
+    }
+    // The resolution itself raised (an ambiguous call).
+    if pending_exc() {
+        return Some(Ok(Value::Undef));
     }
     // `GroovyObject.getProperty` / `setProperty`, and the DGM `getAt(String)` /
     // `putAt(String, value)` every object answers with them: the property read
@@ -8564,6 +8944,10 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
 /// `setProperty(name, value)` and `putAt(name, value)`. Honours a user `setX`
 /// setter, else writes the field.
 fn set_property(vm: &mut VM, recv: Value, name: String, value: Value) -> Value {
+    if as_meta_class(&recv).is_some() && closure_meta(&value).is_some() {
+        emc_register(&recv, &name, value.clone());
+        return value;
+    }
     // `clo.delegate = x` / `clo.resolveStrategy = n` — the two settable
     // properties of a `groovy.lang.Closure`, written through the handle so every
     // holder of the closure sees them.
@@ -9199,14 +9583,20 @@ fn dispatch_category(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) ->
         let Some(idx) = lookup_method(id, method) else {
             continue;
         };
-        // The declared parameter count includes the receiver, which arrives as
-        // the first argument.
-        if method_arity(id, method) != Some(args.len() as u8 + 1) {
+        // An `@Category` class's instance method runs with the receiver as
+        // `this`; a classic category's static method takes it as its first
+        // argument, which its declared parameter count includes.
+        let annotated = class_generates(id, GEN_CATEGORY);
+        let receiver_params = u8::from(!annotated);
+        if method_arity(id, method) != Some(args.len() as u8 + receiver_params) {
             continue;
         }
-        // Slot 0 of a method body is `this`, which a category method never uses.
+        // Slot 0 of a method body is `this`, which a static category method
+        // never uses.
         let mut pushes = Vec::with_capacity(args.len() + 2);
-        pushes.push(Value::Undef);
+        if !annotated {
+            pushes.push(Value::Undef);
+        }
         pushes.push(recv.clone());
         pushes.extend_from_slice(args);
         return Some(match invoke_sub(vm, idx, &pushes) {
@@ -9788,6 +10178,68 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
 }
 
 fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
+    if ANY_JSON.with(Cell::get) {
+        if let Some(v) = dispatch_json(vm, &recv, method, &args) {
+            return v;
+        }
+    }
+    dispatch_call_plain(vm, recv, method, args)
+}
+
+/// The `groovy.json` objects' methods: a builder delegate's collecting calls,
+/// a `JsonBuilder`'s, and `JsonSlurper.parseText`.
+fn dispatch_json(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
+    let recv = recv.clone();
+    let args = args.to_vec();
+    if let Some(map) = json_collector(&recv) {
+        let v = json::builder_value(vm, &args);
+        omap_set(&map, method.to_string(), v);
+        return Some(Value::Undef);
+    }
+    if let Some(content) =
+        json_builder(&recv).filter(|_| !matches!(method, "getClass" | "hashCode" | "equals" | "is"))
+    {
+        return Some(match (method, args.as_slice()) {
+            ("toString", []) => Value::str(json::to_json(vm, &content)),
+            ("toPrettyString", []) => Value::str(json::pretty_print(&json::to_json(vm, &content))),
+            ("getContent", []) => content,
+            // `builder { … }` / `builder.call(…)` is the root; any other name
+            // is a root object holding that one key.
+            ("call", _) => {
+                let v = json::builder_value(vm, &args);
+                set_json_builder(&recv, v.clone());
+                v
+            }
+            (name, _) => {
+                let v = json::builder_value(vm, &args);
+                let root = gmap(vec![(name.to_string(), v)]);
+                set_json_builder(&recv, root.clone());
+                root
+            }
+        });
+    }
+    if is_json_slurper(&recv) {
+        if let ("parseText", [text]) = (method, args.as_slice()) {
+            return Some(match json::parse_text(&groovy_str(text)) {
+                Ok(v) => v,
+                Err(message) => {
+                    raise(vm, "JsonException", &message);
+                    Value::Undef
+                }
+            });
+        }
+    }
+    None
+}
+
+fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
+    // A method a script injected through `metaClass` wins over the class's own,
+    // as an `ExpandoMetaClass` method does.
+    if ANY_EMC.with(Cell::get) {
+        if let Some(clo) = emc_lookup(&recv, method) {
+            return emc_invoke(vm, &clo, &recv, &args);
+        }
+    }
     // A tuple's `getV1()` … and `getFirst()` / `getSecond()`.
     if args.is_empty() && method.starts_with("get") {
         if let Some(v) = seq::tuple_component(&recv, method) {
@@ -12435,6 +12887,30 @@ fn b_prop(vm: &mut VM, _argc: u8) -> Value {
 /// The property read `recv.name`: an instance's getter, field or
 /// `propertyMissing` first, then every other receiver's property.
 fn get_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
+    if name == "metaClass" {
+        return meta_class_of(recv);
+    }
+    if name == "content" {
+        if let Some(content) = json_builder(recv) {
+            return content;
+        }
+    }
+    if let Some((class, instance, _)) = as_meta_class(recv) {
+        if name == "static" {
+            return heap_push(HeapObj::MetaClass {
+                class,
+                instance,
+                statics: true,
+            });
+        }
+    }
+    // A property an `ExpandoMetaClass` getter (`X.metaClass.getY = { … }`)
+    // answers.
+    if ANY_EMC.with(Cell::get) {
+        if let Some(clo) = emc_lookup(recv, &format!("get{}", capitalize(name))) {
+            return emc_invoke(vm, &clo, recv, &[]);
+        }
+    }
     if let Some(v) = seq::tuple_component(recv, name) {
         return v;
     }
@@ -12623,6 +13099,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
     }
     // A `Range` answers its own members and hands everything else to the list it
     // enumerates — which is faithful, because Groovy's `Range` is a `List`.
+    if let Some(SetKind::TreeBy(cmp)) = set_kind(recv) {
+        if let Some(v) = dispatch_tree_by(vm, recv, cmp, method, args) {
+            return v;
+        }
+    }
     if let Some(v) = dispatch_set_fast(recv, method, args) {
         return v;
     }
@@ -15947,9 +16428,10 @@ fn cast_assign(vm: &mut VM, v: Value, ty: &str) -> Value {
             let message = format!(
                 "Cannot cast object '{}' with class '{}' to class '{name}' due to: \
                  org.codehaus.groovy.runtime.metaclass.MissingPropertyExceptionNoStack: \
-                 No such property: {bad} for class: {name}",
+                 No such property: {bad} for class: {name}{}",
                 java_to_string(vm, &v),
-                java_class_name(&v)
+                java_class_name(&v),
+                class_property_suggestions(cid, &bad)
             );
             raise(vm, "GroovyCastException", &message);
             return Value::Undef;
@@ -16064,7 +16546,11 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
             // proxy subclass built by the no-argument constructor, the map's
             // entries left as method overrides it never sets as properties.
             if unsettable_key(cid, &entries).is_some() {
-                return construct(vm, &ty_simple, Vec::new());
+                let built = construct(vm, &ty_simple, Vec::new());
+                if let Value::Obj(id) = built {
+                    MAP_PROXIES.with(|p| p.borrow_mut().insert(id));
+                }
+                return built;
             }
             return construct(vm, &ty_simple, vec![v]);
         }
@@ -16813,6 +17299,13 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
     }
     if (class, method) == ("Tuple", "tuple") {
         return seq::tuple_of(args);
+    }
+    match (class, method, args) {
+        ("JsonOutput", "toJson", [v]) => return Some(Value::str(json::to_json(vm, v))),
+        ("JsonOutput", "prettyPrint", [v]) => {
+            return Some(Value::str(json::pretty_print(&groovy_str(v))))
+        }
+        _ => {}
     }
     let arg0 = args.first().cloned().unwrap_or(Value::Undef);
     let f0 = as_f64(&arg0);
@@ -18993,7 +19486,86 @@ fn set_elements(items: &[Value], kind: SetKind) -> Vec<Value> {
             out.sort_by(natural_order);
             out
         }
+        SetKind::TreeBy(cmp) => {
+            let mut out = items.to_vec();
+            with_vm(|vm| out.sort_by(|a, b| comparator_order(vm, cmp, a, b)));
+            out
+        }
     }
+}
+
+/// The implementation kind of a set handle, read without copying it.
+fn set_kind(v: &Value) -> Option<SetKind> {
+    let Value::Obj(id) = v else { return None };
+    HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::SetVal { kind, .. }) => Some(*kind),
+        _ => None,
+    })
+}
+
+/// What the comparator closure `cmp` answers for `a` against `b`, as an
+/// ordering (its sign).
+fn comparator_order(vm: &mut VM, cmp: u32, a: &Value, b: &Value) -> std::cmp::Ordering {
+    match invoke_closure(vm, &Value::Obj(cmp), &[a.clone(), b.clone()]) {
+        Ok(v) => as_i64(&v).unwrap_or(0).cmp(&0),
+        Err(e) => {
+            fault(vm, e);
+            std::cmp::Ordering::Equal
+        }
+    }
+}
+
+/// `add` / `<<` / `contains` / `remove` / `addAll` on a `TreeSet` ordered by a
+/// comparator: membership is the comparator answering `0`, as `TreeMap`'s is,
+/// so a case-insensitive set keeps the first spelling it was given.
+fn dispatch_tree_by(
+    vm: &mut VM,
+    recv: &Value,
+    cmp: u32,
+    method: &str,
+    args: &[Value],
+) -> Option<Value> {
+    let (items, _) = as_set(recv)?;
+    let position = |vm: &mut VM, items: &[Value], probe: &Value| {
+        items
+            .iter()
+            .position(|e| comparator_order(vm, cmp, e, probe) == std::cmp::Ordering::Equal)
+    };
+    Some(match (method, args) {
+        ("add" | "leftShift", [probe]) => {
+            let present = position(vm, &items, probe).is_some();
+            if !present {
+                set_push(recv, probe.clone());
+            }
+            if method == "leftShift" {
+                recv.clone()
+            } else {
+                Value::bool(!present)
+            }
+        }
+        ("contains", [probe]) => Value::bool(position(vm, &items, probe).is_some()),
+        ("remove", [probe]) => match position(vm, &items, probe) {
+            Some(i) => {
+                let mut items = items;
+                items.remove(i);
+                set_store(recv, items);
+                Value::bool(true)
+            }
+            None => Value::bool(false),
+        },
+        ("addAll", [more]) => {
+            let mut changed = false;
+            for e in iteration_elements(more) {
+                let (now, _) = as_set(recv)?;
+                if position(vm, &now, &e).is_none() {
+                    set_push(recv, e);
+                    changed = true;
+                }
+            }
+            Value::bool(changed)
+        }
+        _ => return None,
+    })
 }
 
 /// The key a [`SetIndex`] hashes an element under. Deliberately narrow: only the
@@ -19117,7 +19689,7 @@ fn make_set(items: Vec<Value>, kind: SetKind) -> Value {
     // A hash-built set hashes every element, and a collection that reaches
     // itself has no finite hash: `def a = []; a << a; a.toSet()` (and `as Set`,
     // `new HashSet(a)`) is a `StackOverflowError` in Groovy.
-    if !matches!(kind, SetKind::Tree)
+    if !matches!(kind, SetKind::Tree | SetKind::TreeBy(_))
         && items.iter().any(|v| {
             matches!(v, Value::Obj(_)) && checked_hash_code(|| object_hash_code(v)).is_none()
         })
@@ -19227,6 +19799,9 @@ fn set_membership_fast(recv: &Value, probe: &Value) -> Option<bool> {
 /// `None` hands the call back to the general path, so a set the index cannot
 /// cover behaves exactly as it did.
 fn dispatch_set_fast(recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
+    if let Some(SetKind::TreeBy(cmp)) = set_kind(recv) {
+        return with_vm(|vm| dispatch_tree_by(vm, recv, cmp, method, args)).flatten();
+    }
     if args.len() != 1 || !matches!(method, "add" | "leftShift" | "contains" | "remove") {
         return None;
     }
@@ -19265,7 +19840,7 @@ fn set_is_hashed(v: &Value) -> bool {
     HEAP.with(|h| {
         matches!(
             h.borrow().get(*id as usize),
-            Some(HeapObj::SetVal { kind, .. }) if !matches!(kind, SetKind::Tree)
+            Some(HeapObj::SetVal { kind, .. }) if !matches!(kind, SetKind::Tree | SetKind::TreeBy(_))
         )
     })
 }
@@ -19464,7 +20039,7 @@ fn set_class(kind: SetKind) -> &'static str {
     match kind {
         SetKind::Linked => "java.util.LinkedHashSet",
         SetKind::Hash { .. } => "java.util.HashSet",
-        SetKind::Tree => "java.util.TreeSet",
+        SetKind::Tree | SetKind::TreeBy(_) => "java.util.TreeSet",
     }
 }
 
@@ -21099,6 +21674,10 @@ thread_local! {
 /// [`render_value`] for one value, its members rendered through the
 /// cycle-tracking entry point.
 fn render_shape(vm: &mut VM, v: &Value) -> String {
+    // A `JsonBuilder` renders as the JSON it has built.
+    if let Some(content) = json_builder(v).filter(|_| ANY_JSON.with(Cell::get)) {
+        return json::to_json(vm, &content);
+    }
     if let Some(parts) = as_gstring(v) {
         return gstring_text(vm, &parts);
     }
@@ -21256,6 +21835,13 @@ pub fn groovy_str(v: &Value) -> String {
     }
     if let Some((_, text)) = as_writable(v) {
         return text;
+    }
+    // A closure has `Object.toString`: its class, `@`, and a hex identity
+    // hash. Groovy's hash is the JVM's and differs per run; this one is
+    // derived from the handle, so it is stable but not Groovy's number.
+    if let (Some(meta), Value::Obj(id)) = (closure_meta(v), v) {
+        let class = closure_class_name(&meta).unwrap_or_else(|| "groovy.lang.Closure".to_string());
+        return format!("{class}@{:x}", id.wrapping_mul(0x9E37_79B1) | 0x1000_0000);
     }
     if let Some(o) = as_optional(v) {
         return match o {

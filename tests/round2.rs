@@ -744,7 +744,7 @@ println (+3)
 2.5
 3.8
 1.414213562
-2.0
+2
 4.0
 precision=7 roundingMode=HALF_UP
 precision=16 roundingMode=HALF_EVEN

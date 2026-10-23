@@ -254,6 +254,23 @@ reported as parse or compile errors, never silently mis-run.
   `groovy.lang.GroovyRuntimeException` naming every overload a `null` argument
   matches at once. `sum` folds through the same table, so
   `[[1, 2], [3, 4]].sum(0)` raises rather than concatenating.
+- **Methods overloaded by parameter type.** `m(int)`, `m(String)` and `m(x)`
+  in one class are three bodies; a call picks the declaration whose parameter
+  types fit its arguments closest — the argument's own class, then a supertype,
+  then `Object`/`def`, first declared on a tie — along the superclass chain, an
+  override beating what it overrides. `m(null)` picks `m(Object)`, as Groovy's
+  does. A name with one declaration per arity dispatches as before.
+- **`++`/`--` are `next()`/`previous()`.** A number keeps the native `+ 1`
+  (and its JIT trace); any other operand at a `++`/`--` site — a `String`
+  (`'Az'++` is `A{`), a user class — calls its `next()`/`previous()`, on a bare
+  name, a field, a property and a subscript alike.
+- **A `switch` that ends a body is its return value**, per Groovy's
+  `ReturnAdder`: a case ending in `break` returns its last value, `default`
+  returns its, a fall-through case returns nothing except the last case of a
+  switch with no `default`. A `default` before a later `case` is a compile
+  error.
+- **A closure stored in a variable typed as a script interface or abstract
+  class is coerced**, exactly as `closure as Type` is.
 - **Operator overloading.** A user-class instance operand dispatches the Groovy
   operator method: `+`→`plus`, `-`→`minus`, `*`→`multiply`, `/`→`div`,
   `%`→`remainder`, `**`→`power`, unary `-`→`negative`; `<`/`>`/`<=`/`>=` and
@@ -793,6 +810,35 @@ error.
   and of the lines), so `.toList()` agrees with Groovy and `getClass()` does
   not.
 
+**Found in the round-8 sweep** (each line run on both sides, Groovy 6.0.0 /
+JVM 21.0.12):
+
+- A function or closure *parameter* declared as a script interface is not
+  coerced: `def take(I i) { i.calc(2) }; take { it + 1 }` raises
+  `MissingMethodException` on `calc`. A typed *local* (`I i = { … }`) and
+  `as I` are coerced. The parser drops function parameter types.
+- A closure coerced to a *concrete* class (`{ 'c' } as C`) should answer every
+  method of `C`; groovyrs leaves the closure uncoerced. An abstract class is
+  coerced (the closure implements the body-less methods).
+- Constructors overloaded by parameter type (`P(int)` beside `P(String)`)
+  share one body slot per arity; methods are selected by type.
+- Writing a `final` field after construction (`a.v = 4`) succeeds; Groovy
+  raises `ReadOnlyPropertyException`.
+- A class's `invokeMethod(String, args)` is not consulted for an unknown
+  method; interface constants (`interface I { static final int K = 7 }`,
+  `X.K` on an implementor) are a `MissingPropertyException`.
+- `Pt p = [3, 4]` (a list assigned to a class-typed local) stores the list;
+  Groovy calls the two-argument constructor.
+- `record` declarations print nothing and fail (`unable to resolve`).
+- `Tuple2`/`Tuple.tuple`, `String.CASE_INSENSITIVE_ORDER`, `List.withDefault`,
+  `String.md5()`, `URLEncoder`/`URLDecoder` are unresolved or missing.
+- `byte[].encodeBase64()` / `encodeHex()` answer the encoded `String`, where
+  Groovy answers a `groovy.lang.Writable`; text and `toString()` agree.
+- `println -7 % 3` prints `-1`; Groovy reads `println - 7 % 3` and raises
+  `MissingPropertyException` (the documented paren-less `println` latitude).
+- `Integer.equals(Long)` (`5.equals(5L)`) is `true`; Java answers `false`. An
+  `Integer` and a `Long` are one `Value::Int` at run time.
+
 **The probe corpus under 6.0.0.** Of the probes in `parity-scripts/probes.txt`
 that still miss under 6.0.0, two are the documented Java cast and GString
 class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
@@ -900,16 +946,13 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   `int` the static `Integer.toString(int)` wants — where groovyrs raises
   `MissingMethodException`. The `Long` spelling of the same call is modeled (see
   `GMETHOD_WIDE`); only the `BigInteger` coercion is missing.
-- **`++`/`--` do not call `next`/`previous`.** To keep the JIT fast path for
-  integer loop counters (`for (i=0; i<n; i++)`), `++`/`--` lower to native
-  `+ 1` / `- 1` rather than routing through a builtin (which would abort trace
-  JIT). On a user-class instance they therefore dispatch `plus`/`minus`, not
-  Groovy's `next`/`previous`. Call `x.next()` / `x.previous()` explicitly for
-  those.
 - **`import`/`package`** are tolerated (skipped) but do nothing.
-- **Command-argument chains** (`println a, b`, `foo bar baz`). Only a member call
-  with its parentheses left off parses (`sb.append 'x'`, `m.put 'k', 1`); the
-  argument must start with a literal, a name, `new`, `true`, `false` or `null`.
+- **Command-argument chains** (`println a, b`, `foo bar baz`). A member call
+  with its parentheses left off parses (`sb.append 'x'`, `m.put 'k', 1`), its
+  argument starting with a literal, a name, `new`, `true`, `false` or `null`. A
+  bare-name call parses only when its first argument is a literal (`printf
+  "%d\n", 5`, `f 1, k: 2`): `f x` is read as the declaration `Type name`, and a
+  chained `foo 1 bar 2` is not parsed.
 
 ## Modeled with a documented simplification
 

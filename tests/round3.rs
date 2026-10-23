@@ -369,3 +369,298 @@ true
 "####;
     check(src, expected);
 }
+
+#[test]
+fn bare_command_expressions_with_a_literal_argument() {
+    let src = r####"def f(a, b = 'z') { println "$a$b" }
+f 1, 2
+f 'x'
+def c = { x -> println "c$x" }
+c 5
+printf "%05d|%s\n", 42, 'q'
+def g(Map m, x) { println "${m.k}$x" }
+g 7, k: 1
+class K {
+    static void s(x) { println "s$x" }
+    def run() { s 3 }
+}
+new K().run()
+[1].each { f 'e', it }
+def sb = new StringBuilder()
+sb.append 'a'
+println sb
+"####;
+    let expected = r####"12
+xz
+c5
+00042|q
+17
+s3
+e1
+a
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn bytes_decode_and_base64_hex_encodings() {
+    let src = r####"println new String([104, 105] as byte[])
+println new String('héllo'.getBytes('UTF-8'), 'UTF-8')
+println new String([104, -23] as byte[], 'ISO-8859-1')
+println new String(['a', 'b'] as char[])
+println new String('aGVsbG8='.decodeBase64())
+println new String('aGVs bG8'.decodeBase64())
+println 'aGVsbG8gd29ybGQ=\n'.decodeBase64().length
+println new String('aGVsbA'.decodeBase64())
+println '[' + ''.bytes.encodeBase64() + ']'
+println 'a'.bytes.encodeBase64()
+println 'ab'.bytes.encodeBase64()
+println 'abc'.bytes.encodeBase64()
+println 'héllo wörld!'.bytes.encodeBase64().toString()
+println 'hi'.bytes.encodeHex()
+println(([-1, 0, 16] as byte[]).encodeHex().toString())
+try { 'a$b'.decodeBase64() } catch (RuntimeException e) { println e.message }
+"####;
+    let expected = r####"hi
+héllo
+hé
+ab
+hello
+hello
+11
+hell
+[]
+YQ==
+YWI=
+YWJj
+aMOpbGxvIHfDtnJsZCE=
+6869
+ff0010
+bad character in base64 value
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn closure_declared_as_a_script_interface_is_coerced() {
+    let src = r####"interface I { int calc(int x) }
+I b = { x -> x * 5 }
+println b.calc(4)
+println(b instanceof I)
+abstract class AC {
+    abstract String nm()
+    String hi() { "hi " + nm() }
+}
+AC ac = { -> 'zed' }
+println ac.hi()
+def plain = { 3 }
+println plain()
+"####;
+    let expected = r####"20
+true
+hi zed
+3
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn increment_and_decrement_call_next_and_previous() {
+    let src = r####"def s = 'Az'
+s++
+println s
+def t = s--
+println t + s
+def z = 'a'
+println(++z)
+class R {
+    int lo
+    def next() { new R(lo: lo + 1) }
+    def previous() { new R(lo: lo - 1) }
+    String toString() { "R$lo" }
+}
+def r = new R(lo: 1)
+r++
+println r
+--r
+println r
+def q = r++
+println "$q $r"
+class C {
+    def s = 'a'
+    def bump() { s++; s }
+}
+println new C().bump()
+def c = new C()
+c.s++
+println c.s
+def l = ['x']
+l[0]++
+println l
+def m = [k: 'p']
+m.k--
+println m
+class N { int v }
+def n = new N(v: 1)
+try { n++ } catch (MissingMethodException e) { println e.message.readLines()[0] }
+println n.v
+def u = null
+try { u++ } catch (NullPointerException e) { println e.message }
+def b = 2.5G
+b++
+println b
+int i = 0
+for (int k = 0; k < 5; k++) i++
+println i
+"####;
+    let expected = r####"A{
+A{Az
+b
+R2
+R1
+R1 R2
+b
+b
+[y]
+[k:o]
+No signature of method: next for class: N is applicable for argument types: () values: []
+1
+Cannot invoke method next() on null object
+3.5
+5
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn methods_overloaded_by_parameter_type() {
+    let src = r####"class A {
+    def m(int x) { 'int' }
+    def m(String s) { 'str' }
+    def m(x) { 'obj' }
+    def n(Number x) { 'num' }
+    def n(Integer x) { 'integer' }
+    def k(List l) { 'list' }
+    def k(Map m) { 'map' }
+    def two(String a, int b) { 'si' }
+    def two(int a, String b) { 'is' }
+    static s(String x) { 'sstr' }
+    static s(Integer x) { 'sint' }
+    def self() { [m(1), m('a'), m(null)] }
+}
+def a = new A()
+println a.m(1); println a.m('s'); println a.m(1.5); println a.m([1]); println a.m("g${1}")
+println a.n(1); println a.n(1.5)
+println a.k([1]); println a.k([a: 1])
+println a.two('x', 1); println a.two(1, 'x')
+println A.s('q'); println A.s(3)
+println a.self()
+class B extends A { def m(String s) { 'B.str' } }
+println new B().m('z'); println new B().m(2)
+"####;
+    let expected = r####"int
+str
+obj
+obj
+str
+integer
+num
+list
+map
+si
+is
+sstr
+sint
+[int, str, obj]
+B.str
+int
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn switch_as_the_last_statement_is_the_return_value() {
+    let src = r####"def g1(s) { switch (s) { case 1: 'one'; break; case 2: 'two'; break; default: 'other' } }
+println g1(1); println g1(2); println g1(3)
+def g2(s) { switch (s) { case 1: 'one' } }
+println g2(1); println g2(5)
+def g4(s) { switch (s) { case 1: 'a'; case 2: 'b'; break; default: 'c' } }
+println g4(1)
+def c = { s -> switch (s) { case 1: 'one'; break; default: 'dflt' } }
+println c(1); println c(9)
+def g6(s) { switch (s) { case 1: def x = 5; x + 1; break; default: 0 } }
+println g6(1)
+def g8(s) { switch (s) { case 1: println 'side'; break } }
+println g8(1)
+def a2(s) { if (s > 0) { switch (s) { case 1: 'one'; break; default: 'pos' } } else { 'neg' } }
+println a2(1); println a2(4); println a2(-1)
+def a3(s) { switch (s) { case 1: case 2: 'low'; break; default: if (s > 5) { 'hi' } else { 'mid' } } }
+println a3(2); println a3(7); println a3(4)
+def a4(s) { switch (s) { case 1: 'x'; break; case 2: 'y' } }
+println a4(2); println a4(3)
+def a1(s) { switch (s) { case 1 -> 'one'; default -> 'd' } }
+println a1(1); println a1(2)
+"####;
+    let expected = r####"one
+two
+other
+one
+null
+b
+one
+dflt
+6
+side
+null
+one
+pos
+neg
+low
+hi
+mid
+y
+null
+one
+d
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn user_method_mutating_a_field_list_keeps_the_instance() {
+    let src = r####"class P {
+    def items = []
+    def add(x) { items << x; 7 }
+    def push(x) { items.add(x) }
+    def clear() { items.clear() }
+    def leftShift(x) { items << x; this }
+}
+def p = new P()
+p.add(1)
+println p.items
+p.push(2)
+println p.items
+p << 3 << 4
+println p.items
+p.clear()
+println p.items.size()
+println p.getClass().name
+"####;
+    let expected = r####"[1]
+[1, 2]
+[1, 2, 3, 4]
+0
+P
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn switch_default_before_a_case_is_a_compile_error() {
+    // Groovy rejects the program before running any of it: "A default branch
+    // must appear as the last branch of a switch".
+    let (out, ok) =
+        run("println 'before'\nswitch (1) { default: println 'd'; case 1: println 'one' }\n");
+    assert!(!ok);
+    assert_eq!(out, "");
+}

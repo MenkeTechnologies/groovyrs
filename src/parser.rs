@@ -50,6 +50,7 @@ pub fn parse(src: &str) -> Result<Program, String> {
         hoisted: Vec::new(),
         param_defaults: Vec::new(),
         param_varargs: None,
+        param_types: Vec::new(),
         depth: 0,
         switch_exprs: 0,
     };
@@ -83,6 +84,9 @@ struct Parser {
     param_defaults: Vec<Option<Expr>>,
     /// The array type of the last parameter list's variadic last parameter.
     param_varargs: Option<String>,
+    /// The declared type of each parameter of the last parameter list parsed
+    /// (`def` when untyped), read by a class method declaration.
+    param_types: Vec<String>,
     /// How deep the AST being built is at this point, bounded by
     /// [`MAX_NESTING`]. Maintained at the three places source nesting becomes
     /// tree depth: [`Parser::unary`] (every parenthesised, bracketed, braced or
@@ -450,6 +454,32 @@ impl Parser {
             let e = self.expression()?;
             return Ok(StmtKind::Expr(e));
         }
+        // A bare command expression `name arg, arg` — `printf "%d\n", 5`,
+        // `f 1, 2` — is the call `name(arg, arg)`. Only a literal first argument
+        // is read this way: a name there is the declaration `Type name`.
+        if let Tok::Ident(name) = self.peek().clone() {
+            let literal_arg = matches!(
+                self.peek_at(1),
+                Tok::Str(_)
+                    | Tok::GStr(_)
+                    | Tok::Int(..)
+                    | Tok::Float(_)
+                    | Tok::Single(_)
+                    | Tok::Dec(_)
+                    | Tok::BigInt(_)
+                    | Tok::True
+                    | Tok::False
+                    | Tok::Null
+            );
+            if literal_arg && !matches!(name.as_str(), "this" | "super") {
+                let col = self.col_at(0);
+                self.advance();
+                let args = self.command_args()?;
+                return Ok(StmtKind::Expr(
+                    self.record(col, Expr::Call { name, args, line }),
+                ));
+            }
+        }
 
         // Modifiers in front of a script-level declaration (`final x = 1`,
         // `static int sq(int x) { … }`) have no runtime effect here; with no type
@@ -610,9 +640,9 @@ impl Parser {
             )
         {
             let op = if matches!(self.peek(), Tok::PlusPlus) {
-                AssignOp::Add
+                AssignOp::Next
             } else {
-                AssignOp::Sub
+                AssignOp::Previous
             };
             self.advance();
             return self.assign_to_target(lhs, op, Expr::Int(1, IntWidth::Int));
@@ -1470,11 +1500,13 @@ impl Parser {
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
                 let params = self.param_list()?;
+                let types = std::mem::take(&mut self.param_types);
                 let line = self.line();
                 for (kept, supply) in self.default_overloads(&params) {
                     let body = forward_body(&name, &params, None, supply, line);
                     methods.push(Method {
                         name: name.clone(),
+                        param_types: kept_types(&params, &types, &kept),
                         params: kept,
                         body,
                         ret_ty: ty.clone(),
@@ -1487,6 +1519,7 @@ impl Parser {
                 methods.push(Method {
                     name,
                     params,
+                    param_types: types,
                     body,
                     ret_ty: ty,
                 });
@@ -1523,11 +1556,13 @@ impl Parser {
             let name = self.ident()?;
             if self.is(&Tok::LParen) {
                 let params = self.param_list()?;
+                let types = std::mem::take(&mut self.param_types);
                 let line = self.line();
                 for (kept, supply) in self.default_overloads(&params) {
                     let body = forward_body(&name, &params, None, supply, line);
                     methods.push(Method {
                         name: name.clone(),
+                        param_types: kept_types(&params, &types, &kept),
                         params: kept,
                         body,
                         ret_ty: ty.clone(),
@@ -1540,6 +1575,7 @@ impl Parser {
                 methods.push(Method {
                     name,
                     params,
+                    param_types: types,
                     body,
                     ret_ty: ty,
                 });
@@ -1584,22 +1620,27 @@ impl Parser {
         let mut out = Vec::new();
         let mut defaults: Vec<Option<Expr>> = Vec::new();
         let mut varargs: Option<String> = None;
+        let mut types = Vec::new();
         if !self.is(&Tok::RParen) {
             loop {
                 varargs = None;
+                let mut declared = "def".to_string();
                 if self.is(&Tok::Def) {
                     self.advance();
                 } else if self.looks_like_decl() {
                     // A type in front of the parameter name; an array type on the
                     // last parameter makes it variadic, as Groovy reads it.
                     let ty = self.decl_type()?;
+                    declared = ty.clone();
                     varargs = ty.ends_with("[]").then_some(ty);
                 } else if matches!(self.peek(), Tok::Ident(_))
                     && matches!(self.peek_at(1), Tok::Ellipsis)
                 {
                     let ty = self.ident()?;
+                    declared = format!("{ty}[]");
                     varargs = Some(format!("{ty}[]"));
                 }
+                types.push(declared);
                 // `Type... name` / `... name` — the variadic spelling.
                 if self.is(&Tok::Ellipsis) {
                     self.advance();
@@ -1627,6 +1668,7 @@ impl Parser {
         defaults.resize(out.len(), None);
         self.param_defaults = defaults;
         self.param_varargs = varargs;
+        self.param_types = types;
         Ok(out)
     }
 
@@ -2023,6 +2065,14 @@ impl Parser {
         if cases.iter().filter(|c| c.labels.is_empty()).count() > 1 {
             return Err(format!(
                 "groovyrs: duplicate `default` in switch on line {}",
+                self.line()
+            ));
+        }
+        // Groovy's grammar admits `default` only as the final section, in both
+        // the colon and the arrow form.
+        if cases.iter().rev().skip(1).any(|c| c.labels.is_empty()) {
+            return Err(format!(
+                "groovyrs: A default branch must appear as the last branch of a switch on line {}",
                 self.line()
             ));
         }
@@ -4260,16 +4310,45 @@ impl Parser {
     }
 
     /// The arguments of a command expression (`recv.method arg, arg`): every
-    /// argument runs to the next comma at the top level.
+    /// argument runs to the next comma at the top level. Named arguments
+    /// (`g 7, k: 1`) gather into one map passed first, as in [`Self::call_args`].
     fn command_args(&mut self) -> Result<Vec<Expr>, String> {
-        let mut args = vec![self.expression()?];
-        while self.is(&Tok::Comma) {
+        let mut args = Vec::new();
+        let mut named: Vec<(Expr, Expr)> = Vec::new();
+        loop {
+            if self.named_arg_ahead() {
+                let k = self.map_key()?;
+                self.eat(&Tok::Colon)?;
+                self.skip_newlines();
+                named.push((k, self.expression()?));
+            } else {
+                args.push(self.expression()?);
+            }
+            if !self.is(&Tok::Comma) {
+                break;
+            }
             self.advance();
             self.skip_newlines();
-            args.push(self.expression()?);
+        }
+        if !named.is_empty() {
+            args.insert(0, Expr::Map(named));
         }
         Ok(args)
     }
+}
+
+/// The declared types of the parameters a default-argument overload keeps, in
+/// the order it keeps them.
+fn kept_types(params: &[String], types: &[String], kept: &[String]) -> Vec<String> {
+    kept.iter()
+        .map(|k| {
+            params
+                .iter()
+                .position(|p| p == k)
+                .and_then(|i| types.get(i).cloned())
+                .unwrap_or_else(|| "def".to_string())
+        })
+        .collect()
 }
 
 /// A member name after `.`: known at parse time, or computed from an
@@ -4737,6 +4816,7 @@ fn parse_interpolation(src: &str) -> Result<Expr, String> {
         hoisted: Vec::new(),
         param_defaults: Vec::new(),
         param_varargs: None,
+        param_types: Vec::new(),
         depth: 0,
         switch_exprs: 0,
     };

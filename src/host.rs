@@ -708,6 +708,11 @@ thread_local! {
     /// The op indices of statically-`Long` arithmetic in the running chunk, from
     /// the compiler. Replaced on each compile.
     static WIDE_SITES: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    /// The op indices of the `+ 1`/`- 1` a bare `x++`/`x--` lowers to. Groovy's
+    /// `++` is `next()` and `--` is `previous()`, which agree with `+ 1` on a
+    /// number but not on a `String` (`'a'++` is `b`) or a user class, so a
+    /// non-numeric operand at one of these sites calls the method instead.
+    static INCDEC_SITES: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
 
 thread_local! {
@@ -756,6 +761,11 @@ fn closure_parameter_types(meta: &ClosureMeta) -> Value {
 /// Publish the compiler's statically-`Long` arithmetic sites for this chunk.
 pub fn set_wide_sites(sites: HashSet<usize>) {
     WIDE_SITES.with(|s| *s.borrow_mut() = sites);
+}
+
+/// Publish the compiler's `x++`/`x--` sites for this chunk.
+pub fn set_incdec_sites(sites: HashSet<usize>) {
+    INCDEC_SITES.with(|s| *s.borrow_mut() = sites);
 }
 
 /// Whether the op at `ip` was compiled as `Long` arithmetic.
@@ -874,6 +884,25 @@ fn int_arith(op: NumOp, a: &Value, b: &Value, ip: usize) -> Option<Value> {
 pub fn sited_numeric_hook(call: fusevm::NumericCall<'_>) -> Result<Value, String> {
     if let Some(v) = int_arith(call.op, call.a, call.b, call.ip) {
         return Ok(v);
+    }
+    if matches!(call.op, NumOp::Add | NumOp::Sub)
+        && !is_number(call.a)
+        && INCDEC_SITES.with(|s| s.borrow().contains(&call.ip))
+    {
+        let method = if matches!(call.op, NumOp::Add) {
+            "next"
+        } else {
+            "previous"
+        };
+        let recv = call.a.clone();
+        // A user class answers its own `next()`/`previous()`; the GDK table
+        // below does not consult the class's methods.
+        if as_instance(&recv).is_some() {
+            return dispatch_operator_method(&recv, method, &[]);
+        }
+        if let Some(v) = with_vm(|vm| dispatch_method(vm, &recv, method, &[])) {
+            return Ok(v);
+        }
     }
     numeric_hook(call.op, call.a, call.b)
 }
@@ -1554,6 +1583,7 @@ fn register_throwables() {
                 static_inits: Vec::new(),
                 methods: std::collections::HashMap::new(),
                 overloads: std::collections::HashMap::new(),
+                typed_overloads: std::collections::HashMap::new(),
                 method_arity: std::collections::HashMap::new(),
                 ctors: std::collections::HashMap::new(),
                 bool_getters: std::collections::HashSet::new(),
@@ -2241,7 +2271,8 @@ struct ClassMeta {
     /// What the class's annotations asked the compiler to generate — the bit
     /// set `Compiler::register_class` builds from `ast::Generated`: bit 0
     /// `toString`, bit 1 its `includeNames` form, bit 2 `equals`/`hashCode`,
-    /// bit 3 a positional constructor, bit 4 read-only properties.
+    /// bit 3 a positional constructor, bit 4 read-only properties, bit 5 an
+    /// abstract class (one declaring a body-less method).
     ///
     /// The *declaration* is a compile-time decision, so it arrives as a flag;
     /// the *behaviour* lives here, because that is where an instance's fields,
@@ -2281,6 +2312,10 @@ struct ClassMeta {
     /// `methods` remains the answer where the arity is implied by the question
     /// (`toString`, `compareTo`, a getter, a setter).
     overloads: std::collections::HashMap<String, u16>,
+    /// `name/arity` → every declaration of that name and arity, with its
+    /// declared parameter types, in declaration order — what separates
+    /// `m(int)` from `m(String)`; see [`lookup_method_args`].
+    typed_overloads: std::collections::HashMap<String, Vec<(Vec<String>, u16)>>,
     /// method name → its declared parameter count. Read only where the *shape*
     /// of a call has to match the declaration rather than just its name:
     /// `propertyMissing` is one method name with a one-argument reader and a
@@ -4491,6 +4526,72 @@ fn lookup_method_argc(class: u32, method: &str, argc: usize) -> Option<u16> {
     lookup_overload_exact(class, method, argc).or_else(|| lookup_method(class, method))
 }
 
+/// The method `class` resolves `method` to for a call with these `args`. Where
+/// the class declares genuine overloads of that name and arity, the one whose
+/// declared parameter types fit the arguments best is chosen — an exact class
+/// over a supertype over `Object`/`def`, the first declared on a tie, as
+/// Groovy's distance-based selection orders them. Everything else is
+/// [`lookup_method_argc`].
+fn lookup_method_args(class: u32, method: &str, args: &[Value]) -> Option<u16> {
+    let key = format!("{method}/{}", args.len());
+    // Walked most-derived first and replaced only on a strictly closer fit, so
+    // an override beats the declaration it overrides and, within one class,
+    // the first declared wins a tie.
+    let mut best: Option<(u32, u16)> = None;
+    let mut candidates = 0;
+    let mut cur = Some(class);
+    while let Some(id) = cur {
+        let Some(meta) = class_meta(id) else { break };
+        for (types, idx) in meta.typed_overloads.get(&key).into_iter().flatten() {
+            candidates += 1;
+            let distance = types
+                .iter()
+                .zip(args)
+                .try_fold(0, |acc, (ty, v)| Some(acc + param_distance(ty, v)?));
+            if let Some(d) = distance {
+                if best.map_or(true, |(b, _)| d < b) {
+                    best = Some((d, *idx));
+                }
+            }
+        }
+        cur = meta.superclass.as_deref().and_then(find_class);
+    }
+    match best {
+        Some((_, idx)) if candidates > 1 => Some(idx),
+        _ => lookup_method_argc(class, method, args.len()),
+    }
+}
+
+/// How far an argument is from a declared parameter type: `0` when the
+/// parameter names the argument's own class, `1` for a supertype it is
+/// assignable to, `2` for `Object`/`def`, `None` when it does not fit.
+fn param_distance(ty: &str, v: &Value) -> Option<u32> {
+    if matches!(ty, "def" | "Object" | "java.lang.Object") {
+        return Some(if matches!(v, Value::Undef) { 0 } else { 2 });
+    }
+    let boxed = match ty {
+        "int" => "Integer",
+        "long" => "Long",
+        "short" => "Short",
+        "byte" => "Byte",
+        "double" => "Double",
+        "float" => "Float",
+        "boolean" => "Boolean",
+        "char" => "Character",
+        other => other,
+    };
+    // `null` fits any reference type, but never a primitive; Groovy ranks
+    // `Object` closest for it, so `m(null)` picks `m(Object)` over `m(String)`.
+    if matches!(v, Value::Undef) {
+        return (boxed == ty).then_some(1);
+    }
+    let own = simple_class_name(v);
+    if own == boxed {
+        return Some(0);
+    }
+    value_is_a(v, boxed).then_some(1)
+}
+
 /// The declaration of `method` taking exactly `argc` arguments, or `None`.
 ///
 /// No fallback, unlike [`lookup_method_argc`]: used where the arity *is* the
@@ -5029,10 +5130,28 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
         Value::Hash(h) => h.into_iter().map(|(k, v)| (k, v.to_int() as u8)).collect(),
         _ => std::collections::HashMap::new(),
     };
-    let overloads: std::collections::HashMap<String, u16> = match overloads_h {
+    let mut overloads: std::collections::HashMap<String, u16> = match overloads_h {
         Value::Hash(h) => h.into_iter().map(|(k, v)| (k, v.to_int() as u16)).collect(),
         _ => std::collections::HashMap::new(),
     };
+    // The `name/arity:ordinal:T1,T2` entries of genuine overloads, regrouped by
+    // `name/arity` in declaration order.
+    let mut typed: Vec<(String, usize, Vec<String>, u16)> = Vec::new();
+    overloads.retain(|k, idx| {
+        let mut parts = k.splitn(3, ':');
+        let (Some(key), Some(ord), Some(types)) = (parts.next(), parts.next(), parts.next()) else {
+            return true;
+        };
+        let types = types.split(',').map(str::to_string).collect();
+        typed.push((key.to_string(), ord.parse().unwrap_or(0), types, *idx));
+        false
+    });
+    typed.sort_by_key(|t| t.1);
+    let mut typed_overloads: std::collections::HashMap<String, Vec<(Vec<String>, u16)>> =
+        std::collections::HashMap::new();
+    for (key, _, types, idx) in typed {
+        typed_overloads.entry(key).or_default().push((types, idx));
+    }
     let bool_getters: std::collections::HashSet<String> = match bool_getters_a {
         Value::Array(a) => a.iter().map(|v| v.as_str_cow().into_owned()).collect(),
         _ => std::collections::HashSet::new(),
@@ -5051,6 +5170,7 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
             plain_fields,
             ret_types,
             overloads,
+            typed_overloads,
             bool_getters,
             method_arity,
             superclass,
@@ -5198,6 +5318,24 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
             None => raise_number_format(vm, text().trim()),
         },
         "Boolean" => Value::bool(matches!(&first(), Value::Bool(true)) || text() == "true"),
+        // `new String(byte[] [, charset])` decodes the bytes — UTF-8 unless a
+        // single-byte charset is named — with Java's U+FFFD for a malformed run.
+        "String" if args.first().and_then(array_elem) == Some(ArrayElem::Byte) => {
+            let bytes: Vec<u8> = as_list(&args[0])
+                .unwrap_or_default()
+                .iter()
+                .map(|b| as_i64(b).unwrap_or(0) as u8)
+                .collect();
+            let charset = args.get(1).map(groovy_str).unwrap_or_default();
+            Value::str(match charset.to_ascii_uppercase().as_str() {
+                "ISO-8859-1" | "ISO8859_1" | "LATIN1" => bytes.iter().map(|&b| b as char).collect(),
+                "US-ASCII" | "ASCII" => bytes
+                    .iter()
+                    .map(|&b| if b < 0x80 { b as char } else { '\u{FFFD}' })
+                    .collect(),
+                _ => String::from_utf8_lossy(&bytes).into_owned(),
+            })
+        }
         "String" => Value::str(text()),
         // `new BigDecimal("1.5")` / `new BigInteger("12")` parse with Java's own
         // character-level diagnostics.
@@ -7334,7 +7472,7 @@ fn dispatch_instance_method(
         if method == "hasProperty" && args.len() == 1 && lookup_method(cid, method).is_none() {
             return Some(Ok(has_property(cid, &groovy_str(&args[0]))));
         }
-        let idx = lookup_method_argc(cid, method, args.len())?;
+        let idx = lookup_method_args(cid, method, args)?;
         if let Err(e) = ensure_static_init(vm, cid) {
             return Some(Err(e));
         }
@@ -7350,8 +7488,9 @@ fn dispatch_instance_method(
     // A handle whose class is not in the registry is not an instance call.
     class_meta(inst.class)?;
     // Virtual dispatch: resolve the method most-derived-first through the chain,
-    // preferring the declaration whose arity matches this call.
-    if let Some(idx) = lookup_method_argc(inst.class, method, args.len()) {
+    // preferring the declaration whose arity — and, between genuine overloads,
+    // whose parameter types — match this call.
+    if let Some(idx) = lookup_method_args(inst.class, method, args) {
         let mut pushes = Vec::with_capacity(args.len() + 1);
         pushes.push(recv.clone());
         pushes.extend_from_slice(args);
@@ -9304,6 +9443,23 @@ fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
         // `subList` answers a live **window** onto this list, so it too is
         // decided on the handle rather than on the detached elements.
         // `asReversed()` answers a read-only live view rather than a copy.
+        // `byte[].encodeBase64()` / `encodeHex()` answer a `Writable` whose
+        // text is the encoding; groovyrs answers that text.
+        if matches!(method, "encodeBase64" | "encodeHex")
+            && args.is_empty()
+            && array_elem(&recv) == Some(ArrayElem::Byte)
+        {
+            let bytes: Vec<u8> = as_list(&recv)
+                .unwrap_or_default()
+                .iter()
+                .map(|b| as_i64(b).unwrap_or(0) as u8)
+                .collect();
+            return Value::str(if method == "encodeHex" {
+                bytes.iter().map(|b| format!("{b:02x}")).collect()
+            } else {
+                base64_encode(&bytes)
+            });
+        }
         // A Java array is not a `List`, and has no `asReversed`.
         if method == "asReversed" && args.is_empty() {
             if array_elem(&recv).is_some() {
@@ -11716,6 +11872,54 @@ fn value_size(v: &Value) -> i64 {
     }
 }
 
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Groovy's `EncodingGroovyMethods.encodeBase64`: the standard alphabet with
+/// `=` padding and no line breaks.
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |acc, (i, &b)| acc | (u32::from(b) << (16 - 8 * i)));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(BASE64_ALPHABET[(n >> (18 - 6 * i)) as usize & 63] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Groovy's `decodeBase64`: whitespace is skipped, `=` ends the data, a short
+/// final group is accepted unpadded, and any other character outside the
+/// alphabet is `None` (Groovy's `bad character in base64 value`).
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes() {
+        if c.is_ascii_whitespace() {
+            continue;
+        }
+        if c == b'=' {
+            break;
+        }
+        let v = BASE64_ALPHABET.iter().position(|&a| a == c)? as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
 /// Dispatch a faithful subset of the Groovy GDK for `recv.method(args)`. A
 /// combination outside the subset raises `groovy.lang.MissingMethodException`
 /// rather than mis-running, and a modeled method that Groovy fails on (an
@@ -11773,6 +11977,19 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `x.isCase(y)` spelled as a call is the same test a `switch` label and
         // `grep` apply — one implementation, [`is_case`].
         (_, "isCase") if args.len() == 1 => is_case(vm, recv, &args[0]),
+        (Value::Str(s), "decodeBase64") if args.is_empty() => match base64_decode(s) {
+            Some(bytes) => garray(
+                bytes
+                    .into_iter()
+                    .map(|b| Value::int(i64::from(b as i8)))
+                    .collect(),
+                ArrayElem::Byte,
+            ),
+            None => {
+                raise(vm, "RuntimeException", "bad character in base64 value");
+                Value::Undef
+            }
+        },
         // Universal size query (String chars / list elements / map entries) —
         // for the values that HAVE one. A number does not: `42.size()` is a
         // `MissingMethodException` in Groovy, and answering `0` here (which is
@@ -15025,7 +15242,9 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
     // over a positional one (`[4] as V` is `new V(4)`), and anything else is a
     // `GroovyCastException`. A closure is left to the interface coercion.
     if let Some(cid) = resolve_class_name(ty).filter(|_| !ty.ends_with("[]")) {
-        let is_iface = class_meta(cid).is_some_and(|m| m.is_interface);
+        // An abstract class coerces the way an interface does: the closure
+        // implements the body-less methods, and the declared ones keep theirs.
+        let is_iface = class_meta(cid).is_some_and(|m| m.is_interface || m.generated & 32 != 0);
         if is_iface && !value_is_a(&v, ty) && (closure_meta(&v).is_some() || as_omap(&v).is_some())
         {
             let name = class_meta(cid).map(|m| m.name).unwrap_or_default();
@@ -19424,9 +19643,20 @@ fn drain_iterable(vm: &mut VM, v: &Value) -> Option<Result<Vec<Value>, String>> 
 fn b_writeback(vm: &mut VM, _argc: u8) -> Value {
     let receiver = vm.stack.pop().unwrap_or(Value::Undef);
     let result = vm.stack.pop().unwrap_or(Value::Undef);
+    // A user instance is never the list a GDK mutator changed: a method of its
+    // own (`p.add(1)`, `p << 1`) may mutate a *field* list, and the contents that
+    // call parked belong to the field, not to the variable naming the instance.
+    let parked = take_mutated();
+    if let Value::Obj(id) = receiver {
+        let instance =
+            HEAP.with(|h| matches!(h.borrow().get(id as usize), Some(HeapObj::Instance(_))));
+        if instance {
+            return receiver;
+        }
+    }
     // A call whose *result* is not the new list (`add` answers `true`) parks the
     // new contents instead; prefer them when they are there.
-    if let Some(new) = take_mutated() {
+    if let Some(new) = parked {
         return new;
     }
     if matches!(receiver, Value::Array(_)) {

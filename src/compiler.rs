@@ -255,10 +255,18 @@ struct Compiler {
     /// native lowering, so a shifting loop keeps its JIT trace. Tracked and
     /// scoped alongside [`Compiler::wide_vars`].
     obj_vars: HashSet<String>,
+    /// The names of the script's own top-level classes and interfaces: a
+    /// closure stored into a variable declared as one is coerced to it, as
+    /// `closure as Type` is.
+    script_types: HashSet<String>,
     /// The op indices of arithmetic whose operands are statically `Long`, handed
     /// to the host as [`crate::host::set_wide_sites`]. See
     /// [`Compiler::is_wide`].
     wide_sites: HashSet<usize>,
+    /// The op indices of the `+ 1`/`- 1` each bare `x++`/`x--` lowers to,
+    /// published as [`crate::host::set_incdec_sites`]: a non-numeric operand
+    /// there is `next()`/`previous()`, not `plus`/`minus`.
+    incdec_sites: HashSet<usize>,
     /// The declared parameter types of every closure literal that types one,
     /// keyed by its body's name-pool index and handed to the host as
     /// [`crate::host::set_closure_param_types`].
@@ -544,7 +552,9 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         typed_vars: HashMap::new(),
         inline_finally_depth: 0,
         obj_vars: HashSet::new(),
+        script_types: HashSet::new(),
         wide_sites: HashSet::new(),
+        incdec_sites: HashSet::new(),
         closure_param_types: HashMap::new(),
         closure_min_params: HashMap::new(),
         imports: prog
@@ -580,15 +590,21 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             fields,
             ctors,
             methods,
+            abstract_methods,
             ..
         } = &stmt.kind
         {
+            c.script_types.insert(name.clone());
+            // A class that declares a method without a body is abstract: a
+            // closure coerced to it implements only those methods.
+            let is_abstract = !*is_interface && !abstract_methods.is_empty();
             c.register_class(
                 name,
                 superclass.as_deref(),
                 interfaces,
                 *is_interface,
                 *is_trait,
+                is_abstract,
                 generated,
                 fields,
                 ctors,
@@ -688,6 +704,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         c.b.patch_jump(jf, after);
     }
     crate::host::set_wide_sites(std::mem::take(&mut c.wide_sites));
+    crate::host::set_incdec_sites(std::mem::take(&mut c.incdec_sites));
     crate::host::set_closure_param_types(std::mem::take(&mut c.closure_param_types));
     crate::host::set_closure_min_params(std::mem::take(&mut c.closure_min_params));
     Ok(c.b.build())
@@ -1232,6 +1249,28 @@ impl Compiler {
     fn method_sub_name(class: &str, method: &str, arity: usize) -> String {
         format!("$cls_{class}_m_{method}_{arity}")
     }
+
+    /// The sub name of every method of a class, in declaration order. A method
+    /// overloading an earlier one of the same name *and* arity (`m(int)` beside
+    /// `m(String)`) takes an ordinal suffix, so each keeps its own body.
+    fn method_sub_names(class: &str, methods: &[Method]) -> Vec<String> {
+        methods
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let base = Self::method_sub_name(class, &m.name, m.params.len());
+                let earlier = methods[..i]
+                    .iter()
+                    .filter(|o| o.name == m.name && o.params.len() == m.params.len())
+                    .count();
+                if earlier == 0 {
+                    base
+                } else {
+                    format!("{base}_o{earlier}")
+                }
+            })
+            .collect()
+    }
     /// Synthetic sub name for a class constructor of the given arity.
     fn ctor_sub_name(class: &str, arity: usize) -> String {
         format!("$cls_{class}_ctor_{arity}")
@@ -1253,6 +1292,7 @@ impl Compiler {
         interfaces: &[String],
         is_interface: bool,
         is_trait: bool,
+        is_abstract: bool,
         generated: &Generated,
         fields: &[Field],
         ctors: &[Ctor],
@@ -1278,7 +1318,8 @@ impl Compiler {
             | ((generated.include_names as i64) << 1)
             | ((generated.equals_hash as i64) << 2)
             | ((generated.tuple_ctor as i64) << 3)
-            | ((generated.immutable as i64) << 4);
+            | ((generated.immutable as i64) << 4)
+            | ((is_abstract as i64) << 5);
         self.b.emit(Op::LoadInt(gbits), line);
         for i in interfaces {
             let c = self.b.add_constant(Value::str(i.clone()));
@@ -1321,12 +1362,11 @@ impl Compiler {
         }
         self.b.emit(Op::MakeArray(fields.len() as u16), line);
         // method table: name -> sub name-pool index
-        for m in methods {
+        let sub_names = Self::method_sub_names(name, methods);
+        for (m, sub_name) in methods.iter().zip(&sub_names) {
             let k = self.b.add_constant(Value::str(m.name.clone()));
             self.b.emit(Op::LoadConst(k), line);
-            let sub = self
-                .b
-                .add_name(&Self::method_sub_name(name, &m.name, m.params.len()));
+            let sub = self.b.add_name(sub_name);
             self.b.emit(Op::LoadInt(sub as i64), line);
         }
         self.b.emit(Op::MakeHash((methods.len() * 2) as u16), line);
@@ -1367,17 +1407,25 @@ impl Compiler {
         // separates two same-named methods; the name-only table above stays for
         // the lookups where the arity is implied by the question being asked
         // (`toString`, `compareTo`, `hashCode`, a getter, a setter).
-        for m in methods {
-            let k = self
-                .b
-                .add_constant(Value::str(format!("{}/{}", m.name, m.params.len())));
-            self.b.emit(Op::LoadConst(k), line);
-            let sub = self
-                .b
-                .add_name(&Self::method_sub_name(name, &m.name, m.params.len()));
-            self.b.emit(Op::LoadInt(sub as i64), line);
+        //
+        // Methods sharing a name and an arity — in this class or along its
+        // superclass chain — are told apart at the call by their parameter
+        // types, so each method is also entered under `name/arity:ordinal:T1,T2`.
+        // The ordinal keeps declaration order, which breaks a tie the way
+        // Groovy's first-declared choice does.
+        let mut entries = 0;
+        for (i, (m, sub_name)) in methods.iter().zip(&sub_names).enumerate() {
+            let sub = self.b.add_name(sub_name) as i64;
+            let key = format!("{}/{}", m.name, m.params.len());
+            let typed = format!("{key}:{i}:{}", m.param_types.join(","));
+            for k in [key, typed] {
+                let k = self.b.add_constant(Value::str(k));
+                self.b.emit(Op::LoadConst(k), line);
+                self.b.emit(Op::LoadInt(sub), line);
+                entries += 1;
+            }
         }
-        self.b.emit(Op::MakeHash((methods.len() * 2) as u16), line);
+        self.b.emit(Op::MakeHash((entries * 2) as u16), line);
         // The `isX()` methods declared `boolean` with no parameters — the only
         // `is` spelling Groovy reads as the getter of the property `x`.
         let bool_getters: Vec<&Method> = methods
@@ -1456,8 +1504,7 @@ impl Compiler {
                 &method_set,
             )?;
         }
-        for m in methods {
-            let sub = Self::method_sub_name(name, &m.name, m.params.len());
+        for (m, sub) in methods.iter().zip(Self::method_sub_names(name, methods)) {
             self.ret_ty = Some(m.ret_ty.clone());
             self.emit_member(line, &sub, &m.params, &m.body, &field_set, &method_set)?;
         }
@@ -1787,7 +1834,7 @@ impl Compiler {
             }
             _ => {
                 self.expr(value)?;
-                self.b.emit(compound_op(op), self.cur_line);
+                self.emit_compound_op(op);
                 Ok(())
             }
         }
@@ -1833,7 +1880,7 @@ impl Compiler {
             _ => {
                 self.emit_field_get(name)?;
                 self.expr(value)?;
-                self.b.emit(compound_op(op), self.cur_line);
+                self.emit_compound_op(op);
             }
         }
         let c = self.b.add_constant(Value::str(name.to_string()));
@@ -1882,7 +1929,7 @@ impl Compiler {
             // the value is the last expression of whichever branch runs. Rewrite
             // that expression into an explicit `return` so the ordinary return
             // path — including the `finally` bodies it must run first — applies.
-            StmtKind::If { .. } | StmtKind::Try { .. } => {
+            StmtKind::If { .. } | StmtKind::Try { .. } | StmtKind::Switch(_) => {
                 match tail_return(std::slice::from_ref(last)) {
                     Some(rewritten) => {
                         for s in &rewritten {
@@ -1995,7 +2042,7 @@ impl Compiler {
                         // `x <op>= e` → x = x <op> e
                         self.emit_name_load(name, self.cur_line)?;
                         self.expr(value)?;
-                        let pos = self.b.emit(compound_op(*op), self.cur_line);
+                        let pos = self.emit_compound_op(*op);
                         // `long t = 0; t += 2000000000; t += 2000000000` is
                         // `4000000000`: the target's own width decides, not the
                         // running value's, which is still inside `Integer`
@@ -3049,18 +3096,40 @@ impl Compiler {
     /// Emit the in-place update `name = name ± 1` (leaving nothing on the stack).
     /// Used by both `++`/`--` in statement position and as the update step of the
     /// value-position pre/post forms.
+    /// Emit the native op a compound assignment applies, answering its index.
+    /// A `++`/`--` site is recorded so a non-numeric operand there calls
+    /// `next()`/`previous()` (see [`Compiler::incdec_sites`]).
+    fn emit_compound_op(&mut self, op: AssignOp) -> usize {
+        let pos = self.b.emit(compound_op(op), self.cur_line);
+        if matches!(op, AssignOp::Next | AssignOp::Previous) {
+            self.incdec_sites.insert(pos);
+        }
+        pos
+    }
+
     fn inc_dec_update(&mut self, name: &str, inc: bool) -> Result<(), String> {
         // A bare field inside a method is `this.field`, so `n++` is the field
         // compound assignment `n += 1` — reading it as a script name found
         // nothing and answered `null + 1`.
         if self.is_field(name) {
-            let op = if inc { AssignOp::Add } else { AssignOp::Sub };
+            let op = if inc {
+                AssignOp::Next
+            } else {
+                AssignOp::Previous
+            };
             return self.assign_field(name, op, &Expr::Int(1, IntWidth::Int));
         }
         self.emit_name_load(name, self.cur_line)?;
         self.b.emit(Op::LoadInt(1), self.cur_line);
-        self.b
+        let pos = self
+            .b
             .emit(if inc { Op::Add } else { Op::Sub }, self.cur_line);
+        self.incdec_sites.insert(pos);
+        // A `next()`/`previous()` the operand does not answer raises; settle it
+        // before the store, so a handler sees the variable unchanged.
+        if self.has_exceptions && self.static_num_kind(&Expr::Var(name.to_string())).is_none() {
+            self.emit_exc_check(self.cur_line)?;
+        }
         // `byte`/`short` wrap on the store (`byte b = 127; b++` is `-128`), as
         // `b += 1` already does through the typed-store coercion.
         if let Some(ty) = self
@@ -4157,6 +4226,13 @@ impl Compiler {
         // `List.sort(Comparator)` then treats differently from a `Closure`.
         if matches!(ty, "Comparator" | "java.util.Comparator") {
             let tidx = self.b.add_constant(Value::str("Comparator".to_string()));
+            self.b.emit(Op::LoadConst(tidx), self.cur_line);
+            return self.emit_call_builtin(crate::host::GCAST, 0, self.cur_line);
+        }
+        // `I i = { x -> … }` coerces the closure to the script's own interface or
+        // abstract class, exactly as `{ x -> … } as I` does.
+        if matches!(value, Expr::Closure { .. }) && self.script_types.contains(ty) {
+            let tidx = self.b.add_constant(Value::str(ty.to_string()));
             self.b.emit(Op::LoadConst(tidx), self.cur_line);
             return self.emit_call_builtin(crate::host::GCAST, 0, self.cur_line);
         }
@@ -5267,6 +5343,46 @@ fn tail_return(body: &[Stmt]) -> Option<Vec<Stmt>> {
                 finally_body: finally_body.clone(),
             },
         ),
+        // A colon-form `switch`, as Groovy's `ReturnAdder` rewrites one: a case
+        // that ends in `break` returns its last value, the `default` returns
+        // its, and a case that falls through returns nothing — except the last
+        // one of a switch with no `default` (GROOVY-9896). A `break` stays after
+        // the rewrite: a body whose tail is not a value still has to leave.
+        StmtKind::Switch(sw) if !sw.arrow => {
+            let has_default = sw.cases.iter().any(|c| c.labels.is_empty());
+            let n = sw.cases.len();
+            let cases = sw
+                .cases
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let body = match c.body.split_last() {
+                        Some((brk, rest)) if matches!(brk.kind, StmtKind::Break(None)) => {
+                            tail_return(rest).map(|mut v| {
+                                v.push(brk.clone());
+                                v
+                            })
+                        }
+                        _ if c.labels.is_empty() || (!has_default && i + 1 == n) => {
+                            tail_return(&c.body)
+                        }
+                        _ => None,
+                    };
+                    SwitchCase {
+                        labels: c.labels.clone(),
+                        body: body.unwrap_or_else(|| c.body.clone()),
+                    }
+                })
+                .collect();
+            Stmt::new(
+                last.line,
+                StmtKind::Switch(Box::new(SwitchBody {
+                    subject: sw.subject.clone(),
+                    cases,
+                    arrow: false,
+                })),
+            )
+        }
         _ => return None,
     };
     let mut out = init.to_vec();
@@ -5631,8 +5747,8 @@ fn recursive_fns(prog: &Program, fn_names: &HashSet<String>) -> HashSet<String> 
 
 fn compound_op(op: AssignOp) -> Op {
     match op {
-        AssignOp::Add => Op::Add,
-        AssignOp::Sub => Op::Sub,
+        AssignOp::Add | AssignOp::Next => Op::Add,
+        AssignOp::Sub | AssignOp::Previous => Op::Sub,
         AssignOp::Mul => Op::Mul,
         AssignOp::Mod => unreachable!("Mod lowers through Compiler::emit_mod, not compound_op"),
         AssignOp::Div => unreachable!("Div lowers through the GDIV builtin, not compound_op"),
@@ -5683,8 +5799,8 @@ enum NumKind {
 fn compound_binop(op: AssignOp) -> Option<BinOp> {
     match op {
         AssignOp::Assign => None,
-        AssignOp::Add => Some(BinOp::Add),
-        AssignOp::Sub => Some(BinOp::Sub),
+        AssignOp::Add | AssignOp::Next => Some(BinOp::Add),
+        AssignOp::Sub | AssignOp::Previous => Some(BinOp::Sub),
         AssignOp::Mul => Some(BinOp::Mul),
         AssignOp::Div => Some(BinOp::Div),
         AssignOp::Mod => Some(BinOp::Mod),

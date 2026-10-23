@@ -750,9 +750,10 @@ Next waves, in priority order:
    rather than live views, and `getClass()` names `java.util.ArrayList` where
    Groovy names `java.util.TreeMap$KeySet`. A `Map.Entry` carries no class
    either.
-5. **Command-argument chains** — `println a, b` and `foo bar baz` do not parse;
-   only a member call with its parentheses left off does (`sb.append 'x'`),
-   and the parenthesised call always parses.
+5. **Command-argument chains** — `println a, b` and `foo bar baz` do not parse.
+   A member call with its parentheses left off does (`sb.append 'x'`), as does
+   a bare-name call whose first argument is a literal (`printf "%d\n", 5`,
+   `f 1, k: 2`), and the parenthesised call always parses.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list.
 

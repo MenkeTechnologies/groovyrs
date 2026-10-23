@@ -322,6 +322,9 @@ pub struct Ctor {
 pub struct Method {
     pub name: String,
     pub params: Vec<String>,
+    /// Each parameter's declared type, as written (`def` when untyped). Two
+    /// methods of one name and arity are told apart by these at the call.
+    pub param_types: Vec<String>,
     pub body: Vec<Stmt>,
     /// The declared return type, as written (`def` when untyped). Read for one
     /// run-time decision: a no-argument `isX()` declared `boolean` is the getter
@@ -338,6 +341,11 @@ pub enum AssignOp {
     Mul,
     Div,
     Mod,
+    /// `target++` / `target--` on a property, subscript or field: `target += 1`
+    /// / `-= 1` for a number, but Groovy's `next()` / `previous()` for any
+    /// other operand (`'a'++` is `b`), which `+= 1` is not.
+    Next,
+    Previous,
     /// The bitwise and exponent compound assignments — `<<=`, `>>=`, `>>>=`,
     /// `&=`, `|=`, `^=`, `**=`. Each carries the [`BinOp`] it applies, and the
     /// compiler lowers it through exactly the binary-operator path that `BinOp`

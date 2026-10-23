@@ -9266,10 +9266,7 @@ fn quoted_constant_member_is_the_identifier_it_spells() {
          println([size: 9].\"size\")\nprintln([1]*.\"toString\"())\n",
     );
     assert!(ok);
-    assert_eq!(
-        out,
-        "1\ngetter\nhi v\n1\nhi q\n1\n2\n3\n3\n9\n[1]\n"
-    );
+    assert_eq!(out, "1\ngetter\nhi v\n1\nhi q\n1\n2\n3\n3\n9\n[1]\n");
 }
 
 #[test]

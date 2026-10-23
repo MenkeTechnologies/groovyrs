@@ -514,9 +514,19 @@ Implemented and checked against Apache Groovy:
   three methods, for a class, an interface, a trait and a top-level script
   function alike. A spread call resolves its overload at run time, since its
   argument count is not known until the operand is evaluated.
-- **Overloading by parameter type** — methods and constructors sharing an arity
-  (`P(int)`, `P(String)`, `P(List)`) are told apart by their declared parameter
-  types at the call, the closest fit winning.
+- **Overloading by parameter type** — methods, constructors and script
+  functions sharing an arity (`P(int)`, `P(String)`, `P(List)`) are told apart
+  by their declared parameter types at the call, the closest fit winning, with
+  Groovy's numeric widening (`d(3)` against `d(double x)` sees `3.0`). A call
+  no declaration fits raises (`MissingMethodException`, or `Could not find
+  matching constructor`); a variadic last parameter (`String... xs`) collects
+  the trailing arguments; `f()` against a single-parameter `f(x)` passes
+  `null`.
+- **Records and tuples** — `record P(int x, int y) { … }` (canonical and
+  named-argument constructors, `x()` accessors, `P[x=1, y=2]`, record
+  `equals`/`hashCode`, `toList()`/`toMap()`), and `Tuple2` … `Tuple16` /
+  `Tuple.tuple(…)` with `v1` … `vN`. `List.withDefault` / `withLazyDefault` /
+  `withEagerDefault` grow the list on a read past its end.
 - **Closure coercion at a typed parameter** — a closure passed where a
   function, method, constructor or closure parameter is declared as one of the
   script's single-abstract-method interfaces or abstract classes is coerced to
@@ -592,7 +602,9 @@ Implemented and checked against Apache Groovy:
 - **Digests and URL encoding** — `md5()` / `sha256()` on a string (its UTF-8
   bytes) and on a `byte[]`, as lower-case hex; `URLEncoder.encode` /
   `URLDecoder.decode` with the one-argument (UTF-8) and named-charset forms
-  (UTF-8, ISO-8859-1) and the JDK's diagnostics.
+  (UTF-8, ISO-8859-1) and the JDK's diagnostics. `byte[].encodeBase64()` /
+  `encodeHex()` answer a `groovy.lang.Writable`, and `encodeBase64(true)`
+  chunks its output.
 - **`java.util.Optional`** — `Optional.of` / `ofNullable` / `empty`, `get`,
   `isPresent` / `isEmpty`, `orElse` / `orElseGet` / `orElseThrow`, `map`,
   `flatMap`, `filter`, `or`, `ifPresent` / `ifPresentOrElse` (a closure for each
@@ -658,7 +670,7 @@ Implemented and checked against Apache Groovy:
   `instanceof`, and `new`.
 
 See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`GString` as a type,
-records, `Tuple2`, a `TreeSet` ordered by a `Comparator`).
+a `TreeSet` ordered by a `Comparator`).
 
 ---
 

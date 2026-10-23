@@ -262,10 +262,51 @@ reported as parse or compile errors, never silently mis-run.
   types fit its arguments closest — the argument's own class, then a supertype,
   then `Object`/`def`, first declared on a tie — along the superclass chain, an
   override beating what it overrides. `m(null)` picks `m(Object)`, as Groovy's
-  does. A name with one declaration per arity dispatches as before.
-  Constructors are selected the same way among the class's own (they are not
-  inherited): `P(int)`, `P(String)` and `P(List)` are three bodies, for `new`
-  and for `super(…)` alike.
+  does. Constructors are selected the same way among the class's own (they
+  are not inherited), for `new` and `super(…)` alike, and so are top-level
+  script functions declared more than once at one arity. A number widens to a
+  `long`, `double`, `float`, `BigDecimal` or `BigInteger` parameter, and a
+  `double`/`float`/`BigDecimal`/`BigInteger` parameter converts the number it
+  receives (`def d(double x)` called with `3` sees `3.0`); a closure fits a
+  single-abstract-method parameter. Arguments that fit no declaration are a
+  miss: `MissingMethodException` for a method or a script function's overload
+  set, and `GroovyRuntimeException: Could not find matching constructor for:
+  P(String)` for `new`. A lone list argument that fits nothing is tried as the
+  argument list (`m([7])` against `m(int)`), a variadic last parameter
+  (`String... xs`, `String[] xs`) collects the trailing arguments into its
+  array, and a call with no arguments hands the one single-parameter
+  declaration a `null` (`f()` against `f(x)`), where groovyrs used to run the
+  body over a misaligned frame.
+- **`record` declarations.** `record P(int x, int y) { … }` is a class of
+  `final` components with a canonical (and a named-argument) constructor,
+  accessors `x()` but no `getX()`, `toString` as `P[x=1, y=2]`, the JDK
+  record's `equals` and `hashCode`, `instanceof Record`, and Groovy's
+  `toList()` / `size()` / `p[i]` / `toMap()`.
+- **`groovy.lang.Tuple`.** `new Tuple2(a, b)` … `Tuple16`, `new Tuple(…)` and
+  `Tuple.tuple(…)` build an unmodifiable list of the fixed-arity class, with
+  `v1` … `vN` / `getV1()` and `Tuple2`/`Tuple3`'s `first`/`second`/`third`.
+- **`List.withDefault` / `withLazyDefault` / `withEagerDefault`.** A read past
+  the end grows the list (with `null`s and the default at the index, or with
+  the default at every new index when eager), a lazy list also fills a `null`
+  it holds, and a negative index reaching before the start is
+  `IndexOutOfBoundsException`.
+- **`final` direct writes.** `obj.@f = v` on a `final` field raises
+  `GroovyRuntimeException: Cannot set the property 'f' because the backing field
+  is final.`; a method (not a constructor) assigning its class's `final` field
+  is the compile error `cannot modify final field 'f' outside of constructor.`
+- **A store into a class-typed variable is `castToType`.** Any value, not only
+  a literal: a list or map builds the class, and what cannot (a map key with no
+  property, a list no constructor fits, a `String`) raises
+  `GroovyCastException` with Groovy's `due to:` reason; `as` falls back where
+  Groovy's does.
+- **`byte[].encodeBase64()` / `encodeHex()` answer a `Writable`**
+  (`EncodingGroovyMethods$1` / `$2`): its text renders and `writeTo(writer)`
+  writes it, it is not `==` its text, and `encodeBase64(true)` chunks the text
+  with a CRLF after every 76 characters.
+- **`Integer.equals(Long)` is `false`**, and `println -7 % 3` is the binary
+  `println - 7 % 3` that raises `MissingPropertyException`, as in Groovy. A
+  GPath read whose element misses raises Groovy's wrapped `Exception
+  evaluating property 'p' for java.util.ArrayList, Reason: …`.
 - **`++`/`--` are `next()`/`previous()`.** A number keeps the native `+ 1`
   (and its JIT trace); any other operand at a `++`/`--` site — a `String`
   (`'Az'++` is `A{`), a user class — calls its `next()`/`previous()`, on a bare
@@ -850,40 +891,40 @@ error.
 **Found in the round-8 sweep** (each line run on both sides, Groovy 6.0.0 /
 JVM 21.0.12):
 
-- A closure passed to a parameter declared as a script interface with two or
-  more abstract methods stays a closure, so the call reaches the body and
-  misses there; Groovy refuses the call itself (`MissingMethodException` on
-  the function, naming the closure's generated class).
-- A closure coerced to a *concrete* class (`{ 'c' } as C`) should answer every
-  method of `C`; groovyrs leaves the closure uncoerced. An abstract class is
-  coerced (the closure implements the body-less methods).
-- `recv. = v` on a `final` field succeeds; Groovy raises
-  `GroovyRuntimeException: Cannot set the property 'f' because the backing
-  field is final.` A method body (not a constructor) assigning a `final` field
-  is a compile error in Groovy and runs here.
-- A map with a key the class lacks: `[x: 1, z: 2] as Pt` raises
-  `MissingPropertyException` where Groovy falls back to a proxy subclass built
-  by the no-argument constructor (`Pt(0,0)`); `Pt p = [x: 1, z: 2]` raises the
-  bare `MissingPropertyException` where Groovy wraps it in a
-  `GroovyCastException` (`Cannot cast object '{x=1, z=2}' … due to: …`). Only a
-  list or map *literal* stored into a class-typed local is converted; a
-  variable holding one is stored as it is.
+- A closure argument for a parameter declared as a script interface with two
+  or more abstract methods is refused at the call, as Groovy refuses it, for a
+  method or constructor; a top-level script *function* still binds it and
+  misses inside the body. The refusal names the argument's type `Closure`
+  where Groovy names the closure's generated class.
+- `{ … } as C` for a concrete class answers every method `C` declares and its
+  property getters through the closure; its class reports `C1_groovyProxy`,
+  but a closure written with a `T[]`/`T...` parameter does not collect the
+  call's arguments, and a closure returning a `GString` from `toString()` is
+  not the `ClassCastException` Groovy raises.
+- `[x: 1, z: 2] as Pt` builds `Pt` by its no-argument constructor, as Groovy's
+  proxy fallback does, but the result is a plain `Pt` where Groovy's is a
+  `Pt1_groovyProxy`. The `GroovyCastException` for `Pt p = [x: 1, z: 2]` has no
+  second `Possible solutions: x, y` line.
 - `new TreeSet(comparator)` takes the comparator as an element to copy rather
   than as the ordering.
-- `record` declarations print nothing and fail (`unable to resolve`).
-- `Tuple2`/`Tuple.tuple` and `List.withDefault` are unresolved or missing.
+- A `record`'s `properties` lack `serialVersionUID`; a compact canonical
+  constructor (`P { … }`) does not parse.
+- `withDefault` on a list registers the default on that list itself, so `l.withDefault { … }.is(l)` is `true` (Groovy
+  answers a separate `ListWithDefault` over it) and the original reference
+  defaults too.
 - `MissingMethodException`'s `values: […]` renders a closure argument as
   `(obj:N)`; Groovy prints the closure's generated class and identity hash.
 - `BigDecimal.sqrt(MathContext)` follows JDK 21 (the pinned oracle): an exact
   root's preferred scale is `scale / 2`, so `4.0G.sqrt(mc)` is `2`. JDK 27
   changed it to the ceiling and prints `2.0` (and words the unlimited-precision
   failure `Computed root not exact.`), so the same script differs by JVM.
-- `byte[].encodeBase64()` / `encodeHex()` answer the encoded `String`, where
-  Groovy answers a `groovy.lang.Writable`; text and `toString()` agree.
-- `println -7 % 3` prints `-1`; Groovy reads `println - 7 % 3` and raises
-  `MissingPropertyException` (the documented paren-less `println` latitude).
-- `Integer.equals(Long)` (`5.equals(5L)`) is `true`; Java answers `false`. An
-  `Integer` and a `Long` are one `Value::Int` at run time.
+- `Integer.equals(Long)` is `false` only where the compiler sees the `Long`
+  (a `L` literal, a `long`/`Long`-typed or `L`-initialised variable); a `Long`
+  that only the run time produces is one `Value::Int` with an `Integer`.
+- Two constructors a no-argument `new` could both reach with a `null`
+  (`S(String)` beside `S(Integer)`) raise `GroovyRuntimeException: Could not
+  find matching constructor`; Groovy raises `MethodSelectionException` listing
+  them.
 - A compound write or `++`/`--` on a *property* evaluates its receiver once
   (`f().x += 1`, `f().x++`, `++f().x` call `f` one time); Groovy 6 evaluates
   it twice, once to read and once to write. A subscript target
@@ -979,14 +1020,12 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   synthetic per-closure class (`Script1$_run_closure1`), whose name depends on
   the enclosing script's name and the closure's position; groovyrs has no such
   class to name.
-- **Script functions overloaded by *parameter type*.** Class methods and
-  constructors sharing an arity are selected by their parameter types (see
-  above); two top-level script *functions* of one name and arity still collapse
-  onto one, so `def f(String s)` beside `def f(int i)` answers `f(1)` with
-  whichever body registered last. A call whose arguments fit no declared type
-  still reaches the arity's body rather than raising — Groovy raises
-  `MissingMethodException` for a method and `GroovyRuntimeException: Could not
-  find matching constructor` for `new P("x")` against `P(int)` alone.
+- **A script function declared once is not type-checked at the call.** A
+  name declared at one arity compiles to a direct call, so `def k(String s)`
+  called as `k(5)` runs the body with `5` where Groovy raises
+  `MissingMethodException`, and a lone list argument is not spread into its
+  parameters. Declarations sharing an arity, methods and constructors are
+  selected (and refused) by type.
 - **A `BigInteger` argument where the JDK overload wants an `int`.**
   `255.toString(16G)` answers `16` in Groovy — the `BigInteger` coerces to the
   `int` the static `Integer.toString(int)` wants — where groovyrs raises

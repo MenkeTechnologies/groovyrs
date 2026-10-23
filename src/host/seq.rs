@@ -956,3 +956,73 @@ pub(super) fn static_call(vm: &mut VM, class: &str, method: &str, args: &[Value]
         _ => return None,
     })
 }
+
+// ── groovy.lang.Tuple ───────────────────────────────────────────────────────
+
+/// The class of each fixed-arity tuple, `Tuple0` … `Tuple16`.
+const TUPLE_CLASSES: [&str; 17] = [
+    "groovy.lang.Tuple0",
+    "groovy.lang.Tuple1",
+    "groovy.lang.Tuple2",
+    "groovy.lang.Tuple3",
+    "groovy.lang.Tuple4",
+    "groovy.lang.Tuple5",
+    "groovy.lang.Tuple6",
+    "groovy.lang.Tuple7",
+    "groovy.lang.Tuple8",
+    "groovy.lang.Tuple9",
+    "groovy.lang.Tuple10",
+    "groovy.lang.Tuple11",
+    "groovy.lang.Tuple12",
+    "groovy.lang.Tuple13",
+    "groovy.lang.Tuple14",
+    "groovy.lang.Tuple15",
+    "groovy.lang.Tuple16",
+];
+
+/// A `groovy.lang.Tuple` of `items`: an unmodifiable `List`, of the
+/// fixed-arity class `class` names (`Tuple2`, or the variadic `Tuple`).
+pub(super) fn make_tuple(items: Vec<Value>, class: &'static str) -> Value {
+    let out = glist(items);
+    set_flavor(&out, class, Writes::Frozen);
+    out
+}
+
+/// `new Tuple2(a, b)` / `new Tuple(a, b, c)`: `None` when `simple` names no
+/// tuple class or the arity does not match the class's.
+pub(super) fn new_tuple(simple: &str, args: &[Value]) -> Option<Value> {
+    if simple == "Tuple" {
+        return Some(make_tuple(args.to_vec(), "groovy.lang.Tuple"));
+    }
+    let arity: usize = simple.strip_prefix("Tuple")?.parse().ok()?;
+    let class = TUPLE_CLASSES.get(arity)?;
+    (args.len() == arity).then(|| make_tuple(args.to_vec(), class))
+}
+
+/// `Tuple.tuple(…)`: the fixed-arity tuple of its arguments.
+pub(super) fn tuple_of(args: &[Value]) -> Option<Value> {
+    let class = TUPLE_CLASSES.get(args.len())?;
+    Some(make_tuple(args.to_vec(), class))
+}
+
+/// The component a fixed-arity tuple answers for `name` — the property `v2`
+/// or the call `getV2()`, and `Tuple2`/`Tuple3`'s `first`/`second`/`third` —
+/// or `None` when `v` is no such tuple or `name` no such component.
+pub(super) fn tuple_component(v: &Value, name: &str) -> Option<Value> {
+    let class = flavor_class(v)?;
+    let arity = TUPLE_CLASSES.iter().position(|c| *c == class)?;
+    let name = name
+        .strip_prefix("get")
+        .map(lower_first)
+        .unwrap_or_else(|| name.to_string());
+    let index = match name.as_str() {
+        "first" if matches!(arity, 2 | 3) => 1,
+        "second" if matches!(arity, 2 | 3) => 2,
+        "third" if arity == 3 => 3,
+        _ => name.strip_prefix('v')?.parse::<usize>().ok()?,
+    };
+    if index == 0 || index > arity {
+        return None;
+    }
+    as_list(v)?.get(index - 1).cloned()
+}

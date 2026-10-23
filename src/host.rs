@@ -450,6 +450,30 @@ pub const GLIST_ADOPT: u16 = 779;
 /// anything else passes through.
 pub const GSAM_PARAM: u16 = 780;
 
+/// Builtin id for the numeric conversion a parameter declared `double`,
+/// `float`, `BigDecimal` or `BigInteger` applies to the number it receives
+/// (`def d(double x)` called with `3` sees `3.0`). Stack: the argument, then
+/// the type name.
+pub const GPARAM_CONVERT: u16 = 781;
+
+/// Builtin id for a call to a script function declared more than once at
+/// the call's arity: the declaration whose parameter types fit the arguments
+/// runs. Stack: the arguments, then the `name/arity` key.
+pub const GCALL_TYPED: u16 = 782;
+
+/// Builtin id for a constructor's direct write of its own field: `GFIELD_SET`
+/// without the `final` check, since a constructor is where a `final` field is
+/// assigned.
+pub const GFIELD_INIT: u16 = 783;
+
+/// Builtin id for the conversion a store into a variable declared as a script
+/// class applies: Groovy's `castToType`, which unlike `as` refuses what it
+/// cannot convert (see [`cast_assign`]). Stack: the value, then the type name.
+pub const GCAST_ASSIGN: u16 = 784;
+
+/// Builtin id for `this` outside any class: the script object.
+pub const GSCRIPT_THIS: u16 = 785;
+
 /// The method name `list.remove((Object) x)` compiles to: the cast selects
 /// `Collection.remove(Object)` over `List.remove(int)`, which only the call
 /// site can see. Not an identifier, so no script can name it.
@@ -552,6 +576,11 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GIN, b_in);
     vm.register_builtin(GCAST, b_cast);
     vm.register_builtin(GSAM_PARAM, b_sam_param);
+    vm.register_builtin(GPARAM_CONVERT, b_param_convert);
+    vm.register_builtin(GCALL_TYPED, b_call_typed);
+    vm.register_builtin(GFIELD_INIT, b_field_init);
+    vm.register_builtin(GCAST_ASSIGN, b_cast_assign);
+    vm.register_builtin(GSCRIPT_THIS, b_script_this);
     vm.register_builtin(GJCAST, b_java_cast);
     vm.register_builtin(GLIST_ADOPT, b_list_adopt);
     vm.register_builtin(GCLASSREF, b_classref);
@@ -664,6 +693,10 @@ thread_local! {
     /// the map's heap id. A missing-key read then answers that closure's result
     /// and stores it, which is what `groovy.lang.MapWithDefault` does.
     static MAP_DEFAULTS: RefCell<HashMap<u32, Value>> = RefCell::new(HashMap::new());
+    /// The default closure a list got from `withDefault` / `withLazyDefault`
+    /// (`false`) or `withEagerDefault` (`true`), keyed by its heap id: see
+    /// [`list_default_get`].
+    static LIST_DEFAULTS: RefCell<HashMap<u32, (Value, bool)>> = RefCell::new(HashMap::new());
     /// The `with`/`tap` receivers whose closures are currently running, innermost
     /// last — Groovy's closure *delegate* chain. A bare call inside the closure
     /// that the owner (the script) cannot resolve is dispatched against the
@@ -738,6 +771,40 @@ thread_local! {
 /// Publish the compiler's per-closure minimum argument counts for this chunk.
 pub fn set_closure_min_params(min: HashMap<u16, u8>) {
     CLOSURE_MIN_PARAMS.with(|t| *t.borrow_mut() = min);
+}
+
+/// The script functions declared more than once at one arity, by
+/// `name/arity`: each declaration's parameter types and sub name, in
+/// declaration order.
+pub type FnOverloads = HashMap<String, Vec<(Vec<String>, String)>>;
+
+thread_local! {
+    /// The script functions declared more than once at one arity, by
+    /// `name/arity`: each declaration's parameter types and sub name.
+    static FN_TYPED: RefCell<FnOverloads> =
+        RefCell::new(HashMap::new());
+}
+
+thread_local! {
+    /// The script's single-abstract-method types (see the compiler's
+    /// `sam_types`): the interfaces and abstract classes a closure argument
+    /// can stand in for.
+    static SAM_TYPES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Publish the compiler's single-abstract-method types.
+pub fn set_sam_types(types: HashSet<String>) {
+    SAM_TYPES.with(|t| *t.borrow_mut() = types);
+}
+
+/// Whether script type `name` has exactly one abstract method.
+fn is_sam_type(name: &str) -> bool {
+    SAM_TYPES.with(|t| t.borrow().contains(name))
+}
+
+/// Publish the compiler's type-selected script function overloads.
+pub fn set_fn_typed(table: FnOverloads) {
+    FN_TYPED.with(|t| *t.borrow_mut() = table);
 }
 
 /// Publish the compiler's typed closure parameter lists for this chunk.
@@ -1028,8 +1095,27 @@ fn raise_missing_method_wide(
     args: &[Value],
     widths: u8,
 ) -> Value {
+    raise_missing_method_as(vm, recv, None, method, args, widths)
+}
+
+/// [`raise_missing_method`] naming `class` as the receiver's class — the
+/// generated class of a proxy (`C1_groovyProxy`), which has no value of its own.
+fn raise_missing_method_on(vm: &mut VM, class: &str, method: &str, args: &[Value]) {
+    raise_missing_method_as(vm, &Value::Undef, Some(class), method, args, 0);
+}
+
+/// The body of [`raise_missing_method_wide`], with the class it names
+/// overridable.
+fn raise_missing_method_as(
+    vm: &mut VM,
+    recv: &Value,
+    class_override: Option<&str>,
+    method: &str,
+    args: &[Value],
+    widths: u8,
+) -> Value {
     // A missing method on `null` is `NullObject`'s: a `NullPointerException`.
-    if matches!(recv, Value::Undef) && as_class_ref(recv).is_none() {
+    if matches!(recv, Value::Undef) && as_class_ref(recv).is_none() && class_override.is_none() {
         raise(
             vm,
             "NullPointerException",
@@ -1057,6 +1143,7 @@ fn raise_missing_method_wide(
     // method, and Groovy names the class the call was made on.
     let static_on = as_class_ref(recv);
     let class = match (recv, &static_on) {
+        _ if class_override.is_some() => class_override.unwrap_or_default().to_string(),
         (_, Some(q)) => q.clone(),
         (Value::Int(_), None) if wide_at(0) => "java.lang.Long".to_string(),
         _ => java_class_name(recv),
@@ -1287,6 +1374,40 @@ fn raise_ambiguous_plus(vm: &mut VM, recv: &Value) -> Value {
     Value::Undef
 }
 
+/// An element's `MissingPropertyException` during a GPath read of `name`
+/// over `coll`, rewrapped the way `DefaultGroovyMethods.getAt(Collection,
+/// String)` reports it: `Exception evaluating property 'name' for
+/// java.util.ArrayList, Reason: groovy.lang.MissingPropertyException: …`. Any
+/// other pending throwable is left as it is.
+fn wrap_gpath_miss(vm: &mut VM, coll: &Value, name: &str) {
+    let Some(exc) = PENDING.with(|p| p.borrow().clone()) else {
+        return;
+    };
+    let is_miss = as_instance(&exc)
+        .and_then(|i| class_meta(i.class))
+        .is_some_and(|m| m.name == "MissingPropertyException");
+    if !is_miss {
+        return;
+    }
+    PENDING.with(|p| p.borrow_mut().take());
+    let class = java_class_name(coll);
+    let payload_class = class.clone();
+    raise_with(
+        vm,
+        "MissingPropertyException",
+        Some(&format!(
+            "Exception evaluating property '{name}' for {class}, Reason: {}",
+            throwable_str(&exc)
+        )),
+        || {
+            vec![
+                ("property", Value::str(name.to_string())),
+                ("type", heap_push(HeapObj::ClassRef(payload_class))),
+            ]
+        },
+    );
+}
+
 /// Raise `groovy.lang.MissingPropertyException` for an unresolved `recv.name`.
 fn raise_missing_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     let class = java_class_name(recv);
@@ -1322,6 +1443,11 @@ fn java_class_name(v: &Value) -> String {
     }
     if as_print_stream(v).is_some() {
         return "java.io.PrintStream".to_string();
+    }
+    // The subclass `ProxyGenerator` builds for `{ … } as C`.
+    if let Some(class) = concrete_closure_proxy(v) {
+        let name = class_meta(class).map(|m| m.name).unwrap_or_default();
+        return format!("{name}1_groovyProxy");
     }
     if matches!(v, Value::Obj(id) if HEAP.with(|h| matches!(h.borrow().get(*id as usize), Some(HeapObj::Random(_)))))
     {
@@ -1375,6 +1501,9 @@ fn java_class_name(v: &Value) -> String {
     if as_uuid(v).is_some() {
         return "java.util.UUID".to_string();
     }
+    if let Some((class, _)) = as_writable(v) {
+        return class.to_string();
+    }
     if as_optional(v).is_some() {
         return "java.util.Optional".to_string();
     }
@@ -1389,6 +1518,7 @@ fn java_class_name(v: &Value) -> String {
         // accessor: `getClass()` is one of the two calls Groovy still answers on
         // a stale window (`is()` is the other), so it must not comodification-check.
         _ if is_sublist(v) => "java.util.ArrayList$SubList",
+        _ if list_default(v).is_some() => "groovy.lang.ListWithDefault",
         _ if reversed_root(v).is_some() => "org.apache.groovy.util.ReversedList",
         // An array is a list *kind*, so it has to be asked about before the
         // plain-list arm claims it.
@@ -1479,13 +1609,6 @@ fn to_type_string(names: &[String], max_size: i64) -> String {
     } else {
         abbreviated
     }
-}
-
-/// The simple class name Groovy lists in a `MissingMethodException`'s
-/// `argument types: (…)` — the qualified name's last segment, and `null` for a
-/// null argument.
-fn simple_class_name(v: &Value) -> String {
-    simple_name_of(&java_class_name(v))
 }
 
 /// The last segment of a qualified class name (`java.lang.String` → `String`).
@@ -1932,6 +2055,8 @@ mod bignum;
 mod digest;
 #[path = "host/mapkey.rs"]
 mod mapkey;
+#[path = "host/params.rs"]
+mod params;
 #[path = "host/seq.rs"]
 mod seq;
 #[path = "host/urlcodec.rs"]
@@ -2068,6 +2193,12 @@ enum HeapObj {
     },
     /// A `java.util.UUID`: its most and least significant 64 bits.
     Uuid(i64, i64),
+    /// The `groovy.lang.Writable` `byte[].encodeBase64()` / `encodeHex()`
+    /// answer: the encoded text, and the anonymous class it is an instance of.
+    Writable {
+        class: &'static str,
+        text: String,
+    },
     /// `list.asReversed()` — Groovy's `ReversedList`, a read-only live view
     /// of `root` in reverse order. Reading it reads the root as it is now;
     /// any write through it is `UnsupportedOperationException`.
@@ -2443,6 +2574,8 @@ fn reset_heap() {
     MEMO.with(|m| m.borrow_mut().clear());
     STATICS.with(|s| s.borrow_mut().clear());
     MAP_DEFAULTS.with(|m| m.borrow_mut().clear());
+    LIST_DEFAULTS.with(|m| m.borrow_mut().clear());
+    SCRIPT_THIS.with(|s| s.borrow_mut().take());
     PENDING.with(|p| *p.borrow_mut() = None);
     EXC_ARMED.with(|a| a.set(false));
     // The built-in throwables occupy the first registry ids of every run; a
@@ -3100,6 +3233,17 @@ fn as_uuid(v: &Value) -> Option<(i64, i64)> {
     }
 }
 
+/// The class and text of a [`HeapObj::Writable`].
+fn as_writable(v: &Value) -> Option<(&'static str, String)> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::Writable { class, text }) => Some((*class, text.clone())),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 /// `UUID.toString`: five lower-case hex groups, 8-4-4-4-12.
 fn uuid_str(msb: i64, lsb: i64) -> String {
     let (m, l) = (msb as u64, lsb as u64);
@@ -3712,6 +3856,57 @@ fn map_backing(v: &Value) -> Value {
     }
 }
 
+/// The default closure and eagerness of a list given one by `withDefault`.
+fn list_default(v: &Value) -> Option<(Value, bool)> {
+    match v {
+        Value::Obj(id) => LIST_DEFAULTS.with(|m| m.borrow().get(id).cloned()),
+        _ => None,
+    }
+}
+
+/// `ListWithDefault.get(i)`: past the end the list grows to reach `i` — with
+/// `null`s and the default at `i` when lazy, with the default at every new
+/// position when eager — and a lazy list also fills a `null` it already holds.
+/// A negative index counts from the end, and one reaching before the start
+/// is `IndexOutOfBoundsException`.
+fn list_default_get(vm: &mut VM, list: &Value, index: i64, default: (Value, bool)) -> Value {
+    let (clo, eager) = default;
+    let len = list_len_root(list).unwrap_or(0) as i64;
+    let i = if index < 0 { len + index } else { index };
+    if i < 0 {
+        raise(
+            vm,
+            "IndexOutOfBoundsException",
+            &format!("Negative index [{index}] too large for list size {len}"),
+        );
+        return Value::Undef;
+    }
+    let compute = |vm: &mut VM, at: i64| match invoke_closure(vm, &clo, &[Value::int(at)]) {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    };
+    if i >= len {
+        for at in len..=i {
+            let v = if eager || at == i {
+                compute(vm, at)
+            } else {
+                Value::Undef
+            };
+            if pending_exc() {
+                return Value::Undef;
+            }
+            list_push_root(list, v);
+        }
+    } else if !eager && matches!(list_get_root(list, i as usize), Some(Value::Undef)) {
+        let v = compute(vm, i);
+        list_set_root(list, i as usize, v);
+    }
+    list_get_root(list, i as usize).unwrap_or(Value::Undef)
+}
+
 /// Is `v` a `withDefault` view rather than a map of its own? The one question
 /// [`map_backing`] deliberately hides, and `getClass()` is what asks it.
 fn is_map_with_default(v: &Value) -> bool {
@@ -4179,7 +4374,7 @@ fn b_make_closure(vm: &mut VM, _argc: u8) -> Value {
             (enclosing, this_obj)
         }
         Value::Undef => {
-            let script = heap_push(HeapObj::ScriptThis);
+            let script = b_script_this(vm, 0);
             (Some(script.clone()), Some(script))
         }
         instance => (Some(instance.clone()), Some(instance)),
@@ -4621,99 +4816,91 @@ fn lookup_method_argc(class: u32, method: &str, argc: usize) -> Option<u16> {
     lookup_overload_exact(class, method, argc).or_else(|| lookup_method(class, method))
 }
 
-/// The method `class` resolves `method` to for a call with these `args`. Where
-/// the class declares genuine overloads of that name and arity, the one whose
-/// declared parameter types fit the arguments best is chosen — an exact class
-/// over a supertype over `Object`/`def`, the first declared on a tie, as
-/// Groovy's distance-based selection orders them. Everything else is
-/// [`lookup_method_argc`].
-fn lookup_method_args(class: u32, method: &str, args: &[Value]) -> Option<u16> {
-    let key = format!("{method}/{}", args.len());
-    // Walked most-derived first and replaced only on a strictly closer fit, so
-    // an override beats the declaration it overrides and, within one class,
-    // the first declared wins a tie.
-    let mut best: Option<(u32, u16)> = None;
-    let mut candidates = 0;
-    let mut cur = Some(class);
-    while let Some(id) = cur {
-        let Some(meta) = class_meta(id) else { break };
-        for (types, idx) in meta.typed_overloads.get(&key).into_iter().flatten() {
-            candidates += 1;
-            let distance = types
-                .iter()
-                .zip(args)
-                .try_fold(0, |acc, (ty, v)| Some(acc + param_distance(ty, v)?));
-            if let Some(d) = distance {
-                if best.map_or(true, |(b, _)| d < b) {
-                    best = Some((d, *idx));
-                }
+/// The method `class` resolves `method` to for a call with these `args`, and
+/// the arguments it receives: every declaration of the name along the
+/// superclass chain, most-derived first, weighed by [`params::select_call`]
+/// (closest declared types, then a variadic parameter, then the one-`null`
+/// rule). A lone list argument that fits none gets Groovy's second chance:
+/// its elements are tried as the argument list (`f([7])` against `f(int)` is
+/// `f(7)`). A name the chain declares nowhere with types (a trait or interface
+/// `default` method) resolves by arity as [`lookup_method_argc`] does.
+fn resolve_method_call(
+    vm: &mut VM,
+    class: u32,
+    method: &str,
+    args: &[Value],
+) -> Option<(u16, Vec<Value>)> {
+    let prefix = format!("{method}/");
+    let mut decls: Vec<(Vec<String>, u16)> = Vec::new();
+    for meta in class_chain(class).into_iter().rev().filter_map(class_meta) {
+        let mut keys: Vec<&String> = meta
+            .typed_overloads
+            .keys()
+            .filter(|k| {
+                k.strip_prefix(&prefix)
+                    .is_some_and(|n| n.parse::<usize>().is_ok())
+            })
+            .collect();
+        keys.sort_by_key(|k| k[prefix.len()..].parse::<usize>().unwrap_or(0));
+        for k in keys {
+            decls.extend(meta.typed_overloads[k].iter().cloned());
+        }
+    }
+    match params::select_call(vm, &decls, args) {
+        params::Selection::Found(idx, args) => Some((idx, args)),
+        params::Selection::NoCandidates => {
+            lookup_method_argc(class, method, args.len()).map(|idx| (idx, args.to_vec()))
+        }
+        params::Selection::NoFit => {
+            let [only] = args else { return None };
+            let items = as_list(only).filter(|_| array_elem(only).is_none())?;
+            match params::select_call(vm, &decls, &items) {
+                params::Selection::Found(idx, args) => Some((idx, args)),
+                _ => None,
             }
         }
-        cur = meta.superclass.as_deref().and_then(find_class);
     }
-    match best {
-        Some((_, idx)) if candidates > 1 => Some(idx),
-        _ => lookup_method_argc(class, method, args.len()),
-    }
-}
-
-/// How far an argument is from a declared parameter type: `0` when the
-/// parameter names the argument's own class, `1` for a supertype it is
-/// assignable to, `2` for `Object`/`def`, `None` when it does not fit.
-fn param_distance(ty: &str, v: &Value) -> Option<u32> {
-    if matches!(ty, "def" | "Object" | "java.lang.Object") {
-        return Some(if matches!(v, Value::Undef) { 0 } else { 2 });
-    }
-    let boxed = match ty {
-        "int" => "Integer",
-        "long" => "Long",
-        "short" => "Short",
-        "byte" => "Byte",
-        "double" => "Double",
-        "float" => "Float",
-        "boolean" => "Boolean",
-        "char" => "Character",
-        other => other,
-    };
-    // `null` fits any reference type, but never a primitive; Groovy ranks
-    // `Object` closest for it, so `m(null)` picks `m(Object)` over `m(String)`.
-    if matches!(v, Value::Undef) {
-        return (boxed == ty).then_some(1);
-    }
-    let own = simple_class_name(v);
-    if own == boxed {
-        return Some(0);
-    }
-    value_is_a(v, boxed).then_some(1)
 }
 
 /// The constructor of `meta`'s class a `new` (or `super(…)`) with these `args`
 /// runs. Constructors are not inherited, so only the class's own are weighed:
 /// where several share the call's arity, the one whose declared parameter
-/// types fit best wins by [`param_distance`], the first declared on a tie.
+/// types fit best wins by [`params::param_fit`], the first declared on a tie.
 /// Otherwise — one candidate, or none that fits — it is the arity's own.
-fn select_ctor(meta: &ClassMeta, args: &[Value]) -> Option<u16> {
-    let key = format!("<init>/{}", args.len());
-    let candidates = meta
+fn select_ctor(vm: &mut VM, meta: &ClassMeta, args: &[Value]) -> params::Selection {
+    let mut decls: Vec<(Vec<String>, u16)> = Vec::new();
+    let mut keys: Vec<&String> = meta
         .typed_overloads
-        .get(&key)
-        .map_or(&[][..], Vec::as_slice);
-    let mut best: Option<(u32, u16)> = None;
-    if candidates.len() > 1 {
-        for (types, idx) in candidates {
-            let distance = types
-                .iter()
-                .zip(args)
-                .try_fold(0, |acc, (ty, v)| Some(acc + param_distance(ty, v)?));
-            if let Some(d) = distance {
-                if best.map_or(true, |(b, _)| d < b) {
-                    best = Some((d, *idx));
-                }
-            }
-        }
+        .keys()
+        .filter(|k| k.starts_with("<init>/"))
+        .collect();
+    keys.sort_by_key(|k| k["<init>/".len()..].parse::<usize>().unwrap_or(0));
+    for k in keys {
+        decls.extend(meta.typed_overloads[k].iter().cloned());
     }
-    best.map(|(_, idx)| idx)
-        .or_else(|| meta.ctors.get(&(args.len() as u8)).copied())
+    params::select_call(vm, &decls, args)
+}
+
+/// Groovy's refusal of a `new` no declared constructor takes:
+/// `GroovyRuntimeException: Could not find matching constructor for:
+/// P(String, Integer)`, each argument named by [`format_type_name`].
+fn raise_no_matching_ctor(vm: &mut VM, class: &str, args: &[Value]) -> Value {
+    let types: Vec<String> = args.iter().map(format_type_name).collect();
+    raise(
+        vm,
+        "GroovyRuntimeException",
+        &format!(
+            "Could not find matching constructor for: {class}({})",
+            types.join(", ")
+        ),
+    );
+    Value::Undef
+}
+
+/// How `args` fit the class's own constructors of their arity.
+fn ctor_fit(meta: &ClassMeta, args: &[Value]) -> params::Fit {
+    let key = format!("<init>/{}", args.len());
+    params::best_fit(meta.typed_overloads.get(&key).into_iter().flatten(), args)
 }
 
 /// The declaration of `method` taking exactly `argc` arguments, or `None`.
@@ -4802,6 +4989,8 @@ const GEN_EQUALS_HASH: u8 = 4;
 const GEN_TUPLE_CTOR: u8 = 8;
 /// Bit 4 – read-only properties (`@Immutable`).
 const GEN_IMMUTABLE: u8 = 16;
+/// A `record`: `Name[x=1, y=2]`, component accessors and no `getX()`.
+const GEN_RECORD: u8 = 64;
 
 /// Does `class` — or any class it descends from — carry the generated `what`?
 fn class_generates(class: u32, what: u8) -> bool {
@@ -4868,6 +5057,16 @@ fn generated_to_string(inst: &Instance) -> String {
     let cls = class_meta(inst.class)
         .map(|m| m.name.clone())
         .unwrap_or_default();
+    if class_generates(inst.class, GEN_RECORD) {
+        let named: Vec<String> = generated_member_fields(inst.class, true)
+            .into_iter()
+            .map(|f| {
+                let v = inst.fields.get(&f).cloned().unwrap_or(Value::Undef);
+                format!("{f}={}", groovy_str(&v))
+            })
+            .collect();
+        return format!("{cls}[{}]", named.join(", "));
+    }
     format!("{cls}({})", shown.join(", "))
 }
 
@@ -4878,7 +5077,10 @@ fn generated_to_string(inst: &Instance) -> String {
 /// field contributing `0`. Measured against the helper itself rather than taken
 /// from the docs, so the *number* matches, not merely its consistency.
 fn generated_hash_code(inst: &Instance) -> i32 {
-    let mut h: i32 = 127;
+    // A record's is `java.lang.runtime.ObjectMethods`': from 0, `31 * h` plus
+    // each component's hash.
+    let record = class_generates(inst.class, GEN_RECORD);
+    let (mut h, factor): (i32, i32) = if record { (0, 31) } else { (127, 59) };
     for f in generated_member_fields(inst.class, false) {
         let v = inst.fields.get(&f).cloned().unwrap_or(Value::Undef);
         let fh = if matches!(v, Value::Undef) {
@@ -4886,7 +5088,7 @@ fn generated_hash_code(inst: &Instance) -> i32 {
         } else {
             object_hash_code(&v)
         };
-        h = h.wrapping_mul(59).wrapping_add(fh);
+        h = h.wrapping_mul(factor).wrapping_add(fh);
     }
     h
 }
@@ -5275,7 +5477,13 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
         let (Some(key), Some(ord), Some(types)) = (parts.next(), parts.next(), parts.next()) else {
             return true;
         };
-        let types = types.split(',').map(str::to_string).collect();
+        // A method of no parameters has an empty type list, not one empty
+        // type.
+        let types = if types.is_empty() {
+            Vec::new()
+        } else {
+            types.split(',').map(str::to_string).collect()
+        };
         typed.push((key.to_string(), ord.parse().unwrap_or(0), types, *idx));
         false
     });
@@ -5418,6 +5626,7 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
             };
             gmap_kind(entries, kind)
         }
+        tuple if tuple.starts_with("Tuple") => return seq::new_tuple(tuple, args),
         "UUID" if args.len() == 2 => heap_push(HeapObj::Uuid(
             as_i64(&args[0]).unwrap_or(0),
             as_i64(&args[1]).unwrap_or(0),
@@ -5949,7 +6158,18 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
     {
         return handle;
     }
-    if let Some(ctor_idx) = select_ctor(&meta, &args) {
+    // Declared constructors the arguments fit none of: Groovy refuses the
+    // `new` rather than running one of them — except a lone map beside a
+    // no-argument constructor, which is the named-argument constructor below.
+    let selection = select_ctor(vm, &meta, &args);
+    // (A record takes named arguments beside its canonical constructor.)
+    let named_args = argc == 1
+        && as_omap(&args[0]).is_some()
+        && (meta.ctors.contains_key(&0) || class_generates(cid, GEN_RECORD));
+    if matches!(selection, params::Selection::NoFit) && !named_args {
+        return raise_no_matching_ctor(vm, &meta.name, &args);
+    }
+    if let params::Selection::Found(ctor_idx, args) = selection {
         let mut pushes = Vec::with_capacity(args.len() + 1);
         pushes.push(handle.clone());
         pushes.extend(args);
@@ -6001,11 +6221,7 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
             }
         }
     } else if !meta.ctors.is_empty() {
-        fault(
-            vm,
-            format!("groovyrs: no constructor for {name} taking {argc} argument(s)"),
-        );
-        return Value::Undef;
+        return raise_no_matching_ctor(vm, &meta.name, &args);
     } else if argc == 0 {
         // Implicit default constructor: run the nearest ancestor's no-arg ctor.
         if let Err(e) = run_implicit_super_ctor(vm, &handle, cid) {
@@ -6013,11 +6229,7 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
             return Value::Undef;
         }
     } else {
-        fault(
-            vm,
-            format!("groovyrs: no constructor for {name} taking {argc} argument(s)"),
-        );
-        return Value::Undef;
+        return raise_no_matching_ctor(vm, &meta.name, &args);
     }
     handle
 }
@@ -6113,7 +6325,14 @@ fn b_super_ctor(vm: &mut VM, argc: u8) -> Value {
     // As in `b_new`: a spread's arity is the parked list's length, because the
     // opcode carries a count of zero when the real one is a run-time value.
     let argc = args.len() as u8;
-    let Some(idx) = class_meta(super_id).and_then(|m| select_ctor(&m, &args)) else {
+    let selected = class_meta(super_id).and_then(|m| match select_ctor(vm, &m, &args) {
+        params::Selection::Found(idx, args) => Some((idx, args)),
+        _ => m
+            .ctors
+            .get(&(args.len() as u8))
+            .map(|idx| (*idx, args.clone())),
+    });
+    let Some((idx, args)) = selected else {
         // `super(message)` / `super(message, cause)` into the built-in throwable
         // chain — the modeled JDK constructors, which a user exception class
         // calls.
@@ -6981,6 +7200,10 @@ fn values_equal_shape(a: &Value, b: &Value) -> bool {
             return true;
         }
     }
+    // A `Writable` has `Object.equals`: only itself, never the text it holds.
+    if as_writable(a).is_some() || as_writable(b).is_some() {
+        return false;
+    }
     // A list rides a heap handle, but `List.equals` is by *elements* — two
     // separately built lists holding the same values are equal, and the same
     // list under two names is not equal by virtue of being one handle. Deref to
@@ -7420,11 +7643,22 @@ fn value_is_a(value: &Value, class: &str) -> bool {
                     .iter()
                     .any(|i| i.rsplit('.').next() == Some(short))
             });
-        if declares || (short == "Serializable" && is_throwable_class(inst.class)) {
+        let record = short == "Record" && class_generates(inst.class, GEN_RECORD);
+        if declares || record || (short == "Serializable" && is_throwable_class(inst.class)) {
             return true;
         }
         // Named type is not a user class — fall through to built-in checks (an
         // instance is still an `Object`/`GroovyObject`).
+    }
+    if as_writable(value).is_some() {
+        return matches!(
+            class,
+            "Writable" | "groovy.lang.Writable" | "Object" | "java.lang.Object"
+        );
+    }
+    if is_script_this(value) {
+        let short = class.rsplit('.').next().unwrap_or(class);
+        return matches!(short, "Script" | "GroovyObject" | "Object") || class == script_class();
     }
     // A closure coerced to `Comparator` (`as Comparator`, a `Comparator`-typed
     // variable, `String.CASE_INSENSITIVE_ORDER`) is one; a bare closure is not.
@@ -7458,10 +7692,9 @@ fn value_is_a(value: &Value, class: &str) -> bool {
     }
     if let Some((ifaces, _)) = as_proxy(value) {
         if let Some(target) = resolve_class_name(class) {
-            return ifaces
-                .iter()
-                .filter_map(|n| find_class(n))
-                .any(|id| id == target || interface_closure(id).contains(&target));
+            return ifaces.iter().filter_map(|n| find_class(n)).any(|id| {
+                class_chain(id).contains(&target) || interface_closure(id).contains(&target)
+            });
         }
     }
     // An array type — `x instanceof int[]`. Only an array satisfies one, and
@@ -7619,7 +7852,7 @@ fn dispatch_instance_method(
         if method == "hasProperty" && args.len() == 1 && lookup_method(cid, method).is_none() {
             return Some(Ok(has_property(cid, &groovy_str(&args[0]))));
         }
-        let idx = lookup_method_args(cid, method, args)?;
+        let (idx, args) = resolve_method_call(vm, cid, method, args)?;
         if let Err(e) = ensure_static_init(vm, cid) {
             return Some(Err(e));
         }
@@ -7628,7 +7861,7 @@ fn dispatch_instance_method(
         }
         let mut pushes = Vec::with_capacity(args.len() + 1);
         pushes.push(recv.clone());
-        pushes.extend_from_slice(args);
+        pushes.extend(args);
         return Some(invoke_sub(vm, idx, &pushes));
     }
     let inst = as_instance(recv)?;
@@ -7637,10 +7870,10 @@ fn dispatch_instance_method(
     // Virtual dispatch: resolve the method most-derived-first through the chain,
     // preferring the declaration whose arity — and, between genuine overloads,
     // whose parameter types — match this call.
-    if let Some(idx) = lookup_method_args(inst.class, method, args) {
+    if let Some((idx, args)) = resolve_method_call(vm, inst.class, method, args) {
         let mut pushes = Vec::with_capacity(args.len() + 1);
         pushes.push(recv.clone());
-        pushes.extend_from_slice(args);
+        pushes.extend(args);
         return Some(invoke_sub(vm, idx, &pushes));
     }
     // `GroovyObject.getProperty` / `setProperty`, and the DGM `getAt(String)` /
@@ -7656,6 +7889,29 @@ fn dispatch_instance_method(
             return Some(Ok(Value::Undef));
         }
         _ => {}
+    }
+    // A record's components as Groovy's record GDK sees them: `toList()`,
+    // `size()`, `p[i]` and `toMap()` over the components in order.
+    if class_generates(inst.class, GEN_RECORD) {
+        let comps: Vec<(String, Value)> = generated_field_order(inst.class)
+            .into_iter()
+            .map(|f| {
+                let v = inst.fields.get(&f).cloned().unwrap_or(Value::Undef);
+                (f, v)
+            })
+            .collect();
+        match (method, args) {
+            ("toList", []) => return Some(Ok(glist(comps.into_iter().map(|(_, v)| v).collect()))),
+            ("size", []) => return Some(Ok(Value::int(comps.len() as i64))),
+            ("getAt", [Value::Int(i)]) => {
+                let v = usize::try_from(*i).ok().and_then(|i| comps.get(i));
+                return Some(Ok(v.map(|(_, v)| v.clone()).unwrap_or(Value::Undef)));
+            }
+            ("toMap", []) => return Some(Ok(gmap(comps))),
+            // A record has accessors, not getters.
+            (m, []) if m.starts_with("get") && m.len() > 3 => return None,
+            _ => {}
+        }
     }
     // Auto getter `getX()` / setter `setX(v)` over a field.
     if let Some(field) = method.strip_prefix("get") {
@@ -8216,8 +8472,20 @@ fn b_field_get(vm: &mut VM, _argc: u8) -> Value {
     }
 }
 
-/// `GFIELD_SET`: write `recv.@name = value` — the field itself, no setter.
+/// `GFIELD_SET`: write `recv.@name = value` — the field itself, no setter. A
+/// `final` field refuses it, as Groovy's field write does outside the
+/// constructor.
 fn b_field_set(vm: &mut VM, _argc: u8) -> Value {
+    field_write(vm, true)
+}
+
+/// `GFIELD_INIT`: a constructor's direct field write (see [`GFIELD_INIT`]).
+fn b_field_init(vm: &mut VM, _argc: u8) -> Value {
+    field_write(vm, false)
+}
+
+/// The direct field write behind [`b_field_set`] / [`b_field_init`].
+fn field_write(vm: &mut VM, check_final: bool) -> Value {
     let name = vm
         .stack
         .pop()
@@ -8226,7 +8494,15 @@ fn b_field_set(vm: &mut VM, _argc: u8) -> Value {
         .into_owned();
     let value = vm.stack.pop().unwrap_or(Value::Undef);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
-    if as_instance(&recv).is_some_and(|i| i.fields.contains_key(&name)) {
+    if let Some(inst) = as_instance(&recv).filter(|i| i.fields.contains_key(&name)) {
+        if check_final && is_final_field(inst.class, &name) {
+            raise(
+                vm,
+                "GroovyRuntimeException",
+                &format!("Cannot set the property '{name}' because the backing field is final."),
+            );
+            return Value::Undef;
+        }
         store_instance_field(vm, &recv, &name, value.clone());
         return value;
     }
@@ -8430,6 +8706,9 @@ fn map_default(vm: &mut VM, map: &Value, key: &str, subject: &Value) -> Value {
 /// `recv[index]`, shared by the `[…]` subscript builtin and by the `getAt(…)`
 /// method — Groovy defines the subscript *as* `getAt`, so both are one path.
 fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
+    if let (Some(default), Value::Int(i)) = (list_default(&recv), &index) {
+        return list_default_get(vm, &recv, *i, default);
+    }
     if array_index_past_end(vm, &recv, &index) {
         return Value::Undef;
     }
@@ -9349,7 +9628,72 @@ fn b_call_spread(vm: &mut VM, _argc: u8) -> Value {
     // now is the arity known — so the overload is picked here rather than by the
     // compiler. A name with one declaration is registered plainly and this finds
     // nothing, leaving `idx` as it was.
+    if let Some(name) = vm.chunk.names.get(idx as usize).cloned() {
+        let key = format!("{name}/{}", args.len());
+        if FN_TYPED.with(|t| t.borrow().contains_key(&key)) {
+            return call_typed(vm, &key, args);
+        }
+    }
     let idx = overload_sub(vm, idx, args.len()).unwrap_or(idx);
+    match invoke_sub(vm, idx, &args) {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    }
+}
+
+/// `GCALL_TYPED`: run the declaration of an overloaded script function that
+/// the arguments fit best ([`params::best_fit`]). A lone list argument that
+/// fits none is tried as the argument list, as Groovy does; otherwise the call
+/// is a `MissingMethodException` on the script.
+fn b_call_typed(vm: &mut VM, argc: u8) -> Value {
+    let key = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let args = pop_call_args(vm, argc);
+    call_typed(vm, &key, args)
+}
+
+/// The type-selected call behind [`b_call_typed`], also reached by a spread
+/// call whose arity lands on an overloaded declaration.
+fn call_typed(vm: &mut VM, key: &str, args: Vec<Value>) -> Value {
+    let name = key.split('/').next().unwrap_or(key).to_string();
+    let decls = FN_TYPED
+        .with(|t| t.borrow().get(key).cloned())
+        .unwrap_or_default();
+    // The candidates, as `(types, name-pool index)` in declaration order.
+    let candidates: Vec<(Vec<String>, u16)> = decls
+        .into_iter()
+        .filter_map(|(types, sub)| {
+            let idx = vm.chunk.names.iter().position(|n| *n == sub)?;
+            Some((types, idx as u16))
+        })
+        .collect();
+    let (idx, args) = match params::best_fit(&candidates, &args) {
+        params::Fit::Best(idx) => (idx, args),
+        _ => {
+            let spread = match args.as_slice() {
+                [only] if array_elem(only).is_none() => as_list(only),
+                _ => None,
+            };
+            let retry = spread.and_then(|items| {
+                let key = format!("{name}/{}", items.len());
+                FN_TYPED
+                    .with(|t| t.borrow().contains_key(&key))
+                    .then_some((key, items))
+            });
+            if let Some((key, items)) = retry {
+                return call_typed(vm, &key, items);
+            }
+            let script = heap_push(HeapObj::ScriptThis);
+            return raise_missing_method(vm, &script, &name, &args);
+        }
+    };
     match invoke_sub(vm, idx, &args) {
         Ok(v) => v,
         Err(e) => {
@@ -9444,6 +9788,52 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
 }
 
 fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
+    // A tuple's `getV1()` … and `getFirst()` / `getSecond()`.
+    if args.is_empty() && method.starts_with("get") {
+        if let Some(v) = seq::tuple_component(&recv, method) {
+            return v;
+        }
+    }
+    // `List.withDefault { i -> … }` and its lazy/eager spellings.
+    if let ("withDefault" | "withLazyDefault" | "withEagerDefault", [clo]) =
+        (method, args.as_slice())
+    {
+        if let (Value::Obj(id), true) = (&recv, closure_meta(clo).is_some()) {
+            if as_list_raw(&recv).is_some() && array_elem(&recv).is_none() && !is_sublist(&recv) {
+                let eager = method == "withEagerDefault";
+                LIST_DEFAULTS.with(|m| m.borrow_mut().insert(*id, (clo.clone(), eager)));
+                return recv;
+            }
+        }
+    }
+    if let (Some(default), "get" | "getAt", [Value::Int(i)]) =
+        (list_default(&recv), method, args.as_slice())
+    {
+        return list_default_get(vm, &recv, *i, default);
+    }
+    // A `Writable` answers `toString()` with its text and `writeTo(writer)` by
+    // writing it; the rest of `Object` is identity, and nothing else is defined.
+    if let Some((_, text)) = as_writable(&recv) {
+        match (method, args.as_slice()) {
+            ("toString", []) => return Value::str(text),
+            ("writeTo", [writer]) => {
+                let writer = writer.clone();
+                dispatch_call(vm, writer.clone(), "write", vec![Value::str(text)]);
+                return writer;
+            }
+            ("equals", [other]) => return Value::bool(recv == *other),
+            ("hashCode" | "getClass" | "is", _) => {}
+            _ => return raise_missing_method(vm, &recv, method, &args),
+        }
+    }
+    // `Integer.equals(Long)` is `false` in Java whatever the values: an
+    // `Integer` and a `Long` are one `Value::Int` here, so the widths the call
+    // site saw ([`GMETHOD_WIDE`]) tell them apart.
+    if let ("equals", Value::Int(a), [Value::Int(b)]) = (method, &recv, args.as_slice()) {
+        let mask = CALL_WIDTHS.with(Cell::get);
+        let same_width = (mask & 1 != 0) == (mask & 2 != 0);
+        return Value::bool(same_width && a == b);
+    }
     // A `String` is not `Iterable`: `sum()` is not defined on it.
     if method == "sum" && matches!(recv, Value::Str(_)) {
         return raise_missing_method(vm, &recv, method, &args);
@@ -9668,8 +10058,15 @@ fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
         // `byte[].encodeBase64()` / `encodeHex()` answer a `Writable` whose
         // text is the encoding; groovyrs answers that text.
         // `md5()` / `sha256()` digest the bytes and answer the hex text.
+        // `encodeBase64(true)` is the chunked form: a CRLF after every 76
+        // characters of output.
+        let chunked = match (method, args.as_slice()) {
+            (_, []) => Some(false),
+            ("encodeBase64", [Value::Bool(b)]) => Some(*b),
+            _ => None,
+        };
         if matches!(method, "encodeBase64" | "encodeHex" | "md5" | "sha256")
-            && args.is_empty()
+            && chunked.is_some()
             && array_elem(&recv) == Some(ArrayElem::Byte)
         {
             let bytes: Vec<u8> = as_list(&recv)
@@ -9677,12 +10074,36 @@ fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
                 .iter()
                 .map(|b| as_i64(b).unwrap_or(0) as u8)
                 .collect();
-            return Value::str(match method {
-                "encodeHex" => digest::hex(&bytes),
-                "md5" => digest::hex(&digest::md5(&bytes)),
-                "sha256" => digest::hex(&digest::sha256(&bytes)),
-                _ => base64_encode(&bytes),
-            });
+            return match method {
+                "encodeHex" => heap_push(HeapObj::Writable {
+                    class: "org.codehaus.groovy.runtime.EncodingGroovyMethods$2",
+                    text: digest::hex(&bytes),
+                }),
+                "md5" => Value::str(digest::hex(&digest::md5(&bytes))),
+                "sha256" => Value::str(digest::hex(&digest::sha256(&bytes))),
+                _ => {
+                    let mut text = base64_encode(&bytes);
+                    if chunked == Some(true) {
+                        let lines: Vec<&str> = text
+                            .as_bytes()
+                            .chunks(76)
+                            .map(|c| std::str::from_utf8(c).unwrap_or_default())
+                            .collect();
+                        let mut out = String::new();
+                        for line in lines {
+                            out.push_str(line);
+                            if line.len() == 76 {
+                                out.push_str("\r\n");
+                            }
+                        }
+                        text = out;
+                    }
+                    heap_push(HeapObj::Writable {
+                        class: "org.codehaus.groovy.runtime.EncodingGroovyMethods$1",
+                        text,
+                    })
+                }
+            };
         }
         // A Java array is not a `List`, and has no `asReversed`.
         if method == "asReversed" && args.is_empty() {
@@ -12014,6 +12435,26 @@ fn b_prop(vm: &mut VM, _argc: u8) -> Value {
 /// The property read `recv.name`: an instance's getter, field or
 /// `propertyMissing` first, then every other receiver's property.
 fn get_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
+    if let Some(v) = seq::tuple_component(recv, name) {
+        return v;
+    }
+    // A property of a closure-backed concrete-class proxy reads through its
+    // getter, which is the closure.
+    if let Some(class) = concrete_closure_proxy(recv) {
+        if class_chain(class)
+            .iter()
+            .any(|c| class_declares_field(*c, name))
+        {
+            let target = as_proxy(recv).map(|(_, t)| t).unwrap_or_default();
+            return match invoke_closure(vm, &target, &[]) {
+                Ok(v) => v,
+                Err(e) => {
+                    fault(vm, e);
+                    Value::Undef
+                }
+            };
+        }
+    }
     if let Some(res) = dispatch_instance_prop_get(vm, recv, name) {
         return match res {
             Ok(v) => v,
@@ -15426,6 +15867,109 @@ fn b_sam_param(vm: &mut VM, _argc: u8) -> Value {
     }
 }
 
+/// `GPARAM_CONVERT`: see [`params::convert_param`].
+fn b_param_convert(vm: &mut VM, _argc: u8) -> Value {
+    let ty = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    params::convert_param(vm, &ty, v)
+}
+
+/// `GSCRIPT_THIS`: the script object, what `this` names at script level.
+fn b_script_this(_vm: &mut VM, _argc: u8) -> Value {
+    if let Some(v) = SCRIPT_THIS.with(|s| s.borrow().clone()) {
+        return v;
+    }
+    let v = heap_push(HeapObj::ScriptThis);
+    SCRIPT_THIS.with(|s| *s.borrow_mut() = Some(v.clone()));
+    v
+}
+
+thread_local! {
+    /// The one script object `this` names, made on first use.
+    static SCRIPT_THIS: RefCell<Option<Value>> = const { RefCell::new(None) };
+}
+
+/// `GCAST_ASSIGN`: see [`cast_assign`].
+fn b_cast_assign(vm: &mut VM, _argc: u8) -> Value {
+    let ty = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    cast_assign(vm, v, &ty)
+}
+
+/// The first key of `entries` that names no property of script class `cid` —
+/// no field along its chain, no setter, and no `propertyMissing(name, value)`
+/// to take it.
+fn unsettable_key(cid: u32, entries: &[(String, Value)]) -> Option<String> {
+    let settable = |key: &str| {
+        class_chain(cid)
+            .iter()
+            .any(|c| class_declares_field(*c, key))
+            || lookup_method(cid, &format!("set{}", capitalize(key))).is_some()
+            || lookup_overload_exact(cid, "propertyMissing", 2).is_some()
+    };
+    entries
+        .iter()
+        .find(|(k, _)| !settable(k))
+        .map(|(k, _)| k.clone())
+}
+
+/// `castToType(value, C)` for a script class `C` — what `C c = value` does.
+/// An instance of `C`, `null`, a closure (coerced as `as C` coerces it) and a
+/// value of an enum target take the `as` path. A map builds `C` through the
+/// named-argument constructor and a list through the positional one, but
+/// where that would fail — a key `C` has no property for, no constructor the
+/// list fits — the store raises `GroovyCastException` naming the reason,
+/// where `as` falls back or raises the bare cause. Anything else cannot be
+/// cast at all.
+fn cast_assign(vm: &mut VM, v: Value, ty: &str) -> Value {
+    let Some(cid) = resolve_class_name(ty) else {
+        return as_type(vm, v, ty);
+    };
+    let is_enum = class_meta(cid).is_some_and(|m| m.interfaces.iter().any(|i| i == "Enum"));
+    if matches!(v, Value::Undef) || is_enum || value_is_a(&v, ty) || closure_meta(&v).is_some() {
+        return as_type(vm, v, ty);
+    }
+    let name = class_meta(cid)
+        .map(|m| m.name)
+        .unwrap_or_else(|| ty.to_string());
+    if let Some(entries) = as_omap(&v) {
+        if let Some(bad) = unsettable_key(cid, &entries) {
+            let message = format!(
+                "Cannot cast object '{}' with class '{}' to class '{name}' due to: \
+                 org.codehaus.groovy.runtime.metaclass.MissingPropertyExceptionNoStack: \
+                 No such property: {bad} for class: {name}",
+                java_to_string(vm, &v),
+                java_class_name(&v)
+            );
+            raise(vm, "GroovyCastException", &message);
+            return Value::Undef;
+        }
+        return as_type(vm, v, ty);
+    }
+    if let Some(items) = as_list_raw(&v).filter(|_| array_elem(&v).is_none()) {
+        let fits = class_meta(cid).is_some_and(|m| {
+            (m.ctors.contains_key(&(items.len() as u8))
+                && !matches!(ctor_fit(&m, &items), params::Fit::Mismatch))
+                || (items.is_empty() && m.ctors.is_empty())
+        });
+        if fits {
+            return as_type(vm, v, ty);
+        }
+        return raise_java_cast(vm, &v, &name);
+    }
+    raise_java_cast(vm, &v, &name)
+}
+
 /// The coercion `value as ty` itself, shared with the Java-style cast
 /// ([`java_cast`]) for the targets where the two agree.
 fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
@@ -15501,8 +16045,11 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
         // An abstract class coerces the way an interface does: the closure
         // implements the body-less methods, and the declared ones keep theirs.
         let is_iface = class_meta(cid).is_some_and(|m| m.is_interface || m.generated & 32 != 0);
-        if is_iface && !value_is_a(&v, ty) && (closure_meta(&v).is_some() || as_omap(&v).is_some())
-        {
+        // A closure coerced to a *concrete* class is a proxy subclass whose
+        // every method — its declared ones and its property getters — runs
+        // the closure.
+        let proxied = closure_meta(&v).is_some() || (is_iface && as_omap(&v).is_some());
+        if proxied && !value_is_a(&v, ty) {
             let name = class_meta(cid).map(|m| m.name).unwrap_or_default();
             return heap_push(HeapObj::Proxy {
                 ifaces: vec![name],
@@ -15512,7 +16059,13 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
         if value_is_a(&v, ty) || closure_meta(&v).is_some() {
             return v;
         }
-        if as_omap(&v).is_some() {
+        if let Some(entries) = as_omap(&v) {
+            // A key the class has no property for: `asType` falls back to a
+            // proxy subclass built by the no-argument constructor, the map's
+            // entries left as method overrides it never sets as properties.
+            if unsettable_key(cid, &entries).is_some() {
+                return construct(vm, &ty_simple, Vec::new());
+            }
             return construct(vm, &ty_simple, vec![v]);
         }
         // `v` is the list's transient form here (see `deref_list` above); the
@@ -15997,6 +16550,9 @@ pub fn jdk_class_package(name: &str) -> Option<&'static str> {
         | "Runtime" => "java.lang",
         "BigDecimal" | "BigInteger" => "java.math",
         "URLEncoder" | "URLDecoder" => "java.net",
+        "Tuple" | "Tuple0" | "Tuple1" | "Tuple2" | "Tuple3" | "Tuple4" | "Tuple5" | "Tuple6"
+        | "Tuple7" | "Tuple8" | "Tuple9" | "Tuple10" | "Tuple11" | "Tuple12" | "Tuple13"
+        | "Tuple14" | "Tuple15" | "Tuple16" => "groovy.lang",
         "Collections" | "Arrays" | "List" | "Map" | "Set" | "Random" | "UUID" | "Objects"
         | "Optional" => "java.util",
         // Named for its resolve-strategy constants (`Closure.DELEGATE_FIRST`).
@@ -16254,6 +16810,9 @@ fn java_parse_radix(text: &str, radix: i64) -> Option<i64> {
 fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Option<Value> {
     if let Some(v) = seq::static_call(vm, class, method, args) {
         return Some(v);
+    }
+    if (class, method) == ("Tuple", "tuple") {
+        return seq::tuple_of(args);
     }
     let arg0 = args.first().cloned().unwrap_or(Value::Undef);
     let f0 = as_f64(&arg0);
@@ -19656,7 +20215,11 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
                     }
                     None => dispatch_property(vm, &it, name),
                 };
-                if faulted() || pending_exc() {
+                if faulted() {
+                    return Value::Undef;
+                }
+                if pending_exc() {
+                    wrap_gpath_miss(vm, recv, name);
                     return Value::Undef;
                 }
                 out.push(v);
@@ -20691,6 +21254,9 @@ pub fn groovy_str(v: &Value) -> String {
     if let Some((msb, lsb)) = as_uuid(v) {
         return uuid_str(msb, lsb);
     }
+    if let Some((_, text)) = as_writable(v) {
+        return text;
+    }
     if let Some(o) = as_optional(v) {
         return match o {
             Some(x) => format!("Optional[{}]", groovy_str(&x)),
@@ -21660,6 +22226,8 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
                 || as_omap(b).is_some()
                 || as_buffer(a).is_some()
                 || as_buffer(b).is_some()
+                || as_writable(a).is_some()
+                || as_writable(b).is_some()
                 || as_instance(a).is_some_and(|i| class_generates(i.class, GEN_EQUALS_HASH))
                 || as_instance(b).is_some_and(|i| class_generates(i.class, GEN_EQUALS_HASH)) =>
         {
@@ -21844,6 +22412,32 @@ fn proxy_dispatch(
             Value::Undef
         }
     };
+    // A closure behind a concrete class answers every method the class
+    // declares, and its property getters; anything else misses on the proxy
+    // class Groovy generates (`C1_groovyProxy`).
+    let concrete: Vec<u32> = ifaces
+        .iter()
+        .filter_map(|n| find_class(n))
+        .filter(|id| class_meta(*id).is_some_and(|m| !m.is_interface && m.generated & 32 == 0))
+        .collect();
+    if closure_meta(target).is_some() && !concrete.is_empty() {
+        let declared = concrete.iter().any(|id| {
+            lookup_method_argc(*id, method, args.len()).is_some()
+                || accessor_field(method, args.len()).is_some_and(|f| {
+                    class_chain(*id)
+                        .iter()
+                        .any(|c| class_declares_field(*c, &f))
+                })
+        });
+        if declared {
+            return Some(call(vm, target, args));
+        }
+        if matches!(method, "toString" | "hashCode" | "equals" | "getClass") {
+            return None;
+        }
+        raise_missing_method_on(vm, &java_class_name(recv), method, args);
+        return Some(Value::Undef);
+    }
     if closure_meta(target).is_some() {
         if let Some(idx) = default {
             let mut pushes = vec![recv.clone()];
@@ -21882,6 +22476,35 @@ fn proxy_dispatch(
     }
     raise(vm, "UnsupportedOperationException", method);
     Some(Value::Undef)
+}
+
+/// The concrete script class a closure was coerced to (`{ … } as C`), when
+/// `v` is such a proxy.
+fn concrete_closure_proxy(v: &Value) -> Option<u32> {
+    let (ifaces, target) = as_proxy(v)?;
+    closure_meta(&target)?;
+    ifaces
+        .iter()
+        .filter_map(|n| find_class(n))
+        .find(|id| class_meta(*id).is_some_and(|m| !m.is_interface && m.generated & 32 == 0))
+}
+
+/// The field a `getX()` / `isX()` (no arguments) or `setX(v)` accessor call
+/// names, if `method` is spelled as one.
+fn accessor_field(method: &str, argc: usize) -> Option<String> {
+    let rest = match argc {
+        0 => method
+            .strip_prefix("get")
+            .or_else(|| method.strip_prefix("is")),
+        1 => method.strip_prefix("set"),
+        _ => None,
+    }?;
+    (!rest.is_empty()).then(|| lower_first(rest))
+}
+
+/// Whether script class `class` itself declares a field named `field`.
+fn class_declares_field(class: u32, field: &str) -> bool {
+    class_meta(class).is_some_and(|m| m.declared_fields.iter().any(|f| f == field))
 }
 
 /// The parts of a lazily-evaluated `GString` (see [`HeapObj::GString`]).

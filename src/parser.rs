@@ -317,6 +317,14 @@ impl Parser {
                 let is_trait = matches!(self.peek(), Tok::Ident(w) if w == "trait");
                 self.class_decl_with(is_interface, is_trait, generated)?
             }
+            // `record P(int x, int y) { … }`.
+            Tok::Ident(w)
+                if w == "record"
+                    && matches!(self.peek_at(1), Tok::Ident(_))
+                    && matches!(self.peek_at(2), Tok::LParen) =>
+            {
+                self.record_decl()?
+            }
             // `enum E { A, B }`, optionally behind modifiers.
             Tok::Ident(_) if self.enum_decl_ahead() => {
                 while !matches!(self.peek(), Tok::Ident(w) if w == "enum") {
@@ -1054,25 +1062,8 @@ impl Parser {
             }
             self.advance();
         }
-        self.eat(&Tok::LBrace)?;
-        let mut fields = Vec::new();
-        let mut ctors = Vec::new();
-        let mut methods = Vec::new();
-        let mut abstract_methods = Vec::new();
-        self.skip_terminators();
-        while !self.is(&Tok::RBrace) && !self.is(&Tok::Eof) {
-            self.class_member(
-                &name,
-                is_interface,
-                &mut fields,
-                &mut ctors,
-                &mut methods,
-                &mut abstract_methods,
-            )?;
-            self.expect_terminator()?;
-            self.skip_terminators();
-        }
-        self.eat(&Tok::RBrace)?;
+        let (mut fields, ctors, methods, abstract_methods) =
+            self.class_body(&name, is_interface)?;
         // Every field an interface declares is a `static final` constant; a
         // trait's fields are per-instance state.
         if is_interface && !is_trait {
@@ -1103,6 +1094,136 @@ impl Parser {
             generated,
             is_interface,
             is_trait,
+            fields,
+            ctors,
+            methods,
+            abstract_methods,
+        })
+    }
+
+    /// A type's `{ members }`, sorted into fields, constructors, methods and
+    /// the names of its body-less methods.
+    #[allow(clippy::type_complexity)]
+    fn class_body(
+        &mut self,
+        name: &str,
+        is_interface: bool,
+    ) -> Result<(Vec<Field>, Vec<Ctor>, Vec<Method>, Vec<String>), String> {
+        self.eat(&Tok::LBrace)?;
+        let mut fields = Vec::new();
+        let mut ctors = Vec::new();
+        let mut methods = Vec::new();
+        let mut abstract_methods = Vec::new();
+        self.skip_terminators();
+        while !self.is(&Tok::RBrace) && !self.is(&Tok::Eof) {
+            self.class_member(
+                name,
+                is_interface,
+                &mut fields,
+                &mut ctors,
+                &mut methods,
+                &mut abstract_methods,
+            )?;
+            self.expect_terminator()?;
+            self.skip_terminators();
+        }
+        self.eat(&Tok::RBrace)?;
+        Ok((fields, ctors, methods, abstract_methods))
+    }
+
+    /// `record Name(T a, U b) [implements I] { members }` — Groovy's record
+    /// class, desugared: each component is a `final` property, the canonical
+    /// constructor assigns them in order, each gets an accessor `a()` unless the
+    /// body declares one, and the class generates `toString`
+    /// (`Name[a=1, b=2]`), `equals` and `hashCode`.
+    fn record_decl(&mut self) -> Result<StmtKind, String> {
+        let line = self.line();
+        self.advance(); // `record`
+        let name = self.ident()?;
+        let components = self.param_list()?;
+        let types = std::mem::take(&mut self.param_types);
+        self.skip_newlines();
+        let mut interfaces = Vec::new();
+        if matches!(self.peek(), Tok::Ident(k) if k == "implements") {
+            self.advance();
+            loop {
+                interfaces.push(self.ident()?);
+                if !self.is(&Tok::Comma) {
+                    break;
+                }
+                self.advance();
+                self.skip_newlines();
+            }
+            self.skip_newlines();
+        }
+        let (body_fields, mut ctors, mut methods, abstract_methods) =
+            self.class_body(&name, false)?;
+        let mut fields: Vec<Field> = components
+            .iter()
+            .zip(&types)
+            .map(|(c, ty)| Field {
+                name: c.clone(),
+                ty: ty.clone(),
+                init: None,
+                is_static: false,
+                is_property: true,
+                is_delegate: false,
+                is_final: true,
+            })
+            .collect();
+        fields.extend(body_fields);
+        if !ctors.iter().any(|c| c.params.len() == components.len()) {
+            let body = components
+                .iter()
+                .map(|c| {
+                    Stmt::new(
+                        line,
+                        StmtKind::SetProperty {
+                            recv: Expr::This,
+                            name: c.clone(),
+                            op: AssignOp::Assign,
+                            value: Expr::Var(c.clone()),
+                        },
+                    )
+                })
+                .collect();
+            ctors.push(Ctor {
+                params: components.clone(),
+                param_types: types.clone(),
+                body,
+            });
+        }
+        for (c, ty) in components.iter().zip(&types) {
+            if methods.iter().any(|m| m.name == *c && m.params.is_empty()) {
+                continue;
+            }
+            let read = Expr::Property {
+                recv: Box::new(Expr::This),
+                name: c.clone(),
+                line,
+                safe: false,
+            };
+            methods.push(Method {
+                name: c.clone(),
+                params: Vec::new(),
+                param_types: Vec::new(),
+                body: vec![Stmt::new(line, StmtKind::Expr(read))],
+                ret_ty: ty.clone(),
+            });
+        }
+        Ok(StmtKind::Class {
+            name,
+            superclass: None,
+            interfaces,
+            generated: Generated {
+                to_string: true,
+                equals_hash: true,
+                immutable: true,
+                record: true,
+                ..Generated::default()
+            },
+            is_interface: false,
+            is_trait: false,
             fields,
             ctors,
             methods,
@@ -1262,6 +1383,8 @@ impl Parser {
             for c in &mut ctors {
                 c.params.push("$name".to_string());
                 c.params.push("$ordinal".to_string());
+                c.param_types.push("String".to_string());
+                c.param_types.push("int".to_string());
                 let mut body = store.clone();
                 body.append(&mut c.body);
                 c.body = body;
@@ -3705,7 +3828,10 @@ impl Parser {
         // subscript `println[1, 2]` — of the property `println`, which raises
         // `MissingPropertyException`. The name is handed back as a plain
         // variable for the postfix loop to subscript.
-        if self.is(&Tok::LBracket) {
+        // `println -7 % 3` likewise: a `+`/`-` after the name is the binary
+        // operator, so Groovy computes `println - 7 % 3` and the read of the
+        // property `println` raises.
+        if matches!(self.peek(), Tok::LBracket | Tok::Plus | Tok::Minus) {
             return Ok(Expr::Var(name.to_string()));
         }
         // Command form: a bare argument up to the statement terminator. With no

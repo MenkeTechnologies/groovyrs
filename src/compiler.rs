@@ -24,6 +24,7 @@
 //!   `body_uses_exceptions`).
 
 use crate::ast::*;
+use crate::host::FnOverloads;
 use fusevm::{Chunk, ChunkBuilder, Op, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -159,6 +160,17 @@ struct Compiler {
     /// The arities each user function name is declared at, so a call can pick
     /// the body matching its argument count.
     fn_arities: HashMap<String, HashSet<usize>>,
+    /// The sub name each script function's body is emitted under, in
+    /// declaration order: see [`function_sub_names`].
+    fn_subs: Vec<String>,
+    /// Every script function's declared parameter types (`def` when untyped),
+    /// one list per declaration.
+    fn_param_types: HashMap<String, Vec<Vec<String>>>,
+    /// The script functions declared more than once at one arity, by
+    /// `name/arity`: each declaration's parameter types and sub name, in
+    /// declaration order. A call to one is chosen by its arguments' types at
+    /// run time ([`crate::host::GCALL_TYPED`]).
+    fn_typed: FnOverloads,
     /// The user functions whose last parameter is variadic: each variadic
     /// declaration's arity and the array type the trailing arguments are
     /// collected into. More than one when default arguments generate shorter
@@ -184,6 +196,12 @@ struct Compiler {
     /// field access, bypassing `getX()`/`setX()`; everywhere else (a subclass,
     /// a closure, another receiver) the property goes through the accessors.
     cur_class_own_fields: Option<HashSet<String>>,
+    /// The `final` fields of the class whose constructor or method body is
+    /// being lowered, and whether that body is a constructor: only a
+    /// constructor may assign one (anywhere else it is Groovy's compile error
+    /// `cannot modify final field 'f' outside of constructor.`).
+    cur_class_final_fields: HashSet<String>,
+    in_ctor: bool,
     /// The method names of the class whose member body is currently being
     /// lowered. A bare call to one of these (not shadowed by a local) is an
     /// implicit `this.method(args)`.
@@ -430,6 +448,67 @@ fn assignment_target(kind: &StmtKind, line: u32) -> (Expr, AssignOp, &Expr) {
     }
 }
 
+/// The sub name of every script function, in declaration order, and the
+/// type-selected overload table. A name declared at one arity keeps its plain
+/// name and at several `name/arity` (see [`Compiler::fn_sub_name`]); a second
+/// declaration at the *same* arity takes an `_o<n>` suffix, and every
+/// declaration at that arity joins the table under `name/arity`.
+fn function_sub_names(
+    prog: &Program,
+    fn_arities: &HashMap<String, HashSet<usize>>,
+) -> (Vec<String>, FnOverloads) {
+    let mut subs = Vec::new();
+    let mut table: FnOverloads = HashMap::new();
+    for stmt in &prog.body {
+        let StmtKind::Function {
+            name,
+            params,
+            param_types,
+            ..
+        } = &stmt.kind
+        else {
+            continue;
+        };
+        let arity = params.len();
+        let base = if fn_arities.get(name).is_some_and(|a| a.len() > 1) {
+            format!("{name}/{arity}")
+        } else {
+            name.clone()
+        };
+        let key = format!("{name}/{arity}");
+        let entry = table.entry(key).or_default();
+        let sub = if entry.is_empty() {
+            base
+        } else {
+            format!("{base}_o{}", entry.len())
+        };
+        let types = if param_types.is_empty() {
+            vec!["def".to_string(); arity]
+        } else {
+            param_types.clone()
+        };
+        entry.push((types, sub.clone()));
+        subs.push(sub);
+    }
+    table.retain(|_, decls| decls.len() > 1);
+    (subs, table)
+}
+
+/// The parameter types whose declaration converts a number passed to them:
+/// `def d(double x)` called with `3` sees the `Double` `3.0`.
+const CONVERTED_PARAM_TYPES: &[&str] = &[
+    "double",
+    "Double",
+    "java.lang.Double",
+    "float",
+    "Float",
+    "java.lang.Float",
+    "BigDecimal",
+    "java.math.BigDecimal",
+    "BigInteger",
+    "java.math.BigInteger",
+];
+
 /// The script's single-abstract-method types: every class or interface whose
 /// body-less methods, unioned over itself and all its ancestors, leave exactly
 /// one name no class along the way gives a body.
@@ -618,6 +697,24 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
                 .insert(params.len());
         }
     }
+    let (fn_subs, fn_typed) = function_sub_names(prog, &fn_arities);
+    let mut fn_param_types: HashMap<String, Vec<Vec<String>>> = HashMap::new();
+    for stmt in &prog.body {
+        if let StmtKind::Function {
+            name,
+            params,
+            param_types,
+            ..
+        } = &stmt.kind
+        {
+            let types = if param_types.is_empty() {
+                vec!["def".to_string(); params.len()]
+            } else {
+                param_types.clone()
+            };
+            fn_param_types.entry(name.clone()).or_default().push(types);
+        }
+    }
     // Index every class's inheritance shape up front so a subclass body can
     // resolve inherited bare names to `this` (a subclass may appear before its
     // superclass in source, like function forward references).
@@ -662,11 +759,16 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         has_ffi,
         fn_names,
         fn_arities,
+        fn_subs,
+        fn_typed,
+        fn_param_types,
         fn_varargs,
         recursive_fns: recursive,
         scope: None,
         cur_class_fields: None,
         cur_class_own_fields: None,
+        cur_class_final_fields: HashSet::new(),
+        in_ctor: false,
         cur_class_methods: None,
         cur_class_super: None,
         class_index,
@@ -791,6 +893,8 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     // Jump past the function/method bodies so top-level fall-through halts
     // instead of running into a body (only reachable via `Op::Call`/dispatch).
     let skip = c.b.emit(Op::Jump(0), 0);
+    let fn_subs = std::mem::take(&mut c.fn_subs);
+    let mut fn_subs = fn_subs.iter();
     for stmt in &prog.body {
         if let StmtKind::Function {
             name,
@@ -801,7 +905,8 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             ..
         } = &stmt.kind
         {
-            c.function(stmt.line, name, params, param_types, body, ret_ty)?;
+            let sub = fn_subs.next().cloned().unwrap_or_default();
+            c.function(stmt.line, &sub, name, params, param_types, body, ret_ty)?;
         }
     }
     // Emit each class's field-initializer, constructor, and method subroutines.
@@ -855,6 +960,8 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     crate::host::set_incdec_sites(std::mem::take(&mut c.incdec_sites));
     crate::host::set_closure_param_types(std::mem::take(&mut c.closure_param_types));
     crate::host::set_closure_min_params(std::mem::take(&mut c.closure_min_params));
+    crate::host::set_fn_typed(std::mem::take(&mut c.fn_typed));
+    crate::host::set_sam_types(c.sam_types.clone());
     Ok(c.b.build())
 }
 
@@ -1040,9 +1147,11 @@ impl Compiler {
     /// its parameters from the value stack into frame slots, lower the body with
     /// an implicit last-expression return, and end with a `null` fall-through
     /// return. See the `Op::Call` frame ABI in fusevm.
+    #[allow(clippy::too_many_arguments)]
     fn function(
         &mut self,
         line: u32,
+        sub: &str,
         name: &str,
         params: &[String],
         param_types: &[String],
@@ -1050,8 +1159,7 @@ impl Compiler {
         ret_ty: &str,
     ) -> Result<(), String> {
         let entry = self.b.current_pos();
-        let sub = self.fn_sub_name(name, params.len());
-        let nidx = self.b.add_name(&sub);
+        let nidx = self.b.add_name(sub);
         self.b.add_sub_entry(nidx, entry);
 
         let mut vars = HashMap::new();
@@ -1379,6 +1487,23 @@ impl Compiler {
         Some(out)
     }
 
+    /// Whether `name()` with no arguments may run `name`'s single-parameter
+    /// declaration with a `null`: exactly one such declaration, its parameter
+    /// not a primitive.
+    fn fn_null_arg_ok(&self, name: &str) -> bool {
+        match self
+            .fn_param_types
+            .get(name)
+            .map(|d| d.iter().filter(|t| t.len() == 1).collect::<Vec<_>>())
+        {
+            Some(single) if single.len() == 1 => !matches!(
+                single[0][0].as_str(),
+                "int" | "long" | "short" | "byte" | "double" | "float" | "boolean" | "char"
+            ),
+            _ => false,
+        }
+    }
+
     /// The subroutine name a user function's body is registered under.
     ///
     /// The plain name while it is the only declaration at that name — which
@@ -1492,7 +1617,8 @@ impl Compiler {
             | ((generated.equals_hash as i64) << 2)
             | ((generated.tuple_ctor as i64) << 3)
             | ((generated.immutable as i64) << 4)
-            | ((is_abstract as i64) << 5);
+            | ((is_abstract as i64) << 5)
+            | ((generated.record as i64) << 6);
         self.b.emit(Op::LoadInt(gbits), line);
         for i in interfaces {
             let c = self.b.add_constant(Value::str(i.clone()));
@@ -1684,8 +1810,17 @@ impl Compiler {
             _ => HashSet::new(),
         };
         self.cur_class_own_fields = Some(own_fields);
+        let prev_final = std::mem::replace(
+            &mut self.cur_class_final_fields,
+            fields
+                .iter()
+                .filter(|f| f.is_final)
+                .map(|f| f.name.clone())
+                .collect(),
+        );
         let prev_ret = self.ret_ty.take();
         for (ctor, sub) in ctors.iter().zip(Self::ctor_sub_names(name, ctors)) {
+            self.in_ctor = true;
             self.emit_member(
                 line,
                 &sub,
@@ -1696,6 +1831,7 @@ impl Compiler {
                 &method_set,
             )?;
         }
+        self.in_ctor = false;
         for (m, sub) in methods.iter().zip(Self::method_sub_names(name, methods)) {
             self.ret_ty = Some(m.ret_ty.clone());
             self.emit_member(
@@ -1711,6 +1847,7 @@ impl Compiler {
         self.ret_ty = prev_ret;
         self.cur_class_super = prev_super;
         self.cur_class_own_fields = prev_own;
+        self.cur_class_final_fields = prev_final;
         Ok(())
     }
 
@@ -2073,7 +2210,7 @@ impl Compiler {
                 let direct = self.direct_field(recv, name).map(str::to_string);
                 let name = direct.as_ref().unwrap_or(name);
                 let (get_id, set_id) = if direct.is_some() {
-                    (crate::host::GFIELD_GET, crate::host::GFIELD_SET)
+                    (crate::host::GFIELD_GET, self.field_write_id(name)?)
                 } else {
                     (crate::host::GPROP, crate::host::GSETPROP)
                 };
@@ -2161,6 +2298,25 @@ impl Compiler {
         }
     }
 
+    /// The builtin a direct write of field `name` lowers to. A constructor
+    /// initialises its class's fields, `final` ones included
+    /// ([`crate::host::GFIELD_INIT`]); a method of the class writing one of its
+    /// `final` fields is Groovy's compile error; any other direct write
+    /// (`obj.@f = v`) checks finality at run time ([`crate::host::GFIELD_SET`]).
+    fn field_write_id(&self, name: &str) -> Result<u16, String> {
+        let in_member = self.cur_class_own_fields.is_some();
+        if in_member && self.in_ctor {
+            return Ok(crate::host::GFIELD_INIT);
+        }
+        if in_member && self.cur_class_final_fields.contains(name) {
+            return Err(format!(
+                "groovyrs: cannot modify final field '{name}' outside of constructor. on line {}",
+                self.cur_line
+            ));
+        }
+        Ok(crate::host::GFIELD_SET)
+    }
+
     /// Lower an assignment to a bare field inside a method: `field <op>= value`
     /// becomes `this.field = this.field <op> value` through the property-set
     /// builtin. Stack for the builtin is `this` (deepest), the new value, then
@@ -2207,7 +2363,7 @@ impl Compiler {
         let c = self.b.add_constant(Value::str(name.to_string()));
         self.b.emit(Op::LoadConst(c), self.cur_line);
         let id = if self.is_own_field(name) {
-            crate::host::GFIELD_SET
+            self.field_write_id(name)?
         } else {
             crate::host::GSETPROP
         };
@@ -3529,6 +3685,11 @@ impl Compiler {
                     self.emit_name_load(name, self.cur_line)?;
                 }
             }
+            // Outside a class member (and a closure that captured its `this`),
+            // `this` is the script object.
+            Expr::This if !self.is_local("this") && self.cur_class_fields.is_none() => {
+                self.emit_call_builtin(crate::host::GSCRIPT_THIS, 0, self.cur_line)?;
+            }
             Expr::This => {
                 self.emit_this();
             }
@@ -4172,6 +4333,45 @@ impl Compiler {
             // arity exactly.
             let packed = self.varargs_args(name, args);
             let args = packed.as_deref().unwrap_or(args);
+            // No declaration takes this many arguments. With none at all,
+            // Groovy hands the one single-parameter declaration a `null`
+            // (unless that parameter is a primitive); otherwise the call
+            // misses, which the type-selecting builtin raises for a key it
+            // has no declarations under.
+            let declared = self
+                .fn_arities
+                .get(name)
+                .is_some_and(|a| a.contains(&args.len()));
+            if !declared && self.varargs_args(name, args).is_none() {
+                if args.is_empty() && self.fn_null_arg_ok(name) {
+                    let nidx = self.b.add_name(&self.fn_sub_name(name, 1));
+                    self.b.emit(Op::LoadUndef, line);
+                    self.b.emit(Op::Call(nidx, 1), line);
+                    self.emit_exc_check(line)?;
+                    return Ok(());
+                }
+                for a in args {
+                    self.expr(a)?;
+                }
+                let k = self
+                    .b
+                    .add_constant(Value::str(format!("{name}/{}", args.len())));
+                self.b.emit(Op::LoadConst(k), line);
+                self.emit_call_builtin(crate::host::GCALL_TYPED, args.len() as u8, line)?;
+                return Ok(());
+            }
+            // Declarations sharing this arity are told apart by the
+            // arguments' types, which only the run time knows.
+            let key = format!("{name}/{}", args.len());
+            if self.fn_typed.contains_key(&key) {
+                for a in args {
+                    self.expr(a)?;
+                }
+                let k = self.b.add_constant(Value::str(key));
+                self.b.emit(Op::LoadConst(k), line);
+                self.emit_call_builtin(crate::host::GCALL_TYPED, args.len() as u8, line)?;
+                return Ok(());
+            }
             let nidx = self.b.add_name(&self.fn_sub_name(name, args.len()));
             for a in args {
                 self.expr(a)?;
@@ -4179,6 +4379,20 @@ impl Compiler {
             self.b.emit(Op::Call(nidx, args.len() as u8), line);
             self.emit_exc_check(line)?;
             return Ok(());
+        }
+        // `getClass()` with no receiver, outside a class: the script's own.
+        if name == "getClass"
+            && args.is_empty()
+            && self.cur_class_fields.is_none()
+            && !self.is_local(name)
+        {
+            return self.expr(&Expr::MethodCall {
+                recv: Box::new(Expr::This),
+                method: name.to_string(),
+                args: Vec::new(),
+                line,
+                safe: false,
+            });
         }
         // Unknown callee. With a `rust { ... }` block present it may be an FFI
         // export registered at runtime, so lower to a by-name FFI dispatch: push
@@ -4500,18 +4714,23 @@ impl Compiler {
     /// called as `take { … }` reaches the closure through `m`. Parameters live
     /// in slots `first..`; the run-time test (closure argument, coercible
     /// target) is [`crate::host::GSAM_PARAM`]'s, so an argument that already is
-    /// an instance passes through unchanged.
+    /// an instance passes through unchanged. A parameter of one of
+    /// [`CONVERTED_PARAM_TYPES`] converts the number it receives
+    /// ([`crate::host::GPARAM_CONVERT`]).
     fn emit_param_coercions(&mut self, param_types: &[String], first: u16, line: u32) {
         for (i, ty) in param_types.iter().enumerate() {
-            if !self.sam_types.contains(ty) {
+            let builtin = if self.sam_types.contains(ty) {
+                crate::host::GSAM_PARAM
+            } else if CONVERTED_PARAM_TYPES.contains(&ty.as_str()) {
+                crate::host::GPARAM_CONVERT
+            } else {
                 continue;
-            }
+            };
             let slot = first + i as u16;
             let tidx = self.b.add_constant(Value::str(ty.clone()));
             self.b.emit(Op::GetSlot(slot), line);
             self.b.emit(Op::LoadConst(tidx), line);
-            self.b
-                .emit(Op::CallBuiltin(crate::host::GSAM_PARAM, 0), line);
+            self.b.emit(Op::CallBuiltin(builtin, 0), line);
             self.b.emit(Op::SetSlot(slot), line);
         }
     }
@@ -4530,17 +4749,17 @@ impl Compiler {
         }
         // `I i = { x -> … }` coerces the closure to the script's own interface or
         // abstract class, exactly as `{ x -> … } as I` does.
-        // A list or map literal stored into a variable declared as a script class is
-        // Groovy's `castToType` constructor call: `Pt p = [3, 4]` is
-        // `new Pt(3, 4)` and `Pt p = [x: 3]` the named-argument constructor —
-        // the same conversion `as Pt` makes, which also passes an instance
-        // already of that type through unchanged.
-        if matches!(value, Expr::Closure { .. } | Expr::List(_) | Expr::Map(_))
-            && self.script_types.contains(ty)
-        {
+        // A store into a variable declared as a script class is Groovy's
+        // `castToType`: a list or map builds one (`Pt p = [3, 4]` is
+        // `new Pt(3, 4)`), a closure is coerced, an instance passes through,
+        // and anything else raises `GroovyCastException`. Skipped for a value
+        // statically of that class (`Pt p = new Pt(…)`) and for `null`.
+        let already =
+            matches!(value, Expr::New { class, .. } if class == ty) || matches!(value, Expr::Null);
+        if self.script_types.contains(ty) && !already {
             let tidx = self.b.add_constant(Value::str(ty.to_string()));
             self.b.emit(Op::LoadConst(tidx), self.cur_line);
-            return self.emit_call_builtin(crate::host::GCAST, 0, self.cur_line);
+            return self.emit_call_builtin(crate::host::GCAST_ASSIGN, 0, self.cur_line);
         }
         if !COERCED_TYPES.contains(&ty) {
             return Ok(());

@@ -1259,3 +1259,616 @@ true
 "####;
     check(src, expected);
 }
+
+#[test]
+fn script_function_overloads_by_parameter_type() {
+    let src = r####"SN = this.getClass().name
+def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)?.replace(SN, "Script")}" } }
+def f(String s) { "s" }
+def f(int i) { "i" }
+def f(List l) { "l" }
+t(1) { f(1) }
+t(2) { f('x') }
+t(3) { f([1]) }
+t(4) { f("g${1}") }
+def g(Integer i) { 'I' }
+def g(Object o) { 'O' }
+t(5) { g(1) }
+t(6) { g('a') }
+t(7) { g(null) }
+def h(int a, String b) { 'is' }
+def h(String a, int b) { 'si' }
+t(8) { h(1, 'x') }
+t(9) { h('x', 1) }
+t(10) { h(1, 2) }
+def k(String s) { 'ks' }
+def k(Map m) { 'km' }
+t(11) { k(['z']) }
+t(12) { k(5) }
+def args = [2]
+t(13) { f(*args) }
+"####;
+    let expected = r####"1: i
+2: s
+3: l
+4: s
+5: I
+6: O
+7: O
+8: is
+9: si
+10: groovy.lang.MissingMethodException No signature of method: h for class: Script is applicable for argument types: (Integer, Integer) values: [1, 2]
+11: ks
+12: groovy.lang.MissingMethodException No signature of method: k for class: Script is applicable for argument types: (Integer) values: [5]
+13: i
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn method_selection_by_argument_type() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+interface Calc { int calc(int x) }
+class A { def m(Calc c) { c.calc(1) }; def m(String s) { 's' }
+          def n(Closure c) { c(2) }; def n(int i) { 'i' }
+          def g(String s) { s }; def g(int i) { 'gi' }
+          def o(Object o) { 'o' }; def o(int i) { 'oi' }
+          def d(double d) { "d$d" }; def d(String s) { 'ds' }
+          def b(BigDecimal b) { "b$b" }; def b(String s) { 'bs' }
+          def ch(Character c) { "C$c" }; def ch(int i) { 'ci' }
+          def s(String x) { 'ss' }; def one(int a) { "one$a" }; def bo(boolean x) { "b$x" } }
+def a = new A()
+t(1) { a.m { it + 10 } }
+t(2) { a.m('x') }
+t(3) { a.n { it * 3 } }
+t(4) { a.n(4) }
+t(5) { a.g("x${1}") }
+t(6) { a.g(3) }
+t(7) { a.o(null) }
+t(8) { a.o(3) }
+t(9) { a.o('x') }
+t(10) { a.d(3) }
+t(11) { a.d(2.5) }
+t(12) { a.b(3) }
+t(13) { a.b(2.5d) }
+t(14) { a.ch('q' as Character) }
+t(15) { a.s(5) }
+t(16) { a.one('x') }
+t(17) { a.one(2.5) }
+t(18) { a.one([7]) }
+t(19) { a.one([1, 2]) }
+t(20) { a.bo(1) }
+t(21) { a.one(null) }
+"####;
+    let expected = r####"1: 11
+2: s
+3: 6
+4: i
+5: x1
+6: gi
+7: o
+8: oi
+9: o
+10: d3.0
+11: d2.5
+12: b3
+13: b2.5
+14: Cq
+15: groovy.lang.MissingMethodException No signature of method: s for class: A is applicable for argument types: (Integer) values: [5]
+16: groovy.lang.MissingMethodException No signature of method: one for class: A is applicable for argument types: (String) values: [x]
+17: groovy.lang.MissingMethodException No signature of method: one for class: A is applicable for argument types: (BigDecimal) values: [2.5]
+18: one7
+19: groovy.lang.MissingMethodException No signature of method: one for class: A is applicable for argument types: (ArrayList) values: [[1, 2]]
+20: groovy.lang.MissingMethodException No signature of method: bo for class: A is applicable for argument types: (Integer) values: [1]
+21: groovy.lang.MissingMethodException No signature of method: one for class: A is applicable for argument types: (null) values: [null]
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn numeric_parameters_convert_their_argument() {
+    let src = r####"class P { def v; P(double d) { v = "double ${d} ${d.getClass().simpleName}" } }
+class R { def v; R(BigDecimal d) { v = "BD ${d} ${d.getClass().simpleName}" } }
+class X { def v; X(float d) { v = "f ${d} ${d.getClass().simpleName}" } }
+class Y { def v; Y(BigInteger d) { v = "BI ${d} ${d.getClass().simpleName}" } }
+def ok = { c -> try { c() } catch (e) { 'X' } }
+println([3, 3L, 2.5, 2.5d, 'str', 2.5f, 5G].collect { a -> ok { new P(a).v } })
+println([3, 3L, 2.5, 2.5d, 'str', 2.5f, 5G].collect { a -> ok { new R(a).v } })
+println([3, 3L, 2.5, 2.5d, 'str', 2.5f, 5G].collect { a -> ok { new X(a).v } })
+println([3, 3L, 2.5, 2.5d, 'str', 2.5f, 5G].collect { a -> ok { new Y(a).v } })
+def half(double x) { x / 2 }
+println half(3)
+class M { def twice(double x) { x * 2 } }
+println new M().twice(4)
+def big = { BigDecimal b -> b.scale() }
+println big(7)
+"####;
+    let expected = r####"[double 3.0 Double, double 3.0 Double, double 2.5 Double, double 2.5 Double, X, double 2.5 Double, double 5.0 Double]
+[BD 3 BigDecimal, BD 3 BigDecimal, BD 2.5 BigDecimal, BD 2.5 BigDecimal, X, BD 2.5 BigDecimal, BD 5 BigDecimal]
+[f 3.0 Float, f 3.0 Float, f 2.5 Float, X, X, f 2.5 Float, f 5.0 Float]
+[BI 3 BigInteger, BI 3 BigInteger, X, X, X, X, BI 5 BigInteger]
+1.5
+8.0
+0
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn constructor_without_a_matching_signature_raises() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.join(' / ')}" } }
+class P { P(int a) {}; P(int a, String b) {} ; String toString() { 'P' } }
+class Q { Q(String s) {}; String toString() { 'Q' } }
+t(1) { new P('x') }
+t(2) { new P('x', 1) }
+t(3) { new P(null, null) }
+t(4) { new P([1], 2.5) }
+t(5) { new Q(1) }
+t(6) { new Q(new java.math.MathContext(2)) }
+t(7) { new P(1) }
+t(8) { new Q(null) }
+t(9) { new P(1, 'a') }
+t(10) { new P(1, 2, 3) }
+t(11) { new Q() }
+class E1 extends Exception { E1(String m) { super(m) } }
+t(12) { new E1(5).message }
+t(13) { new E1('m').message }
+"####;
+    let expected = r####"1: groovy.lang.GroovyRuntimeException Could not find matching constructor for: P(String)
+2: groovy.lang.GroovyRuntimeException Could not find matching constructor for: P(String, Integer)
+3: groovy.lang.GroovyRuntimeException Could not find matching constructor for: P(null, null)
+4: groovy.lang.GroovyRuntimeException Could not find matching constructor for: P(ArrayList, BigDecimal)
+5: groovy.lang.GroovyRuntimeException Could not find matching constructor for: Q(Integer)
+6: groovy.lang.GroovyRuntimeException Could not find matching constructor for: Q(java.math.MathContext)
+7: P
+8: Q
+9: P
+10: groovy.lang.GroovyRuntimeException Could not find matching constructor for: P(Integer, Integer, Integer)
+11: Q
+12: groovy.lang.GroovyRuntimeException Could not find matching constructor for: E1(Integer)
+13: m
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn closure_for_a_multi_method_interface_is_refused() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)?.replaceAll(/\(.*/, "(…")}" } }
+interface Two { int a(int x); int b(int x) }
+interface One { int a(int x) }
+class H { def two(Two t) { t.a(3) }; def one(One o) { o.a(3) }; H() {}; H(Two t) {}; String toString() { 'H' } }
+t(1) { new H().two { it * 2 } }
+t(2) { new H().one { it * 2 } }
+t(3) { new H({ it }) }
+"####;
+    let expected = r####"1: groovy.lang.MissingMethodException No signature of method: two for class: H is applicable for argument types: (…
+2: 6
+3: groovy.lang.GroovyRuntimeException Could not find matching constructor for: H(…
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn closure_as_a_concrete_class() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+class C { def a() { 'a' }; def b(x) { "b$x" }; def f = 3 }
+def d = { 'k' } as C
+t(1) { d.a() }
+t(2) { d.b(1) }
+t(3) { d instanceof C }
+t(4) { d.zzz() }
+t(5) { d.f }
+t(6) { d.getClass().name }
+t(7) { [d].collect { it.a() } }
+def e = { x -> "e$x" } as C
+t(8) { e.b(5) }
+t(9) { e.a() }
+"####;
+    let expected = r####"1: k
+2: k
+3: true
+4: groovy.lang.MissingMethodException No signature of method: zzz for class: C1_groovyProxy is applicable for argument types: () values: []
+5: k
+6: C1_groovyProxy
+7: [k]
+8: e5
+9: enull
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn direct_write_of_a_final_field() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+class A { final int v = 3; final String s; int w; A(String s) { this.s = s; this.@w = 1 }; A(int x) { s = 'i'; this.@v2 = 0 }; int v2 }
+def a = new A('q')
+t(1) { a.@v = 11; a.v }
+t(2) { a.@w = 5; a.w }
+t(3) { a.s }
+t(4) { new A(2).s }
+t(5) { a.@s = 'z' }
+"####;
+    let expected = r####"1: groovy.lang.GroovyRuntimeException Cannot set the property 'v' because the backing field is final.
+2: 5
+3: q
+4: i
+5: groovy.lang.GroovyRuntimeException Cannot set the property 's' because the backing field is final.
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn store_into_a_class_typed_variable_is_cast_to_type() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+class Pt { int x, y; Pt(int x, int y) { this.x = x; this.y = y }; Pt() {}; String toString() { "Pt($x,$y)" } }
+class V { def a; String toString() { "V($a)" } }
+t(1) { def l = [3, 4]; Pt p = l; p }
+t(2) { def m = [x: 5, y: 6]; Pt p = m; p }
+t(3) { Pt p = [x: 1, z: 2]; p }
+t(4) { [x: 1, z: 2] as Pt }
+t(5) { Pt p = [1]; p }
+t(6) { def l = [1]; Pt p = l; p }
+t(7) { [a: 1, b: 2] as V }
+t(8) { V v = [a: 1, b: 2]; v }
+t(9) { Pt p = 'str'; p }
+t(10) { def s = 'str'; Pt p = s; p }
+t(11) { Pt p = null; p }
+t(12) { def q = new Pt(2, 2); Pt p = q; p }
+Pt mk() { [7, 8] }
+t(13) { mk() }
+"####;
+    let expected = r####"1: Pt(3,4)
+2: Pt(5,6)
+3: org.codehaus.groovy.runtime.typehandling.GroovyCastException Cannot cast object '{x=1, z=2}' with class 'java.util.LinkedHashMap' to class 'Pt' due to: org.codehaus.groovy.runtime.metaclass.MissingPropertyExceptionNoStack: No such property: z for class: Pt
+4: Pt(0,0)
+5: org.codehaus.groovy.runtime.typehandling.GroovyCastException Cannot cast object '[1]' with class 'java.util.ArrayList' to class 'Pt' due to: groovy.lang.GroovyRuntimeException: Could not find matching constructor for: Pt(Integer)
+6: org.codehaus.groovy.runtime.typehandling.GroovyCastException Cannot cast object '[1]' with class 'java.util.ArrayList' to class 'Pt' due to: groovy.lang.GroovyRuntimeException: Could not find matching constructor for: Pt(Integer)
+7: V(null)
+8: org.codehaus.groovy.runtime.typehandling.GroovyCastException Cannot cast object '{a=1, b=2}' with class 'java.util.LinkedHashMap' to class 'V' due to: org.codehaus.groovy.runtime.metaclass.MissingPropertyExceptionNoStack: No such property: b for class: V
+9: org.codehaus.groovy.runtime.typehandling.GroovyCastException Cannot cast object 'str' with class 'java.lang.String' to class 'Pt'
+10: org.codehaus.groovy.runtime.typehandling.GroovyCastException Cannot cast object 'str' with class 'java.lang.String' to class 'Pt'
+11: null
+12: Pt(2,2)
+13: Pt(7,8)
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn record_declarations() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+record Point(int x, int y) {
+  def sum() { x + y }
+}
+record Named(String name, List tags) {}
+def p = new Point(1, 2)
+t(1) { p }
+t(2) { p.x() }
+t(3) { p.x }
+t(4) { p.sum() }
+t(5) { p == new Point(1, 2) }
+t(6) { p == new Point(2, 1) }
+t(7) { p.hashCode() }
+t(8) { p.x = 5 }
+t(9) { new Named('a', [1]) }
+t(10) { new Point(x: 3, y: 4) }
+t(11) { p.getClass().name }
+t(12) { new Point(1) }
+t(13) { [new Point(2, 2), new Point(1, 1)].sort { it.x } }
+t(14) { p.getX() }
+t(15) { p.toList() }
+t(16) { p.size() }
+t(17) { p[1] }
+t(18) { p.toMap() }
+t(19) { new Named('b', null).hashCode() }
+t(20) { p instanceof Record }
+"####;
+    let expected = r####"1: Point[x=1, y=2]
+2: 1
+3: 1
+4: 3
+5: true
+6: false
+7: 33
+8: groovy.lang.ReadOnlyPropertyException Cannot set read-only property: x for class: Point
+9: Named[name=a, tags=[1]]
+10: Point[x=3, y=4]
+11: Point
+12: groovy.lang.GroovyRuntimeException Could not find matching constructor for: Point(Integer)
+13: [Point[x=1, y=1], Point[x=2, y=2]]
+14: groovy.lang.MissingMethodException No signature of method: getX for class: Point is applicable for argument types: () values: []
+15: [1, 2]
+16: 2
+17: 2
+18: [x:1, y:2]
+19: 3038
+20: true
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn integer_equals_long_is_false() {
+    let src = r####"println 5.equals(5L)
+println 5L.equals(5L)
+println 5L.equals(5)
+println 5.equals(5)
+def x = 5L
+println 5.equals(x)
+println x.equals(5L)
+long y = 7
+println y.equals(7)
+println y.equals(7L)
+println 5.equals(6)
+println 5 == 5L
+"####;
+    let expected = r####"false
+true
+false
+true
+false
+true
+false
+true
+false
+true
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn println_before_a_sign_is_a_binary_operator() {
+    let src = r####"SN = this.getClass().name
+def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)?.replace(SN, "Script")}" } }
+t(1) { println -7 % 3 }
+t(2) { print +5 }
+t(3) { println(-7 % 3) }
+t(4) { def x = 3; println -x }
+println 'end'
+"####;
+    let expected = r####"1: groovy.lang.MissingPropertyException No such property: println for class: Script
+2: groovy.lang.MissingPropertyException No such property: print for class: Script
+-1
+3: null
+4: groovy.lang.MissingPropertyException No such property: println for class: Script
+end
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn encodings_answer_a_writable() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def w = 'abc'.bytes.encodeBase64()
+def h = 'abc'.bytes.encodeHex()
+t(1) { w }
+t(2) { w.getClass().name }
+t(3) { h.getClass().name }
+t(4) { w == 'YWJj' }
+t(5) { w.toString() == 'YWJj' }
+t(6) { w instanceof Writable }
+t(7) { w.length() }
+t(8) { "x${w}y" }
+t(9) { def sw = new StringWriter(); w.writeTo(sw); sw.toString() }
+t(10) { w as String }
+t(11) { [w].join(',') }
+t(12) { h.toString() }
+t(13) { ('x' * 60).bytes.encodeBase64(true).toString().inspect() }
+t(14) { ('y' * 57).bytes.encodeBase64(true).toString().inspect() }
+t(15) { 'ab'.bytes.encodeBase64(false).toString() }
+"####;
+    let expected = r####"1: YWJj
+2: org.codehaus.groovy.runtime.EncodingGroovyMethods$1
+3: org.codehaus.groovy.runtime.EncodingGroovyMethods$2
+4: false
+5: true
+6: true
+7: groovy.lang.MissingMethodException No signature of method: length for class: org.codehaus.groovy.runtime.EncodingGroovyMethods$1 is applicable for argument types: () values: []
+8: xYWJjy
+9: YWJj
+10: YWJj
+11: YWJj
+12: 616263
+13: 'eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4\r\neHh4'
+14: 'eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5\r\n'
+15: YWI=
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn list_with_default() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def l = [].withDefault { it * 2 }
+t(1) { [l[3], l] }
+t(2) { [l[1], l] }
+t(3) { l.getClass().name }
+t(4) { l.size() }
+t(5) { l.get(5); l }
+t(6) { def e = [1].withEagerDefault { it * 10 }; [e[3], e] }
+t(7) { def z = [1, null, 3].withDefault { -1 }; [z[1], z] }
+t(8) { def z = [1, null, 3].withEagerDefault { -1 }; [z[1], z] }
+t(9) { def z = [].withLazyDefault { 'x' }; [z[0], z] }
+t(10) { def z = [5].withDefault { 0 }; z << 6; z }
+t(11) { def z = [].withDefault { 0 }; z[-1] }
+t(12) { def z = [1,2].withDefault { 0 }; z.collect { it + 1 } }
+"####;
+    let expected = r####"1: [6, [null, null, null, 6]]
+2: [2, [null, 2, null, 6]]
+3: groovy.lang.ListWithDefault
+4: 4
+5: [null, 2, null, 6, null, 10]
+6: [30, [1, 10, 20, 30]]
+7: [-1, [1, -1, 3]]
+8: [null, [1, null, 3]]
+9: [x, [x]]
+10: [5, 6]
+11: java.lang.IndexOutOfBoundsException Negative index [-1] too large for list size 0
+12: [2, 3]
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn tuples() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def tp = new Tuple2(1, 'a')
+t(1) { tp }
+t(2) { [tp.v1, tp.v2, tp.getV1(), tp[1], tp.size()] }
+t(3) { tp.getClass().name }
+t(4) { tp == [1, 'a'] }
+t(5) { tp[0] = 5 }
+t(6) { tp.add(3) }
+t(7) { Tuple.tuple(1, 2, 3).getClass().name }
+t(8) { Tuple.tuple(1, 2, 3).v3 }
+t(9) { new Tuple(1, 2).getClass().name }
+t(10) { tp.collect { it.toString() * 2 } }
+t(11) { def (a, b) = tp; "$a$b" }
+t(12) { tp.v3 }
+t(13) { new Tuple2(1, 2) == new Tuple2(1, 2) }
+t(14) { Tuple.tuple().getClass().name }
+t(15) { new Tuple3(1, 2, 3).v3 }
+t(16) { tp instanceof List }
+t(17) { tp.first }
+t(18) { tp.second }
+"####;
+    let expected = r####"1: [1, a]
+2: [1, a, 1, a, 2]
+3: groovy.lang.Tuple2
+4: true
+5: java.lang.UnsupportedOperationException null
+6: java.lang.UnsupportedOperationException null
+7: groovy.lang.Tuple3
+8: 3
+9: groovy.lang.Tuple
+10: [11, aa]
+11: 1a
+12: groovy.lang.MissingPropertyException Exception evaluating property 'v3' for groovy.lang.Tuple2, Reason: groovy.lang.MissingPropertyException: No such property: v3 for class: java.lang.Integer
+13: true
+14: groovy.lang.Tuple0
+15: 3
+16: true
+17: 1
+18: a
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn gpath_property_miss_is_wrapped() {
+    let src = r####"try { [1, 'a'].v3 } catch (MissingPropertyException e) { println e.message }
+try { [new Object()].zz } catch (MissingPropertyException e) { println e.message }
+println(['ab', 'c'].bytes.size())
+"####;
+    let expected = r####"Exception evaluating property 'v3' for java.util.ArrayList, Reason: groovy.lang.MissingPropertyException: No such property: v3 for class: java.lang.Integer
+Exception evaluating property 'zz' for java.util.ArrayList, Reason: groovy.lang.MissingPropertyException: No such property: zz for class: java.lang.Object
+2
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn zero_arguments_and_variadic_parameters() {
+    let src = r####"SN = this.getClass().name
+def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)?.replace(SN, "Script")}" } }
+class A { def m(x) { "m$x" }; def p(int x) { "p$x" }; def s(String x) { "s$x" }
+  def v(String... xs) { xs.length }; def w(int a, Object... rest) { "$a ${rest.length}" } }
+class Q { def v; Q(String s) { v = "q$s" } }
+class R { def v; R(int s) { v = "r$s" } }
+class V { def n; V(String... xs) { n = xs.length } }
+def f(x) { "f$x" }
+def g(int x) { x }
+def h(a, b) { a }
+def a = new A()
+t(1) { a.m() }
+t(2) { a.p() }
+t(3) { a.s() }
+t(4) { new Q().v }
+t(5) { new R().v }
+t(6) { f() }
+t(7) { g() }
+t(8) { h(1) }
+t(9) { f(1, 2) }
+t(10) { a.v('a', 'b') }
+t(11) { a.v() }
+t(12) { a.v('x') }
+t(13) { a.w(1, 2, 3) }
+t(14) { a.w(1) }
+t(15) { new V('a', 'b', 'c').n }
+t(16) { new V().n }
+t(17) { a.v(1) }
+"####;
+    let expected = r####"1: mnull
+2: groovy.lang.MissingMethodException No signature of method: p for class: A is applicable for argument types: () values: []
+3: snull
+4: qnull
+5: groovy.lang.GroovyRuntimeException Could not find matching constructor for: R()
+6: fnull
+7: groovy.lang.MissingMethodException No signature of method: g for class: Script is applicable for argument types: () values: []
+8: groovy.lang.MissingMethodException No signature of method: h for class: Script is applicable for argument types: (Integer) values: [1]
+9: groovy.lang.MissingMethodException No signature of method: f for class: Script is applicable for argument types: (Integer, Integer) values: [1, 2]
+10: 2
+11: 0
+12: 1
+13: 1 2
+14: 1 0
+15: 3
+16: 0
+17: groovy.lang.MissingMethodException No signature of method: v for class: A is applicable for argument types: (Integer) values: [1]
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn enum_constructor_arguments() {
+    let src = r####"enum Op {
+  PLUS("+"), MINUS("-")
+  final String sym
+  Op(String sym) { this.sym = sym }
+  def apply(a, b) { this == PLUS ? a + b : a - b }
+}
+println Op.MINUS.sym
+println Op.PLUS.apply(2, 3)
+enum Level { LOW(1), HIGH(10)
+  final int n
+  Level(int n) { this.n = n }
+}
+println Level.values().collect { "$it:${it.n}:${it.ordinal()}" }
+"####;
+    let expected = r####"-
+5
+[LOW:1:0, HIGH:10:1]
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn script_level_this() {
+    let src = r####"println this.is(this)
+def f() { this.getClass().name == getClass().name }
+println f()
+def c = { this.is(owner) && this.is(thisObject) }
+println c()
+println(this instanceof Script)
+"####;
+    let expected = r####"true
+true
+true
+true
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn method_assigning_a_final_field_is_a_compile_error() {
+    // Groovy rejects the program before running any of it: "cannot modify
+    // final field 'v' outside of constructor."
+    for src in [
+        "println 'x'\nclass B { final int v = 1; def bump() { v = 2 } }\n",
+        "println 'x'\nclass B { final int v = 1; def bump() { this.v += 2 } }\n",
+    ] {
+        let (out, ok) = run(src);
+        assert!(!ok);
+        assert_eq!(out, "");
+    }
+}

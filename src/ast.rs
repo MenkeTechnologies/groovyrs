@@ -385,6 +385,9 @@ pub struct Generated {
     pub immutable: bool,
     /// `@Singleton` — a `static` `instance` property holding the one instance.
     pub singleton: bool,
+    /// A `record` declaration: its components are read-only properties read
+    /// through `x()` (no `getX()`), and it renders `Name[x=1, y=2]`.
+    pub record: bool,
     /// `@ToString(includes = …)` — render only these properties (when set).
     pub to_string_includes: Option<Vec<String>>,
     /// `@ToString(excludes = …)` — properties left out of the rendering.

@@ -2323,3 +2323,604 @@ groovy.json.JsonBuilder
 "####;
     check(src, expected);
 }
+
+#[test]
+fn gstring_is_a_runtime_type() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def x = 1
+t(1) { "a${x}".getClass().name }
+t(2) { "a${x}" == 'a1' }
+t(3) { "a${x}".equals('a1') }
+t(4) { 'a1'.equals("a${x}") }
+t(5) { "a${x}".hashCode() == 'a1'.hashCode() }
+t(6) { def m = [("k${x}"): 1]; m.containsKey('k1') }
+t(7) { def m = ['k1': 1]; m["k${x}"] }
+t(9) { ["a${x}"].contains('a1') }
+t(10) { "a${x}" instanceof String }
+t(11) { "a${x}" instanceof GString }
+t(12) { "a${x}" instanceof CharSequence }
+t(13) { def g = "a${x}"; g.strings.toList() + g.values.toList() }
+t(14) { def y = 1; def g = "v=${-> y}"; y = 2; g.toString() }
+t(15) { def y = 1; def g = "v=${y}"; y = 2; g.toString() }
+t(16) { "a${x}" + 'b' }
+t(17) { ("a${x}" + 'b').getClass().name }
+t(18) { 'b' + "a${x}" }
+t(19) { ('b' + "a${x}").getClass().name }
+t(20) { "a${x}".length() }
+t(21) { def g = "a${x}"; g.valueCount }
+t(22) { "plain".getClass().name }
+t(23) { "a${x}".toString().getClass().name }
+t(24) { String s = "a${x}"; s.getClass().name }
+t(25) { "a${x}" <=> 'a1' }
+t(26) { ["a${x}", 'a1'].unique().size() }
+t(27) { def m = [:]; m["k${x}"] = 1; m['k1'] = 2; m.size() }
+t(28) { "a${x}".is("a${x}") }
+t(29) { def l = []; l << "${x}"; l*.getClass()*.simpleName }
+t(30) { switch ("a${x}") { case 'a1': return 'matched'; default: return 'no' } }
+t(31) { "${x}${x}".bytes.length }
+t(32) { "a${x}".toUpperCase().getClass().name }
+t(33) { ["a${x}"].contains("a${x}") }
+t(34) { ["a${x}"].indexOf("a${x}") }
+"####;
+    let expected = r####"1: org.codehaus.groovy.runtime.GStringImpl
+2: true
+3: false
+4: false
+5: false
+6: false
+7: 1
+9: false
+10: false
+11: true
+12: true
+13: [a, , 1]
+14: v=2
+15: v=1
+16: a1b
+17: org.codehaus.groovy.runtime.GStringImpl
+18: ba1
+19: java.lang.String
+20: 2
+21: 1
+22: java.lang.String
+23: java.lang.String
+24: java.lang.String
+25: 0
+26: 1
+27: 1
+28: false
+29: [GStringImpl]
+30: matched
+31: 2
+32: java.lang.String
+33: true
+34: 0
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn gstring_concatenation_and_members() {
+    let src = r####"def x = 1
+println "a${x}".hashCode()
+println 'a1'.hashCode()
+println(("a${x}" + 1).getClass().name)
+println(("a${x}" + "b${x}").getClass().name)
+println(("a${x}" + "b${x}").values.toList())
+println(("a${x}" + 'z').strings.toList())
+println("a${x}".equals("a${x}"))
+println("a${x}".compareTo('a1'))
+println("${x}".strings.toList())
+println("a${x}${x}b".strings.toList())
+println((1 + "a${x}").getClass().name)
+println(("a${x}" * 2).getClass().name)
+println("a${x}".plus('q').getClass().name)
+"####;
+    let expected = r####"3093
+3056
+java.lang.String
+org.codehaus.groovy.runtime.GStringImpl
+[1, 1]
+[a, z]
+true
+0
+[, ]
+[a, , b]
+java.lang.String
+java.lang.String
+org.codehaus.groovy.runtime.GStringImpl
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn gstring_where_a_string_is_expected() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def x = 7; def e = ''; def sep = ','; def k = 'a'
+t(1) { "${x}" as Integer }
+t(2) { Integer.parseInt("${x}") }
+t(3) { ("a${x}" =~ /a(\d)/)[0][1] }
+t(4) { "a${x}" ==~ /a\d/ }
+t(5) { 'abc'.contains("b${e}") }
+t(6) { [1, 2].join("${sep}") }
+t(7) { 'a,b'.split("${sep}").toList() }
+t(8) { [a: 1]["${k}"] }
+t(9) { 'abc'.indexOf("c${e}") }
+t(10) { 'x-y'.replace("-${e}", '+') }
+t(11) { "${x}".toInteger() + 1 }
+t(12) { "${x}".padLeft(3, '0') }
+t(13) { new StringBuilder("s${x}").append("t${x}").toString() }
+t(14) { String.format("%s!", "v${x}") }
+t(15) { "a${x}".startsWith("a${e}") }
+t(16) { ['a7': 1].get("a${x}") }
+t(17) { ['a7': 1].containsKey("a${x}") }
+t(18) { def l = ['a7']; l.indexOf("a${x}") }
+t(19) { def m = [:]; m.put("q${x}", 1); m.keySet()*.getClass()*.simpleName }
+t(20) { "a${x}".toList() }
+t(21) { "${x}".each { print it }; '' }
+t(22) { def s = "a${x}"; s += 'b'; s.getClass().simpleName }
+t(23) { def s = 'a'; s += "${x}"; s.getClass().simpleName }
+t(24) { "a${x}" in ['a7'] }
+t(25) { ['a7'].contains("a${x}".toString()) }
+t(26) { "${x}".class.simpleName }
+t(27) { "abc".tr("${'a'}", 'z') }
+t(28) { "${x}".asBoolean() }
+t(29) { "${e}" ? 'y' : 'n' }
+t(30) { [("${k}"): 1].a }
+t(31) { def m = [("${k}"): 1]; m["a"] }
+t(32) { "x${x}".size() }
+t(33) { "${[1, 2]}" }
+"####;
+    let expected = r####"1: 7
+2: 7
+3: 7
+4: true
+5: true
+6: 1,2
+7: [a, b]
+8: 1
+9: 2
+10: x+y
+11: 8
+12: 007
+13: s7t7
+14: v7!
+15: true
+16: null
+17: false
+18: -1
+19: [GStringImpl]
+20: [a, 7]
+721: 
+22: GStringImpl
+23: String
+24: false
+25: true
+26: GStringImpl
+27: zbc
+28: true
+29: n
+30: null
+31: null
+32: 2
+33: [1, 2]
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn comparator_tree_set_operators() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def mk = { def s = new TreeSet(String.CASE_INSENSITIVE_ORDER); s.addAll(['b', 'A', 'c']); s }
+t(1) { mk() + ['a', 'D'] }
+t(2) { (mk() + ['a', 'D']).getClass().name }
+t(3) { mk() - ['B'] }
+t(4) { def s = mk(); s.retainAll(['C', 'a']); s }
+t(5) { def s = mk(); s.removeAll(['C']); s }
+t(6) { mk().intersect(['B', 'x']) }
+t(7) { mk().plus('Z') }
+t(8) { mk() == (['a', 'b', 'c'] as Set) }
+t(9) { mk().first() + mk().last() }
+t(10) { mk().findAll { it < 'c' } }
+t(11) { mk().collect { it } }
+t(12) { mk().size() }
+"####;
+    let expected = r####"1: [A, b, c, D]
+2: java.util.TreeSet
+3: [A, c]
+4: []
+5: [A, b]
+6: []
+7: [A, b, c, Z]
+8: false
+9: Ac
+10: [A, b]
+11: [A, b, c]
+12: 3
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn meta_class_responds_to_constructor_and_left_shift() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+class P { def x = 1; def m() { 'm' }; def m(a) { 'm1' }; P() {}; P(int v) { x = v } }
+t(1) { new P().respondsTo('m').size() }
+t(2) { new P().respondsTo('m', 1).size() }
+t(3) { new P().respondsTo('zz').size() }
+t(4) { new P().respondsTo('m') ? 'y' : 'n' }
+t(5) { P.metaClass.respondsTo(new P(), 'm').size() }
+t(6) { new P().hasProperty('x') != null }
+t(7) { P.metaClass.hasProperty(new P(), 'x') != null }
+t(8) { new P().hasProperty('q') }
+P.metaClass.extra << { -> 'ex' }
+t(9) { new P().extra() }
+t(10) { new P().respondsTo('extra').size() }
+P.metaClass.constructor << { String s -> new P(s.size()) }
+t(11) { new P('abcd').x }
+t(12) { new P(7).x }
+P.metaClass.static.st << { -> 'static!' }
+t(13) { P.st() }
+String.metaClass.twice << { -> delegate * 2 }
+t(14) { 'ab'.twice() }
+"####;
+    let expected = r####"1: 2
+2: 1
+3: 0
+4: y
+5: 2
+6: true
+7: true
+8: null
+9: ex
+10: 1
+11: 4
+12: 7
+13: static!
+14: abab
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn category_applies_only_to_its_type() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+@Category(String) class Rev { String rev() { this.reverse() } }
+@Category(Integer) class Dbl { def dbl() { this * 2 } }
+t(1) { use(Rev) { 'abc'.rev() } }
+t(2) { use(Rev) { 5.rev() } }
+t(3) { use(Rev, Dbl) { 'ab'.rev() + 4.dbl() } }
+t(4) { use(Dbl) { 'x'.dbl() } }
+"####;
+    let expected = r####"1: cba
+2: groovy.lang.MissingMethodException No signature of method: rev for class: java.lang.Integer is applicable for argument types: () values: []
+3: ba8
+4: groovy.lang.MissingMethodException No signature of method: dbl for class: java.lang.String is applicable for argument types: () values: []
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn file_text_and_readers() {
+    let src = r####"def base = new File(System.getProperty('java.io.tmpdir'), 'groovyrs_file_' + System.nanoTime())
+base.mkdirs()
+def d = base.path
+def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)?.replaceAll(/\/.*groovyrs_file_\d+/, 'D')}" } }
+def f = new File(d, 'a.txt')
+t(1) { f.exists() }
+t(2) { f.text = 'one\ntwo\n'; f.text }
+t(3) { f.readLines() }
+t(4) { f << 'three'; f.text.size() }
+t(5) { def r = []; f.eachLine { r << it }; r }
+t(6) { def r = []; f.eachLine { l, n -> r << n }; r }
+t(7) { [f.name, f.path.replace(d, 'D'), f.parent.replace(d, 'D'), f.isFile(), f.isDirectory(), f.length()] }
+t(8) { new File(d + '/nope.txt').text }
+t(9) { f.write('w'); f.text }
+t(10) { f.append('x'); f.append('y'); f.text }
+t(11) { new File(d).isDirectory() }
+t(12) { new File(d, 'sub').mkdirs(); new File(d, 'sub').exists() }
+t(13) { new File(d).list().toList().sort() }
+t(14) { f.toString().replace(d, 'D') }
+t(15) { f.getClass().name }
+t(16) { def g = new File(d, 'b.txt'); g.withWriter { w -> w << 'p'; w.write('q\nr') }; g.text }
+t(17) { new File(d, 'b.txt').withReader { [it.readLine(), it.readLine(), it.readLine()] } }
+t(18) { new File(d, 'b.txt').bytes.length }
+t(19) { def g = new File(d, 'c.txt'); g.text = 'a\r\nb'; g.readLines() }
+t(20) { new File('rel/x.txt').path + ' ' + new File('rel/x.txt').name + ' ' + new File('rel/x.txt').parent }
+t(21) { new groovy.json.JsonSlurper().parse(new File(d, 'j.json').with { it.text = '{"k":[1]}'; it }) }
+t(22) { new groovy.json.JsonSlurper().parse(new StringReader('[true]')) }
+t(23) { new StringReader('x\ny').readLines() }
+['a.txt', 'b.txt', 'c.txt', 'j.json', 'sub'].each { new File(d, it).delete() }
+println base.delete()
+"####;
+    let expected = r####"1: false
+2: one
+two
+
+3: [one, two]
+4: 13
+5: [one, two, three]
+6: [1, 2, 3]
+7: [a.txt, D/a.txt, D, true, false, 13]
+8: java.io.FileNotFoundException D/nope.txt (No such file or directory)
+9: w
+10: wxy
+11: true
+12: true
+13: [a.txt, sub]
+14: D/a.txt
+15: java.io.File
+16: pq
+r
+17: [pq, r, null]
+18: 4
+19: [a, b]
+20: rel/x.txt x.txt rel
+21: [k:[1]]
+22: [true]
+23: [x, y]
+true
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn list_spread_into_a_function() {
+    let src = r####"SN = this.getClass().name
+def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)?.replace(SN, 'S')}" } }
+def f(int a) { a * 2 }
+def g(String a, int b) { a * b }
+def h(int a, int b) { a + b }
+t(1) { f([7]) }
+t(2) { g(['ab', 2]) }
+t(3) { f(['x']) }
+t(4) { f([1, 2]) }
+t(5) { h([3, 4]) }
+t(6) { f(7) }
+t(7) { def l = [5]; f(l) }
+"####;
+    let expected = r####"1: 14
+2: abab
+3: groovy.lang.MissingMethodException No signature of method: f for class: S is applicable for argument types: (ArrayList) values: [[x]]
+4: groovy.lang.MissingMethodException No signature of method: f for class: S is applicable for argument types: (ArrayList) values: [[1, 2]]
+5: 7
+6: 14
+7: 10
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn regex_matchers() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+t(1) { def m = 'a1b22c333' =~ /(\d+)/; [m.count, m[0], m[1][1], m.size()] }
+t(2) { ('foo=1, bar=2' =~ /(\w+)=(\d+)/).collect { it[1] + ':' + it[2] } }
+t(3) { 'x' ==~ /x|y/ }
+t(4) { def m = 'ab' =~ /(?<first>a)(?<second>b)/; m.matches(); m.group('second') }
+t(5) { 'a-b-c'.replaceAll(/-(\w)/) { all, ch -> ch.toUpperCase() } }
+t(6) { 'hello world'.find(/o\w*/) }
+t(7) { 'hello world'.findAll(/o./) }
+t(8) { 'a1b2'.replaceFirst(/\d/, '#') }
+t(9) { def p = ~/(\d)(\d)/; def m = p.matcher('12 34'); def r = []; while (m.find()) r << m.group(2); r }
+t(10) { ('2024-01-15' =~ /(\d+)-(\d+)-(\d+)/)[0][1..3] }
+t(11) { 'abc' =~ /z/ ? 'y' : 'n' }
+t(12) { switch ('abc') { case ~/a.c/: return 'rx'; default: return 'no' } }
+t(13) { 'a,b;c'.split(/[,;]/).toList() }
+t(14) { def m = 'x=1' =~ /(x)=(\d)/; m[0].size() }
+t(15) { ('aaa' =~ /a/).replaceAll('b') }
+t(16) { 'Hello'.matches(/H.*/) }
+t(17) { (~/a+/).getClass().name }
+t(18) { ('a' =~ /a/).getClass().name }
+t(19) { 'tel: 555-1234'.find(/(\d{3})-(\d{4})/) { full, a, b -> b + a } }
+t(20) { 'one two'.eachMatch(/\w+/) { print it[0].toUpperCase() + ' ' }; '' }
+"####;
+    let expected = r####"1: [3, [1, 1], 22, 3]
+2: [foo:1, bar:2]
+3: true
+4: b
+5: aBC
+6: o
+7: [o , or]
+8: a#b2
+9: [2, 4]
+10: [2024, 01, 15]
+11: n
+12: rx
+13: [a, b, c]
+14: 3
+15: bbb
+16: true
+17: java.util.regex.Pattern
+18: java.util.regex.Matcher
+19: 1234555
+O T 20: 
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn closure_combinators() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def add = { a, b, c -> a + b * c }
+t(1) { add.curry(1)(2, 3) }
+t(2) { add.rcurry(10)(1, 2) }
+t(3) { add.ncurry(1, 5)(1, 2) }
+t(4) { def calls = 0; def sq = { calls++; it * it }.memoize(); sq(3); sq(3); sq(4); calls }
+t(5) { def fact; fact = { n, acc = 1G -> n <= 1 ? acc : fact.trampoline(n - 1, acc * n) }.trampoline(); fact(20) }
+t(6) { def f = { it + 1 } >> { it * 2 }; f(3) }
+t(7) { def f = { it + 1 } << { it * 2 }; f(3) }
+t(8) { [1, 2].with { size() } }
+t(9) { new StringBuilder().tap { append('a'); append('b') }.toString() }
+t(10) { add.maximumNumberOfParameters }
+t(11) { add.curry(1).maximumNumberOfParameters }
+t(12) { def m = { a -> a * 2 }.memoizeAtMost(2); [m(1), m(2), m(1)] }
+t(13) { def c = { x -> x }; c.curry(5)() }
+t(14) { { String a, int b -> a * b }.parameterTypes*.simpleName }
+t(15) { def fib; fib = { n -> n < 2 ? n : fib(n - 1) + fib(n - 2) }.memoize(); fib(30) }
+t(16) { def c = { -> delegate.size() }; c.delegate = [1, 2, 3]; c() }
+t(17) { def c = { it * 2 }; c.call(4) + c(1) }
+t(18) { def c = { a, b -> a + b }; c.curry(1).curry(2)() }
+t(19) { def comp = { it * 2 } >> { it + 1 } >> { "r$it" }; comp(5) }
+t(20) { (1..3).collect({ it * 2 } >> { it + 1 }) }
+"####;
+    let expected = r####"1: 7
+2: 21
+3: 11
+4: 2
+5: 2432902008176640000
+6: 8
+7: 7
+8: 2
+9: ab
+10: 3
+11: 2
+12: [2, 4, 2]
+13: 5
+14: [String, int]
+15: 832040
+16: 3
+17: 10
+18: 3
+19: r11
+20: [3, 5, 7]
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn ast_transform_annotations() {
+    let src = r####"import groovy.transform.*
+def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+@ToString class A { int x; String s }
+@ToString(includeNames = true) class B { int x; String s }
+@EqualsAndHashCode class C { int x }
+@Canonical class D { int a; List b }
+@Immutable class E { int a; String b }
+@TupleConstructor class F { int a; int b = 5 }
+@ToString(includePackage = false, ignoreNulls = true) class G { String a; String b }
+t(1) { new A(x: 1, s: 'q') }
+t(2) { new B(x: 1, s: 'q') }
+t(3) { new C(x: 1) == new C(x: 1) }
+t(4) { new C(x: 1).hashCode() == new C(x: 1).hashCode() }
+t(5) { new D(1, [2]) }
+t(6) { new D(1, [2]) == new D(1, [2]) }
+t(7) { new E(1, 'z') }
+t(8) { def e = new E(1, 'z'); e.copyWith(b: 'w') }
+t(9) { new F(1) .with { [a, b] } }
+t(10) { new G(a: 'x') }
+t(11) { new E(a: 2, b: 'q').hashCode() == new E(2, 'q').hashCode() }
+t(12) { new D(a: 3) }
+t(13) { [new C(x: 1), new C(x: 1)].unique().size() }
+t(14) { new E(1, 'z').with { it.a } }
+@ToString(excludes = 'b') class H { int a; int b }
+t(15) { new H(a: 1, b: 2) }
+@Sortable class S { String n; int v }
+t(16) { [new S(n: 'b', v: 1), new S(n: 'a', v: 2)].sort()*.n }
+@AutoClone class AC { List l = [1] }
+t(17) { def a = new AC(); def b = a.clone(); b.l.is(a.l) }
+"####;
+    let expected = r####"1: A(1, q)
+2: B(x:1, s:q)
+3: true
+4: true
+5: D(1, [2])
+6: true
+7: E(1, z)
+8: groovy.lang.MissingMethodException No signature of method: copyWith for class: E is applicable for argument types: (LinkedHashMap) values: [[b:w]]
+9: [1, 5]
+10: G(x)
+11: true
+12: D(3, null)
+13: 1
+14: 1
+15: H(1)
+16: [a, b]
+17: false
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn annotations_on_script_members() {
+    let src = r####"import groovy.transform.*
+@Memoized def slow(int n) { n * 2 }
+println slow(3)
+@CompileStatic
+int add(int a, int b) { a + b }
+println add(1, 2)
+@Field def counter = 5
+println counter
+@SuppressWarnings('unused') def x = 3
+println x
+@Field def c = 5
+@Field List seen = []
+def f() { seen << c; c + 1 }
+println f()
+println seen
+c = 9
+println f()
+"####;
+    let expected = r####"6
+3
+5
+3
+6
+[5]
+10
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn markup_builder() {
+    let src = r####"import groovy.xml.MarkupBuilder
+def w = new StringWriter()
+def b = new MarkupBuilder(w)
+b.html {
+  head { title('T & <x>') }
+  body(class: 'main', id: "b'1\"") {
+    p 'one'
+    br()
+    ul {
+      [1, 2].each { n -> li(n) }
+    }
+    div(a: 1) { span(b: 2) }
+    empty(k: 'v')
+  }
+}
+println w.toString()
+println '---'
+def w2 = new StringWriter()
+new MarkupBuilder(w2).item(id: 3, 'text')
+println w2
+def w3 = new StringWriter()
+new MarkupBuilder(w3).a { bb { c("deep") } }
+println w3
+"####;
+    let expected = r####"<html>
+  <head>
+    <title>T &amp; &lt;x&gt;</title>
+  </head>
+  <body class='main' id='b&apos;1"'>
+    <p>one</p>
+    <br />
+    <ul>
+      <li>1</li>
+      <li>2</li>
+    </ul>
+    <div a='1'>
+      <span b='2' />
+    </div>
+    <empty k='v' />
+  </body>
+</html>
+---
+<item id='3'>text</item>
+<a>
+  <bb>
+    <c>deep</c>
+  </bb>
+</a>
+"####;
+    check(src, expected);
+}

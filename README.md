@@ -532,6 +532,10 @@ Implemented and checked against Apache Groovy:
   { … }`, `.static`, getters, per-instance `obj.metaClass`), `@Category(T)`
   classes under `use`, and closures that are instances of the classes Groovy
   generates for them (`Script$_run_closure1`).
+- **`GString`** — interpolated literals are `GStringImpl`s with Groovy's
+  `equals`/`hashCode`/map-key semantics and lazy `${-> x}` values.
+- **Files and markup** — `java.io.File`'s text GDK, `StringReader`, and
+  `groovy.xml.MarkupBuilder`.
 - **`groovy.json`** — `JsonOutput.toJson` / `prettyPrint`,
   `JsonSlurper.parseText` and `JsonBuilder`.
 - **Closure coercion at a typed parameter** — a closure passed where a
@@ -676,8 +680,8 @@ Implemented and checked against Apache Groovy:
   `catch (groovy.lang.MissingMethodException e)`, a multi-catch arm,
   `instanceof`, and `new`.
 
-See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`GString` as a type,
-a `TreeSet` ordered by a `Comparator`).
+See [`BUGS.md`](BUGS.md) for the honest known-gaps list (XML parsing, `Date`,
+a `List` implementation kind).
 
 ---
 
@@ -775,21 +779,18 @@ Debug Adapter (`--dap`).
 
 Next waves, in priority order:
 
-1. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
-   `"$s".getClass()` reports `java.lang.String` where Groovy reports
-   `org.codehaus.groovy.runtime.GStringImpl`.
-2. **A `List` implementation kind.** A set and a map each carry one, so a
+1. **A `List` implementation kind.** A set and a map each carry one, so a
    `TreeSet` and a `TreeMap` sort; a list does not, so
    `new LinkedList([1,2]).getClass()` reports `java.util.ArrayList`. The same
    missing kind is why `asImmutable()` takes a write instead of raising
    `UnsupportedOperationException` — a *wrapper* kind is unmodeled on every
    collection, maps included.
-3. **Collection view types.** `keySet()`, `entrySet()` and `values()` answer a
+2. **Collection view types.** `keySet()`, `entrySet()` and `values()` answer a
    plain `List` with the right contents in the right order, but they are copies
    rather than live views, and `getClass()` names `java.util.ArrayList` where
    Groovy names `java.util.TreeMap$KeySet`. A `Map.Entry` carries no class
    either.
-4. **Command-argument chains** — `println a, b` and `foo bar baz` do not parse.
+3. **Command-argument chains** — `println a, b` and `foo bar baz` do not parse.
    A member call with its parentheses left off does (`sb.append 'x'`), as does
    a bare-name call whose first argument is a literal (`printf "%d\n", 5`,
    `f 1, k: 2`), and the parenthesised call always parses.

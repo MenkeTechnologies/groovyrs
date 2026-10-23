@@ -324,6 +324,13 @@ impl Parser {
                 let is_trait = matches!(self.peek(), Tok::Ident(w) if w == "trait");
                 self.class_decl_with(is_interface, is_trait, generated)?
             }
+            // An annotation on a function, a local or a statement
+            // (`@CompileStatic def f()`, `@Memoized`, `@Field`): no run-time
+            // effect groovyrs models, so it is read past.
+            Tok::At => {
+                self.skip_annotations();
+                return self.statement();
+            }
             // `record P(int x, int y) { … }`.
             Tok::Ident(w)
                 if w == "record"
@@ -976,6 +983,7 @@ impl Parser {
                     // Only `includeNames` changes the rendering; the rest of the
                     // attribute set is accepted and ignored (see BUGS.md).
                     gen.include_names |= args.contains("includeNames") && args.contains("true");
+                    gen.ignore_nulls |= args.contains("ignoreNullstrue");
                 }
                 "EqualsAndHashCode" => {
                     gen.equals_hash = true;
@@ -983,7 +991,9 @@ impl Parser {
                     gen.equals_excludes = names_for("excludes").unwrap_or_default();
                 }
                 "TupleConstructor" => gen.tuple_ctor = true,
-                "Category" => gen.category = true,
+                "Sortable" => gen.sortable = true,
+                "AutoClone" => gen.auto_clone = true,
+                "Category" => gen.category = Some(args.clone()),
                 // `@Immutable` and `@Value` are `@Canonical` plus read-only properties.
                 "Singleton" => gen.singleton = true,
                 "Immutable" | "Value" => {
@@ -1079,6 +1089,19 @@ impl Parser {
                 f.is_static = true;
                 f.is_final = true;
             }
+        }
+        // `@Category(T)` records its target as a hidden static field the
+        // host reads when `use` applies the class.
+        if let Some(target) = &generated.category {
+            fields.push(Field {
+                name: "$category".to_string(),
+                ty: "String".to_string(),
+                init: Some(Expr::Str(target.clone())),
+                is_static: true,
+                is_property: false,
+                is_delegate: false,
+                is_final: true,
+            });
         }
         if generated.singleton {
             fields.push(Field {
@@ -1255,6 +1278,40 @@ impl Parser {
             methods,
             abstract_methods,
         })
+    }
+
+    /// Read past a run of annotations: `@Name`, `@pkg.Name`, each with an
+    /// optional balanced argument list.
+    fn skip_annotations(&mut self) {
+        while self.is(&Tok::At) {
+            self.advance();
+            if matches!(self.peek(), Tok::Ident(_)) {
+                self.advance();
+            }
+            while self.is(&Tok::Dot) && matches!(self.peek_at(1), Tok::Ident(_)) {
+                self.advance();
+                self.advance();
+            }
+            if self.is(&Tok::LParen) {
+                let mut depth = 0;
+                loop {
+                    match self.peek() {
+                        Tok::LParen => depth += 1,
+                        Tok::RParen => {
+                            depth -= 1;
+                            if depth == 0 {
+                                self.advance();
+                                break;
+                            }
+                        }
+                        Tok::Eof => break,
+                        _ => {}
+                    }
+                    self.advance();
+                }
+            }
+            self.skip_newlines();
+        }
     }
 
     /// Does an `enum` declaration start here, possibly behind modifiers?

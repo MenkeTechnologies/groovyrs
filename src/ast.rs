@@ -389,8 +389,14 @@ pub struct Generated {
     /// through `x()` (no `getX()`), and it renders `Name[x=1, y=2]`.
     pub record: bool,
     /// `@Category(T)` — the class's instance methods are category methods
-    /// on `T`, with the receiver as `this`.
-    pub category: bool,
+    /// on `T` (the name written), with the receiver as `this`.
+    pub category: Option<String>,
+    /// `@ToString(ignoreNulls = true)` — a `null` property is left out.
+    pub ignore_nulls: bool,
+    /// `@Sortable` — a `compareTo` over the properties in declaration order.
+    pub sortable: bool,
+    /// `@AutoClone` — a `clone()` copying each property, a collection copied.
+    pub auto_clone: bool,
     /// `@ToString(includes = …)` — render only these properties (when set).
     pub to_string_includes: Option<Vec<String>>,
     /// `@ToString(excludes = …)` — properties left out of the rendering.

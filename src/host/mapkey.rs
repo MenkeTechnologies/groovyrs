@@ -39,8 +39,17 @@ pub(super) fn encode(v: &Value) -> String {
         Value::Bool(b) => format!("{MARK}b{}", u8::from(*b)),
         Value::Undef => format!("{MARK}n"),
         _ => {
+            // A `GString` key is not the `String` of its text: its
+            // `hashCode` differs, so `[("${k}"): 1]` does not contain `'a'`.
+            // It comes back as the first `GString` stored under that text.
             if as_gstring(v).is_some() {
-                return groovy_str(v);
+                let enc = format!("{MARK}s{}", groovy_str(v));
+                OBJECTS.with(|o| {
+                    o.borrow_mut()
+                        .entry(enc.clone())
+                        .or_insert_with(|| v.clone());
+                });
+                return enc;
             }
             if let Some(f) = as_float_handle(v) {
                 return format!("{MARK}F{:08x}", f.to_bits());

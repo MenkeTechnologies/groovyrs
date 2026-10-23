@@ -510,6 +510,9 @@ fn function_sub_names(
 /// The `groovy.json` classes `import groovy.json.*` brings into scope.
 const GROOVY_JSON_CLASSES: &[&str] = &["JsonOutput", "JsonSlurper", "JsonBuilder"];
 
+/// The `groovy.xml` classes `import groovy.xml.*` brings into scope.
+const GROOVY_XML_CLASSES: &[&str] = &["MarkupBuilder"];
+
 /// The parameter types whose declaration converts a number passed to them:
 /// `def d(double x)` called with `3` sees the `Double` `3.0`.
 const CONVERTED_PARAM_TYPES: &[&str] = &[
@@ -721,6 +724,28 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         }
     }
     let (fn_subs, fn_typed) = function_sub_names(prog, &fn_arities);
+    // Every declaration's `name/arity`, parameter types and sub, for the
+    // run-time call check (see [`crate::host::GFN_CHECK`]).
+    let mut sigs: HashMap<String, (Vec<String>, String)> = HashMap::new();
+    let mut subs = fn_subs.iter();
+    for stmt in &prog.body {
+        if let StmtKind::Function {
+            name,
+            params,
+            param_types,
+            ..
+        } = &stmt.kind
+        {
+            let types = if param_types.is_empty() {
+                vec!["def".to_string(); params.len()]
+            } else {
+                param_types.clone()
+            };
+            let sub = subs.next().cloned().unwrap_or_default();
+            sigs.insert(format!("{name}/{}", params.len()), (types, sub));
+        }
+    }
+    crate::host::set_fn_sigs(sigs);
     let mut fn_param_types: HashMap<String, Vec<Vec<String>>> = HashMap::new();
     for stmt in &prog.body {
         if let StmtKind::Function {
@@ -839,6 +864,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             .flat_map(|i| match i.strip_suffix(".*") {
                 Some("java.math") => vec!["RoundingMode".to_string(), "MathContext".to_string()],
                 Some("groovy.json") => GROOVY_JSON_CLASSES.iter().map(|c| c.to_string()).collect(),
+                Some("groovy.xml") => GROOVY_XML_CLASSES.iter().map(|c| c.to_string()).collect(),
                 Some(_) => Vec::new(),
                 None => vec![i.clone()],
             })
@@ -999,16 +1025,6 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     crate::host::set_closure_min_params(std::mem::take(&mut c.closure_min_params));
     crate::host::set_fn_typed(std::mem::take(&mut c.fn_typed));
     crate::host::set_sam_types(c.sam_types.clone());
-    crate::host::set_fn_sigs(
-        c.fn_param_types
-            .iter()
-            .flat_map(|(name, decls)| {
-                decls
-                    .iter()
-                    .map(move |t| (format!("{name}/{}", t.len()), t.clone()))
-            })
-            .collect(),
-    );
     Ok(c.b.build())
 }
 
@@ -1723,7 +1739,10 @@ impl Compiler {
             | ((generated.immutable as i64) << 4)
             | ((is_abstract as i64) << 5)
             | ((generated.record as i64) << 6)
-            | ((generated.category as i64) << 7);
+            | ((generated.category.is_some() as i64) << 7)
+            | ((generated.ignore_nulls as i64) << 8)
+            | ((generated.sortable as i64) << 9)
+            | ((generated.auto_clone as i64) << 10);
         self.b.emit(Op::LoadInt(gbits), line);
         for i in interfaces {
             let c = self.b.add_constant(Value::str(i.clone()));
@@ -2353,12 +2372,14 @@ impl Compiler {
                 if !matches!(op, AssignOp::Assign) {
                     self.b.emit(Op::Dup, self.cur_line);
                     self.expr(name)?;
+                    self.emit_call_builtin(crate::host::GNAME_TEXT, 0, self.cur_line)?;
                     self.emit_call_builtin(crate::host::GPROP, 0, self.cur_line)?;
                     self.keep_stack_top(&kept, keep == Keep::Old);
                 }
                 self.emit_compound_value(op, target, value)?;
                 self.keep_stack_top(&kept, keep == Keep::New);
                 self.expr(name)?;
+                self.emit_call_builtin(crate::host::GNAME_TEXT, 0, self.cur_line)?;
                 self.emit_call_builtin(crate::host::GSETPROP, 0, self.cur_line)?;
                 self.b.emit(Op::Pop, self.cur_line);
             }
@@ -3752,16 +3773,43 @@ impl Compiler {
             // host builtin, which renders an object through its `toString()` —
             // lowering to `+` instead would miss that dispatch.
             Expr::GString(parts) => {
+                // Pushed as Groovy's `strings`/`values` alternation — a text
+                // before every value and one after the last, empty where two
+                // values meet — so the `GString` knows which part is which.
+                let mut merged: Vec<GStringPart> = Vec::new();
                 for part in parts {
+                    match (merged.last_mut(), part) {
+                        (Some(GStringPart::Text(acc)), GStringPart::Text(t)) => acc.push_str(t),
+                        _ => merged.push(part.clone()),
+                    }
+                }
+                let mut pushed = 0;
+                let mut want_text = true;
+                for part in &merged {
                     match part {
                         GStringPart::Text(t) => {
                             let c = self.b.add_constant(Value::str(t.clone()));
                             self.b.emit(Op::LoadConst(c), self.cur_line);
+                            want_text = false;
                         }
-                        GStringPart::Expr(e) => self.expr(e)?,
+                        GStringPart::Expr(e) => {
+                            if want_text {
+                                let c = self.b.add_constant(Value::str(String::new()));
+                                self.b.emit(Op::LoadConst(c), self.cur_line);
+                                pushed += 1;
+                            }
+                            self.expr(e)?;
+                            want_text = true;
+                        }
                     }
+                    pushed += 1;
                 }
-                self.b.emit(Op::LoadInt(parts.len() as i64), self.cur_line);
+                if want_text {
+                    let c = self.b.add_constant(Value::str(String::new()));
+                    self.b.emit(Op::LoadConst(c), self.cur_line);
+                    pushed += 1;
+                }
+                self.b.emit(Op::LoadInt(pushed as i64), self.cur_line);
                 self.emit_call_builtin(crate::host::GSTRING, 0, self.cur_line)?;
             }
             Expr::Bool(b) => {
@@ -4132,6 +4180,7 @@ impl Compiler {
                 // `Long`, or an own field read directly.
                 self.expr(recv)?;
                 self.expr(name)?;
+                self.emit_call_builtin(crate::host::GNAME_TEXT, 0, self.cur_line)?;
                 let id = if *safe {
                     crate::host::GPROP_SAFE
                 } else {
@@ -4154,6 +4203,7 @@ impl Compiler {
                 self.expr(recv)?;
                 let argc = self.emit_args(args, *line)?;
                 self.expr(name)?;
+                self.emit_call_builtin(crate::host::GNAME_TEXT, 0, self.cur_line)?;
                 let id = if *safe {
                     crate::host::GMETHOD_SAFE
                 } else {
@@ -4527,13 +4577,17 @@ impl Compiler {
                 }
                 let k = self.b.add_constant(Value::str(key));
                 self.b.emit(Op::LoadConst(k), line);
+                // `true` when the check answered the call itself (a lone list
+                // spread into the parameters, or a raise): the arguments have
+                // been replaced by its result.
                 self.b.emit(
                     Op::CallBuiltin(crate::host::GFN_CHECK, args.len() as u8),
                     line,
                 );
-                self.b.emit(Op::Pop, line);
-                self.emit_exc_check(line)?;
+                let handled = self.b.emit(Op::JumpIfTrue(0), line);
                 self.b.emit(Op::Call(nidx, args.len() as u8), line);
+                let done = self.b.current_pos();
+                self.b.patch_jump(handled, done);
                 self.emit_exc_check(line)?;
                 return Ok(());
             }

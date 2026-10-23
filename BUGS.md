@@ -290,6 +290,32 @@ reported as parse or compile errors, never silently mis-run.
   the default at every new index when eager), a lazy list also fills a `null`
   it holds, and a negative index reaching before the start is
   `IndexOutOfBoundsException`.
+- **`GString` is a runtime type.** An interpolated literal is a
+  `org.codehaus.groovy.runtime.GStringImpl` holding its strings and values,
+  rendered each time it is read (so `"${-> x}"` and a mutated collection
+  show their state then). `==` compares its text; `equals` holds only against
+  another `GString` of that text (`'a1'.equals("a${x}")` is `false`, and
+  `contains`/`indexOf` follow it); `hashCode` is `37 +` the text's;
+  `strings`/`values`/`valueCount`; `GString + String` and `+ GString` stay
+  `GString`s. A `GString` map key is distinct from the `String` of its text
+  (`[("${k}"): 1].containsKey('a')` is `false`) except through a subscript
+  (`m["${k}"]`), which reads it as its `String`; `as`, a typed variable, a
+  JDK constructor and a member name computed at run time take its text.
+- **`java.io.File`** — `text`, `readLines`, `eachLine`, `withReader` /
+  `withWriter`, `write` / `append` / `<<`, `bytes`, `exists`, `isFile`,
+  `isDirectory`, `length`, `delete`, `mkdirs`, `list`, `name` / `path` /
+  `parent`; `new StringReader(s)`; `System.getProperty('java.io.tmpdir')`
+  and `'user.dir'`.
+- **`MarkupBuilder`** — elements, attributes and text written as Groovy lays
+  them out (two-space indent, single-quoted attributes, `<x />` for an empty
+  element).
+- **More metaprogramming** — `obj.respondsTo(name[, args])` and the
+  metaclass's `respondsTo`/`hasProperty`, `metaClass.m << { … }`,
+  `metaClass.constructor << { … }` (chosen by its parameter types), and
+  `@Category(T)` restricted to `T` receivers.
+- **AST transforms** — `@ToString(ignoreNulls = true)`, `@Sortable`,
+  `@AutoClone`; an annotation on a script function or local
+  (`@CompileStatic`, `@Memoized`, `@Field`) is read past.
 - **Closure classes.** A closure literal is an instance of the class Groovy
   generates for it — `Script$_run_closure1`, `Script$_f_closure7` in function
   `f`, `K$_m_closure2` in method `m` of `K`, `K$_closure1` in a field
@@ -940,22 +966,34 @@ JVM 21.0.12):
 - `[x: 1, z: 2] as Pt` is the no-argument instance reporting
   `Pt1_groovyProxy`, but the map's entries are not its method overrides.
 - A `TreeSet` ordered by a comparator answers `add`, `<<`, `contains`,
-  `remove` and `addAll` by the comparator; its other set operations (`+`,
-  `retainAll`, `removeAll`, `intersect`) compare elements with `equals`.
+  `remove`, `addAll`, `removeAll`, `+` and `-` by the comparator; `retainAll`
+  and `intersect` compare elements with `equals`.
 - Groovy lists the candidates of a `MethodSelectionException` in the JVM's
   reflection order, which varies between runs; groovyrs lists them in
   declaration order.
-- `ExpandoMetaClass` injection covers methods, static methods, property
-  getters (`getX`) and per-instance methods, assigned with `=`; `<<`,
-  `respondsTo`, `hasProperty`, constructors (`metaClass.constructor`),
-  `invokeMethod`/`methodMissing` on the metaclass and `GroovySystem
-  .metaClassRegistry` are not modeled.
-- `@Category(T)` applies its methods to every receiver inside `use`, not
-  only to `T`'s.
-- `JsonSlurper` parses text only (`parseText`); `parse(File/Reader/URL)`,
+- `respondsTo` answers for script classes only (a JDK value's methods are not
+  enumerated), and its entries are descriptive strings rather than
+  `MetaMethod`s; `invokeMethod`/`methodMissing` on a metaclass and
+  `GroovySystem.metaClassRegistry` are not modeled.
+- `JsonSlurper.parse` reads a `File`, a reader or a `byte[]`; a URL,
   `JsonSlurperClassic`, `JsonGenerator` and `StreamingJsonBuilder` are not
   modeled, and `JsonOutput.toJson` renders a `Date` or other JDK object
   through its `toString`.
+- `java.io.File` covers the text GDK (`text`, `readLines`, `eachLine`,
+  `withReader`/`withWriter`, `write`/`append`/`<<`, `bytes`) and the basic
+  queries; `eachFile`, `traverse`, `renameTo`, `deleteDir`, streams and
+  `File` comparison are not modeled.
+- `MarkupBuilder` writes elements, attributes and text; `mkp.yield`,
+  namespaces, `MarkupBuilderHelper`, `escapeAttributes = false` and the
+  double-quote option are not modeled, and an element with an empty closure
+  is written open and closed rather than as `<x />`. `XmlSlurper`,
+  `XmlParser`, `Date` and `TimeCategory` are not modeled.
+- A `GString` set element equals a `String` of its text (`(["a${x}"] as
+  Set).contains('a1')` is `true`; Groovy answers `false`), as the hashed
+  collections compare by content.
+- A string-heavy loop costs about 11% more instructions than before
+  interpolations became `GString` objects (measured on the debug build: 27.1 G
+  → 30.2 G for 300 000 interpolations).
 - `withDefault` on a list registers the default on that list itself, so `l.withDefault { … }.is(l)` is `true` (Groovy
   answers a separate `ListWithDefault` over it) and the original reference
   defaults too.
@@ -1059,13 +1097,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   one built by `curry`, `>>` or `memoize`, and a method pointer, answers
   `Object` for each parameter it accepts, where Groovy answers the remaining
   declared types (a method pointer's are the method's).
-- **A `GString` is a `String`.** An interpolated literal produces a plain
-  `java.lang.String`, so `"$s".getClass()` reports `java.lang.String` where
-  Groovy reports `org.codehaus.groovy.runtime.GStringImpl`.
-- **A lone list argument to a script function declared once is not spread.**
-  `def f(int a)` called as `f([7])` raises `MissingMethodException` where
-  Groovy runs `f(7)`; methods, constructors and overloaded script functions do
-  spread it.
 - **A `BigInteger` argument where the JDK overload wants an `int`.**
   `255.toString(16G)` answers `16` in Groovy — the `BigInteger` coerces to the
   `int` the static `Integer.toString(int)` wants — where groovyrs raises
@@ -1492,12 +1523,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   and `in` use the typed `Object.equals`, so `[1.0d].contains(1.0f)` is false as
   in Groovy; only a `Long` small enough to be an `Integer` still matches one,
   because the width is not carried on the value.)
-- **A `GString` whose expression is a closure is not deferred.** `"${-> x}"` is
-  a *lazy* `GString` in Groovy: the closure is called at render time, so
-  `def x = 1; def s = "${-> x}"; x = 2; s.toString()` is `2`. groovyrs renders
-  every interpolation where the literal is written, so it has nothing to defer
-  to — the same root as the *A `GString` is a `String`* entry above. The literal
-  is currently a parse error rather than a wrong answer.
 - **A list a GDK method *returns* is not a reference; only a literal is.** A list
   literal is built behind a heap handle, so every claim in the *Lists are
   references* entry above holds for one — including a list reached through a map

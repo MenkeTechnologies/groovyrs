@@ -518,6 +518,7 @@ fn decimal_method(
             dec_value(round_to(&wide, &c)?)
         }
         ("sqrt", 1) => {
+            // Ported from JDK 21 `BigDecimal.sqrt(MathContext)`.
             let c = ctx?;
             if d.is_negative() {
                 raise(
@@ -527,23 +528,42 @@ fn decimal_method(
                 );
                 return Some(Value::Undef);
             }
-            let digits = if c.precision == 0 { 34 } else { c.precision };
-            let root = d.sqrt()?;
-            if decimal::mul(&root, &root) == *d {
-                // An exact root keeps the preferred scale `ceil(scale / 2)`,
-                // after its trailing zeros are stripped.
-                let preferred = (decimal::scale_of(d) + 1).div_euclid(2);
-                let stripped = decimal::strip_trailing_zeros(&root);
-                let scale = decimal::scale_of(&stripped).max(preferred);
-                return Some(dec_value(stripped.with_scale(scale)));
+            // Java's `this.scale() / 2`, truncating toward zero.
+            let preferred = decimal::scale_of(d) / 2;
+            if d.is_zero() {
+                return Some(dec_value(BigDecimal::from_bigint(
+                    BigInt::zero(),
+                    preferred,
+                )));
             }
-            dec_value(round_to(
-                &root,
-                &MathCtx {
-                    precision: digits,
-                    mode: c.mode,
-                },
-            )?)
+            let root = d.sqrt()?;
+            let exact = decimal::mul(&root, &root) == *d;
+            let result = if c.precision == 0 || c.mode == "UNNECESSARY" {
+                // An exact answer is demanded: the root must exist and fit.
+                let stripped = decimal::strip_trailing_zeros(&root);
+                let fits = c.precision == 0 || stripped.digits() <= c.precision;
+                if !exact || !fits {
+                    raise(vm, "ArithmeticException", "Computed square root not exact.");
+                    return Some(Value::Undef);
+                }
+                stripped
+            } else {
+                round_to(&root, &c)?
+            };
+            if decimal::scale_of(&result) == preferred {
+                return Some(dec_value(result));
+            }
+            // `result.stripTrailingZeros().add(zero at the preferred scale)`,
+            // rounded back to the context's precision: the zeros the
+            // preferred scale asks for are kept only while they fit.
+            let stripped = decimal::strip_trailing_zeros(&result);
+            let low = decimal::scale_of(&stripped);
+            let mut scale = low.max(preferred);
+            if c.precision > 0 {
+                let room = c.precision as i64 - stripped.digits() as i64;
+                scale = scale.min(low + room).max(low);
+            }
+            dec_value(stripped.with_scale(scale))
         }
         ("intValueExact" | "longValueExact", 0) => {
             if decimal::scale_of(d) > 0 && decimal::truncate_to_scale(d, 0) != *d {

@@ -791,6 +791,7 @@ impl Parser {
     fn function_def(&mut self, name: String, ret_ty: String) -> Result<StmtKind, String> {
         let line = self.line();
         let params = self.param_list()?;
+        let types = std::mem::take(&mut self.param_types);
         let overloads = self.default_overloads(&params);
         let varargs = self.param_varargs.take();
         self.skip_newlines();
@@ -803,6 +804,7 @@ impl Parser {
                 line,
                 StmtKind::Function {
                     name: name.clone(),
+                    param_types: kept_types(&params, &types, &kept),
                     params: kept,
                     body,
                     varargs: varargs.clone(),
@@ -813,6 +815,7 @@ impl Parser {
         Ok(StmtKind::Function {
             name,
             params,
+            param_types: types,
             body,
             varargs,
             ret_ty,
@@ -1070,6 +1073,14 @@ impl Parser {
             self.skip_terminators();
         }
         self.eat(&Tok::RBrace)?;
+        // Every field an interface declares is a `static final` constant; a
+        // trait's fields are per-instance state.
+        if is_interface && !is_trait {
+            for f in &mut fields {
+                f.is_static = true;
+                f.is_final = true;
+            }
+        }
         if generated.singleton {
             fields.push(Field {
                 name: "instance".to_string(),
@@ -1082,6 +1093,7 @@ impl Parser {
                 is_static: true,
                 is_property: true,
                 is_delegate: false,
+                is_final: false,
             });
         }
         Ok(StmtKind::Class {
@@ -1276,6 +1288,7 @@ impl Parser {
                     is_static: true,
                     is_property: false,
                     is_delegate: false,
+                    is_final: false,
                 }
             })
             .collect();
@@ -1288,6 +1301,7 @@ impl Parser {
                     is_static: true,
                     is_property: false,
                     is_delegate: false,
+                    is_final: false,
                 });
             }
         }
@@ -1329,6 +1343,7 @@ impl Parser {
         ty: &str,
         is_static: bool,
         is_property: bool,
+        is_final: bool,
         fields: &mut Vec<Field>,
     ) -> Result<(), String> {
         let mut name = first;
@@ -1341,6 +1356,7 @@ impl Parser {
                 is_static,
                 is_property,
                 is_delegate: false,
+                is_final,
             });
             if !self.is(&Tok::Comma) {
                 return Ok(());
@@ -1431,6 +1447,7 @@ impl Parser {
         let mut is_static = false;
         let mut is_abstract = false;
         let mut has_visibility = false;
+        let mut is_final = false;
         while self.is(&Tok::Default)
             || matches!(
                 self.peek(),
@@ -1443,6 +1460,7 @@ impl Parser {
         {
             is_static |= matches!(self.peek(), Tok::Ident(m) if m == "static");
             is_abstract |= matches!(self.peek(), Tok::Ident(m) if m == "abstract");
+            is_final |= matches!(self.peek(), Tok::Ident(m) if m == "final");
             has_visibility |= matches!(
                 self.peek(),
                 Tok::Ident(m) if matches!(m.as_str(), "public" | "private" | "protected")
@@ -1510,7 +1528,7 @@ impl Parser {
                     ret_ty: ty,
                 });
             } else {
-                self.field_decls(name, &ty, is_static, !has_visibility, fields)?;
+                self.field_decls(name, &ty, is_static, !has_visibility, is_final, fields)?;
             }
             return Ok(());
         }
@@ -1521,6 +1539,7 @@ impl Parser {
         {
             self.advance(); // class name
             let params = self.param_list()?;
+            let types = std::mem::take(&mut self.param_types);
             let overloads = self.default_overloads(&params);
             let body = self.member_body()?;
             // A shorter constructor runs the defaults' prelude, then the same
@@ -1528,11 +1547,16 @@ impl Parser {
             for (kept, mut pre) in overloads {
                 pre.extend(body.iter().cloned());
                 ctors.push(Ctor {
+                    param_types: kept_types(&params, &types, &kept),
                     params: kept,
                     body: pre,
                 });
             }
-            ctors.push(Ctor { params, body });
+            ctors.push(Ctor {
+                params,
+                param_types: types,
+                body,
+            });
             return Ok(());
         }
         // A typed member `Type name ...` — a field or method.
@@ -1566,7 +1590,7 @@ impl Parser {
                     ret_ty: ty,
                 });
             } else {
-                self.field_decls(name, &ty, is_static, !has_visibility, fields)?;
+                self.field_decls(name, &ty, is_static, !has_visibility, is_final, fields)?;
             }
             return Ok(());
         }

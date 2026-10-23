@@ -137,6 +137,10 @@ pub enum StmtKind {
     Function {
         name: String,
         params: Vec<String>,
+        /// Each parameter's declared type as written (`def` when untyped),
+        /// parallel to `params`. A closure argument bound to a parameter typed
+        /// as a script interface or abstract class is coerced to it on entry.
+        param_types: Vec<String>,
         body: Vec<Stmt>,
         /// The array type the last parameter collects a call's trailing
         /// arguments into when it is variadic (`Object... rest`, `... rest`,
@@ -305,13 +309,20 @@ pub struct Field {
     pub is_property: bool,
     /// Annotated `@Delegate`: calls the class does not answer forward to it.
     pub is_delegate: bool,
+    /// Declared `final`: no setter is generated, and a property write from
+    /// outside the class raises `ReadOnlyPropertyException`.
+    pub is_final: bool,
 }
 
 /// A class constructor `C(params) { body }`. Overloads are distinguished by
-/// arity at `new` time (Groovy also dispatches constructors by arity here).
+/// arity at `new` time, and constructors sharing an arity by their declared
+/// parameter types, as methods are.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ctor {
     pub params: Vec<String>,
+    /// Each parameter's declared type as written (`def` when untyped). Two
+    /// constructors of one arity are told apart by these at `new`.
+    pub param_types: Vec<String>,
     pub body: Vec<Stmt>,
 }
 

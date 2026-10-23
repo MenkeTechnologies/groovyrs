@@ -125,6 +125,8 @@ const THROWABLES: &[(&str, &str, &str)] = &[
     ("VirtualMachineError", "Error", "java.lang"),
     ("StackOverflowError", "VirtualMachineError", "java.lang"),
     ("IOException", "Exception", "java.io"),
+    // `URLEncoder.encode(s, "no-such-charset")`.
+    ("UnsupportedEncodingException", "IOException", "java.io"),
     ("FileNotFoundException", "IOException", "java.io"),
     ("NoSuchElementException", "RuntimeException", "java.util"),
     ("EmptyStackException", "RuntimeException", "java.util"),

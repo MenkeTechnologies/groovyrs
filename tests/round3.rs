@@ -739,3 +739,523 @@ println "$r $c $m"
 "####;
     check(src, expected);
 }
+
+#[test]
+fn uuid_empty_field_message() {
+    let src = r####"['1--3-4-5', '-1-2-3-4', '1-2-3-4-'].each { s ->
+    try { UUID.fromString(s) } catch (NumberFormatException e) { println "[${e.message}]" }
+}
+try { UUID.fromString('1-2-3-4-+') } catch (NumberFormatException e) { println e.message }
+"####;
+    let expected = r####"[]
+[]
+[]
+Error at index 1 in: "+"
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn bigdecimal_sqrt_mathcontext() {
+    let src = r####"import java.math.MathContext
+import java.math.RoundingMode
+def t(n, Closure c) { try { println "$n: " + c() } catch (ArithmeticException e) { println "$n: ${e.message}" } }
+t(1) { 4.0G.sqrt(new MathContext(10)) }
+t(2) { 16.00G.sqrt(new MathContext(10)) }
+t(3) { 1.5129G.sqrt(new MathContext(2)) }
+t(4) { 4.0000G.sqrt(new MathContext(2)) }
+t(5) { 0.0400G.sqrt(new MathContext(5)) }
+t(6) { 1E+4G.sqrt(new MathContext(5)) }
+t(7) { 1.000G.sqrt(new MathContext(5)) }
+t(8) { 2.0G.sqrt(MathContext.UNLIMITED) }
+t(9) { 6.25G.sqrt(MathContext.UNLIMITED) }
+t(10) { 0.000G.sqrt(new MathContext(5)) }
+t(11) { 2.25000G.sqrt(new MathContext(3)) }
+t(12) { 9.000G.sqrt(new MathContext(3, RoundingMode.UNNECESSARY)) }
+t(13) { 2.0G.sqrt(new MathContext(3, RoundingMode.UNNECESSARY)) }
+t(14) { 1.5129G.sqrt(new MathContext(2, RoundingMode.UNNECESSARY)) }
+t(15) { 2.0G.sqrt(new MathContext(10)) }
+"####;
+    let expected = r####"1: 2
+2: 4.0
+3: 1.2
+4: 2.0
+5: 0.20
+6: 1E+2
+7: 1.0
+8: Computed square root not exact.
+9: 2.5
+10: 0.0
+11: 1.50
+12: 3.0
+13: Computed square root not exact.
+14: Computed square root not exact.
+15: 1.414213562
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn missing_method_message_format() {
+    let src = r####"import java.math.MathContext
+class Foo { String toString() { 'FOO' } }
+def t(n, Closure c) { try { c() } catch (MissingMethodException e) { println "$n: ${e.message.readLines()[0]}" } }
+t(1) { 5.zork(new MathContext(3), new Foo(), 1..3, 2.5f) }
+t(2) { 5.zork(new MathContext(3), new MathContext(4), new MathContext(5), new MathContext(6)) }
+t(3) { 5.zork(*(1..40).toList()) }
+t(4) { 5.zork((1..40).toList()) }
+t(5) { 5.zork('q' * 90, 'r') }
+t(6) { 5.zork(~/x/, [1, 2] as int[]) }
+"####;
+    let expected = r####"1: No signature of method: zork for class: java.lang.Integer is applicable for argument types: (java.math.MathContext, Foo, IntRange, Float) values: [precision=3 roundingMode=HALF_UP, FOO, 1..3, 2.5]
+2: No signature of method: zork for class: java.lang.Integer is applicable for argument types: (j.m.MathContext, j.m.MathContext, j.m.MathContext, j.m.MathContext) values: [precision=3 roundingMode=HALF_UP, precision=4 roundingMode=HALF_UP, precision=5 roundingMode=HALF_UP, ...]
+3: No signature of method: zork for class: java.lang.Integer is applicable for argument types: (Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer...) values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, ...]
+4: No signature of method: zork for class: java.lang.Integer is applicable for argument types: (ArrayList) values: [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, ...]]
+5: No signature of method: zork for class: java.lang.Integer is applicable for argument types: (String, String) values: [qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq, ...]
+6: No signature of method: zork for class: java.lang.Integer is applicable for argument types: (java.util.regex.Pattern, [I) values: [x, [1, 2]]
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn closure_argument_sam_coercion() {
+    let src = r####"interface Calc { int calc(int x) }
+abstract class Ab { abstract int f(int x); int g() { f(1) + 100 } }
+def take(Calc c) { c.calc(2) }
+println take { it + 1 }
+def take2(Calc c, int y) { c.calc(y) }
+println take2({ it * 10 }, 4)
+class Holder { def run(Calc c) { c.calc(5) }; Holder() {}; Holder(Calc c) { println "ctor ${c.calc(1)}" } }
+println new Holder().run { it - 1 }
+new Holder({ it + 41 })
+def g = { Calc c -> c.calc(7) }
+println g { it * 3 }
+def ab(Ab a) { a.g() }
+println ab { it + 5 }
+interface One { def go(x) }
+def one(One o) { [o instanceof One, o instanceof Closure, o.go(4)] }
+println one { it * 3 }
+class Impl implements Calc { int calc(int x) { -x } }
+println take(new Impl())
+"####;
+    let expected = r####"3
+40
+4
+ctor 42
+21
+106
+[true, false, 12]
+-2
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn constructor_overload_by_type() {
+    let src = r####"class P { def v; P(int x) { v = "int $x" }; P(String s) { v = "str $s" }; P(List l) { v = "list $l" } }
+println new P(3).v
+println new P('x').v
+println new P([1]).v
+class B { def tag; B(Integer i) { tag = "B-int $i" }; B(String s) { tag = "B-str $s" } }
+class D extends B { D(String s) { super(s) }; D(int n, int m) { super(n + m) } }
+println new D('q').tag
+println new D(2, 3).tag
+class E { def v; E(String s, int n = 1) { v = "s$s$n" }; E(int a, int b = 2) { v = "i${a + b}" } }
+println new E('x').v
+println new E(5).v
+println new E('y', 7).v
+class F { def v; F(Object o) { v = 'obj' }; F(Number n) { v = 'num' }; F(Integer i) { v = 'int' } }
+println new F(3).v
+println new F(3.5).v
+println new F('s').v
+println new F(null).v
+"####;
+    let expected = r####"int 3
+str x
+list [1]
+B-str q
+B-int 5
+sx1
+i7
+sy7
+int
+num
+obj
+obj
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn final_fields_are_read_only() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+class A { final int v = 3; final String s; A(String s) { this.s = s } }
+def a = new A('q')
+t(1) { a.v = 4 }
+t(2) { a.s = 'z' }
+t(3) { a.s }
+t(4) { a.setV(5) }
+t(5) { a.v += 1 }
+t(6) { a.v++ }
+t(7) { a.v }
+class P { private final int x = 1; public final int y = 2 }
+t(8) { new P().y = 5 }
+class S { static final int K = 1; static int M = 1 }
+t(9) { S.K = 2 }
+t(10) { S.M = 2; S.M }
+class W { final List l = [] }
+t(11) { def w = new W(); w.l << 1; w.l }
+class F { final int k; def w; String toString() { "F($k,$w)" } }
+t(12) { new F(k: 3, w: 1) }
+"####;
+    let expected = r####"1: groovy.lang.ReadOnlyPropertyException Cannot set read-only property: v for class: A
+2: groovy.lang.ReadOnlyPropertyException Cannot set read-only property: s for class: A
+3: q
+4: groovy.lang.MissingMethodException No signature of method: setV for class: A is applicable for argument types: (Integer) values: [5]
+5: groovy.lang.ReadOnlyPropertyException Cannot set read-only property: v for class: A
+6: groovy.lang.ReadOnlyPropertyException Cannot set read-only property: v for class: A
+7: 3
+8: groovy.lang.ReadOnlyPropertyException Cannot set read-only property: y for class: P
+9: groovy.lang.ReadOnlyPropertyException Cannot set read-only property: K for class: S
+10: 2
+11: [1]
+12: groovy.lang.ReadOnlyPropertyException Cannot set read-only property: k for class: F
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn interface_constants_through_implementor() {
+    let src = r####"interface K { static final int A = 7; String B = 'bee' }
+class X implements K { def get() { A + 1 }; def b() { B } }
+class Y extends X {}
+println X.A
+println new X().get()
+println K.A
+println new X().b()
+println X.B
+println Y.A
+println new Y().get()
+try { K.B = 'x' } catch (ReadOnlyPropertyException e) { println e.message }
+trait T { int n = 4 }
+class U implements T {}
+def u = new U(); u.n = 5; println u.n
+"####;
+    let expected = r####"7
+8
+7
+bee
+bee
+7
+8
+Cannot set read-only property: B for class: K
+5
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn trailing_assignment_is_the_return_value() {
+    let src = r####"def x
+def f1() { y = 5 }
+println f1()
+def f2() { def l = [1]; l[0] = 9 }
+println f2()
+def f3() { def m = [:]; m.k = 4 }
+println f3()
+def f4() { def i = 1; i += 2 }
+println f4()
+class C { def v; def set(n) { v = n }; def set2(n) { this.v = n * 2 }; def inc() { v += 1 }
+  String name; def setName(String s) { name = s.toUpperCase() }; def rename(s) { this.name = s } }
+def c = new C()
+println c.set(3)
+println c.set2(3)
+println c.inc()
+println c.rename('al')
+println c.name
+def g = { x = 11 }
+println g()
+println([1, 2].collect { x = it * 3 })
+def h = { a, b -> a = b }
+println h(1, 2)
+def k = { it.v = 8 }
+println k(c)
+def f6() { def s = 'a'; s *= 2 }
+println f6()
+int f7() { def d = 2.9; d = d * 2 }
+println f7()
+"####;
+    let expected = r####"5
+9
+4
+3
+3
+6
+7
+al
+al
+11
+[3, 6]
+2
+8
+aa
+5
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn property_by_name_on_instances() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+class A { def x = 1; String name = 'n'; def setName(String s) { name = s.toUpperCase() }
+  def propertyMissing(String n) { "pm:$n" } }
+class B { def y = 2 }
+def a = new A()
+t(1) { a['x'] }
+t(2) { a['x'] = 5; a.x }
+t(3) { a.setProperty('x', 6); a.x }
+t(4) { a.getProperty('x') }
+t(5) { a['name'] = 'bob'; a.name }
+t(6) { a.setProperty('name', 'al'); a.name }
+t(7) { a['zz'] }
+t(8) { new B()['zz'] }
+t(9) { new B()['zz'] = 1 }
+t(10) { new B().getProperty('zz') }
+t(11) { new B().setProperty('zz', 1) }
+t(12) { def b = new B(); b.setProperty('y', 7); b['y'] }
+"####;
+    let expected = r####"1: 1
+2: 5
+3: 6
+4: 6
+5: BOB
+6: AL
+7: pm:zz
+8: groovy.lang.MissingPropertyException No such property: zz for class: B
+9: groovy.lang.MissingPropertyException No such property: zz for class: B
+10: groovy.lang.MissingPropertyException No such property: zz for class: B
+11: groovy.lang.MissingPropertyException No such property: zz for class: B
+12: 7
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn method_missing_and_invoke_method_hooks() {
+    let src = r####"class M { def methodMissing(String name, args) { "mm:$name:${args.getClass().name}:${args.length}:${args as List}" } }
+println new M().zap(1)
+println new M().zap(1, 'b')
+println new M().zap()
+class O { def invokeMethod(String name, args) { "om:$name:${args.getClass().simpleName}:${args.toList()}" }; def real() { 'real' } }
+println new O().q(5, 6)
+println new O().real()
+class Q { def invokeMethod(String name, args) { "q:$name" }; def methodMissing(String name, args) { "m:$name" } }
+println new Q().zz()
+class R { def invokeMethod(String name, args) { "r:$name" } }
+println new R().with { 5 }
+"####;
+    let expected = r####"mm:zap:[Ljava.lang.Object;:1:[1]
+mm:zap:[Ljava.lang.Object;:2:[1, b]
+mm:zap:[Ljava.lang.Object;:0:[]
+om:q:Object[]:[5, 6]
+real
+m:zz
+5
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn object_level_iteration_on_plain_instances() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+class Z { String toString() { 'Z!' } }
+def z = new Z()
+t(1) { z.collect { it.toString() } }
+t(2) { def r = []; z.each { r << it }; r }
+t(3) { z.each { }.is(z) }
+t(4) { z.find { true } }
+t(5) { z.findAll { true } }
+t(6) { z.any { it instanceof Z } }
+t(7) { z.every { false } }
+t(8) { z.inject('a') { acc, v -> acc + v } }
+t(9) { z.findIndexOf { true } }
+t(10) { z.findResult { 'fr' } }
+t(11) { def r = []; z.eachWithIndex { v, i -> r << i }; r }
+t(12) { z.toList() }
+"####;
+    let expected = r####"1: [Z!]
+2: [Z!]
+3: true
+4: Z!
+5: [Z!]
+6: true
+7: false
+8: aZ!
+9: 0
+10: fr
+11: [0]
+12: groovy.lang.MissingMethodException No signature of method: toList for class: Z is applicable for argument types: () values: []
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn list_and_map_literal_to_class_typed_local() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+class Pt { int x, y; Pt(int x, int y) { this.x = x; this.y = y }; Pt() {}; String toString() { "Pt($x,$y)" } }
+t(1) { Pt p = [3, 4]; p }
+t(2) { Pt p = [3, 4]; p.getClass().name }
+t(3) { Pt p = [x: 5, y: 6]; p }
+t(4) { Pt p = []; p }
+class V { def a; String toString() { "V($a)" } }
+t(5) { V v = [a: 9]; v }
+"####;
+    let expected = r####"1: Pt(3,4)
+2: Pt
+3: Pt(5,6)
+4: Pt(0,0)
+5: V(9)
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn map_constructor_writes_properties() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+class Pt { int x, y; String toString() { "Pt($x,$y)" } }
+t(1) { new Pt(x: 1, z: 2) }
+t(2) { new Pt(x: 1, y: 2) }
+class Q { def a; def propertyMissing(String n, v) { println "pm $n=$v" }; String toString() { "Q($a)" } }
+t(3) { new Q(a: 1, b: 2) }
+class S { def v; void setV(x) { v = x * 2 }; String toString() { "S($v)" } }
+t(4) { new S(v: 4) }
+"####;
+    let expected = r####"1: groovy.lang.MissingPropertyException No such property: z for class: Pt
+2: Pt(1,2)
+pm b=2
+3: Q(1)
+4: S(8)
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn md5_and_sha256() {
+    let src = r####"println 'hello'.md5()
+println ''.md5()
+println 'hello'.sha256()
+println ''.sha256()
+println 'abc'.bytes.md5()
+println 'abc'.bytes.sha256()
+println(('x' * 1000).md5())
+println(('y' * 55).sha256())
+println(('y' * 56).sha256())
+println(('y' * 64).md5())
+println 'héllo ✓'.md5()
+println "a${1}b".sha256()
+"####;
+    let expected = r####"5d41402abc4b2a76b9719d911017c592
+d41d8cd98f00b204e9800998ecf8427e
+2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+900150983cd24fb0d6963f7d28e17f72
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+398533d48111e9f664b1f64cb10c4b63
+fb66d40c3bfff05b0d5af8612d0abfbfacc6f5f26c330bc7ad634f1f44bc20ad
+4877e564e5e36e367c7c8d59670774becd3350610b6df4c399c9fa9b66da5813
+b0c4864f4e28d2d76929c38d87db7ed5
+21b1ae5bc147bb564254200a4731e337
+acee240f9a281b012353cca27eb1c4068a15cc67138da3dbc39cc4464d128448
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn url_encoder_and_decoder() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+t(1) { URLEncoder.encode('a b&c=d/é~*', 'UTF-8') }
+t(2) { URLDecoder.decode('a+b%26c%3Dd%2F%C3%A9', 'UTF-8') }
+t(3) { URLEncoder.encode('x y') + URLEncoder.encode('ü') }
+t(4) { URLEncoder.encode('ü€', 'ISO-8859-1') }
+t(5) { URLDecoder.decode('%FC', 'latin1') }
+t(6) { URLEncoder.encode('x', 'nope') }
+t(7) { URLDecoder.decode('%zz', 'UTF-8') }
+t(8) { URLDecoder.decode('%-1', 'UTF-8') }
+t(9) { URLDecoder.decode('abc%2', 'UTF-8') }
+t(10) { URLDecoder.decode('%C3', 'UTF-8') }
+t(11) { URLDecoder.decode('%e2%82%ac%41', 'utf8') }
+t(12) { URLDecoder.decode('%1z') }
+t(13) { URLEncoder.encode('😀 a.b-c_d') }
+t(14) { java.net.URLEncoder.encode('q r') }
+t(15) { URLDecoder.decode('%%41') }
+"####;
+    let expected = r####"1: a+b%26c%3Dd%2F%C3%A9%7E*
+2: a b&c=d/é
+3: x+y%C3%BC
+4: %FC%3F
+5: ü
+6: java.io.UnsupportedEncodingException nope
+7: java.lang.IllegalArgumentException URLDecoder: Illegal hex characters in escape (%) pattern - Error at index 0 in: "zz"
+8: java.lang.IllegalArgumentException URLDecoder: Illegal hex characters in escape (%) pattern - negative value
+9: java.lang.IllegalArgumentException URLDecoder: Incomplete trailing escape (%) pattern
+10: �
+11: €A
+12: java.lang.IllegalArgumentException URLDecoder: Illegal hex characters in escape (%) pattern - Error at index 1 in: "1z"
+13: %F0%9F%98%80+a.b-c_d
+14: q+r
+15: java.lang.IllegalArgumentException URLDecoder: Illegal hex characters in escape (%) pattern - Error at index 0 in: "%4"
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn case_insensitive_order_comparator() {
+    let src = r####"def l = ['b', 'A', 'c', 'a', 'B']
+println l.sort(String.CASE_INSENSITIVE_ORDER)
+println l
+println String.CASE_INSENSITIVE_ORDER.compare('a', 'B')
+println String.CASE_INSENSITIVE_ORDER.compare('abc', 'ABC')
+println(['b', 'A', 'c'].toSorted(String.CASE_INSENSITIVE_ORDER))
+println(['bb', 'A', 'C'].max(String.CASE_INSENSITIVE_ORDER))
+println(['x', 'Y', 'z'].sort(false, String.CASE_INSENSITIVE_ORDER))
+println(String.CASE_INSENSITIVE_ORDER instanceof Comparator)
+def c = { a, b -> a <=> b }
+println(c instanceof Comparator)
+Comparator d = { a, b -> b <=> a }
+println(d instanceof Comparator)
+"####;
+    let expected = r####"null
+[A, a, b, B, c]
+-1
+0
+[A, b, c]
+C
+[x, Y, z]
+true
+false
+true
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn uuid_name_uuid_from_bytes() {
+    let src = r####"def u = UUID.nameUUIDFromBytes('hello'.bytes)
+println u
+println u.version()
+println u.variant()
+println UUID.nameUUIDFromBytes(new byte[0])
+println UUID.nameUUIDFromBytes('héllo ✓'.getBytes('UTF-8'))
+println UUID.nameUUIDFromBytes('x'.bytes) == UUID.nameUUIDFromBytes('x'.bytes)
+println UUID.nameUUIDFromBytes('abc'.bytes).mostSignificantBits
+"####;
+    let expected = r####"5d41402a-bc4b-3a76-b971-9d911017c592
+3
+2
+d41d8cd9-8f00-3204-a980-0998ecf8427e
+21b1ae5b-c147-3b56-8254-200a4731e337
+true
+-8070080442485555280
+"####;
+    check(src, expected);
+}

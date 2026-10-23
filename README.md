@@ -514,6 +514,20 @@ Implemented and checked against Apache Groovy:
   three methods, for a class, an interface, a trait and a top-level script
   function alike. A spread call resolves its overload at run time, since its
   argument count is not known until the operand is evaluated.
+- **Overloading by parameter type** — methods and constructors sharing an arity
+  (`P(int)`, `P(String)`, `P(List)`) are told apart by their declared parameter
+  types at the call, the closest fit winning.
+- **Closure coercion at a typed parameter** — a closure passed where a
+  function, method, constructor or closure parameter is declared as one of the
+  script's single-abstract-method interfaces or abstract classes is coerced to
+  it, as Groovy's call does (`def take(Calc c) { c.calc(2) }; take { it + 1 }`).
+- **`final` fields** — no setter is generated, and a property write from
+  outside the class (`a.v = 4`, `a.v++`, `S.K = 2`, a map-constructor entry)
+  raises `ReadOnlyPropertyException`. An interface's fields are `static final`
+  constants, readable through an implementing class (`X.A`, a bare `A` inside
+  it).
+- **A trailing assignment is the return value** — `def f() { y = 5 }`,
+  `{ m.k = 4 }` and a method ending `this.v = n` answer what they stored.
 - **Category `use` blocks** — `use (NumCat) { 3.twice() }`. A category makes a
   class's methods available on the type of their first parameter, for the
   duration of the block, and only where the receiver has no such method of its
@@ -561,15 +575,24 @@ Implemented and checked against Apache Groovy:
   tried only once every real resolution has failed, the GDK included: a class
   that defines `methodMissing` still gets `obj.with { … }` from the GDK, and the
   hook sees only what nothing else answered. `propertyMissing(String)` reads and
-  `propertyMissing(String, value)` writes.
+  `propertyMissing(String, value)` writes. The missed call's arguments arrive as
+  an `Object[]`; a class with `invokeMethod(String, args)` and no
+  `methodMissing` receives the miss there. Every instance answers
+  `getProperty(name)` / `setProperty(name, value)` and `obj['name']` through the
+  same property path.
 - **`groovy.util.Expando`** — `new Expando()` / `new Expando(map)`, properties
   added by assignment (absent ones read `null`), closure-valued properties
   callable as methods with the expando as their delegate, `getProperties()`,
   `getProperty` / `setProperty`, `e['k']`, and the `HashMap` rendering and
   iteration order (`{a=1}`).
-- **`java.util.UUID`** — `randomUUID()` (version 4), `fromString` (the JDK's
-  parser and diagnostics), `new UUID(msb, lsb)`, `version`, `variant`, the two
-  bit getters, and 128-bit `equals` / `hashCode` / `compareTo`.
+- **`java.util.UUID`** — `randomUUID()` (version 4), `nameUUIDFromBytes`
+  (version 3), `fromString` (the JDK's parser and diagnostics),
+  `new UUID(msb, lsb)`, `version`, `variant`, the two bit getters, and 128-bit
+  `equals` / `hashCode` / `compareTo`.
+- **Digests and URL encoding** — `md5()` / `sha256()` on a string (its UTF-8
+  bytes) and on a `byte[]`, as lower-case hex; `URLEncoder.encode` /
+  `URLDecoder.decode` with the one-argument (UTF-8) and named-charset forms
+  (UTF-8, ISO-8859-1) and the JDK's diagnostics.
 - **`java.util.Optional`** — `Optional.of` / `ofNullable` / `empty`, `get`,
   `isPresent` / `isEmpty`, `orElse` / `orElseGet` / `orElseThrow`, `map`,
   `flatMap`, `filter`, `or`, `ifPresent` / `ifPresentOrElse` (a closure for each
@@ -634,8 +657,8 @@ Implemented and checked against Apache Groovy:
   `catch (groovy.lang.MissingMethodException e)`, a multi-catch arm,
   `instanceof`, and `new`.
 
-See [`BUGS.md`](BUGS.md) for the honest known-gaps list (method overloading by
-parameter type, `GString` as a type, `++`/`--` not calling `next`/`previous`).
+See [`BUGS.md`](BUGS.md) for the honest known-gaps list (`GString` as a type,
+records, `Tuple2`, a `TreeSet` ordered by a `Comparator`).
 
 ---
 
@@ -733,24 +756,21 @@ Debug Adapter (`--dap`).
 
 Next waves, in priority order:
 
-1. **Method overloading by parameter type** — overloading by *arity* works;
-   two declarations taking the same number of arguments still collapse, because
-   the runtime is dynamically typed and nothing tells them apart.
-2. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
+1. **A `GString` type.** `"$s"` produces a plain `java.lang.String`, so
    `"$s".getClass()` reports `java.lang.String` where Groovy reports
    `org.codehaus.groovy.runtime.GStringImpl`.
-3. **A `List` implementation kind.** A set and a map each carry one, so a
+2. **A `List` implementation kind.** A set and a map each carry one, so a
    `TreeSet` and a `TreeMap` sort; a list does not, so
    `new LinkedList([1,2]).getClass()` reports `java.util.ArrayList`. The same
    missing kind is why `asImmutable()` takes a write instead of raising
    `UnsupportedOperationException` — a *wrapper* kind is unmodeled on every
    collection, maps included.
-4. **Collection view types.** `keySet()`, `entrySet()` and `values()` answer a
+3. **Collection view types.** `keySet()`, `entrySet()` and `values()` answer a
    plain `List` with the right contents in the right order, but they are copies
    rather than live views, and `getClass()` names `java.util.ArrayList` where
    Groovy names `java.util.TreeMap$KeySet`. A `Map.Entry` carries no class
    either.
-5. **Command-argument chains** — `println a, b` and `foo bar baz` do not parse.
+4. **Command-argument chains** — `println a, b` and `foo bar baz` do not parse.
    A member call with its parentheses left off does (`sb.append 'x'`), as does
    a bare-name call whose first argument is a literal (`printf "%d\n", 5`,
    `f 1, k: 2`), and the parenthesised call always parses.

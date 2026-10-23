@@ -283,6 +283,12 @@ struct Compiler {
     /// closure stored into a variable declared as one is coerced to it, as
     /// `closure as Type` is.
     script_types: HashSet<String>,
+    /// The script's own single-abstract-method types — an interface or
+    /// abstract class left with exactly one body-less method once its
+    /// ancestors are counted. A closure argument bound to a parameter declared
+    /// as one is coerced to it (see [`Compiler::emit_param_coercions`]); a
+    /// type with two or more abstract methods takes no closure, as in Groovy.
+    sam_types: HashSet<String>,
     /// The op indices of arithmetic whose operands are statically `Long`, handed
     /// to the host as [`crate::host::set_wide_sites`]. See
     /// [`Compiler::is_wide`].
@@ -372,6 +378,118 @@ struct ClassInfo {
     methods: Vec<String>,
 }
 
+/// The target expression, operator and value of a property or subscript
+/// assignment statement — the shape [`Compiler::write_target`] lowers.
+fn assignment_target(kind: &StmtKind, line: u32) -> (Expr, AssignOp, &Expr) {
+    match kind {
+        StmtKind::SetProperty {
+            recv,
+            name,
+            op,
+            value,
+        } => (
+            Expr::Property {
+                recv: Box::new(recv.clone()),
+                name: name.clone(),
+                line,
+                safe: false,
+            },
+            *op,
+            value,
+        ),
+        StmtKind::SetDynProperty {
+            recv,
+            name,
+            op,
+            value,
+        } => (
+            Expr::DynProperty {
+                recv: Box::new(recv.clone()),
+                name: Box::new(name.clone()),
+                line,
+                safe: false,
+            },
+            *op,
+            value,
+        ),
+        StmtKind::SetIndex {
+            recv,
+            index,
+            op,
+            value,
+        } => (
+            Expr::Index {
+                recv: Box::new(recv.clone()),
+                index: Box::new(index.clone()),
+                line,
+            },
+            *op,
+            value,
+        ),
+        _ => unreachable!("assignment_target on a non-assignment statement"),
+    }
+}
+
+/// The script's single-abstract-method types: every class or interface whose
+/// body-less methods, unioned over itself and all its ancestors, leave exactly
+/// one name no class along the way gives a body.
+fn sam_types(prog: &Program) -> HashSet<String> {
+    struct Shape<'a> {
+        parents: Vec<&'a str>,
+        abstract_names: &'a [String],
+        bodies: Vec<&'a str>,
+    }
+    let mut shapes: HashMap<&str, Shape> = HashMap::new();
+    for stmt in &prog.body {
+        if let StmtKind::Class {
+            name,
+            superclass,
+            interfaces,
+            methods,
+            abstract_methods,
+            ..
+        } = &stmt.kind
+        {
+            let parents = superclass
+                .iter()
+                .chain(interfaces)
+                .map(String::as_str)
+                .collect();
+            let bodies = methods.iter().map(|m| m.name.as_str()).collect();
+            shapes.insert(
+                name,
+                Shape {
+                    parents,
+                    abstract_names: abstract_methods,
+                    bodies,
+                },
+            );
+        }
+    }
+    let mut out = HashSet::new();
+    for name in shapes.keys() {
+        let mut abstract_names: HashSet<&str> = HashSet::new();
+        let mut bodies: HashSet<&str> = HashSet::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut queue = vec![*name];
+        while let Some(cur) = queue.pop() {
+            if !seen.insert(cur) {
+                continue;
+            }
+            let Some(shape) = shapes.get(cur) else {
+                continue;
+            };
+            abstract_names.extend(shape.abstract_names.iter().map(String::as_str));
+            bodies.extend(shape.bodies.iter().copied());
+            queue.extend(shape.parents.iter().copied());
+        }
+        if abstract_names.difference(&bodies).count() == 1 {
+            out.insert(name.to_string());
+        }
+    }
+    out
+}
+
 /// The per-name static shape state — integer width, and whether the name holds
 /// a closure/instance — a function or closure body is entered with, restored
 /// when it ends so its locals cannot leak either outward. See
@@ -401,6 +519,9 @@ struct PendingClosure {
     /// what makes the closure share the enclosing variable.
     cell_captures: HashSet<String>,
     body: Vec<Stmt>,
+    /// The declared parameter types, parallel to `params` (empty when none
+    /// is typed): see [`Compiler::emit_param_coercions`].
+    param_types: Vec<String>,
     line: u32,
     class_fields: Option<HashSet<String>>,
     class_methods: Option<HashSet<String>>,
@@ -529,6 +650,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             );
         }
     }
+    let sam_types = sam_types(prog);
     let recursive = recursive_fns(prog, &fn_names);
     let mut c = Compiler {
         b: ChunkBuilder::new(),
@@ -577,6 +699,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         inline_finally_depth: 0,
         obj_vars: HashSet::new(),
         script_types: HashSet::new(),
+        sam_types,
         wide_sites: HashSet::new(),
         incdec_sites: HashSet::new(),
         closure_param_types: HashMap::new(),
@@ -672,12 +795,13 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         if let StmtKind::Function {
             name,
             params,
+            param_types,
             body,
             ret_ty,
             ..
         } = &stmt.kind
         {
-            c.function(stmt.line, name, params, body, ret_ty)?;
+            c.function(stmt.line, name, params, param_types, body, ret_ty)?;
         }
     }
     // Emit each class's field-initializer, constructor, and method subroutines.
@@ -921,6 +1045,7 @@ impl Compiler {
         line: u32,
         name: &str,
         params: &[String],
+        param_types: &[String],
         body: &[Stmt],
         ret_ty: &str,
     ) -> Result<(), String> {
@@ -953,6 +1078,7 @@ impl Compiler {
         for i in (0..params.len()).rev() {
             self.b.emit(Op::SetSlot(i as u16), line);
         }
+        self.emit_param_coercions(param_types, 0, line);
 
         // A function that can reach itself checks the call depth here. fusevm's
         // `Op::Call` costs no Rust stack, so unbounded native recursion does not
@@ -1185,6 +1311,7 @@ impl Compiler {
         for i in (0..total).rev() {
             self.b.emit(Op::SetSlot(i as u16), pc.line);
         }
+        self.emit_param_coercions(&pc.param_types, 0, pc.line);
 
         let prev_cells = self.enter_cell_scope(&pc.params, &pc.body, &pc.cell_captures, pc.line);
         let prev_ret = self.ret_ty.take();
@@ -1299,6 +1426,28 @@ impl Compiler {
     fn ctor_sub_name(class: &str, arity: usize) -> String {
         format!("$cls_{class}_ctor_{arity}")
     }
+
+    /// The sub name each constructor's body is emitted under: the arity's own
+    /// name for the first one of an arity, then an `_o<n>` suffix for each
+    /// later one, so constructors told apart only by type do not collide.
+    fn ctor_sub_names(class: &str, ctors: &[Ctor]) -> Vec<String> {
+        ctors
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let base = Self::ctor_sub_name(class, c.params.len());
+                let earlier = ctors[..i]
+                    .iter()
+                    .filter(|o| o.params.len() == c.params.len())
+                    .count();
+                if earlier == 0 {
+                    base
+                } else {
+                    format!("{base}_o{earlier}")
+                }
+            })
+            .collect()
+    }
     /// Synthetic sub name for a class field's initializer thunk.
     fn init_sub_name(class: &str, field: &str) -> String {
         format!("$cls_{class}_init_{field}")
@@ -1378,8 +1527,9 @@ impl Compiler {
             };
             let marker = if f.is_static { ":static" } else { "" };
             let plain = if f.is_property { "" } else { ":field" };
+            let fin = if f.is_final { ":final" } else { "" };
             let c = self.b.add_constant(Value::str(format!(
-                "{}:{}{marker}{plain}{no_str}{no_eq}{delegate}",
+                "{}:{}{marker}{plain}{fin}{no_str}{no_eq}{delegate}",
                 f.name, f.ty
             )));
             self.b.emit(Op::LoadConst(c), line);
@@ -1438,6 +1588,24 @@ impl Compiler {
         // The ordinal keeps declaration order, which breaks a tie the way
         // Groovy's first-declared choice does.
         let mut entries = 0;
+        // Constructors join the typed table under the reserved name `<init>`:
+        // `<init>/arity:ordinal:T1,T2`, with no plain `<init>/arity` entry.
+        for (i, (ctor, sub_name)) in ctors
+            .iter()
+            .zip(Self::ctor_sub_names(name, ctors))
+            .enumerate()
+        {
+            let sub = self.b.add_name(&sub_name) as i64;
+            let k = format!(
+                "<init>/{}:{i}:{}",
+                ctor.params.len(),
+                ctor.param_types.join(",")
+            );
+            let k = self.b.add_constant(Value::str(k));
+            self.b.emit(Op::LoadConst(k), line);
+            self.b.emit(Op::LoadInt(sub), line);
+            entries += 1;
+        }
         for (i, (m, sub_name)) in methods.iter().zip(&sub_names).enumerate() {
             let sub = self.b.add_name(sub_name) as i64;
             let key = format!("{}/{}", m.name, m.params.len());
@@ -1517,12 +1685,12 @@ impl Compiler {
         };
         self.cur_class_own_fields = Some(own_fields);
         let prev_ret = self.ret_ty.take();
-        for ctor in ctors {
-            let sub = Self::ctor_sub_name(name, ctor.params.len());
+        for (ctor, sub) in ctors.iter().zip(Self::ctor_sub_names(name, ctors)) {
             self.emit_member(
                 line,
                 &sub,
                 &ctor.params,
+                &ctor.param_types,
                 &ctor.body,
                 &field_set,
                 &method_set,
@@ -1530,7 +1698,15 @@ impl Compiler {
         }
         for (m, sub) in methods.iter().zip(Self::method_sub_names(name, methods)) {
             self.ret_ty = Some(m.ret_ty.clone());
-            self.emit_member(line, &sub, &m.params, &m.body, &field_set, &method_set)?;
+            self.emit_member(
+                line,
+                &sub,
+                &m.params,
+                &m.param_types,
+                &m.body,
+                &field_set,
+                &method_set,
+            )?;
         }
         self.ret_ty = prev_ret;
         self.cur_class_super = prev_super;
@@ -1573,11 +1749,13 @@ impl Compiler {
     /// Emit a class member (method or constructor) as a subroutine: `this` in
     /// slot 0, parameters in slots 1..n+1, bare field names resolving to
     /// `this.field`. Uses the implicit last-expression return like a function.
+    #[allow(clippy::too_many_arguments)]
     fn emit_member(
         &mut self,
         line: u32,
         sub_name: &str,
         params: &[String],
+        param_types: &[String],
         body: &[Stmt],
         field_set: &HashSet<String>,
         method_set: &HashSet<String>,
@@ -1608,6 +1786,7 @@ impl Compiler {
         for i in (0..params.len() + 1).rev() {
             self.b.emit(Op::SetSlot(i as u16), line);
         }
+        self.emit_param_coercions(param_types, 1, line);
         let prev_cells = self.enter_cell_scope(params, body, &HashSet::new(), line);
         self.fn_body(body)?;
         self.exit_cell_scope(prev_cells);
@@ -2067,6 +2246,27 @@ impl Compiler {
                 self.emit_return_coercion(&Expr::Var(name.clone()))?;
                 self.b.emit(Op::ReturnValue, last.line);
             }
+            // A trailing assignment is an expression statement in Groovy, so
+            // its value is returned too: `def f() { y = 5 }` and `{ m.k = 4 }`
+            // answer what they stored. A variable is read back; a property or
+            // subscript keeps the value written, so a setter that transforms
+            // it is not consulted again and the receiver runs once.
+            StmtKind::Assign { name, .. } => {
+                self.stmt(last)?;
+                let var = Expr::Var(name.clone());
+                self.expr(&var)?;
+                self.emit_return_coercion(&var)?;
+                self.b.emit(Op::ReturnValue, last.line);
+            }
+            StmtKind::SetProperty { .. }
+            | StmtKind::SetDynProperty { .. }
+            | StmtKind::SetIndex { .. } => {
+                self.cur_line = last.line;
+                let (target, op, value) = assignment_target(&last.kind, last.line);
+                self.write_target(&target, op, value, Keep::New)?;
+                self.emit_return_coercion(&target)?;
+                self.b.emit(Op::ReturnValue, last.line);
+            }
             // Groovy's implicit return reaches through a trailing `if` or `try`:
             // the value is the last expression of whichever branch runs. Rewrite
             // that expression into an explicit `return` so the ordinary return
@@ -2219,46 +2419,11 @@ impl Compiler {
                 }
                 Ok(())
             }
-            StmtKind::SetProperty {
-                recv,
-                name,
-                op,
-                value,
-            } => {
-                let target = Expr::Property {
-                    recv: Box::new(recv.clone()),
-                    name: name.clone(),
-                    line: self.cur_line,
-                    safe: false,
-                };
-                self.write_target(&target, *op, value, Keep::None)
-            }
-            StmtKind::SetDynProperty {
-                recv,
-                name,
-                op,
-                value,
-            } => {
-                let target = Expr::DynProperty {
-                    recv: Box::new(recv.clone()),
-                    name: Box::new(name.clone()),
-                    line: self.cur_line,
-                    safe: false,
-                };
-                self.write_target(&target, *op, value, Keep::None)
-            }
-            StmtKind::SetIndex {
-                recv,
-                index,
-                op,
-                value,
-            } => {
-                let target = Expr::Index {
-                    recv: Box::new(recv.clone()),
-                    index: Box::new(index.clone()),
-                    line: self.cur_line,
-                };
-                self.write_target(&target, *op, value, Keep::None)
+            StmtKind::SetProperty { .. }
+            | StmtKind::SetDynProperty { .. }
+            | StmtKind::SetIndex { .. } => {
+                let (target, op, value) = assignment_target(&s.kind, self.cur_line);
+                self.write_target(&target, op, value, Keep::None)
             }
             // Classes are hoisted and emitted as subroutine regions by
             // `compile_with`; they produce no code in statement position.
@@ -3629,6 +3794,35 @@ impl Compiler {
                         return self.emit_call_builtin(crate::host::GCLASSREF, 0, *line);
                     }
                 }
+                // `String.CASE_INSENSITIVE_ORDER`: the JDK `Comparator` ordering
+                // by `compareToIgnoreCase`, built as the closure-backed
+                // `Comparator` a script would write for it, so every consumer
+                // of a comparator (`sort`, `max`, `TreeSet`) takes it.
+                if name == "CASE_INSENSITIVE_ORDER"
+                    && matches!(&**recv, Expr::Var(c) if c == "String" && self.is_static_class_ref(c))
+                {
+                    let var = |n: &str| Box::new(Expr::Var(n.to_string()));
+                    let compare = Expr::MethodCall {
+                        recv: var("a"),
+                        method: "compareToIgnoreCase".to_string(),
+                        args: vec![Expr::Var("b".to_string())],
+                        line: *line,
+                        safe: false,
+                    };
+                    let comparator = Expr::Cast {
+                        value: Box::new(Expr::Closure {
+                            params: vec!["a".to_string(), "b".to_string()],
+                            body: vec![Stmt::new(*line, StmtKind::Expr(compare))],
+                            explicit_params: true,
+                            varargs: false,
+                            param_types: Vec::new(),
+                            defaults: 0,
+                        }),
+                        ty: "Comparator".to_string(),
+                        java: false,
+                    };
+                    return self.expr(&comparator);
+                }
                 // `.class` on a statically-`Long` receiver, for the reason
                 // `getClass()` gives above.
                 if name == "class" && self.is_wide(recv) {
@@ -3864,6 +4058,7 @@ impl Compiler {
             captures: captures.clone(),
             cell_captures,
             body: body.to_vec(),
+            param_types: param_types.to_vec(),
             line: self.cur_line,
             class_fields: self.cur_class_fields.clone(),
             class_methods: self.cur_class_methods.clone(),
@@ -4299,6 +4494,28 @@ impl Compiler {
         self.emit_typed_coercion(&ty, value)
     }
 
+    /// Coerce each closure argument bound to a parameter declared as one of the
+    /// script's own interfaces or abstract classes, as Groovy's call does: the
+    /// closure becomes that type's implementation, so `def take(I i) { i.m() }`
+    /// called as `take { … }` reaches the closure through `m`. Parameters live
+    /// in slots `first..`; the run-time test (closure argument, coercible
+    /// target) is [`crate::host::GSAM_PARAM`]'s, so an argument that already is
+    /// an instance passes through unchanged.
+    fn emit_param_coercions(&mut self, param_types: &[String], first: u16, line: u32) {
+        for (i, ty) in param_types.iter().enumerate() {
+            if !self.sam_types.contains(ty) {
+                continue;
+            }
+            let slot = first + i as u16;
+            let tidx = self.b.add_constant(Value::str(ty.clone()));
+            self.b.emit(Op::GetSlot(slot), line);
+            self.b.emit(Op::LoadConst(tidx), line);
+            self.b
+                .emit(Op::CallBuiltin(crate::host::GSAM_PARAM, 0), line);
+            self.b.emit(Op::SetSlot(slot), line);
+        }
+    }
+
     /// Convert the value on the stack to a variable's declared type, as Groovy
     /// does on every store to a typed variable. Skipped when the value already
     /// statically has that type, so `int s = 0; s += i` over typed operands
@@ -4313,7 +4530,14 @@ impl Compiler {
         }
         // `I i = { x -> … }` coerces the closure to the script's own interface or
         // abstract class, exactly as `{ x -> … } as I` does.
-        if matches!(value, Expr::Closure { .. }) && self.script_types.contains(ty) {
+        // A list or map literal stored into a variable declared as a script class is
+        // Groovy's `castToType` constructor call: `Pt p = [3, 4]` is
+        // `new Pt(3, 4)` and `Pt p = [x: 3]` the named-argument constructor —
+        // the same conversion `as Pt` makes, which also passes an instance
+        // already of that type through unchanged.
+        if matches!(value, Expr::Closure { .. } | Expr::List(_) | Expr::Map(_))
+            && self.script_types.contains(ty)
+        {
             let tidx = self.b.add_constant(Value::str(ty.to_string()));
             self.b.emit(Op::LoadConst(tidx), self.cur_line);
             return self.emit_call_builtin(crate::host::GCAST, 0, self.cur_line);

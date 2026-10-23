@@ -489,6 +489,18 @@ pub enum Expr {
         name: String,
         inc: bool,
     },
+    /// `++`/`--` on a property, dynamic property or subscript target
+    /// (`p.x++`, `--m."$k"`, `l[i]++`), in expression position. `post` is the
+    /// postfix form, which yields the value *before* the update; the prefix
+    /// form yields the value after. The bool `inc` is `true` for `++`. As a
+    /// statement it lowers to the same compound write as `target += 1` with no
+    /// value kept. A bare-name operand stays [`Expr::PostIncDec`] /
+    /// [`Expr::PreIncDec`], whose integer fast path the JIT traces.
+    IncDecTarget {
+        target: Box<Expr>,
+        inc: bool,
+        post: bool,
+    },
     /// A general call expression `name(args...)`. Slice 1 has no user methods, so
     /// the only calls that resolve are the inline-Rust FFI ones: the desugar
     /// target `__rust_compile("<b64>", line)` and every bareword a `rust { ... }`

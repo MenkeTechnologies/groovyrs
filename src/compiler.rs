@@ -30,6 +30,30 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// The desugar target a `rust { ... }` block lowers to (see [`crate::rust_ffi`]).
 const RUST_COMPILE: &str = "__rust_compile";
 
+/// The literal `1` that `++`/`--` add or subtract.
+const ONE: Expr = Expr::Int(1, IntWidth::Int);
+
+/// The compound assignment a `++` (`inc`) or `--` applies: Groovy's `next()`
+/// / `previous()`, which is `+ 1` / `- 1` on a number.
+fn incdec_op(inc: bool) -> AssignOp {
+    if inc {
+        AssignOp::Next
+    } else {
+        AssignOp::Previous
+    }
+}
+
+/// Which value a read-modify-write on a property or subscript target leaves
+/// on the stack after the write (see [`Compiler::write_target`]): none for a
+/// statement, the value read before the update (`p.x++`) or the value written
+/// (`++p.x`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    None,
+    Old,
+    New,
+}
+
 /// Lexical state while lowering a user-function body: the parameter/local names
 /// bound to frame slots. Inside a function every declared name (parameters and
 /// `def`/typed locals) addresses a frame-local slot via `GetSlot`/`SetSlot`, so
@@ -1840,6 +1864,124 @@ impl Compiler {
         }
     }
 
+    /// Lower `target <op>= value` for a property (`recv.name`, `recv.@f`), a
+    /// dynamic property (`recv."$name"`) or a subscript (`recv[index]`) target,
+    /// then leave the value `keep` names on the stack — nothing for a
+    /// statement, the value read before the update for `p.x++`, the value
+    /// written for `++p.x`.
+    ///
+    /// The receiver (and index) are evaluated once and duplicated on the stack
+    /// for the read that a compound form makes: `m[key()] += 5` calls `key`
+    /// once, as Groovy's does. (`f().x += 1` also calls `f` once here, where
+    /// Groovy 6 calls it twice — see BUGS.md.) A
+    /// dynamic name runs once per read and write (`m."${f()}" += 1` calls `f`
+    /// twice), also as Groovy's does. A direct field write (`recv.@f`, or
+    /// `this.f` for an own field) reads and writes the field under its bare
+    /// name. A subscript write answers the receiver's new contents, which a
+    /// variable receiver stores back (a fusevm list is a value, so an element
+    /// cannot be written through the handle).
+    fn write_target(
+        &mut self,
+        target: &Expr,
+        op: AssignOp,
+        value: &Expr,
+        keep: Keep,
+    ) -> Result<(), String> {
+        let kept = (keep != Keep::None).then(|| self.fresh_temp("incdec"));
+        match target {
+            Expr::Property { recv, name, .. } => {
+                // Stack: recv (deepest), value, name.
+                let direct = self.direct_field(recv, name).map(str::to_string);
+                let name = direct.as_ref().unwrap_or(name);
+                let (get_id, set_id) = if direct.is_some() {
+                    (crate::host::GFIELD_GET, crate::host::GFIELD_SET)
+                } else {
+                    (crate::host::GPROP, crate::host::GSETPROP)
+                };
+                self.expr(recv)?;
+                if !matches!(op, AssignOp::Assign) {
+                    self.b.emit(Op::Dup, self.cur_line);
+                    let c = self.b.add_constant(Value::str(name.clone()));
+                    self.b.emit(Op::LoadConst(c), self.cur_line);
+                    self.emit_call_builtin(get_id, 0, self.cur_line)?;
+                    self.keep_stack_top(&kept, keep == Keep::Old);
+                }
+                // The target expression, for the operand analyses `binary` runs
+                // (its Java width, whether it may be a `BigInteger`). It is
+                // never emitted — its value is the one on the stack.
+                let target = Expr::Property {
+                    recv: recv.clone(),
+                    name: name.clone(),
+                    line: self.cur_line,
+                    safe: false,
+                };
+                self.emit_compound_value(op, &target, value)?;
+                self.keep_stack_top(&kept, keep == Keep::New);
+                let c = self.b.add_constant(Value::str(name.clone()));
+                self.b.emit(Op::LoadConst(c), self.cur_line);
+                self.emit_call_builtin(set_id, 0, self.cur_line)?;
+                self.b.emit(Op::Pop, self.cur_line);
+            }
+            Expr::DynProperty { recv, name, .. } => {
+                // `Property` with the name evaluated where the constant would
+                // be loaded.
+                self.expr(recv)?;
+                if !matches!(op, AssignOp::Assign) {
+                    self.b.emit(Op::Dup, self.cur_line);
+                    self.expr(name)?;
+                    self.emit_call_builtin(crate::host::GPROP, 0, self.cur_line)?;
+                    self.keep_stack_top(&kept, keep == Keep::Old);
+                }
+                self.emit_compound_value(op, target, value)?;
+                self.keep_stack_top(&kept, keep == Keep::New);
+                self.expr(name)?;
+                self.emit_call_builtin(crate::host::GSETPROP, 0, self.cur_line)?;
+                self.b.emit(Op::Pop, self.cur_line);
+            }
+            Expr::Index { recv, index, .. } => {
+                // Stack: recv (deepest), index, value.
+                self.expr(recv)?;
+                self.expr(index)?;
+                if !matches!(op, AssignOp::Assign) {
+                    self.b.emit(Op::Dup2, self.cur_line);
+                    self.emit_call_builtin(crate::host::GINDEX, 0, self.cur_line)?;
+                    self.keep_stack_top(&kept, keep == Keep::Old);
+                }
+                self.emit_compound_value(op, target, value)?;
+                self.keep_stack_top(&kept, keep == Keep::New);
+                self.emit_call_builtin(crate::host::GSETINDEX, 0, self.cur_line)?;
+                match &**recv {
+                    Expr::Var(name) if !self.is_field(name) => {
+                        self.emit_name_store(name, self.cur_line)?;
+                    }
+                    _ => {
+                        self.b.emit(Op::Pop, self.cur_line);
+                    }
+                }
+            }
+            other => {
+                return Err(format!(
+                    "groovyrs: invalid assignment target {other:?} on line {}",
+                    self.cur_line
+                ))
+            }
+        }
+        if let Some(temp) = kept {
+            self.emit_temp_get(&temp);
+        }
+        Ok(())
+    }
+
+    /// Copy the stack top into `temp` — leaving it on the stack — when `when`
+    /// holds and there is a temporary to fill. The value [`Compiler::write_target`]
+    /// re-pushes after the write.
+    fn keep_stack_top(&mut self, temp: &Option<String>, when: bool) {
+        if let (Some(temp), true) = (temp, when) {
+            self.emit_temp_set(temp);
+            self.emit_temp_get(temp);
+        }
+    }
+
     /// Lower an assignment to a bare field inside a method: `field <op>= value`
     /// becomes `this.field = this.field <op> value` through the property-set
     /// builtin. Stack for the builtin is `this` (deepest), the new value, then
@@ -2083,42 +2225,13 @@ impl Compiler {
                 op,
                 value,
             } => {
-                // `recv.name = value` — stack: recv (deepest), value, name.
-                // A direct field write (`recv.@f`, or `this.f` for an own field)
-                // reads and writes the field under its bare name.
-                let direct = self.direct_field(recv, name).map(str::to_string);
-                let name = direct.as_ref().unwrap_or(name);
-                let (get_id, set_id) = if direct.is_some() {
-                    (crate::host::GFIELD_GET, crate::host::GFIELD_SET)
-                } else {
-                    (crate::host::GPROP, crate::host::GSETPROP)
-                };
-                self.expr(recv)?;
-                if !matches!(op, AssignOp::Assign) {
-                    // `recv.name <op>= value`. The receiver is already on the
-                    // stack and is duplicated to read the old value through, so
-                    // the receiver expression runs once — `f().x += 1` calls `f`
-                    // a single time, as Groovy's does.
-                    self.b.emit(Op::Dup, self.cur_line);
-                    let c = self.b.add_constant(Value::str(name.clone()));
-                    self.b.emit(Op::LoadConst(c), self.cur_line);
-                    self.emit_call_builtin(get_id, 0, self.cur_line)?;
-                }
-                // The target expression, for the operand analyses `binary` runs
-                // (its Java width, whether it may be a `BigInteger`). It is
-                // never emitted — its value is the one on the stack.
                 let target = Expr::Property {
                     recv: Box::new(recv.clone()),
                     name: name.clone(),
                     line: self.cur_line,
                     safe: false,
                 };
-                self.emit_compound_value(*op, &target, value)?;
-                let c = self.b.add_constant(Value::str(name.clone()));
-                self.b.emit(Op::LoadConst(c), self.cur_line);
-                self.emit_call_builtin(set_id, 0, self.cur_line)?;
-                self.b.emit(Op::Pop, self.cur_line);
-                Ok(())
+                self.write_target(&target, *op, value, Keep::None)
             }
             StmtKind::SetDynProperty {
                 recv,
@@ -2126,26 +2239,13 @@ impl Compiler {
                 op,
                 value,
             } => {
-                // `recv."$name" = value` — `SetProperty` with the name evaluated
-                // where the constant would be loaded. The receiver runs once; the
-                // name runs once per read and write, as Groovy's does.
-                self.expr(recv)?;
-                if !matches!(op, AssignOp::Assign) {
-                    self.b.emit(Op::Dup, self.cur_line);
-                    self.expr(name)?;
-                    self.emit_call_builtin(crate::host::GPROP, 0, self.cur_line)?;
-                }
                 let target = Expr::DynProperty {
                     recv: Box::new(recv.clone()),
                     name: Box::new(name.clone()),
                     line: self.cur_line,
                     safe: false,
                 };
-                self.emit_compound_value(*op, &target, value)?;
-                self.expr(name)?;
-                self.emit_call_builtin(crate::host::GSETPROP, 0, self.cur_line)?;
-                self.b.emit(Op::Pop, self.cur_line);
-                Ok(())
+                self.write_target(&target, *op, value, Keep::None)
             }
             StmtKind::SetIndex {
                 recv,
@@ -2153,36 +2253,12 @@ impl Compiler {
                 op,
                 value,
             } => {
-                // `recv[index] = value` — stack: recv (deepest), index, value.
-                // The builtin answers the receiver's new contents, which a
-                // variable receiver stores back (a fusevm list is a value, so a
-                // list element cannot be written through the handle).
-                self.expr(recv)?;
-                self.expr(index)?;
-                if !matches!(op, AssignOp::Assign) {
-                    // `recv[index] <op>= value`. Both are already on the stack
-                    // and are duplicated to read the old element through, so
-                    // each runs once — `m[key()] += 5` calls `key` a single
-                    // time, as Groovy's does.
-                    self.b.emit(Op::Dup2, self.cur_line);
-                    self.emit_call_builtin(crate::host::GINDEX, 0, self.cur_line)?;
-                }
                 let target = Expr::Index {
                     recv: Box::new(recv.clone()),
                     index: Box::new(index.clone()),
                     line: self.cur_line,
                 };
-                self.emit_compound_value(*op, &target, value)?;
-                self.emit_call_builtin(crate::host::GSETINDEX, 0, self.cur_line)?;
-                match recv {
-                    Expr::Var(name) if !self.is_field(name) => {
-                        self.emit_name_store(name, self.cur_line)?;
-                    }
-                    _ => {
-                        self.b.emit(Op::Pop, self.cur_line);
-                    }
-                }
-                Ok(())
+                self.write_target(&target, *op, value, Keep::None)
             }
             // Classes are hoisted and emitted as subroutine regions by
             // `compile_with`; they produce no code in statement position.
@@ -2199,6 +2275,11 @@ impl Compiler {
                 // In statement position pre and post are identical: the result is
                 // discarded, so only the in-place update matters.
                 self.inc_dec_update(name, *inc)
+            }
+            // `p.x++` / `--l[i]` as a statement: the compound write
+            // `target += 1` / `-= 1`, nothing kept.
+            StmtKind::Expr(Expr::IncDecTarget { target, inc, .. }) => {
+                self.write_target(target, incdec_op(*inc), &ONE, Keep::None)
             }
             StmtKind::Expr(e) => {
                 self.stmt_expr(e)?;
@@ -3112,12 +3193,7 @@ impl Compiler {
         // compound assignment `n += 1` — reading it as a script name found
         // nothing and answered `null + 1`.
         if self.is_field(name) {
-            let op = if inc {
-                AssignOp::Next
-            } else {
-                AssignOp::Previous
-            };
-            return self.assign_field(name, op, &Expr::Int(1, IntWidth::Int));
+            return self.assign_field(name, incdec_op(inc), &ONE);
         }
         self.emit_name_load(name, self.cur_line)?;
         self.b.emit(Op::LoadInt(1), self.cur_line);
@@ -3406,6 +3482,12 @@ impl Compiler {
                 // Pre: update, then yield the new value.
                 self.inc_dec_update(name, *inc)?;
                 self.expr(&Expr::Var(name.clone()))?;
+            }
+            // `p.x++` yields the value read before the update, `++p.x` the one
+            // written; the receiver (and index) run once either way.
+            Expr::IncDecTarget { target, inc, post } => {
+                let keep = if *post { Keep::Old } else { Keep::New };
+                self.write_target(target, incdec_op(*inc), &ONE, keep)?;
             }
             Expr::Call { name, args, line } => self.call(name, args, *line)?,
             Expr::List(elems) => {
@@ -5156,6 +5238,7 @@ fn free_in_expr(e: &Expr, bound: &HashSet<String>, cx: &mut FreeCtx) {
         Expr::Var(n) => note_free(n, bound, cx),
         Expr::Cast { value, .. } => free_in_expr(value, bound, cx),
         Expr::PostIncDec { name, .. } | Expr::PreIncDec { name, .. } => note_free(name, bound, cx),
+        Expr::IncDecTarget { target, .. } => free_in_expr(target, bound, cx),
         Expr::Unary { rhs, .. } => free_in_expr(rhs, bound, cx),
         Expr::Binary { lhs, rhs, .. } => {
             free_in_expr(lhs, bound, cx);
@@ -5658,6 +5741,7 @@ fn expr_any(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) -> bool {
         }
         Expr::New { args, .. } => args.iter().any(|a| expr_any(a, f)),
         Expr::Index { recv, index, .. } => expr_any(recv, f) || expr_any(index, f),
+        Expr::IncDecTarget { target, .. } => expr_any(target, f),
         Expr::SuperCtor { args, .. } => args.iter().any(|a| expr_any(a, f)),
         Expr::InstanceOf { value, .. } => expr_any(value, f),
         Expr::Regex(_)

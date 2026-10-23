@@ -194,7 +194,9 @@ reported as parse or compile errors, never silently mis-run.
   what Groovy's `IntRange` does.
 - **`++`/`--` in expression position.** Both postfix (`i++`, value before
   update) and prefix (`++i`, value after update), in addition to the statement
-  forms.
+  forms, on a bare name and on a property, direct field (`a.@x++`),
+  dynamic name (`a."$p"--`) or subscript (`l[i]++`) target. The receiver and
+  index are evaluated once; an interpolated name once per read and write.
 - **Closures.** `{ a, b -> … }`, the explicit zero-parameter `{ -> … }`, and the
   implicit `{ it }` single-parameter form
   are first-class callable values: a closure lowers to a fusevm subroutine
@@ -838,6 +840,10 @@ JVM 21.0.12):
   `MissingPropertyException` (the documented paren-less `println` latitude).
 - `Integer.equals(Long)` (`5.equals(5L)`) is `true`; Java answers `false`. An
   `Integer` and a `Long` are one `Value::Int` at run time.
+- A compound write or `++`/`--` on a *property* evaluates its receiver once
+  (`f().x += 1`, `f().x++`, `++f().x` call `f` one time); Groovy 6 evaluates
+  it twice, once to read and once to write. A subscript target
+  (`g()[idx()]++`) runs each part once on both sides.
 
 **The probe corpus under 6.0.0.** Of the probes in `parity-scripts/probes.txt`
 that still miss under 6.0.0, two are the documented Java cast and GString

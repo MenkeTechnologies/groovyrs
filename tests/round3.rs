@@ -664,3 +664,78 @@ fn switch_default_before_a_case_is_a_compile_error() {
     assert!(!ok);
     assert_eq!(out, "");
 }
+
+#[test]
+fn incdec_on_property_and_subscript_targets_in_expression_position() {
+    // `p.x++` yields the value before the update, `++p.x` the one after, on a
+    // property, a direct field, a dynamic name and a subscript; a `String`
+    // operand steps through `next()`.
+    let src = r####"class A { int x = 1 }
+def a = new A()
+def y = a.x++
+println "$y ${a.x}"
+println(--a.x)
+println(a.x++ + 10)
+println((a.x--) * 3)
+println a.x
+def fld = a.@x++
+println "$fld ${a.@x}"
+def p = 'x'
+def dyn = a."$p"--
+println "$dyn ${a.x}"
+def l = [1, 2, 3]
+def e = l[1]++
+println "$e $l"
+println(++l[2])
+def m = [k: 5, s: 'a']
+println "${m.k++} ${m.k} ${m.s++} ${m.s}"
+println(--m.k)
+println m
+def counts = [:].withDefault { 0 }
+['a', 'b', 'a'].each { counts[it]++ }
+println counts
+assert a.x++ == 1
+println a.x
+"####;
+    let expected = r####"1 2
+1
+11
+6
+1
+1 2
+2 1
+2 [1, 3, 3]
+4
+5 6 a b
+5
+[k:5, s:b]
+[a:2, b:1]
+2
+"####;
+    check(src, expected);
+}
+
+#[test]
+fn incdec_on_a_subscript_or_dynamic_name_evaluates_each_part_as_groovy_does() {
+    // The receiver and index of `g()[idx()]++` run once; an interpolated name
+    // runs once per read and per write, so `key` is called twice.
+    let src = r####"def l = [1, 2]
+int k = 0, j = 0
+def g = { k++; l }
+def idx = { j++; 0 }
+def r = g()[idx()]++
+println "$r $k $j $l"
+r = --g()[idx()]
+println "$r $k $j $l"
+def m = [k: 1]
+int c = 0
+def key = { c++; 'k' }
+r = m."${key()}"++
+println "$r $c $m"
+"####;
+    let expected = r####"1 1 1 [2, 2]
+1 2 2 [1, 2]
+1 2 [k:2]
+"####;
+    check(src, expected);
+}

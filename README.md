@@ -152,8 +152,8 @@ Implemented and checked against Apache Groovy:
   `**=`) on a name, a field, a subscript (`m['a'] += 1`) or a property
   (`p.x += 1`) — the bitwise forms lowered by the binary-operator path itself,
   so `x <<= n` cannot drift from `x = x << n`; increment / decrement in both
-  statement and expression position, postfix (`i++`) and prefix (`++i`), and on
-  a subscript or property target in statement position (`l[0]++`, `p.x--`). A
+  statement and expression position, postfix (`i++`) and prefix (`++i`), on a
+  name, a field, a subscript or a property (`def old = l[0]++`, `--p.x`). A
   compound assignment to a subscript evaluates its receiver and index once, so
   `m[key()] += 5` calls `key` a single time.
   An assignment is also an expression where Groovy allows one — a parenthesised

@@ -630,23 +630,9 @@ impl Parser {
             let value = self.expression()?;
             return self.assign_to_target(lhs, op, value);
         }
-        // `recv.name++` / `recv[index]--` in statement position, which is
-        // `<target> += 1` / `-= 1`. Only as a statement: the postfix value a
-        // Groovy expression sees is the *old* one, and nothing here reads it.
-        if matches!(self.peek(), Tok::PlusPlus | Tok::MinusMinus)
-            && matches!(
-                lhs,
-                Expr::Property { .. } | Expr::DynProperty { .. } | Expr::Index { .. }
-            )
-        {
-            let op = if matches!(self.peek(), Tok::PlusPlus) {
-                AssignOp::Next
-            } else {
-                AssignOp::Previous
-            };
-            self.advance();
-            return self.assign_to_target(lhs, op, Expr::Int(1, IntWidth::Int));
-        }
+        // `recv.name++` / `recv[index]--` arrive as an `Expr::IncDecTarget`
+        // (the postfix chain takes the operator); in statement position the
+        // compiler lowers it as the compound write `<target> += 1` / `-= 1`.
         Ok(StmtKind::Expr(lhs))
     }
 
@@ -3165,11 +3151,15 @@ impl Parser {
                 self.advance();
                 match self.unary()? {
                     Expr::Var(name) => Ok(Expr::PreIncDec { name, inc }),
-                    _ => Err(format!(
-                        "groovyrs: prefix `{}` requires a variable on line {}",
-                        if inc { "++" } else { "--" },
-                        self.line()
-                    )),
+                    // `++p.x`, `--l[i]`: the prefix form on a property or
+                    // subscript target.
+                    other => incdec_target(other, inc, false).map_err(|_| {
+                        format!(
+                            "groovyrs: prefix `{}` requires a variable on line {}",
+                            if inc { "++" } else { "--" },
+                            self.line()
+                        )
+                    }),
                 }
             }
             // `~/re/` is the prefix `~` applied to a slashy string, and a prefix
@@ -3453,6 +3443,19 @@ impl Parser {
                 );
             } else {
                 break;
+            }
+        }
+        // A trailing `++`/`--` on a property or subscript target (`p.x++`,
+        // `l[i]--`). Groovy's grammar hangs the operator off the whole path
+        // expression, so nothing chains after it: it ends the operand.
+        if matches!(self.peek(), Tok::PlusPlus | Tok::MinusMinus) {
+            let inc = self.is(&Tok::PlusPlus);
+            match incdec_target(e, inc, true) {
+                Ok(wrapped) => {
+                    self.advance();
+                    return Ok(wrapped);
+                }
+                Err(unchanged) => e = unchanged,
             }
         }
         Ok(e)
@@ -4501,6 +4504,29 @@ fn unrecorded(e: &Expr) -> &Expr {
     }
 }
 
+/// Wrap `e` as the operand of an [`Expr::IncDecTarget`] when it is a property,
+/// dynamic property or subscript — the targets Groovy lets `++`/`--` update
+/// besides a bare name. Anything else is handed back unchanged in the `Err`,
+/// so the caller keeps it. A power-assert recording around the target is
+/// dropped: the value the whole expression yields is the one worth recording.
+fn incdec_target(e: Expr, inc: bool, post: bool) -> Result<Expr, Expr> {
+    if !matches!(
+        unrecorded(&e),
+        Expr::Property { .. } | Expr::DynProperty { .. } | Expr::Index { .. }
+    ) {
+        return Err(e);
+    }
+    let target = match e {
+        Expr::Recorded { inner, .. } => *inner,
+        other => other,
+    };
+    Ok(Expr::IncDecTarget {
+        target: Box::new(target),
+        inc,
+        post,
+    })
+}
+
 /// The variables Groovy lists in the *message* form's `Values:` clause, with the
 /// column each was recorded at.
 ///
@@ -4656,6 +4682,14 @@ fn expr_text(e: &Expr) -> String {
         }
         Expr::PreIncDec { name, inc } => {
             format!("({}{name})", if *inc { "++" } else { "--" })
+        }
+        Expr::IncDecTarget { target, inc, post } => {
+            let op = if *inc { "++" } else { "--" };
+            if *post {
+                format!("({}{op})", expr_text(target))
+            } else {
+                format!("({op}{})", expr_text(target))
+            }
         }
         Expr::New { class, args, .. } => format!("new {class}({})", args_text(args)),
         Expr::This => "this".to_string(),

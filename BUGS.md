@@ -399,8 +399,8 @@ reported as parse or compile errors, never silently mis-run.
 - **`ConfigSlurper`** — dotted and block assignments, `environments { env { … }
   }` (run against a config object of their own and merged in after the
   script, as Groovy does), auto-created `ConfigObject`s, `flatten` (through
-  plain maps too), `toProperties`, `isSet`, `merge`, and literals, interpolation, arithmetic, Elvis and method calls
-  over earlier settings. A closure literal in the script is a closure value
+  plain maps too), `toProperties`, `isSet`, `merge`, and literals,
+  interpolation, arithmetic, Elvis and method calls over earlier settings. A closure literal in the script is a closure value
   whose body the config walker runs when it is called — inside a value
   (`nums = (1..3).collect { it * 2 }`) or stored and called later — and it
   reports the class Groovy generates (`Script_<md5 of the text>$_run_closure1`).

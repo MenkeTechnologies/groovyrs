@@ -114,7 +114,9 @@ fn unknown_call_without_a_rust_block_is_a_missing_method() {
     let _ = std::fs::remove_dir_all(&cache);
     assert!(!ok, "expected failure, got stdout={out:?}");
     assert!(
-        err.contains("groovy.lang.MissingMethodException: No signature of method: nope for class: "),
+        err.contains(
+            "groovy.lang.MissingMethodException: No signature of method: nope for class: "
+        ),
         "unexpected stderr: {err}"
     );
 }

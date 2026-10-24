@@ -50,7 +50,15 @@ impl Zone {
             }
             ZoneKind::Fixed(off) => (*off, self.id.clone(), false),
             ZoneKind::Region(data) => {
-                let lt = data.at(ms.div_euclid(1000));
+                let mut lt = data.at(ms.div_euclid(1000));
+                // Ireland keeps negative daylight saving in the tz source: Irish
+                // Standard Time is its standard time and winter GMT the
+                // "daylight" one. The JDK's compiler turns that the right way up,
+                // so every `IST` stretch — the year-round one of 1968-71 too —
+                // is daylight time there.
+                if matches!(self.id.as_str(), "Europe/Dublin" | "Eire") && lt.abbr == "IST" {
+                    lt.dst = true;
+                }
                 let name = jdk_short_name(&self.id, lt.dst)
                     .unwrap_or_else(|| java_short_name(&lt.abbr, lt.offset));
                 (lt.offset, name, lt.dst)

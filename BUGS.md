@@ -374,6 +374,12 @@ reported as parse or compile errors, never silently mis-run.
   flag, the declaring class of an override and the reflected `toString`
   (`public static int P.st()`); `parameterTypes` are Groovy's `CachedClass`
   kinds (`IntegerCachedClass`, `ArrayCachedClass` named `[I`, …).
+- **Declaration errors** — a local redeclared while an enclosing block, closure
+  or method still holds the name, a closure or catch parameter naming a
+  visible variable, and a duplicate class are compile errors with Groovy's
+  messages (`The current scope already contains a variable of the name x`).
+  A script class's `respondsTo` also answers the `GroovyObject` methods
+  (`getMetaClass`, `invokeMethod`, `getProperty`, …) it does not declare.
 - **Metaclass of existing instances** — a script-class instance built before
   its class's metaclass was first injected into keeps the original one.
 - **`ConfigSlurper`** — dotted and block assignments, `environments { env { … }
@@ -1047,19 +1053,14 @@ JVM 21.0.12):
 - Groovy lists the candidates of a `MethodSelectionException` in the JVM's
   reflection order, which varies between runs; groovyrs lists them in
   declaration order.
-- `respondsTo` on a script class does not list the `GroovyObject` methods
-  (`getMetaClass`, `invokeMethod`, …) as the class's own: they answer from the
-  `Object` table, declared by `java.lang.Object`. A JDK value's candidates for
+- A JDK value's `respondsTo` candidates for
   one name come in the table's order, where Groovy's order varies between
   runs for some names (`sort`, `toSorted`). A non-reflected `MetaMethod`'s
   `toString` carries a handle-derived hash. `invokeMethod`/`methodMissing` on
   a metaclass and `GroovySystem.metaClassRegistry` are not modeled.
 - A `GString`'s `metaClass` is an `ExpandoMetaClass` (Groovy: `HandleMetaClass`)
   and its `iterator()` a `java.util.Iterator` (Groovy: `ArrayList$Itr`).
-- A local declared twice in one scope (`def g = 1; def g = 2`) and a class
-  declared twice are accepted; Groovy refuses both at compile time
-  (`The current scope already contains a variable of the name g`,
-  `Invalid duplicate class definition`).
+
 - `2L in [1, 2]` is `true`: a `Long` and an `Integer` are one `Value::Int`, so
   `List.contains`' `Long.equals(Integer)` cannot fail (Groovy: `false`). Casts
   to `byte`/`short`/`long` likewise answer `java.lang.Integer` from
@@ -1087,10 +1088,11 @@ JVM 21.0.12):
   string `{uri}local` where Groovy's key is a `QName`. `node.'**'` on a parser
   node walks elements only (Groovy's `depthFirst()` also lists mixed-content
   text, and `depthFirst()` itself does here).
-- `Date` / `TimeZone`: the default zone is the C library's. A zone whose tz
-  rules mark winter as daylight time (`Europe/Dublin`'s negative DST) reports
-  it the tz database's way round (`IST` 1968–71 is standard time there,
-  daylight time in the JDK). `Calendar` covers `get`/`set`/`add`/`clear`, the
+- `Date` / `TimeZone`: the default zone is the C library's. `Europe/Dublin`'s
+  Irish Standard Time is daylight time, as the JDK reports it; that correction is
+  specific to Ireland, so any other zone the JDK normalizes the same way is
+  reported the tz database's way round.
+  `Calendar` covers `get`/`set`/`add`/`clear`, the
   field constants and `getActualMaximum`; week fields, `roll` and lenient
   overflow beyond `set`/`add` are not modeled, nor are `Date.parse` text
   fields (`MMM`, `EEE`) and `clearTime()`.

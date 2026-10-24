@@ -3763,6 +3763,12 @@ fn responds_to(recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
     }
     // A method the class does not declare is `Object`'s or the GDK's.
     if out.is_empty() {
+        // A script class is a `GroovyObject` too.
+        if let Some(v) = metamethod::responds_to("groovy.lang.GroovyObject", method, args)
+            .filter(|v| list_len_root(v).unwrap_or(0) > 0)
+        {
+            return Some(v);
+        }
         return metamethod::responds_to("java.lang.Object", method, args).or(Some(glist(out)));
     }
     Some(glist(out))

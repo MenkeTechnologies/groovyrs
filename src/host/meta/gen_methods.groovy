@@ -45,3 +45,14 @@ samples.each { v ->
     }
 }
 cached.each { k, v -> println(['C', k, v].join('\t')) }
+// What a script class's own metaclass adds for every instance: the
+// `GroovyObject` methods, filed under that interface.
+class GenProbe {}
+def probe = new GenProbe()
+(((probe.metaClass.methods + probe.metaClass.metaMethods)*.name + GroovyObject.methods*.name) as TreeSet).each { name ->
+    probe.respondsTo(name).findAll { it.declaringClass.name == 'groovy.lang.GroovyObject' }.each { m ->
+        println(['M', 'groovy.lang.GroovyObject', name, m.isStatic() ? 1 : 0, m.declaringClass.name,
+                 m.returnType.name, m.nativeParameterTypes*.name.join(','), m.getClass().name,
+                 m instanceof org.codehaus.groovy.reflection.CachedMethod ? m.toString() : '-'].join('\t'))
+    }
+}

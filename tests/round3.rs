@@ -4635,3 +4635,134 @@ fn tz_database_present() -> bool {
     }
     present
 }
+
+/// Ireland's Irish Standard Time is daylight time to the JDK (the tz source
+/// keeps it as standard time with negative winter saving).
+#[test]
+fn round8_dublin_negative_dst() {
+    if !tz_database_present() {
+        return;
+    }
+    let src = r####"['Europe/Dublin', 'Eire', 'Europe/London', 'Europe/Lisbon', 'Africa/Casablanca', 'Europe/Moscow', 'Asia/Kolkata'].each { id ->
+  def z = TimeZone.getTimeZone(id)
+  [0L, 1700000000000L, 1690000000000L, -1000000000000L, 4118000000000L, 100000000000L].each { println id + ' ' + new Date(it).format("yyyy-MM-dd z Z", z) + " " + z.inDaylightTime(new Date(it)) }
+}
+"####;
+    let expected = r####"Europe/Dublin 1970-01-01 IST +0100 true
+Europe/Dublin 2023-11-14 GMT +0000 false
+Europe/Dublin 2023-07-22 IST +0100 true
+Europe/Dublin 1938-04-24 IST +0100 true
+Europe/Dublin 2100-06-30 IST +0100 true
+Europe/Dublin 1973-03-03 GMT +0000 false
+Eire 1970-01-01 IST +0100 true
+Eire 2023-11-14 GMT +0000 false
+Eire 2023-07-22 IST +0100 true
+Eire 1938-04-24 IST +0100 true
+Eire 2100-06-30 IST +0100 true
+Eire 1973-03-03 GMT +0000 false
+Europe/London 1970-01-01 GMT +0100 false
+Europe/London 2023-11-14 GMT +0000 false
+Europe/London 2023-07-22 BST +0100 true
+Europe/London 1938-04-24 BST +0100 true
+Europe/London 2100-06-30 BST +0100 true
+Europe/London 1973-03-03 GMT +0000 false
+Europe/Lisbon 1970-01-01 WET +0100 false
+Europe/Lisbon 2023-11-14 WET +0000 false
+Europe/Lisbon 2023-07-22 WEST +0100 true
+Europe/Lisbon 1938-04-24 WEST +0100 true
+Europe/Lisbon 2100-06-30 WEST +0100 true
+Europe/Lisbon 1973-03-03 WET +0100 false
+Africa/Casablanca 1970-01-01 WET +0000 false
+Africa/Casablanca 2023-11-14 WEST +0100 true
+Africa/Casablanca 2023-07-22 WEST +0100 true
+Africa/Casablanca 1938-04-24 WET +0000 false
+Africa/Casablanca 2100-06-30 WET +0000 false
+Africa/Casablanca 1973-03-03 WET +0000 false
+Europe/Moscow 1970-01-01 MSK +0300 false
+Europe/Moscow 2023-11-15 MSK +0300 false
+Europe/Moscow 2023-07-22 MSK +0300 false
+Europe/Moscow 1938-04-25 MSK +0300 false
+Europe/Moscow 2100-06-30 MSK +0300 false
+Europe/Moscow 1973-03-03 MSK +0300 false
+Asia/Kolkata 1970-01-01 IST +0530 false
+Asia/Kolkata 2023-11-15 IST +0530 false
+Asia/Kolkata 2023-07-22 IST +0530 false
+Asia/Kolkata 1938-04-25 IST +0530 false
+Asia/Kolkata 2100-06-30 IST +0530 false
+Asia/Kolkata 1973-03-03 IST +0530 false
+"####;
+    check(src, expected);
+}
+
+/// `respondsTo` on a script class answers the `GroovyObject` methods it has
+/// no declaration of.
+#[test]
+fn round8_responds_to_groovy_object_methods() {
+    let src = r####"class P {}
+def p = new P()
+["getMetaClass", "invokeMethod", "setMetaClass", "toString", "getProperty"].each { n -> p.respondsTo(n).each { m -> println "$n ${m.getClass().name} ${m.declaringClass.name} ${m.parameterTypes*.name} ${m.returnType.name}" } }
+println p.respondsTo("invokeMethod")[0]
+"####;
+    let expected = r####"getMetaClass org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy groovy.lang.GroovyObject [] groovy.lang.MetaClass
+invokeMethod org.codehaus.groovy.reflection.CachedMethod groovy.lang.GroovyObject [java.lang.String, java.lang.Object] java.lang.Object
+setMetaClass org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy groovy.lang.GroovyObject [groovy.lang.MetaClass] void
+toString org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy java.lang.Object [] java.lang.String
+getProperty org.codehaus.groovy.reflection.CachedMethod groovy.lang.GroovyObject [java.lang.String] java.lang.Object
+public default java.lang.Object groovy.lang.GroovyObject.invokeMethod(java.lang.String,java.lang.Object)
+"####;
+    check(src, expected);
+}
+
+/// Groovy's compile-time declaration errors: a redeclared local (in the same
+/// scope, a nested block, a closure or a method), a closure parameter or a
+/// catch parameter naming a visible variable, and a duplicate class. Sibling
+/// blocks may reuse a name.
+#[test]
+fn round8_duplicate_declarations_are_compile_errors() {
+    let cases = [
+        (
+            "def x = 1; def x = 2",
+            "The current scope already contains a variable of the name x",
+        ),
+        (
+            "def x = 1; if (true) { def x = 2 }",
+            "The current scope already contains a variable of the name x",
+        ),
+        (
+            "def x = 1; def c = { def x = 2 }",
+            "The current scope already contains a variable of the name x",
+        ),
+        (
+            "def x = 1; def c = { x -> x }",
+            "The current parameter list already contains a parameter of the name x",
+        ),
+        (
+            "def f(a) { def a = 1 }",
+            "The current scope already contains a variable of the name a",
+        ),
+        (
+            "int n = 1; String n = 'x'",
+            "The current scope already contains a variable of the name n",
+        ),
+        (
+            "def x = 1; for (x in 1..2) {}",
+            "The current scope already contains a variable of the name x",
+        ),
+        (
+            "def e = 1; try { } catch (e) { }",
+            "The current scope already contains a variable of the name e",
+        ),
+        (
+            "class A {}; class A {}",
+            "Invalid duplicate class definition of class A",
+        ),
+    ];
+    for (src, message) in cases {
+        let (out, ok) = run(src);
+        assert!(!ok, "{src} compiled; stdout {out:?}");
+        let err = stderr_lines(src, "groovyrs: ");
+        assert!(err.contains(message), "{src}: {err:?}");
+    }
+    let fine = "if (true) { def y = 1 }; def y = 2\nfor (i in 1..2) { def z = i }; for (i in 1..2) { def z = i }\nfor (int k = 0; k < 1; k++) {}; for (int k = 0; k < 1; k++) {}\ntry { def e = 1 } catch (e) { }\nprintln y";
+    check(fine, "2\n");
+}

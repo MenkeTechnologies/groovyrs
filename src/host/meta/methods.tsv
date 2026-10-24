@@ -2201,10 +2201,10 @@ M	java.util.ArrayList	add	0	java.util.List	boolean	java.lang.Object	org.codehaus
 M	java.util.ArrayList	add	0	java.util.List	void	int,java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract void java.util.List.add(int,java.lang.Object)
 M	java.util.ArrayList	addAll	0	java.util.List	boolean	java.util.Collection	org.codehaus.groovy.reflection.CachedMethod	public abstract boolean java.util.List.addAll(java.util.Collection)
 M	java.util.ArrayList	addAll	0	java.util.List	boolean	int,java.util.Collection	org.codehaus.groovy.reflection.CachedMethod	public abstract boolean java.util.List.addAll(int,java.util.Collection)
+M	java.util.ArrayList	addAll	0	java.util.List	boolean	int,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	addAll	0	java.util.Collection	boolean	[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	addAll	0	java.util.Collection	boolean	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	addAll	0	java.util.Collection	boolean	java.util.Iterator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.ArrayList	addAll	0	java.util.List	boolean	int,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	addFirst	0	java.util.List	void	java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public default void java.util.List.addFirst(java.lang.Object)
 M	java.util.ArrayList	addLast	0	java.util.List	void	java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public default void java.util.List.addLast(java.lang.Object)
 M	java.util.ArrayList	addShutdownHook	0	java.lang.Object	void	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -2253,8 +2253,8 @@ M	java.util.ArrayList	collectMany	0	java.lang.Iterable	java.util.List		org.codeh
 M	java.util.ArrayList	collectMany	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	collectMany	0	java.lang.Iterable	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	collectManyParallel	0	java.util.Collection	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.ArrayList	collectNested	0	java.lang.Iterable	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	collectNested	0	java.util.Collection	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.ArrayList	collectNested	0	java.lang.Iterable	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	collectParallel	0	java.util.Collection	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	combinations	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	combinations	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -2377,10 +2377,10 @@ M	java.util.ArrayList	inspect	0	java.lang.Object	java.lang.String		org.codehaus.
 M	java.util.ArrayList	interleave	0	java.lang.Iterable	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	interleave	0	java.lang.Iterable	java.util.List	java.lang.Iterable,boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	intersect	0	java.util.List	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.ArrayList	intersect	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	intersect	0	java.util.List	java.util.List	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	intersect	0	java.util.Collection	java.util.Collection	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	intersect	0	java.util.Collection	java.util.Collection	java.util.Collection,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.ArrayList	intersect	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	invokeMethod	0	java.lang.Object	java.lang.Object	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	is	0	java.lang.Object	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	isCase	0	java.util.Collection	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -2412,9 +2412,9 @@ M	java.util.ArrayList	min	0	java.lang.Iterable	java.lang.Object	java.util.Compar
 M	java.util.ArrayList	minParallel	0	java.util.Collection	java.lang.Object	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	minus	0	java.util.List	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	minus	0	java.util.List	java.util.List	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.ArrayList	minus	0	java.util.List	java.util.List	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	minus	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	minus	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.ArrayList	minus	0	java.util.List	java.util.List	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	multiply	0	java.util.List	java.util.List	java.lang.Number	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	notify	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notify()
 M	java.util.ArrayList	notifyAll	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notifyAll()
@@ -2478,16 +2478,16 @@ M	java.util.ArrayList	size	0	java.util.List	int		org.codehaus.groovy.reflection.
 M	java.util.ArrayList	sleep	1	java.lang.Object	void	long	org.codehaus.groovy.runtime.metaclass.NewStaticMetaMethod	-
 M	java.util.ArrayList	sleep	1	java.lang.Object	void	long,groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewStaticMetaMethod	-
 M	java.util.ArrayList	sort	0	java.util.List	void	java.util.Comparator	org.codehaus.groovy.reflection.CachedMethod	public default void java.util.List.sort(java.util.Comparator)
-M	java.util.ArrayList	sort	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.ArrayList	sort	0	java.lang.Iterable	java.util.List	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.ArrayList	sort	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.ArrayList	sort	0	java.lang.Iterable	java.util.List	boolean,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.ArrayList	sort	0	java.lang.Iterable	java.util.List	boolean,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	sort	0	java.util.List	java.util.List	groovy.lang.IntRange	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	sort	0	java.util.List	java.util.List	groovy.lang.IntRange,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	sort	0	java.util.List	java.util.List	groovy.lang.IntRange,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	sort	0	java.util.List	java.util.List	groovy.lang.IntRange,boolean,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	sort	0	java.util.List	java.util.List	groovy.lang.IntRange,boolean,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.ArrayList	sort	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.ArrayList	sort	0	java.lang.Iterable	java.util.List	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.ArrayList	sort	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.ArrayList	sort	0	java.lang.Iterable	java.util.List	boolean,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.ArrayList	sort	0	java.lang.Iterable	java.util.List	boolean,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	split	0	java.util.List	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	split	0	java.util.List	java.util.List	java.util.function.Predicate	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	splitParallel	0	java.util.Collection	java.util.List	java.util.function.Predicate	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -2522,12 +2522,12 @@ M	java.util.ArrayList	toListString	0	java.util.Collection	java.lang.String		org.
 M	java.util.ArrayList	toListString	0	java.util.Collection	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	toProcessBuilder	0	java.util.List	java.lang.ProcessBuilder		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	toSet	0	java.util.Collection	java.util.Set		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.ArrayList	toSorted	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.ArrayList	toSorted	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.ArrayList	toSorted	0	java.lang.Iterable	java.util.List	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	toSorted	0	java.util.List	java.util.List	groovy.lang.IntRange	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	toSorted	0	java.util.List	java.util.List	groovy.lang.IntRange,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	toSorted	0	java.util.List	java.util.List	groovy.lang.IntRange,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.ArrayList	toSorted	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.ArrayList	toSorted	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.ArrayList	toSorted	0	java.lang.Iterable	java.util.List	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	toSpreadMap	0	java.util.List	groovy.lang.SpreadMap		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	toString	0	java.util.AbstractCollection	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	toUnique	0	java.util.List	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -2536,10 +2536,10 @@ M	java.util.ArrayList	toUnique	0	java.util.List	java.util.List	java.util.Compara
 M	java.util.ArrayList	transpose	0	java.util.List	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	trimToSize	0	java.util.ArrayList	void		org.codehaus.groovy.reflection.CachedMethod	public void java.util.ArrayList.trimToSize()
 M	java.util.ArrayList	union	0	java.util.List	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.ArrayList	union	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	union	0	java.util.List	java.util.List	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	union	0	java.util.Collection	java.util.Collection	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	union	0	java.util.Collection	java.util.Collection	java.util.Collection,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.ArrayList	union	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	unique	0	java.util.List	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	unique	0	java.util.List	java.util.List	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.ArrayList	unique	0	java.util.List	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -2583,10 +2583,10 @@ M	java.util.LinkedList	add	0	java.util.Deque	boolean	java.lang.Object	org.codeha
 M	java.util.LinkedList	add	0	java.util.List	void	int,java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract void java.util.List.add(int,java.lang.Object)
 M	java.util.LinkedList	addAll	0	java.util.Deque	boolean	java.util.Collection	org.codehaus.groovy.reflection.CachedMethod	public abstract boolean java.util.Deque.addAll(java.util.Collection)
 M	java.util.LinkedList	addAll	0	java.util.List	boolean	int,java.util.Collection	org.codehaus.groovy.reflection.CachedMethod	public abstract boolean java.util.List.addAll(int,java.util.Collection)
+M	java.util.LinkedList	addAll	0	java.util.List	boolean	int,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	addAll	0	java.util.Collection	boolean	[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	addAll	0	java.util.Collection	boolean	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	addAll	0	java.util.Collection	boolean	java.util.Iterator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	addAll	0	java.util.List	boolean	int,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	addFirst	0	java.util.Deque	void	java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract void java.util.Deque.addFirst(java.lang.Object)
 M	java.util.LinkedList	addLast	0	java.util.Deque	void	java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract void java.util.Deque.addLast(java.lang.Object)
 M	java.util.LinkedList	addShutdownHook	0	java.lang.Object	void	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -2596,7 +2596,7 @@ M	java.util.LinkedList	any	0	java.lang.Iterable	boolean	java.util.function.Predi
 M	java.util.LinkedList	any	0	java.lang.Iterable	boolean	java.util.function.BiPredicate,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	anyParallel	0	java.util.Collection	boolean	java.util.function.Predicate	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	asBoolean	0	java.util.Collection	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	asChecked	0	java.util.List	java.util.List	java.lang.Class	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	asChecked	0	java.util.Queue	java.util.Queue	java.lang.Class	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	asCollection	0	java.lang.Iterable	java.util.Collection		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	asImmutable	0	java.util.List	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	asList	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -2635,8 +2635,8 @@ M	java.util.LinkedList	collectMany	0	java.lang.Iterable	java.util.List		org.code
 M	java.util.LinkedList	collectMany	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	collectMany	0	java.lang.Iterable	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	collectManyParallel	0	java.util.Collection	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	collectNested	0	java.lang.Iterable	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	collectNested	0	java.util.Collection	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	collectNested	0	java.lang.Iterable	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	collectParallel	0	java.util.Collection	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	combinations	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	combinations	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -2760,10 +2760,10 @@ M	java.util.LinkedList	inspect	0	java.lang.Object	java.lang.String		org.codehaus
 M	java.util.LinkedList	interleave	0	java.lang.Iterable	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	interleave	0	java.lang.Iterable	java.util.List	java.lang.Iterable,boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	intersect	0	java.util.List	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	intersect	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	intersect	0	java.util.List	java.util.List	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	intersect	0	java.util.Collection	java.util.Collection	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	intersect	0	java.util.Collection	java.util.Collection	java.util.Collection,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	intersect	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	invokeMethod	0	java.lang.Object	java.lang.Object	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	is	0	java.lang.Object	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	isCase	0	java.util.Collection	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -2795,9 +2795,9 @@ M	java.util.LinkedList	min	0	java.lang.Iterable	java.lang.Object	java.util.Compa
 M	java.util.LinkedList	minParallel	0	java.util.Collection	java.lang.Object	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	minus	0	java.util.List	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	minus	0	java.util.List	java.util.List	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	minus	0	java.util.List	java.util.List	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	minus	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	minus	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	minus	0	java.util.List	java.util.List	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	multiply	0	java.util.List	java.util.List	java.lang.Number	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	notify	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notify()
 M	java.util.LinkedList	notifyAll	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notifyAll()
@@ -2872,16 +2872,16 @@ M	java.util.LinkedList	size	0	java.util.Deque	int		org.codehaus.groovy.reflectio
 M	java.util.LinkedList	sleep	1	java.lang.Object	void	long	org.codehaus.groovy.runtime.metaclass.NewStaticMetaMethod	-
 M	java.util.LinkedList	sleep	1	java.lang.Object	void	long,groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewStaticMetaMethod	-
 M	java.util.LinkedList	sort	0	java.util.List	void	java.util.Comparator	org.codehaus.groovy.reflection.CachedMethod	public default void java.util.List.sort(java.util.Comparator)
-M	java.util.LinkedList	sort	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	sort	0	java.lang.Iterable	java.util.List	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	sort	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	sort	0	java.lang.Iterable	java.util.List	boolean,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	sort	0	java.lang.Iterable	java.util.List	boolean,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	sort	0	java.util.List	java.util.List	groovy.lang.IntRange	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	sort	0	java.util.List	java.util.List	groovy.lang.IntRange,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	sort	0	java.util.List	java.util.List	groovy.lang.IntRange,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	sort	0	java.util.List	java.util.List	groovy.lang.IntRange,boolean,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	sort	0	java.util.List	java.util.List	groovy.lang.IntRange,boolean,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	sort	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	sort	0	java.lang.Iterable	java.util.List	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	sort	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	sort	0	java.lang.Iterable	java.util.List	boolean,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	sort	0	java.lang.Iterable	java.util.List	boolean,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	split	0	java.util.List	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	split	0	java.util.List	java.util.List	java.util.function.Predicate	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	splitParallel	0	java.util.Collection	java.util.List	java.util.function.Predicate	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -2916,12 +2916,12 @@ M	java.util.LinkedList	toListString	0	java.util.Collection	java.lang.String		org
 M	java.util.LinkedList	toListString	0	java.util.Collection	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	toProcessBuilder	0	java.util.List	java.lang.ProcessBuilder		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	toSet	0	java.util.Collection	java.util.Set		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	toSorted	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	toSorted	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	toSorted	0	java.lang.Iterable	java.util.List	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	toSorted	0	java.util.List	java.util.List	groovy.lang.IntRange	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	toSorted	0	java.util.List	java.util.List	groovy.lang.IntRange,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	toSorted	0	java.util.List	java.util.List	groovy.lang.IntRange,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	toSorted	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	toSorted	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	toSorted	0	java.lang.Iterable	java.util.List	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	toSpreadMap	0	java.util.List	groovy.lang.SpreadMap		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	toString	0	java.util.AbstractCollection	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	toUnique	0	java.util.List	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -2929,10 +2929,10 @@ M	java.util.LinkedList	toUnique	0	java.util.List	java.util.List	groovy.lang.Clos
 M	java.util.LinkedList	toUnique	0	java.util.List	java.util.List	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	transpose	0	java.util.List	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	union	0	java.util.List	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedList	union	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	union	0	java.util.List	java.util.List	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	union	0	java.util.Collection	java.util.Collection	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	union	0	java.util.Collection	java.util.Collection	java.util.Collection,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedList	union	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	unique	0	java.util.List	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	unique	0	java.util.List	java.util.List	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedList	unique	0	java.util.List	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -3630,8 +3630,8 @@ M	java.util.LinkedHashSet	collectMany	0	java.lang.Iterable	java.util.List		org.c
 M	java.util.LinkedHashSet	collectMany	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	collectMany	0	java.lang.Iterable	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	collectManyParallel	0	java.util.Collection	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedHashSet	collectNested	0	java.lang.Iterable	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	collectNested	0	java.util.Collection	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedHashSet	collectNested	0	java.lang.Iterable	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	collectParallel	0	java.util.Collection	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	combinations	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	combinations	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -3741,10 +3741,10 @@ M	java.util.LinkedHashSet	inspect	0	java.lang.Object	java.lang.String		org.codeh
 M	java.util.LinkedHashSet	interleave	0	java.lang.Iterable	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	interleave	0	java.lang.Iterable	java.util.List	java.lang.Iterable,boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	intersect	0	java.util.Set	java.util.Set	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedHashSet	intersect	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	intersect	0	java.util.Set	java.util.Set	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	intersect	0	java.util.Collection	java.util.Collection	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	intersect	0	java.util.Collection	java.util.Collection	java.util.Collection,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedHashSet	intersect	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	invokeMethod	0	java.lang.Object	java.lang.Object	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	is	0	java.lang.Object	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	isCase	0	java.util.Collection	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -3773,9 +3773,9 @@ M	java.util.LinkedHashSet	min	0	java.lang.Iterable	java.lang.Object	java.util.Co
 M	java.util.LinkedHashSet	minParallel	0	java.util.Collection	java.lang.Object	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	minus	0	java.util.Set	java.util.Set	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	minus	0	java.util.Set	java.util.Set	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedHashSet	minus	0	java.util.Set	java.util.Set	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	minus	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	minus	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedHashSet	minus	0	java.util.Set	java.util.Set	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	multiply	0	java.lang.Iterable	java.util.Collection	java.lang.Number	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	newHashSet	1	java.util.HashSet	java.util.HashSet	int	org.codehaus.groovy.reflection.CachedMethod	public static java.util.HashSet java.util.HashSet.newHashSet(int)
 M	java.util.LinkedHashSet	newLinkedHashSet	1	java.util.LinkedHashSet	java.util.LinkedHashSet	int	org.codehaus.groovy.reflection.CachedMethod	public static java.util.LinkedHashSet java.util.LinkedHashSet.newLinkedHashSet(int)
@@ -3857,10 +3857,10 @@ M	java.util.LinkedHashSet	toUnique	0	java.lang.Iterable	java.util.Collection		or
 M	java.util.LinkedHashSet	toUnique	0	java.lang.Iterable	java.util.Collection	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	toUnique	0	java.lang.Iterable	java.util.Collection	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	union	0	java.util.Set	java.util.Set	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.LinkedHashSet	union	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	union	0	java.util.Set	java.util.Set	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	union	0	java.util.Collection	java.util.Collection	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	union	0	java.util.Collection	java.util.Collection	java.util.Collection,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.LinkedHashSet	union	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	unique	0	java.util.Collection	java.util.Collection		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	unique	0	java.util.Collection	java.util.Collection	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.LinkedHashSet	unique	0	java.util.Collection	java.util.Collection	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -3951,8 +3951,8 @@ M	java.util.HashSet	collectMany	0	java.lang.Iterable	java.util.List		org.codehau
 M	java.util.HashSet	collectMany	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	collectMany	0	java.lang.Iterable	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	collectManyParallel	0	java.util.Collection	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.HashSet	collectNested	0	java.lang.Iterable	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	collectNested	0	java.util.Collection	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.HashSet	collectNested	0	java.lang.Iterable	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	collectParallel	0	java.util.Collection	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	combinations	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	combinations	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4060,10 +4060,10 @@ M	java.util.HashSet	inspect	0	java.lang.Object	java.lang.String		org.codehaus.gr
 M	java.util.HashSet	interleave	0	java.lang.Iterable	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	interleave	0	java.lang.Iterable	java.util.List	java.lang.Iterable,boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	intersect	0	java.util.Set	java.util.Set	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.HashSet	intersect	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	intersect	0	java.util.Set	java.util.Set	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	intersect	0	java.util.Collection	java.util.Collection	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	intersect	0	java.util.Collection	java.util.Collection	java.util.Collection,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.HashSet	intersect	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	invokeMethod	0	java.lang.Object	java.lang.Object	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	is	0	java.lang.Object	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	isCase	0	java.util.Collection	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4092,9 +4092,9 @@ M	java.util.HashSet	min	0	java.lang.Iterable	java.lang.Object	java.util.Comparat
 M	java.util.HashSet	minParallel	0	java.util.Collection	java.lang.Object	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	minus	0	java.util.Set	java.util.Set	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	minus	0	java.util.Set	java.util.Set	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.HashSet	minus	0	java.util.Set	java.util.Set	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	minus	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	minus	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.HashSet	minus	0	java.util.Set	java.util.Set	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	multiply	0	java.lang.Iterable	java.util.Collection	java.lang.Number	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	newHashSet	1	java.util.HashSet	java.util.HashSet	int	org.codehaus.groovy.reflection.CachedMethod	public static java.util.HashSet java.util.HashSet.newHashSet(int)
 M	java.util.HashSet	notify	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notify()
@@ -4172,10 +4172,10 @@ M	java.util.HashSet	toUnique	0	java.lang.Iterable	java.util.Collection		org.code
 M	java.util.HashSet	toUnique	0	java.lang.Iterable	java.util.Collection	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	toUnique	0	java.lang.Iterable	java.util.Collection	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	union	0	java.util.Set	java.util.Set	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.HashSet	union	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	union	0	java.util.Set	java.util.Set	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	union	0	java.util.Collection	java.util.Collection	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	union	0	java.util.Collection	java.util.Collection	java.util.Collection,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.HashSet	union	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	unique	0	java.util.Collection	java.util.Collection		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	unique	0	java.util.Collection	java.util.Collection	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.HashSet	unique	0	java.util.Collection	java.util.Collection	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4268,8 +4268,8 @@ M	java.util.TreeSet	collectMany	0	java.lang.Iterable	java.util.List		org.codehau
 M	java.util.TreeSet	collectMany	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	collectMany	0	java.lang.Iterable	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	collectManyParallel	0	java.util.Collection	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.TreeSet	collectNested	0	java.lang.Iterable	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	collectNested	0	java.util.Collection	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.TreeSet	collectNested	0	java.lang.Iterable	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	collectParallel	0	java.util.Collection	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	combinations	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	combinations	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4363,8 +4363,8 @@ M	java.util.TreeSet	groupConsecutive	0	java.lang.Iterable	java.util.List	java.ut
 M	java.util.TreeSet	hasProperty	0	java.lang.Object	groovy.lang.MetaProperty	java.lang.String	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	hashCode	0	java.util.Set	int		org.codehaus.groovy.reflection.CachedMethod	public abstract int java.util.Set.hashCode()
 M	java.util.TreeSet	head	0	java.lang.Iterable	java.lang.Object		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.TreeSet	headSet	0	java.util.NavigableSet	java.util.SortedSet	java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract java.util.SortedSet java.util.NavigableSet.headSet(java.lang.Object)
 M	java.util.TreeSet	headSet	0	java.util.NavigableSet	java.util.NavigableSet	java.lang.Object,boolean	org.codehaus.groovy.reflection.CachedMethod	public abstract java.util.NavigableSet java.util.NavigableSet.headSet(java.lang.Object,boolean)
+M	java.util.TreeSet	headSet	0	java.util.NavigableSet	java.util.SortedSet	java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract java.util.SortedSet java.util.NavigableSet.headSet(java.lang.Object)
 M	java.util.TreeSet	higher	0	java.util.NavigableSet	java.lang.Object	java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract java.lang.Object java.util.NavigableSet.higher(java.lang.Object)
 M	java.util.TreeSet	identity	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	indexed	0	java.lang.Iterable	java.util.Map		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4384,10 +4384,10 @@ M	java.util.TreeSet	inspect	0	java.lang.Object	java.lang.String		org.codehaus.gr
 M	java.util.TreeSet	interleave	0	java.lang.Iterable	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	interleave	0	java.lang.Iterable	java.util.List	java.lang.Iterable,boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	intersect	0	java.util.SortedSet	java.util.SortedSet	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.TreeSet	intersect	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	intersect	0	java.util.SortedSet	java.util.SortedSet	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	intersect	0	java.util.Collection	java.util.Collection	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	intersect	0	java.util.Collection	java.util.Collection	java.util.Collection,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.TreeSet	intersect	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	invokeMethod	0	java.lang.Object	java.lang.Object	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	is	0	java.lang.Object	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	isCase	0	java.util.Collection	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4417,9 +4417,9 @@ M	java.util.TreeSet	min	0	java.lang.Iterable	java.lang.Object	java.util.Comparat
 M	java.util.TreeSet	minParallel	0	java.util.Collection	java.lang.Object	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	minus	0	java.util.SortedSet	java.util.SortedSet	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	minus	0	java.util.SortedSet	java.util.SortedSet	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.TreeSet	minus	0	java.util.SortedSet	java.util.SortedSet	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	minus	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	minus	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.TreeSet	minus	0	java.util.SortedSet	java.util.SortedSet	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	multiply	0	java.lang.Iterable	java.util.Collection	java.lang.Number	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	notify	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notify()
 M	java.util.TreeSet	notifyAll	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notifyAll()
@@ -4468,16 +4468,16 @@ M	java.util.TreeSet	spliterator	0	java.util.SortedSet	java.util.Spliterator		org
 M	java.util.TreeSet	sprintf	0	java.lang.Object	java.lang.String	java.lang.String,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	sprintf	0	java.lang.Object	java.lang.String	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	stream	0	java.util.Collection	java.util.stream.Stream		org.codehaus.groovy.reflection.CachedMethod	public default java.util.stream.Stream java.util.Collection.stream()
-M	java.util.TreeSet	subSet	0	java.util.NavigableSet	java.util.SortedSet	java.lang.Object,java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract java.util.SortedSet java.util.NavigableSet.subSet(java.lang.Object,java.lang.Object)
 M	java.util.TreeSet	subSet	0	java.util.NavigableSet	java.util.NavigableSet	java.lang.Object,boolean,java.lang.Object,boolean	org.codehaus.groovy.reflection.CachedMethod	public abstract java.util.NavigableSet java.util.NavigableSet.subSet(java.lang.Object,boolean,java.lang.Object,boolean)
+M	java.util.TreeSet	subSet	0	java.util.NavigableSet	java.util.SortedSet	java.lang.Object,java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract java.util.SortedSet java.util.NavigableSet.subSet(java.lang.Object,java.lang.Object)
 M	java.util.TreeSet	sum	0	java.lang.Iterable	java.lang.Object		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	sum	0	java.lang.Iterable	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	sum	0	java.lang.Iterable	java.lang.Object	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	sum	0	java.lang.Iterable	java.lang.Object	java.lang.Object,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	sumParallel	0	java.util.Collection	java.lang.Object	java.util.function.BinaryOperator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	tail	0	java.util.SortedSet	java.util.SortedSet		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.TreeSet	tailSet	0	java.util.NavigableSet	java.util.SortedSet	java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract java.util.SortedSet java.util.NavigableSet.tailSet(java.lang.Object)
 M	java.util.TreeSet	tailSet	0	java.util.NavigableSet	java.util.NavigableSet	java.lang.Object,boolean	org.codehaus.groovy.reflection.CachedMethod	public abstract java.util.NavigableSet java.util.NavigableSet.tailSet(java.lang.Object,boolean)
+M	java.util.TreeSet	tailSet	0	java.util.NavigableSet	java.util.SortedSet	java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract java.util.SortedSet java.util.NavigableSet.tailSet(java.lang.Object)
 M	java.util.TreeSet	tails	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	take	0	java.util.SortedSet	java.util.SortedSet	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	takeIf	0	java.lang.Object	java.lang.Object	java.util.function.Predicate	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4503,10 +4503,10 @@ M	java.util.TreeSet	toUnique	0	java.lang.Iterable	java.util.Collection		org.code
 M	java.util.TreeSet	toUnique	0	java.lang.Iterable	java.util.Collection	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	toUnique	0	java.lang.Iterable	java.util.Collection	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	union	0	java.util.SortedSet	java.util.SortedSet	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	java.util.TreeSet	union	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	union	0	java.util.SortedSet	java.util.SortedSet	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	union	0	java.util.Collection	java.util.Collection	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	union	0	java.util.Collection	java.util.Collection	java.util.Collection,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	java.util.TreeSet	union	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	unique	0	java.util.Collection	java.util.Collection		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	unique	0	java.util.Collection	java.util.Collection	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	java.util.TreeSet	unique	0	java.util.Collection	java.util.Collection	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4641,10 +4641,10 @@ M	groovy.lang.IntRange	add	0	java.util.List	boolean	java.lang.Object	org.codehau
 M	groovy.lang.IntRange	add	0	java.util.List	void	int,java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract void java.util.List.add(int,java.lang.Object)
 M	groovy.lang.IntRange	addAll	0	java.util.List	boolean	java.util.Collection	org.codehaus.groovy.reflection.CachedMethod	public abstract boolean java.util.List.addAll(java.util.Collection)
 M	groovy.lang.IntRange	addAll	0	java.util.List	boolean	int,java.util.Collection	org.codehaus.groovy.reflection.CachedMethod	public abstract boolean java.util.List.addAll(int,java.util.Collection)
+M	groovy.lang.IntRange	addAll	0	java.util.List	boolean	int,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	addAll	0	java.util.Collection	boolean	[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	addAll	0	java.util.Collection	boolean	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	addAll	0	java.util.Collection	boolean	java.util.Iterator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	groovy.lang.IntRange	addAll	0	java.util.List	boolean	int,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	addShutdownHook	0	java.lang.Object	void	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	any	0	java.lang.Object	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	any	0	java.lang.Iterable	boolean	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4691,8 +4691,8 @@ M	groovy.lang.IntRange	collectMany	0	java.lang.Iterable	java.util.List		org.code
 M	groovy.lang.IntRange	collectMany	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	collectMany	0	java.lang.Iterable	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	collectManyParallel	0	java.util.Collection	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	groovy.lang.IntRange	collectNested	0	java.lang.Iterable	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	collectNested	0	java.util.Collection	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.IntRange	collectNested	0	java.lang.Iterable	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	collectParallel	0	java.util.Collection	java.util.List	java.util.function.Function	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	combinations	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	combinations	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4820,10 +4820,10 @@ M	groovy.lang.IntRange	inspect	0	groovy.lang.Range	java.lang.String		org.codehau
 M	groovy.lang.IntRange	interleave	0	java.lang.Iterable	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	interleave	0	java.lang.Iterable	java.util.List	java.lang.Iterable,boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	intersect	0	java.util.List	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	groovy.lang.IntRange	intersect	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	intersect	0	java.util.List	java.util.List	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	intersect	0	java.util.Collection	java.util.Collection	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	intersect	0	java.util.Collection	java.util.Collection	java.util.Collection,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.IntRange	intersect	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	invokeMethod	0	java.lang.Object	java.lang.Object	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	is	0	java.lang.Object	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	isCase	0	java.util.Collection	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4856,9 +4856,9 @@ M	groovy.lang.IntRange	min	0	java.lang.Iterable	java.lang.Object	java.util.Compa
 M	groovy.lang.IntRange	minParallel	0	java.util.Collection	java.lang.Object	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	minus	0	java.util.List	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	minus	0	java.util.List	java.util.List	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.IntRange	minus	0	java.util.List	java.util.List	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	minus	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	minus	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	groovy.lang.IntRange	minus	0	java.util.List	java.util.List	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	multiply	0	java.util.List	java.util.List	java.lang.Number	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	notify	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notify()
 M	groovy.lang.IntRange	notifyAll	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notifyAll()
@@ -4918,16 +4918,16 @@ M	groovy.lang.IntRange	size	0	java.util.List	int		org.codehaus.groovy.reflection
 M	groovy.lang.IntRange	sleep	1	java.lang.Object	void	long	org.codehaus.groovy.runtime.metaclass.NewStaticMetaMethod	-
 M	groovy.lang.IntRange	sleep	1	java.lang.Object	void	long,groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewStaticMetaMethod	-
 M	groovy.lang.IntRange	sort	0	java.util.List	void	java.util.Comparator	org.codehaus.groovy.reflection.CachedMethod	public default void java.util.List.sort(java.util.Comparator)
-M	groovy.lang.IntRange	sort	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	groovy.lang.IntRange	sort	0	java.lang.Iterable	java.util.List	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	groovy.lang.IntRange	sort	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	groovy.lang.IntRange	sort	0	java.lang.Iterable	java.util.List	boolean,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	groovy.lang.IntRange	sort	0	java.lang.Iterable	java.util.List	boolean,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	sort	0	java.util.List	java.util.List	groovy.lang.IntRange	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	sort	0	java.util.List	java.util.List	groovy.lang.IntRange,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	sort	0	java.util.List	java.util.List	groovy.lang.IntRange,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	sort	0	java.util.List	java.util.List	groovy.lang.IntRange,boolean,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	sort	0	java.util.List	java.util.List	groovy.lang.IntRange,boolean,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.IntRange	sort	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.IntRange	sort	0	java.lang.Iterable	java.util.List	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.IntRange	sort	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.IntRange	sort	0	java.lang.Iterable	java.util.List	boolean,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.IntRange	sort	0	java.lang.Iterable	java.util.List	boolean,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	split	0	java.util.List	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	split	0	java.util.List	java.util.List	java.util.function.Predicate	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	splitParallel	0	java.util.Collection	java.util.List	java.util.function.Predicate	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4966,12 +4966,12 @@ M	groovy.lang.IntRange	toListString	0	java.util.Collection	java.lang.String		org
 M	groovy.lang.IntRange	toListString	0	java.util.Collection	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	toProcessBuilder	0	java.util.List	java.lang.ProcessBuilder		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	toSet	0	java.util.Collection	java.util.Set		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	groovy.lang.IntRange	toSorted	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	groovy.lang.IntRange	toSorted	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	groovy.lang.IntRange	toSorted	0	java.lang.Iterable	java.util.List	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	toSorted	0	java.util.List	java.util.List	groovy.lang.IntRange	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	toSorted	0	java.util.List	java.util.List	groovy.lang.IntRange,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	toSorted	0	java.util.List	java.util.List	groovy.lang.IntRange,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.IntRange	toSorted	0	java.lang.Iterable	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.IntRange	toSorted	0	java.lang.Iterable	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.IntRange	toSorted	0	java.lang.Iterable	java.util.List	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	toSpreadMap	0	java.util.List	groovy.lang.SpreadMap		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	toString	0	groovy.lang.IntRange	java.lang.String		org.codehaus.groovy.reflection.CachedMethod	public java.lang.String groovy.lang.IntRange.toString()
 M	groovy.lang.IntRange	toUnique	0	java.util.List	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -4979,10 +4979,10 @@ M	groovy.lang.IntRange	toUnique	0	java.util.List	java.util.List	groovy.lang.Clos
 M	groovy.lang.IntRange	toUnique	0	java.util.List	java.util.List	java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	transpose	0	java.util.List	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	union	0	java.util.List	java.util.List	java.lang.Iterable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
-M	groovy.lang.IntRange	union	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	union	0	java.util.List	java.util.List	java.lang.Iterable,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	union	0	java.util.Collection	java.util.Collection	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	union	0	java.util.Collection	java.util.Collection	java.util.Collection,java.util.Comparator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.IntRange	union	0	java.lang.Iterable	java.util.Collection	java.lang.Iterable,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	unique	0	java.util.List	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	unique	0	java.util.List	java.util.List	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
 M	groovy.lang.IntRange	unique	0	java.util.List	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
@@ -5214,3 +5214,8 @@ C	org.codehaus.groovy.control.CompilePhase	org.codehaus.groovy.reflection.Cached
 C	org.codehaus.groovy.runtime.GStringImpl	org.codehaus.groovy.reflection.CachedClass
 C	org.codehaus.groovy.runtime.MethodClosure	org.codehaus.groovy.reflection.stdclasses.CachedClosureClass
 C	short	org.codehaus.groovy.reflection.stdclasses.ShortCachedClass
+M	groovy.lang.GroovyObject	getMetaClass	0	groovy.lang.GroovyObject	groovy.lang.MetaClass		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.GroovyObject	getProperty	0	groovy.lang.GroovyObject	java.lang.Object	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public default java.lang.Object groovy.lang.GroovyObject.getProperty(java.lang.String)
+M	groovy.lang.GroovyObject	invokeMethod	0	groovy.lang.GroovyObject	java.lang.Object	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public default java.lang.Object groovy.lang.GroovyObject.invokeMethod(java.lang.String,java.lang.Object)
+M	groovy.lang.GroovyObject	setMetaClass	0	groovy.lang.GroovyObject	void	groovy.lang.MetaClass	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.lang.GroovyObject	setProperty	0	groovy.lang.GroovyObject	void	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public default void groovy.lang.GroovyObject.setProperty(java.lang.String,java.lang.Object)

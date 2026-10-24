@@ -671,6 +671,194 @@ pub fn compile_debug(prog: &Program) -> Result<Chunk, String> {
     compile_with(prog, true)
 }
 
+/// Groovy's compile-time declaration checks: a class declared twice, a local
+/// redeclared while an enclosing scope (block, closure, method) still holds
+/// that name, and a closure parameter naming such a variable.
+fn check_declarations(body: &[Stmt]) -> Result<(), String> {
+    let mut classes: HashSet<&str> = HashSet::new();
+    for s in body {
+        if let StmtKind::Class { name, .. } = &s.kind {
+            if !classes.insert(name) {
+                return Err(format!(
+                    "groovyrs: Invalid duplicate class definition of class {name} on line {}",
+                    s.line
+                ));
+            }
+        }
+    }
+    check_scope(body, &mut vec![HashSet::new()])
+}
+
+/// Check one block's statements with `frames` the names visible from the
+/// enclosing scopes; the block gets a frame of its own.
+fn check_scope(body: &[Stmt], frames: &mut Vec<HashSet<String>>) -> Result<(), String> {
+    frames.push(HashSet::new());
+    let out = body.iter().try_for_each(|s| check_stmt(s, frames));
+    frames.pop();
+    out
+}
+
+fn check_stmt(s: &Stmt, frames: &mut Vec<HashSet<String>>) -> Result<(), String> {
+    let fresh = |params: &[String]| vec![params.iter().cloned().collect::<HashSet<String>>()];
+    match &s.kind {
+        // A function, method or constructor sees only its own parameters.
+        StmtKind::Function { params, body, .. } => return check_scope(body, &mut fresh(params)),
+        StmtKind::Class { methods, ctors, .. } => {
+            for m in methods {
+                check_scope(&m.body, &mut fresh(&m.params))?;
+            }
+            for c in ctors {
+                check_scope(&c.body, &mut fresh(&c.params))?;
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+    check_closures(s, frames)?;
+    match &s.kind {
+        StmtKind::Local { name, .. } => {
+            // Compiler-made locals (`$…`) are never a script's own.
+            if !name.starts_with('$') && frames.iter().any(|f| f.contains(name)) {
+                return Err(format!(
+                    "groovyrs: The current scope already contains a variable of the name {name} on line {}",
+                    s.line
+                ));
+            }
+            if let Some(top) = frames.last_mut() {
+                top.insert(name.clone());
+            }
+        }
+        // `for (x in c)` arrives lowered: its variable declared before an
+        // index loop whose body re-declares it per element.
+        StmtKind::If { then, .. } if matches!(then.first().map(|t| &t.kind), Some(StmtKind::Local { name, .. }) if name.starts_with("$g_")) =>
+        {
+            frames.push(HashSet::new());
+            let out = then.iter().try_for_each(|t| match &t.kind {
+                StmtKind::For {
+                    init, update, body, ..
+                } => {
+                    let var = frames
+                        .last()
+                        .and_then(|f| f.iter().find(|n| !n.starts_with('$')).cloned());
+                    let body = match (body.first().map(|b| &b.kind), &var) {
+                        (Some(StmtKind::Local { name, .. }), Some(v)) if name == v => &body[1..],
+                        _ => &body[..],
+                    };
+                    let _ = (init, update);
+                    check_scope(body, frames)
+                }
+                _ => check_stmt(t, frames),
+            });
+            frames.pop();
+            out?;
+        }
+        StmtKind::If { then, els, .. } => {
+            check_scope(then, frames)?;
+            check_scope(els, frames)?;
+        }
+        StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => check_scope(body, frames)?,
+        StmtKind::For {
+            init, update, body, ..
+        } => {
+            // The header's declarations live in the loop's own scope.
+            frames.push(HashSet::new());
+            let out = (|| {
+                if let Some(i) = init {
+                    check_stmt(i, frames)?;
+                }
+                if let Some(u) = update {
+                    check_stmt(u, frames)?;
+                }
+                check_scope(body, frames)
+            })();
+            frames.pop();
+            out?;
+        }
+        StmtKind::Switch(sw) => {
+            for c in &sw.cases {
+                check_scope(&c.body, frames)?;
+            }
+        }
+        StmtKind::Labeled { stmt, .. } => check_stmt(stmt, frames)?,
+        StmtKind::Try {
+            body,
+            catches,
+            finally_body,
+        } => {
+            check_scope(body, frames)?;
+            for arm in catches {
+                if frames.iter().any(|f| f.contains(&arm.name)) {
+                    return Err(format!(
+                        "groovyrs: The current scope already contains a variable of the name {} on line {}",
+                        arm.name, s.line
+                    ));
+                }
+                frames.push(HashSet::from([arm.name.clone()]));
+                let out = check_scope(&arm.body, frames);
+                frames.pop();
+                out?;
+            }
+            check_scope(finally_body, frames)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The closure literals in a statement's own expressions: a parameter may not
+/// name a visible variable, and the body is a scope nested in this one.
+fn check_closures(s: &Stmt, frames: &mut Vec<HashSet<String>>) -> Result<(), String> {
+    let mut closures: Vec<(Vec<String>, Vec<Stmt>, bool)> = Vec::new();
+    let mut collect = |e: &Expr| {
+        if let Expr::Closure {
+            params,
+            body,
+            explicit_params,
+            ..
+        } = e
+        {
+            closures.push((params.clone(), body.clone(), *explicit_params));
+        }
+        false
+    };
+    // Only this statement's expressions: nested blocks are walked as scopes.
+    let shallow = match &s.kind {
+        StmtKind::If { cond, .. }
+        | StmtKind::While { cond, .. }
+        | StmtKind::DoWhile { cond, .. } => {
+            vec![cond]
+        }
+        StmtKind::For { cond, .. } => cond.iter().collect(),
+        StmtKind::Switch(sw) => vec![&sw.subject],
+        StmtKind::Try { .. } | StmtKind::Labeled { .. } => Vec::new(),
+        _ => {
+            body_any(std::slice::from_ref(s), &mut collect);
+            Vec::new()
+        }
+    };
+    for e in shallow {
+        expr_any(e, &mut collect);
+    }
+    for (params, body, explicit) in closures {
+        if explicit {
+            if let Some(p) = params
+                .iter()
+                .find(|p| frames.iter().any(|f| f.contains(*p)))
+            {
+                return Err(format!(
+                    "groovyrs: The current parameter list already contains a parameter of the name {p} on line {}",
+                    s.line
+                ));
+            }
+        }
+        frames.push(params.into_iter().collect());
+        let out = check_scope(&body, frames);
+        frames.pop();
+        out?;
+    }
+    Ok(())
+}
+
 /// Collect every name the *script* binds at its own level — a `def`/typed
 /// declaration or a bare assignment, including inside the script's own control
 /// flow. A function or class body is a different scope, and a closure body is
@@ -725,6 +913,7 @@ fn collect_script_vars(body: &[Stmt], out: &mut HashSet<String>) {
 }
 
 fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
+    check_declarations(&prog.body)?;
     let has_ffi = body_has_ffi(&prog.body);
     // Collect user-function names up front so calls can resolve forward references.
     let mut fn_names = HashSet::new();

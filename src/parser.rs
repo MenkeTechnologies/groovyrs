@@ -983,6 +983,8 @@ impl Parser {
             let mut args = String::new();
             let mut opts: Vec<(String, String)> = Vec::new();
             let mut key = String::new();
+            // The `name = true` attributes, by name.
+            let mut set_true: Vec<String> = Vec::new();
             if self.is(&Tok::LParen) {
                 let mut depth = 0;
                 loop {
@@ -1004,7 +1006,10 @@ impl Parser {
                             }
                         }
                         Tok::Str(s) => opts.push((key.clone(), s.clone())),
-                        Tok::True => args.push_str("true"),
+                        Tok::True => {
+                            args.push_str("true");
+                            set_true.push(key.clone());
+                        }
                         _ => {}
                     }
                     self.advance();
@@ -1022,22 +1027,32 @@ impl Parser {
                 }
                 found
             };
+            let flag = |k: &str| set_true.iter().any(|s| s == k);
+            // The selection attributes the three member-generating transforms
+            // share; `super_flag` names the one that reaches the superclass's
+            // own generated member (`includeSuper` / `callSuper`).
+            let selection = |super_flag: &str| MemberSelection {
+                includes: names_for("includes"),
+                excludes: names_for("excludes").unwrap_or_default(),
+                include_fields: flag("includeFields"),
+                include_super_properties: flag("includeSuperProperties"),
+                include_super: flag(super_flag),
+            };
             match name.as_str() {
                 "ToString" => {
                     gen.to_string = true;
-                    gen.to_string_includes = names_for("includes");
-                    gen.to_string_excludes = names_for("excludes").unwrap_or_default();
-                    // Only `includeNames` changes the rendering; the rest of the
-                    // attribute set is accepted and ignored (see BUGS.md).
-                    gen.include_names |= args.contains("includeNames") && args.contains("true");
-                    gen.ignore_nulls |= args.contains("ignoreNullstrue");
+                    gen.to_string_sel = selection("includeSuper");
+                    gen.include_names = flag("includeNames");
+                    gen.ignore_nulls = flag("ignoreNulls");
                 }
                 "EqualsAndHashCode" => {
                     gen.equals_hash = true;
-                    gen.equals_includes = names_for("includes");
-                    gen.equals_excludes = names_for("excludes").unwrap_or_default();
+                    gen.equals_sel = selection("callSuper");
                 }
-                "TupleConstructor" => gen.tuple_ctor = true,
+                "TupleConstructor" => {
+                    gen.tuple_ctor = true;
+                    gen.tuple_sel = selection("callSuper");
+                }
                 "Sortable" => gen.sortable = true,
                 "AutoClone" => gen.auto_clone = true,
                 "Category" => gen.category = Some(args.clone()),
@@ -1049,11 +1064,27 @@ impl Parser {
                     gen.tuple_ctor = true;
                     gen.immutable = true;
                 }
-                // `@Canonical` is exactly the three together.
+                // `@Canonical` is exactly the three together; its `includes` /
+                // `excludes` reach all three, except one an explicit annotation
+                // of that transform already configured.
                 "Canonical" => {
                     gen.to_string = true;
                     gen.equals_hash = true;
                     gen.tuple_ctor = true;
+                    let shared = MemberSelection {
+                        includes: names_for("includes"),
+                        excludes: names_for("excludes").unwrap_or_default(),
+                        ..MemberSelection::default()
+                    };
+                    for sel in [
+                        &mut gen.to_string_sel,
+                        &mut gen.equals_sel,
+                        &mut gen.tuple_sel,
+                    ] {
+                        if *sel == MemberSelection::default() {
+                            *sel = shared.clone();
+                        }
+                    }
                 }
                 _ => {}
             }

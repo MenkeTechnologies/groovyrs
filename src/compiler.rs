@@ -1980,26 +1980,12 @@ impl Compiler {
         // explicit `public`/`private`/`protected`, so not a property) a
         // trailing `:field` after that.
         for f in fields {
-            let skip = |inc: &Option<Vec<String>>, exc: &[String]| {
-                !f.is_static
-                    && (exc.contains(&f.name) || inc.as_ref().is_some_and(|i| !i.contains(&f.name)))
-            };
-            let no_str = if skip(&generated.to_string_includes, &generated.to_string_excludes) {
-                ":nostr"
-            } else {
-                ""
-            };
             let delegate = if f.is_delegate { ":delegate" } else { "" };
-            let no_eq = if skip(&generated.equals_includes, &generated.equals_excludes) {
-                ":noeq"
-            } else {
-                ""
-            };
             let marker = if f.is_static { ":static" } else { "" };
             let plain = if f.is_property { "" } else { ":field" };
             let fin = if f.is_final { ":final" } else { "" };
             let c = self.b.add_constant(Value::str(format!(
-                "{}:{}{marker}{plain}{fin}{no_str}{no_eq}{delegate}",
+                "{}:{}{marker}{plain}{fin}{delegate}",
                 f.name, f.ty
             )));
             self.b.emit(Op::LoadConst(c), line);
@@ -2130,6 +2116,17 @@ impl Compiler {
             self.b.emit(Op::LoadConst(s), line);
         }
         self.b.emit(Op::MakeArray(methods.len() as u16), line);
+        // The member selections of `@ToString`, `@EqualsAndHashCode` and
+        // `@TupleConstructor`, in that order (see `ast::MemberSelection`).
+        for sel in [
+            &generated.to_string_sel,
+            &generated.equals_sel,
+            &generated.tuple_sel,
+        ] {
+            let s = self.b.add_constant(Value::str(sel.encode()));
+            self.b.emit(Op::LoadConst(s), line);
+        }
+        self.b.emit(Op::MakeArray(3), line);
         self.b.emit(Op::CallBuiltin(crate::host::GCLASS, 0), line);
         self.b.emit(Op::Pop, line);
     }

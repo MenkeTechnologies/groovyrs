@@ -426,6 +426,16 @@ reported as parse or compile errors, never silently mis-run.
 - **AST transforms** — `@ToString(ignoreNulls = true)`, `@Sortable`,
   `@AutoClone`; an annotation on a script function or local
   (`@CompileStatic`, `@Memoized`, `@Field`) is read past.
+- **AST transforms on a class hierarchy.** `@ToString`, `@EqualsAndHashCode`
+  and `@TupleConstructor` select Groovy's members: the annotated class's own
+  properties (no plain `private`/`public` fields, nothing a superclass
+  declares), read through their getters, with `@ToString` adding getter-only
+  properties and trait properties; `includeFields`, `includeSuperProperties`,
+  `includeSuper` and `callSuper` widen the set in Groovy's order. A generated
+  member belongs to the annotated class — a plain subclass inherits it with
+  that class's name, and it shadows a superclass's declared one; generated
+  `equals` honours `canEqual`; `super.toString()` reaches a generated parent;
+  and a tuple constructor is not inherited.
 - **Closure classes.** A closure literal is an instance of the class Groovy
   generates for it — `Script$_run_closure1`, `Script$_f_closure7` in function
   `f`, `K$_m_closure2` in method `m` of `K`, `K$_closure1` in a field
@@ -1801,11 +1811,21 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   script-`this` entry above. `clo.owner` raises rather than answering a value
   groovyrs does not have.
 - **Only part of each AST-transform annotation's attribute set is read.**
-  `@ToString`'s `includeNames` is honoured; its `excludes`, `includes`,
-  `includeSuper`, `ignoreNulls` and the rest are accepted and ignored, as are
-  `@EqualsAndHashCode`'s and `@TupleConstructor`'s. An annotation outside the
-  family (`@Immutable`, `@Sortable`, `@CompileStatic`, …) is consumed and has no
-  effect, which is what the member-level annotation skip already did.
+  Honoured: `includes`, `excludes` and `includeFields` on `@ToString` /
+  `@EqualsAndHashCode` / `@TupleConstructor`, `includeSuperProperties` on
+  `@ToString` / `@TupleConstructor` (Groovy's `@EqualsAndHashCode` has none),
+  `@ToString`'s `includeNames`, `ignoreNulls` and `includeSuper`,
+  `@EqualsAndHashCode`'s `callSuper`, and `@Canonical`'s `includes` /
+  `excludes`. Everything else (`includePackage`, `includeSuperFields`,
+  `allProperties = false`, `useGetters`, `cache`, `pre` / `post`,
+  `defaults = false`, …) is accepted and ignored. `includeSuper` over a class
+  with no `toString` of its own renders `Name`, not `Name@hash` (the default
+  rendering above). `@Immutable` does not wrap a `List` / `Map` property in
+  an unmodifiable view (`im.l << 2` succeeds where Groovy raises
+  `UnsupportedOperationException`) and generates no `copyWith`. `@Memoized`
+  on a method is read past, so the body runs on every call. An annotation
+  outside the family (`@CompileStatic`, …) is consumed and has no effect,
+  which is what the member-level annotation skip already did.
 - **A `static` method has no static state.** `C.m(args)` calls a script
   class's `static` method with the class handle standing in for `this`, so a
   static body can call its sibling statics and compute from its arguments, but

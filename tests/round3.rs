@@ -5193,3 +5193,124 @@ println d.flatten()
 "####;
     check(src, expected);
 }
+
+/// `@ToString` belongs to the annotated class: a plain subclass inherits it
+/// (name and members), an annotated one renders only its own properties unless
+/// `includeSuperProperties` / `includeSuper` widen it, plain fields need
+/// `includeFields`, getters and trait properties count, and a generated member
+/// shadows a superclass's declared one.
+#[test]
+fn round10_to_string_member_selection_and_inheritance() {
+    let src = r####"import groovy.transform.*
+@ToString class A { int a = 1; String a2 = 'x' }
+class B extends A { int b = 2 }
+@ToString class C extends B { int c = 3 }
+@ToString(includeSuperProperties = true, includeNames = true) class D extends B { int d = 4 }
+@ToString(includeSuper = true) class E extends C { int e = 5 }
+println new B()
+println new C()
+println new D()
+println new E()
+class F extends A { String toString() { 'F:' + super.toString() } }
+println new F()
+class U { String toString() { 'U!' } }
+@ToString class U2 extends U { int u = 1 }
+println new U2()
+@ToString(includeSuper = true, includeNames = true) class U3 extends U { int u = 1 }
+println new U3()
+@ToString class Pv { int a = 1; private int b = 2; public int c = 3; static int s = 4 }
+println new Pv()
+@ToString(includeFields = true) class Pf { private int z = 9; int a = 1; public int p = 4 }
+println new Pf()
+@ToString(includes = 'b,a') class Inc { int a = 1; int b = 2; int c = 3 }
+println new Inc()
+@ToString class G { String n = 'a'; String getN() { 'G' + n }; boolean isOk() { true }; String getUrl() { 'u' } }
+println new G()
+trait Tr { int t = 7 }
+@ToString class W implements Tr { int w = 1 }
+println new W()
+"####;
+    let expected = r####"A(1, x)
+C(3)
+D(d:4, b:2, a:1, a2:x)
+E(5, C(3))
+F:A(1, x)
+U2(1)
+U3(u:1, super:U!)
+Pv(1)
+Pf(1, 9, 4)
+Inc(2, 1)
+G(Ga, true, u)
+W(1, 7)
+"####;
+    check(src, expected);
+}
+
+/// `@EqualsAndHashCode` / `@TupleConstructor` / `@Canonical` on a class
+/// hierarchy: own properties only by default, `callSuper` folds the parent in
+/// last, `canEqual` keeps a re-annotated subclass from equalling its parent,
+/// getters are read, and a tuple constructor is not inherited.
+#[test]
+fn round10_equals_tuple_member_selection_and_inheritance() {
+    let src = r####"import groovy.transform.*
+@EqualsAndHashCode class Q { int q }
+class Q2 extends Q { int r }
+@EqualsAndHashCode class Q3 extends Q { int r }
+@EqualsAndHashCode(callSuper = true) class Q4 extends Q { int r }
+println new Q2(q: 1, r: 1) == new Q2(q: 1, r: 2)
+println new Q2(q: 1, r: 1).hashCode()
+println new Q(q: 1) == new Q2(q: 1, r: 5)
+println new Q3(q: 1, r: 1) == new Q3(q: 2, r: 1)
+println new Q(q: 1) == new Q3(q: 1, r: 1)
+println new Q3(q: 1, r: 1) == new Q(q: 1)
+println new Q4(q: 1, r: 1) == new Q4(q: 2, r: 1)
+println new Q4(q: 1, r: 1) == new Q4(q: 1, r: 1)
+println new Q4(q: 1, r: 1).hashCode()
+println([new Q2(q: 1, r: 1), new Q2(q: 1, r: 2)].unique().size())
+@EqualsAndHashCode class Pv { int a = 1; private int b = 2 }
+println new Pv().hashCode()
+@EqualsAndHashCode(includeFields = true) class Pf { private int z = 9; int a = 1 }
+println new Pf().hashCode()
+@EqualsAndHashCode class Gt { String n = 'a'; String getN() { 'b' } }
+println new Gt().hashCode()
+println new Gt() == new Gt(n: 'z')
+@TupleConstructor class T0 { int a; int b }
+@TupleConstructor class T1 extends T0 { int c }
+println new T1(5).c
+@TupleConstructor(includeSuperProperties = true) class T2 extends T0 { int c }
+def t2 = new T2(1, 2, 3)
+println "${t2.a}${t2.b}${t2.c}"
+@TupleConstructor class T3 { private int z = 9; int a; int b }
+println new T3(1, 2).b
+@TupleConstructor(includes = 'b,a') class T4 { int a; int b }
+println new T4(1, 2).a
+@Canonical class P0 { String n }
+@Canonical class P1 extends P0 { int k }
+println new P1(3)
+println new P1(n: 'z', k: 3)
+println new P1(n: 'x', k: 1) == new P1(n: 'y', k: 1)
+"####;
+    let expected = r####"true
+7494
+true
+true
+false
+false
+false
+true
+449640
+1
+7494
+442155
+7591
+true
+5
+123
+2
+2
+P1(3)
+P1(3)
+true
+"####;
+    check(src, expected);
+}

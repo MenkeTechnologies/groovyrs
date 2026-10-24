@@ -581,13 +581,20 @@ Implemented and checked against Apache Groovy:
   `null`; a property the collection really has (`empty`, `class`) answers instead
   of spreading.
 - **The AST-transform annotations** — `@ToString` (with `includeNames`,
-  `includes`, `excludes`), `@EqualsAndHashCode` (with `includes`, `excludes`),
-  `@TupleConstructor`, `@Canonical` (the three together), `@Immutable` / `@Value`
+  `ignoreNulls`, `includes`, `excludes`, `includeFields`,
+  `includeSuperProperties`, `includeSuper`), `@EqualsAndHashCode` (with
+  `includes`, `excludes`, `includeFields`, `callSuper`), `@TupleConstructor`
+  (with `includes`, `excludes`, `includeFields`, `includeSuperProperties`),
+  `@Canonical` (the three together), `@Immutable` / `@Value`
   (`@Canonical` plus read-only properties: a write raises
   `ReadOnlyPropertyException`), `@Singleton` (a static `instance` property), and
   a field-level `@Delegate` (calls the class does not answer forward to the
-  field; with several delegate fields, the first one takes them all). A declared member always wins over the generated one. The generated
-  `hashCode` is Groovy's own number, not merely a self-consistent one.
+  field; with several delegate fields, the first one takes them all). Members
+  are chosen as Groovy chooses them — the annotated class's own properties,
+  read through their getters — and a generated member belongs to the annotated
+  class: a subclass inherits it like any method, and it shadows a declared one
+  further up the hierarchy, while a member the class itself declares wins. The
+  generated `hashCode` is Groovy's own number, not merely a self-consistent one.
 - **Named arguments and the map constructor** — `f(a: 1, 9)` gathers the named
   arguments into one map passed first, and `new P(a: 1, b: 2)` sets those
   properties on a default-built instance. An uninitialised field of a primitive

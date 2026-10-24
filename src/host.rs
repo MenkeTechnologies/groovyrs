@@ -21,6 +21,7 @@
 //!    delegating any operation with a non-numeric operand to [`numeric_hook`],
 //!    where `+` routes through `groovy_add`.
 
+use crate::ast::MemberSelection;
 use crate::decimal;
 use bigdecimal::{BigDecimal, Signed, Zero};
 use fusevm::{Frame, NumOp, VMResult, Value, VM};
@@ -2007,8 +2008,9 @@ fn register_throwables() {
                 is_interface: false,
                 is_trait: false,
                 generated: 0,
-                to_string_skip: Vec::new(),
-                equals_skip: Vec::new(),
+                to_string_sel: MemberSelection::default(),
+                equals_sel: MemberSelection::default(),
+                tuple_sel: MemberSelection::default(),
                 delegates: Vec::new(),
                 field_types: std::collections::HashMap::new(),
                 field_names: if superclass.is_none() {
@@ -2821,10 +2823,12 @@ struct ClassMeta {
     /// the *behaviour* lives here, because that is where an instance's fields,
     /// its rendering and its equality already live.
     generated: u16,
-    /// Properties `@ToString(includes/excludes)` leaves out of the rendering.
-    to_string_skip: Vec<String>,
-    /// Properties `@EqualsAndHashCode(includes/excludes)` leaves out of `equals`/`hashCode`.
-    equals_skip: Vec<String>,
+    /// The members `@ToString` renders (see [`generated_members`]).
+    to_string_sel: MemberSelection,
+    /// The members `@EqualsAndHashCode` compares and hashes.
+    equals_sel: MemberSelection,
+    /// The members `@TupleConstructor` takes positionally.
+    tuple_sel: MemberSelection,
     /// Fields annotated `@Delegate`, in declaration order.
     delegates: Vec<String>,
     /// Declared field type by name — read only to decide an uninitialised
@@ -5779,12 +5783,28 @@ fn lookup_bool_getter(class: u32, method: &str) -> Option<u16> {
     None
 }
 
+/// Whether `meta`'s annotations generate the member named `method`: the
+/// `toString` of `@ToString`, the `equals` / `hashCode` of
+/// `@EqualsAndHashCode`.
+fn generates_member(meta: &ClassMeta, method: &str) -> bool {
+    match method {
+        "toString" => meta.generated & GEN_TO_STRING != 0,
+        "equals" | "hashCode" => meta.generated & GEN_EQUALS_HASH != 0,
+        _ => false,
+    }
+}
+
 fn lookup_method(class: u32, method: &str) -> Option<u16> {
     let mut cur = Some(class);
     while let Some(id) = cur {
         let meta = class_meta(id)?;
         if let Some(idx) = meta.methods.get(method) {
             return Some(*idx);
+        }
+        // A member this class *generates* shadows a declared one further up,
+        // as the method the transform writes into this class would.
+        if generates_member(&meta, method) {
+            return None;
         }
         cur = meta.superclass.as_deref().and_then(find_class);
     }
@@ -5846,9 +5866,8 @@ fn class_generates(class: u32, what: u16) -> bool {
 }
 
 /// Every field of an instance's class, in declaration order across the chain
-/// (root first) and the traits it implements — the order every generated member
-/// walks, because `@ToString`'s rendering and `@TupleConstructor`'s parameter
-/// order are both that order.
+/// (root first) and the traits it implements — what a record's components and
+/// `@Sortable`'s comparison walk.
 fn generated_field_order(class: u32) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for id in trait_closure(class).iter().chain(class_chain(class).iter()) {
@@ -5863,50 +5882,221 @@ fn generated_field_order(class: u32) -> Vec<String> {
     out
 }
 
-/// `generated_field_order` minus what `@ToString` (`for_string`) or
-/// `@EqualsAndHashCode` leaves out through `includes` / `excludes`.
-fn generated_member_fields(class: u32, for_string: bool) -> Vec<String> {
-    let chain: Vec<ClassMeta> = class_chain(class)
+/// The member-generating transforms that pick their members the same way.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GenMember {
+    ToString,
+    Equals,
+    Tuple,
+}
+
+/// The class whose generated `what` member an instance of `class` answers
+/// with: the nearest one in its superclass chain that carries the annotation.
+/// A subclass without the annotation inherits that class's member unchanged —
+/// its name, its members — exactly as it inherits any other method.
+fn generated_owner(class: u32, what: u16) -> Option<u32> {
+    class_chain(class)
         .into_iter()
+        .rev()
+        .find(|id| class_meta(*id).is_some_and(|m| m.generated & what != 0))
+}
+
+/// A class's own properties: its non-static fields declared without an
+/// access modifier, in declaration order.
+fn own_properties(meta: &ClassMeta) -> Vec<String> {
+    meta.field_names
+        .iter()
+        .filter(|f| !meta.plain_fields.contains(*f))
+        .cloned()
+        .collect()
+}
+
+/// The properties `class`'s traits contribute that its superclass's do not —
+/// the traits `class` itself brings in.
+fn introduced_trait_properties(class: u32) -> Vec<String> {
+    let inherited = class_meta(class)
+        .and_then(|m| m.superclass.as_deref().and_then(find_class))
+        .map(trait_closure)
+        .unwrap_or_default();
+    trait_closure(class)
+        .into_iter()
+        .filter(|t| !inherited.contains(t))
         .filter_map(class_meta)
-        .collect();
-    generated_field_order(class)
-        .into_iter()
-        .filter(|f| {
-            !chain.iter().any(|m| {
-                let skip = if for_string {
-                    &m.to_string_skip
-                } else {
-                    &m.equals_skip
-                };
-                skip.contains(f)
-            })
+        .flat_map(|m| own_properties(&m))
+        .collect()
+}
+
+/// The getter-only properties a class declares (`String getUrl()`,
+/// `boolean isOk()`), in declaration order: `@ToString` renders them after
+/// the field-backed properties.
+fn getter_properties(meta: &ClassMeta) -> Vec<String> {
+    meta.method_sigs
+        .iter()
+        .filter(|s| !s.is_static && s.types.is_empty() && s.ret != "void")
+        .filter_map(|s| {
+            let rest = s
+                .name
+                .strip_prefix("get")
+                .or_else(|| meta.bool_getters.contains(&s.name).then(|| &s.name[2..]))?;
+            rest.starts_with(|c: char| c.is_uppercase())
+                .then(|| lower_first(rest))
         })
         .collect()
 }
 
+/// The members `owner`'s generated `which` member covers, in Groovy's order.
+///
+/// Groovy's default is the annotated class's own properties only — no plain
+/// fields and nothing a superclass declares. `@ToString` adds the getter-only
+/// properties and the properties of the traits the class implements; then
+/// `includeFields` adds the plain fields, and `includeSuperProperties` the
+/// superclasses' properties (nearest first after the class's own for
+/// `@ToString`, root first ahead of them for `@TupleConstructor`). An
+/// `includes` list replaces the order for `@ToString` and
+/// `@TupleConstructor`; `@EqualsAndHashCode` keeps declaration order.
+fn generated_members(owner: u32, which: GenMember) -> Vec<String> {
+    let Some(meta) = class_meta(owner) else {
+        return Vec::new();
+    };
+    let sel = match which {
+        GenMember::ToString => &meta.to_string_sel,
+        GenMember::Equals => &meta.equals_sel,
+        GenMember::Tuple => &meta.tuple_sel,
+    };
+    let mut ancestors: Vec<u32> = class_chain(owner);
+    ancestors.pop(); // `owner` itself; the rest is root first
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |names: Vec<String>| {
+        for n in names {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    };
+    if which == GenMember::Tuple && sel.include_super_properties {
+        for id in &ancestors {
+            add(class_meta(*id).map(|m| own_properties(&m)).unwrap_or_default());
+        }
+    }
+    add(own_properties(&meta));
+    if which == GenMember::ToString {
+        add(getter_properties(&meta));
+        add(introduced_trait_properties(owner));
+    }
+    if sel.include_fields {
+        add(meta
+            .field_names
+            .iter()
+            .filter(|f| meta.plain_fields.contains(*f))
+            .cloned()
+            .collect());
+    }
+    if which == GenMember::ToString && sel.include_super_properties {
+        for id in ancestors.iter().rev() {
+            add(class_meta(*id).map(|m| own_properties(&m)).unwrap_or_default());
+            add(introduced_trait_properties(*id));
+        }
+    }
+    let mut members = match (&sel.includes, which) {
+        (Some(names), GenMember::ToString | GenMember::Tuple) => names
+            .iter()
+            .filter(|n| out.contains(n))
+            .cloned()
+            .collect(),
+        (Some(names), GenMember::Equals) => out.into_iter().filter(|n| names.contains(n)).collect(),
+        (None, _) => out,
+    };
+    members.retain(|n| !sel.excludes.contains(n));
+    members
+}
+
+/// A member's value as the generated `toString` / `equals` / `hashCode` read
+/// it: through the property's getter when the class declares one (so an
+/// overriding `getName()` is what renders), else the field itself.
+fn generated_member_value(recv: &Value, inst: &Instance, name: &str) -> Value {
+    let getter = lookup_method(inst.class, &format!("get{}", capitalize(name))).or_else(|| {
+        let is_name = format!("is{}", capitalize(name));
+        class_chain(inst.class)
+            .into_iter()
+            .any(|id| class_meta(id).is_some_and(|m| m.bool_getters.contains(&is_name)))
+            .then(|| lookup_method(inst.class, &is_name))
+            .flatten()
+    });
+    if let Some(idx) = getter {
+        if let Some(v) = with_vm(|vm| invoke_sub(vm, idx, std::slice::from_ref(recv)).ok()).flatten()
+        {
+            return v;
+        }
+    }
+    inst.fields.get(name).cloned().unwrap_or(Value::Undef)
+}
+
+/// `super.<method>()` for a generated member: what the superclass of `owner`
+/// answers for `toString` / `hashCode` / `equals(other)` — its declared
+/// method, the generated one it carries or inherits, or `Object`'s.
+fn super_member(recv: &Value, owner: u32, method: &str, args: &[Value]) -> Value {
+    let Some(sup) = class_meta(owner).and_then(|m| m.superclass.as_deref().and_then(find_class))
+    else {
+        return object_member(recv, method, args);
+    };
+    if let Some(idx) = lookup_method(sup, method) {
+        let mut pushes = vec![recv.clone()];
+        pushes.extend_from_slice(args);
+        return with_vm(|vm| invoke_sub(vm, idx, &pushes).unwrap_or(Value::Undef))
+            .unwrap_or(Value::Undef);
+    }
+    generated_member_call(recv, sup, method, args).unwrap_or_else(|| object_member(recv, method, args))
+}
+
+/// `java.lang.Object`'s `toString` / `hashCode` / `equals` for a script
+/// instance: its class name (see [`default_instance_str`]), its identity.
+fn object_member(recv: &Value, method: &str, args: &[Value]) -> Value {
+    match method {
+        "toString" => Value::str(
+            as_instance(recv)
+                .map(|i| default_instance_str(&i))
+                .unwrap_or_default(),
+        ),
+        "hashCode" => Value::int(i64::from(match recv {
+            Value::Obj(id) => *id as i32,
+            _ => 0,
+        })),
+        _ => Value::bool(
+            matches!((recv, args.first()), (Value::Obj(a), Some(Value::Obj(b))) if a == b),
+        ),
+    }
+}
+
+/// The generated `toString` / `hashCode` / `equals` that an instance answers
+/// as a member of `class` (itself or a superclass it is viewed through), or
+/// `None` when no class from `class` up generates that member.
+fn generated_member_call(recv: &Value, class: u32, method: &str, args: &[Value]) -> Option<Value> {
+    match (method, args) {
+        ("toString", []) => {
+            let owner = generated_owner(class, GEN_TO_STRING)?;
+            Some(Value::str(generated_to_string_as(recv, owner)))
+        }
+        ("hashCode", []) => {
+            let owner = generated_owner(class, GEN_EQUALS_HASH)?;
+            Some(Value::int(i64::from(generated_hash_code_as(recv, owner))))
+        }
+        ("equals", [other]) => {
+            let owner = generated_owner(class, GEN_EQUALS_HASH)?;
+            Some(Value::bool(generated_equals_as(recv, owner, other)))
+        }
+        _ => None,
+    }
+}
+
 /// The `toString` `@ToString` generates: `ClassName(v1, v2)`, or
 /// `ClassName(a:1, b:x)` under `includeNames`.
-fn generated_to_string(inst: &Instance) -> String {
-    let names = class_generates(inst.class, GEN_INCLUDE_NAMES);
-    let skip_nulls = class_generates(inst.class, GEN_IGNORE_NULLS);
-    let shown: Vec<String> = generated_member_fields(inst.class, true)
-        .into_iter()
-        .filter(|f| !(skip_nulls && matches!(inst.fields.get(f), None | Some(Value::Undef))))
-        .map(|f| {
-            let v = inst.fields.get(&f).cloned().unwrap_or(Value::Undef);
-            if names {
-                format!("{f}:{}", groovy_str(&v))
-            } else {
-                groovy_str(&v)
-            }
-        })
-        .collect();
-    let cls = class_meta(inst.class)
-        .map(|m| m.name.clone())
-        .unwrap_or_default();
+fn generated_to_string(recv: &Value) -> String {
+    let Some(inst) = as_instance(recv) else {
+        return String::new();
+    };
     if class_generates(inst.class, GEN_RECORD) {
-        let named: Vec<String> = generated_member_fields(inst.class, true)
+        let cls = class_meta(inst.class).map(|m| m.name).unwrap_or_default();
+        let named: Vec<String> = generated_field_order(inst.class)
             .into_iter()
             .map(|f| {
                 let v = inst.fields.get(&f).cloned().unwrap_or(Value::Undef);
@@ -5915,48 +6105,140 @@ fn generated_to_string(inst: &Instance) -> String {
             .collect();
         return format!("{cls}[{}]", named.join(", "));
     }
-    format!("{cls}({})", shown.join(", "))
+    match generated_owner(inst.class, GEN_TO_STRING) {
+        Some(owner) => generated_to_string_as(recv, owner),
+        None => default_instance_str(&inst),
+    }
+}
+
+/// [`generated_to_string`] as the annotated class `owner` renders it. The
+/// name is `owner`'s, not the instance's: Groovy writes the annotated class's
+/// name into the method it generates.
+fn generated_to_string_as(recv: &Value, owner: u32) -> String {
+    let Some(inst) = as_instance(recv) else {
+        return String::new();
+    };
+    let Some(meta) = class_meta(owner) else {
+        return String::new();
+    };
+    let names = meta.generated & GEN_INCLUDE_NAMES != 0;
+    let skip_nulls = meta.generated & GEN_IGNORE_NULLS != 0;
+    let label = |name: &str, text: String| {
+        if names {
+            format!("{name}:{text}")
+        } else {
+            text
+        }
+    };
+    let mut shown: Vec<String> = Vec::new();
+    for f in generated_members(owner, GenMember::ToString) {
+        let v = generated_member_value(recv, &inst, &f);
+        if !(skip_nulls && matches!(v, Value::Undef)) {
+            shown.push(label(&f, groovy_str(&v)));
+        }
+    }
+    if meta.to_string_sel.include_super {
+        let sup = super_member(recv, owner, "toString", &[]);
+        shown.push(label("super", groovy_str(&sup)));
+    }
+    format!("{}({})", meta.name, shown.join(", "))
 }
 
 /// The `hashCode` `@EqualsAndHashCode` generates.
 ///
 /// Groovy's is `org.codehaus.groovy.util.HashCodeHelper`: `initHash()` is 127
-/// and each field folds in as `59 * current + hashCode(field)`, with a null
-/// field contributing `0`. Measured against the helper itself rather than taken
-/// from the docs, so the *number* matches, not merely its consistency.
-fn generated_hash_code(inst: &Instance) -> i32 {
-    // A record's is `java.lang.runtime.ObjectMethods`': from 0, `31 * h` plus
-    // each component's hash.
-    let record = class_generates(inst.class, GEN_RECORD);
-    let (mut h, factor): (i32, i32) = if record { (0, 31) } else { (127, 59) };
-    for f in generated_member_fields(inst.class, false) {
-        let v = inst.fields.get(&f).cloned().unwrap_or(Value::Undef);
-        let fh = if matches!(v, Value::Undef) {
-            0
-        } else {
-            object_hash_code(&v)
-        };
-        h = h.wrapping_mul(factor).wrapping_add(fh);
+/// and each member folds in as `59 * current + hashCode(member)`, with a null
+/// member contributing `0`; under `callSuper` the superclass's `hashCode()`
+/// folds in last. Measured against the helper itself rather than taken from
+/// the docs, so the *number* matches, not merely its consistency.
+fn generated_hash_code(recv: &Value) -> i32 {
+    let Some(inst) = as_instance(recv) else {
+        return 0;
+    };
+    if class_generates(inst.class, GEN_RECORD) {
+        // A record's is `java.lang.runtime.ObjectMethods`': from 0, `31 * h`
+        // plus each component's hash.
+        return generated_field_order(inst.class).iter().fold(0i32, |h, f| {
+            let v = inst.fields.get(f).cloned().unwrap_or(Value::Undef);
+            h.wrapping_mul(31).wrapping_add(member_hash(&v))
+        });
+    }
+    generated_owner(inst.class, GEN_EQUALS_HASH)
+        .map_or(0, |owner| generated_hash_code_as(recv, owner))
+}
+
+/// A member's contribution to a generated hash: `0` for `null`.
+fn member_hash(v: &Value) -> i32 {
+    if matches!(v, Value::Undef) {
+        0
+    } else {
+        object_hash_code(v)
+    }
+}
+
+/// [`generated_hash_code`] as the annotated class `owner` computes it.
+fn generated_hash_code_as(recv: &Value, owner: u32) -> i32 {
+    let Some(inst) = as_instance(recv) else {
+        return 0;
+    };
+    let mut h: i32 = 127;
+    for f in generated_members(owner, GenMember::Equals) {
+        let v = generated_member_value(recv, &inst, &f);
+        h = h.wrapping_mul(59).wrapping_add(member_hash(&v));
+    }
+    if class_meta(owner).is_some_and(|m| m.equals_sel.include_super) {
+        let sup = super_member(recv, owner, "hashCode", &[]).to_int() as i32;
+        h = h.wrapping_mul(59).wrapping_add(sup);
     }
     h
 }
 
-/// The `equals` `@EqualsAndHashCode` generates: the same class, and every field
-/// equal.
-fn generated_equals(a: &Instance, b: &Value) -> bool {
-    let Some(other) = as_instance(b) else {
+/// The `equals` `@EqualsAndHashCode` generates.
+fn generated_equals(recv: &Value, other: &Value) -> bool {
+    let Some(inst) = as_instance(recv) else {
         return false;
     };
-    if other.class != a.class {
+    if class_generates(inst.class, GEN_RECORD) {
+        let Some(o) = as_instance(other) else {
+            return false;
+        };
+        return o.class == inst.class
+            && generated_field_order(inst.class).iter().all(|f| {
+                let x = inst.fields.get(f).cloned().unwrap_or(Value::Undef);
+                let y = o.fields.get(f).cloned().unwrap_or(Value::Undef);
+                values_equal(&x, &y)
+            });
+    }
+    generated_owner(inst.class, GEN_EQUALS_HASH)
+        .is_some_and(|owner| generated_equals_as(recv, owner, other))
+}
+
+/// [`generated_equals`] as the annotated class `owner` decides it: `other`
+/// must be an instance of `owner`, and `other.canEqual(this)` must hold — the
+/// generated `canEqual` of the nearest annotated class above `other`'s class
+/// is `this instanceof` that class, so a subclass that adds its own
+/// `@EqualsAndHashCode` never equals an instance of its parent, while a plain
+/// subclass does. Then every member is equal, and under `callSuper` so is
+/// `super.equals(other)`.
+fn generated_equals_as(recv: &Value, owner: u32, other: &Value) -> bool {
+    let (Some(a), Some(b)) = (as_instance(recv), as_instance(other)) else {
+        return false;
+    };
+    if !class_chain(b.class).contains(&owner) {
         return false;
     }
-    generated_member_fields(a.class, false)
-        .into_iter()
-        .all(|f| {
-            let x = a.fields.get(&f).cloned().unwrap_or(Value::Undef);
-            let y = other.fields.get(&f).cloned().unwrap_or(Value::Undef);
-            values_equal(&x, &y)
-        })
+    let can_equal = generated_owner(b.class, GEN_EQUALS_HASH)
+        .is_some_and(|theirs| class_chain(a.class).contains(&theirs));
+    if !can_equal {
+        return false;
+    }
+    let same = generated_members(owner, GenMember::Equals).iter().all(|f| {
+        let x = generated_member_value(recv, &a, f);
+        let y = generated_member_value(other, &b, f);
+        values_equal(&x, &y)
+    });
+    same && (!class_meta(owner).is_some_and(|m| m.equals_sel.include_super)
+        || super_member(recv, owner, "equals", std::slice::from_ref(other)).is_truthy())
 }
 
 /// The traits `class` implements, transitively — the subset of its interface
@@ -6215,6 +6497,7 @@ fn capitalize(s: &str) -> String {
 /// constructor table on top.
 fn b_class(vm: &mut VM, _argc: u8) -> Value {
     // Pushed last by `register_class`, so these pop first and in reverse.
+    let selections_a = vm.stack.pop().unwrap_or(Value::Undef);
     let sigs_a = vm.stack.pop().unwrap_or(Value::Undef);
     let ret_types_h = vm.stack.pop().unwrap_or(Value::Undef);
     let bool_getters_a = vm.stack.pop().unwrap_or(Value::Undef);
@@ -6253,8 +6536,6 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
     // field, then `:field` for a plain (non-property) field (see
     // `Compiler::register_class`).
     let mut static_fields: Vec<String> = Vec::new();
-    let mut to_string_skip: Vec<String> = Vec::new();
-    let mut equals_skip: Vec<String> = Vec::new();
     let mut delegates: Vec<String> = Vec::new();
     let mut plain_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut final_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -6275,8 +6556,6 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
                             final_fields.insert(n.to_string());
                         }
                         "static" => static_fields.push(n.to_string()),
-                        "nostr" => to_string_skip.push(n.to_string()),
-                        "noeq" => equals_skip.push(n.to_string()),
                         "delegate" => delegates.push(n.to_string()),
                         _ => {}
                     }
@@ -6360,6 +6639,19 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
             .collect(),
         _ => std::collections::HashMap::new(),
     };
+    // `@ToString`'s, `@EqualsAndHashCode`'s and `@TupleConstructor`'s member
+    // selections, in that order.
+    let mut selections: Vec<MemberSelection> = match selections_a {
+        Value::Array(a) => a
+            .iter()
+            .map(|v| MemberSelection::decode(&v.as_str_cow()))
+            .collect(),
+        _ => Vec::new(),
+    };
+    selections.resize(3, MemberSelection::default());
+    let tuple_sel = selections.pop().unwrap_or_default();
+    let equals_sel = selections.pop().unwrap_or_default();
+    let to_string_sel = selections.pop().unwrap_or_default();
     let method_sigs: Vec<MethodSig> = match sigs_a {
         Value::Array(a) => a
             .iter()
@@ -6403,8 +6695,9 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
             is_interface,
             is_trait,
             generated,
-            to_string_skip,
-            equals_skip,
+            to_string_sel,
+            equals_sel,
+            tuple_sel,
             delegates,
             field_names,
             field_types,
@@ -7118,21 +7411,22 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
             fault(vm, e);
             return Value::Undef;
         }
-    } else if class_generates(cid, GEN_TUPLE_CTOR)
+    } else if meta.generated & GEN_TUPLE_CTOR != 0
         && !meta.ctors.contains_key(&argc)
-        && argc as usize <= generated_field_order(cid).len()
+        && argc as usize <= generated_members(cid, GenMember::Tuple).len()
         && !(argc == 1 && as_omap(&args[0]).is_some())
     {
-        // The constructor `@TupleConstructor` generates: the fields taken
-        // positionally, in declaration order, with any the call stops short of
-        // left at their default. A single map argument is excluded so the map
-        // constructor below still wins for `new C(a: 1)`, which is what Groovy
-        // does when both are available.
+        // The constructor `@TupleConstructor` generates — on the annotated
+        // class only, since a constructor is not inherited: its members (see
+        // [`generated_members`]) taken positionally, with any the call stops
+        // short of left at their default. A single map argument is excluded so
+        // the map constructor below still wins for `new C(a: 1)`, which is
+        // what Groovy does when both are available.
         if let Err(e) = run_implicit_super_ctor(vm, &handle, cid) {
             fault(vm, e);
             return Value::Undef;
         }
-        for (f, v) in generated_field_order(cid).into_iter().zip(args) {
+        for (f, v) in generated_members(cid, GenMember::Tuple).into_iter().zip(args) {
             store_instance_field(vm, &handle, &f, v);
         }
     } else if argc == 1 && as_omap(&args[0]).is_some() && !meta.ctors.contains_key(&1) {
@@ -7225,6 +7519,13 @@ fn b_super_method(vm: &mut VM, argc: u8) -> Value {
         );
         return Value::Undef;
     };
+    // `super.toString()` (or `equals` / `hashCode`) over a class whose member
+    // is generated rather than declared.
+    if lookup_method(super_id, &method).is_none() {
+        if let Some(v) = generated_member_call(&this, super_id, &method, &args) {
+            return v;
+        }
+    }
     let Some(idx) = lookup_method(super_id, &method) else {
         fault(
             vm,
@@ -8247,12 +8548,12 @@ fn values_equal_shape(a: &Value, b: &Value) -> bool {
     // `@EqualsAndHashCode` alone, where there is no generated rendering.
     if let Some(x) = as_instance(a) {
         if class_generates(x.class, GEN_EQUALS_HASH) {
-            return generated_equals(&x, b);
+            return generated_equals(a, b);
         }
     }
     if let Some(y) = as_instance(b) {
         if class_generates(y.class, GEN_EQUALS_HASH) {
-            return generated_equals(&y, a);
+            return generated_equals(b, a);
         }
     }
     // A character buffer is `Comparable`, so Groovy's `==` compares its
@@ -8980,11 +9281,11 @@ fn dispatch_instance_method(
         }))));
     }
     if args.is_empty() && method == "toString" && class_generates(inst.class, GEN_TO_STRING) {
-        return Some(Ok(Value::str(generated_to_string(&inst))));
+        return Some(Ok(Value::str(generated_to_string(recv))));
     }
     if class_generates(inst.class, GEN_EQUALS_HASH) {
         if method == "hashCode" && args.is_empty() {
-            return Some(Ok(match checked_hash_code(|| generated_hash_code(&inst)) {
+            return Some(Ok(match checked_hash_code(|| generated_hash_code(recv)) {
                 Some(h) => Value::int(i64::from(h)),
                 None => {
                     raise_stack_overflow(vm);
@@ -8993,7 +9294,7 @@ fn dispatch_instance_method(
             }));
         }
         if method == "equals" && args.len() == 1 {
-            return Some(Ok(Value::bool(generated_equals(&inst, &args[0]))));
+            return Some(Ok(Value::bool(generated_equals(recv, &args[0]))));
         }
     }
     // `getClass()` answers on every object (a user override was already found
@@ -23082,7 +23383,7 @@ fn instance_to_string(vm: &mut VM, recv: &Value) -> Option<String> {
     // which is why this asks for the declared one first.
     if lookup_method(inst.class, "toString").is_none() && class_generates(inst.class, GEN_TO_STRING)
     {
-        return Some(generated_to_string(&inst));
+        return Some(generated_to_string(recv));
     }
     let idx = lookup_method(inst.class, "toString")?;
     match invoke_sub(vm, idx, std::slice::from_ref(recv)) {
@@ -23204,7 +23505,7 @@ pub fn groovy_str(v: &Value) -> String {
     // `println p` and `"$p"` agree with `p.toString()`.
     if let Some(inst) = as_instance(v) {
         if class_generates(inst.class, GEN_TO_STRING) {
-            return generated_to_string(&inst);
+            return generated_to_string(v);
         }
     }
     // `Map.Entry.toString` is `key=value`.
@@ -23828,7 +24129,7 @@ fn instance_equals(a: &Value, b: &Value) -> Result<bool, String> {
     // A generated `equals` decides next — after a declared one, which Groovy's
     // transform also defers to, and before the identity default below.
     if class_generates(inst.class, GEN_EQUALS_HASH) {
-        return Ok(generated_equals(&inst, b));
+        return Ok(generated_equals(a, b));
     }
     // No `compareTo`/`equals`: default `Object` identity — the same heap handle.
     Ok(matches!((a, b), (Value::Obj(x), Value::Obj(y)) if x == y))

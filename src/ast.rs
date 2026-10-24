@@ -399,14 +399,81 @@ pub struct Generated {
     pub sortable: bool,
     /// `@AutoClone` — a `clone()` copying each property, a collection copied.
     pub auto_clone: bool,
-    /// `@ToString(includes = …)` — render only these properties (when set).
-    pub to_string_includes: Option<Vec<String>>,
-    /// `@ToString(excludes = …)` — properties left out of the rendering.
-    pub to_string_excludes: Vec<String>,
-    /// `@EqualsAndHashCode(includes = …)` — compare and hash only these.
-    pub equals_includes: Option<Vec<String>>,
-    /// `@EqualsAndHashCode(excludes = …)` — properties left out of both.
-    pub equals_excludes: Vec<String>,
+    /// Which members `@ToString` renders.
+    pub to_string_sel: MemberSelection,
+    /// Which members `@EqualsAndHashCode` compares and hashes.
+    pub equals_sel: MemberSelection,
+    /// Which members `@TupleConstructor` takes positionally.
+    pub tuple_sel: MemberSelection,
+}
+
+/// The member-selection attributes `@ToString`, `@EqualsAndHashCode` and
+/// `@TupleConstructor` share.
+///
+/// Groovy's default for all three is the annotated class's *own* properties:
+/// no plain (`private`/`public`) fields and nothing from a superclass. Each
+/// attribute widens or narrows that set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemberSelection {
+    /// `includes = …` — only these names, in the order written (when set).
+    pub includes: Option<Vec<String>>,
+    /// `excludes = …` — names left out.
+    pub excludes: Vec<String>,
+    /// `includeFields = true` — the class's plain fields too, after its
+    /// properties.
+    pub include_fields: bool,
+    /// `includeSuperProperties = true` — the superclasses' properties too.
+    pub include_super_properties: bool,
+    /// `@ToString(includeSuper = true)` appends `super.toString()`;
+    /// `@EqualsAndHashCode(callSuper = true)` folds in `super.equals` /
+    /// `super.hashCode`.
+    pub include_super: bool,
+}
+
+impl MemberSelection {
+    /// The one-line form the compiler hands the class registry:
+    /// `flags;includes;excludes`, where `flags` holds `F` / `P` / `S` for the
+    /// three switches and `includes` is `*` when unset.
+    pub fn encode(&self) -> String {
+        let mut flags = String::new();
+        for (on, c) in [
+            (self.include_fields, 'F'),
+            (self.include_super_properties, 'P'),
+            (self.include_super, 'S'),
+        ] {
+            if on {
+                flags.push(c);
+            }
+        }
+        let includes = self
+            .includes
+            .as_ref()
+            .map_or_else(|| "*".to_string(), |names| names.join(","));
+        format!("{flags};{includes};{}", self.excludes.join(","))
+    }
+
+    /// The inverse of [`MemberSelection::encode`].
+    pub fn decode(text: &str) -> Self {
+        let mut parts = text.splitn(3, ';');
+        let flags = parts.next().unwrap_or_default();
+        let names = |s: &str| -> Vec<String> {
+            s.split(',')
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        let includes = match parts.next().unwrap_or("*") {
+            "*" => None,
+            list => Some(names(list)),
+        };
+        MemberSelection {
+            includes,
+            excludes: names(parts.next().unwrap_or_default()),
+            include_fields: flags.contains('F'),
+            include_super_properties: flags.contains('P'),
+            include_super: flags.contains('S'),
+        }
+    }
 }
 
 impl Generated {

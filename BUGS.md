@@ -397,8 +397,9 @@ reported as parse or compile errors, never silently mis-run.
 - **Metaclass of existing instances** — a script-class instance built before
   its class's metaclass was first injected into keeps the original one.
 - **`ConfigSlurper`** — dotted and block assignments, `environments { env { … }
-  }`, auto-created `ConfigObject`s, `flatten`, `toProperties`, `isSet`,
-  `merge`, and literals, interpolation, arithmetic, Elvis and method calls
+  }` (run against a config object of their own and merged in after the
+  script, as Groovy does), auto-created `ConfigObject`s, `flatten` (through
+  plain maps too), `toProperties`, `isSet`, `merge`, and literals, interpolation, arithmetic, Elvis and method calls
   over earlier settings. A closure literal in the script is a closure value
   whose body the config walker runs when it is called — inside a value
   (`nums = (1..3).collect { it * 2 }`) or stored and called later — and it

@@ -70,6 +70,10 @@ struct Run {
     env: Option<String>,
     locals: HashMap<String, Value>,
     names: std::rc::Rc<ClosureNames>,
+    /// The settings the active environment's block made: Groovy runs it
+    /// against a config object of its own and merges that into the result
+    /// after the script.
+    env_settings: Option<Value>,
 }
 
 /// A closure literal's generated class name, by the address of its body.
@@ -131,10 +135,14 @@ pub(super) fn parse(vm: &mut VM, env: Option<String>, text: &str) -> Value {
         env,
         locals: HashMap::new(),
         names: std::rc::Rc::new(closure_names(text, &program.body)),
+        env_settings: None,
     };
     if let Err(e) = block(vm, &mut run, &program.body, std::slice::from_ref(&root)) {
         fault(vm, e);
         return Value::Undef;
+    }
+    if let Some(env) = &run.env_settings {
+        merge(&root, env);
     }
     root
 }
@@ -269,6 +277,7 @@ pub(super) fn call_closure(
         env: clo.env.clone(),
         locals,
         names: clo.names.clone(),
+        env_settings: None,
     };
     Ok(match body_value(vm, &mut run, clo.body, &clo.scopes)? {
         Flow::Next(v) | Flow::Return(v) => v,
@@ -367,7 +376,11 @@ fn block(
                         if let StmtKind::Expr(Expr::Call { name, args, .. }) = &inner.kind {
                             if *name == env {
                                 if let [Expr::Closure { body, .. }] = args.as_slice() {
-                                    block(vm, run, body, scopes)?;
+                                    let settings =
+                                        run.env_settings.get_or_insert_with(new_config).clone();
+                                    let mut inner = scopes.to_vec();
+                                    inner.push(settings);
+                                    block(vm, run, body, &inner)?;
                                 }
                             }
                         }
@@ -663,8 +676,8 @@ fn eval(vm: &mut VM, run: &mut Run, e: &'static Expr, scopes: &[Value]) -> Resul
     })
 }
 
-/// `ConfigObject.flatten()`: every leaf under its dotted path, depth first;
-/// an empty nested object contributes nothing.
+/// `ConfigObject.flatten()`: every leaf under its dotted path, depth first,
+/// through nested config objects and plain maps alike.
 fn flatten_into(config: &Value, prefix: &str, out: &mut Vec<(String, Value)>) {
     for (k, v) in as_omap(config).unwrap_or_default() {
         let key = mapkey::text(&k);
@@ -673,10 +686,12 @@ fn flatten_into(config: &Value, prefix: &str, out: &mut Vec<(String, Value)>) {
         } else {
             format!("{prefix}.{key}")
         };
-        if is_config(&v) {
-            flatten_into(&v, &path, out);
-        } else {
-            out.push((path, v));
+        // `ConfigObject.flatten` descends into every map, and an empty one
+        // contributes nothing.
+        match as_omap(&v) {
+            Some(entries) if entries.is_empty() => {}
+            Some(_) => flatten_into(&v, &path, out),
+            None => out.push((path, v)),
         }
     }
 }

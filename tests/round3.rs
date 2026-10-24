@@ -5147,3 +5147,49 @@ true
 "####;
     check(src, expected);
 }
+
+/// `ConfigSlurper` runs the active environment's block against a config
+/// object of its own and merges it into the result after the script, and
+/// `flatten` descends into every non-empty map.
+#[test]
+fn round9_config_slurper_environment_merge_and_flatten() {
+    let src = r####"def c = new ConfigSlurper('dev').parse('''
+a = 1
+environments { dev { a = 2; b = 3; n { x = 1 } } }
+n { y = 2 }
+m = [:]
+p = [k: [j: 1]]
+e {}
+z = 9
+''')
+println c
+println c.flatten()
+println c.toProperties().sort()
+"####;
+    let expected = r####"[a:2, n:[y:2, x:1], m:[:], p:[k:[j:1]], e:[:], z:9, b:3]
+[a:2, n.y:2, n.x:1, p.k.j:1, z:9, b:3]
+[a:2, b:3, n.x:1, n.y:2, p.k.j:1, z:9]
+"####;
+    check(src, expected);
+    let src = r####"def c = new ConfigSlurper('dev').parse('''
+a = 1
+s { t = 1 }
+environments { dev { b = a + 1; s.u = 2; q.r = 3; s { v = t } } }
+after = a
+''')
+println c
+println c.flatten()
+def d = new ConfigSlurper().parse('''
+environments { dev { b = 1 } }
+x = [k: [:], j: [1]]
+''')
+println d
+println d.flatten()
+"####;
+    let expected = r####"[a:1, s:[t:[:], u:2, v:[:]], after:1, b:2, q:[r:3]]
+[a:1, s.u:2, after:1, b:2, q.r:3]
+[x:[k:[:], j:[1]]]
+[x.j:[1]]
+"####;
+    check(src, expected);
+}

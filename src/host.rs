@@ -6014,7 +6014,9 @@ fn generated_members(owner: u32, which: GenMember) -> Vec<String> {
     };
     if which == GenMember::Tuple && sel.include_super_properties {
         for id in &ancestors {
-            add(class_meta(*id).map(|m| own_properties(&m)).unwrap_or_default());
+            add(class_meta(*id)
+                .map(|m| own_properties(&m))
+                .unwrap_or_default());
         }
     }
     add(own_properties(&meta));
@@ -6032,16 +6034,16 @@ fn generated_members(owner: u32, which: GenMember) -> Vec<String> {
     }
     if which == GenMember::ToString && sel.include_super_properties {
         for id in ancestors.iter().rev() {
-            add(class_meta(*id).map(|m| own_properties(&m)).unwrap_or_default());
+            add(class_meta(*id)
+                .map(|m| own_properties(&m))
+                .unwrap_or_default());
             add(introduced_trait_properties(*id));
         }
     }
     let mut members = match (&sel.includes, which) {
-        (Some(names), GenMember::ToString | GenMember::Tuple) => names
-            .iter()
-            .filter(|n| out.contains(n))
-            .cloned()
-            .collect(),
+        (Some(names), GenMember::ToString | GenMember::Tuple) => {
+            names.iter().filter(|n| out.contains(n)).cloned().collect()
+        }
         (Some(names), GenMember::Equals) => out.into_iter().filter(|n| names.contains(n)).collect(),
         (None, _) => out,
     };
@@ -6062,7 +6064,8 @@ fn generated_member_value(recv: &Value, inst: &Instance, name: &str) -> Value {
             .flatten()
     });
     if let Some(idx) = getter {
-        if let Some(v) = with_vm(|vm| invoke_sub(vm, idx, std::slice::from_ref(recv)).ok()).flatten()
+        if let Some(v) =
+            with_vm(|vm| invoke_sub(vm, idx, std::slice::from_ref(recv)).ok()).flatten()
         {
             return v;
         }
@@ -6084,7 +6087,8 @@ fn super_member(recv: &Value, owner: u32, method: &str, args: &[Value]) -> Value
         return with_vm(|vm| invoke_sub(vm, idx, &pushes).unwrap_or(Value::Undef))
             .unwrap_or(Value::Undef);
     }
-    generated_member_call(recv, sup, method, args).unwrap_or_else(|| object_member(recv, method, args))
+    generated_member_call(recv, sup, method, args)
+        .unwrap_or_else(|| object_member(recv, method, args))
 }
 
 /// `java.lang.Object`'s `toString` / `hashCode` / `equals` for a script
@@ -7472,7 +7476,10 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
             fault(vm, e);
             return Value::Undef;
         }
-        for (f, v) in generated_members(cid, GenMember::Tuple).into_iter().zip(args) {
+        for (f, v) in generated_members(cid, GenMember::Tuple)
+            .into_iter()
+            .zip(args)
+        {
             store_instance_field(vm, &handle, &f, v);
         }
     } else if argc == 1 && as_omap(&args[0]).is_some() && !meta.ctors.contains_key(&1) {

@@ -4,9 +4,10 @@
 //   JAVA_HOME=... groovy src/host/meta/gen_jdk_types.groovy > src/host/meta/jdk_types.tsv
 //
 // One line per type: qualified name, `I` for an interface or `C` for a class,
-// the direct superclass ('-' for an interface and `Object`), and every
+// the direct superclass ('-' for an interface and `Object`), every
 // supertype — superclasses and interfaces, transitively — comma-separated in
-// a breadth-first walk from the type.
+// a breadth-first walk from the type, and the direct interfaces in
+// `getInterfaces()` order.
 def types = [
     // java.lang
     Object, String, CharSequence, Comparable, Number, Integer, Long, Short, Byte,
@@ -47,5 +48,6 @@ types.each { Class c ->
         c.isInterface() ? 'I' : 'C',
         c.superclass?.name ?: '-',
         seen*.name.join(',') ?: '-',
+        c.interfaces*.name.join(',') ?: '-',
     ].join('\t'))
 }

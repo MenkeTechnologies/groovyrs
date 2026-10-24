@@ -502,6 +502,16 @@ pub const GSTRING_STORED: u16 = 789;
 /// `Integer` becomes the box that keeps its class (see `boxed`).
 pub const GBOX_LONG: u16 = 790;
 
+/// Builtin id for `new T(args) { … }`, an anonymous class instantiated with
+/// the enclosing locals its bodies capture. Stack: the constructor arguments,
+/// the captured values, their count, then the class name; `argc` counts the
+/// arguments.
+pub const GNEW_ANON: u16 = 791;
+
+/// Builtin id for one captured local inside an anonymous class's member or
+/// field initializer. Stack: the instance, then the capture's index.
+pub const GANON_CAP: u16 = 792;
+
 /// The method name `list.remove((Object) x)` compiles to: the cast selects
 /// `Collection.remove(Object)` over `List.remove(int)`, which only the call
 /// site can see. Not an identifier, so no script can name it.
@@ -624,6 +634,8 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GNAME_GET, b_name_get);
     vm.register_builtin(GNAME_SET, b_name_set);
     vm.register_builtin(GBOX_LONG, b_box_long);
+    vm.register_builtin(GNEW_ANON, b_new_anon);
+    vm.register_builtin(GANON_CAP, b_anon_cap);
     // A fresh VM install starts with an empty object heap: `Value::Obj` handles
     // are chunk-relative (a closure carries a name-pool index, an instance a
     // class id), so a handle from a prior run must never survive into a new
@@ -789,6 +801,12 @@ thread_local! {
     /// `List.sort(Comparator)` is the JDK's `void` method on them, where a plain
     /// `Closure` reaches the GDK `sort` that answers the list.
     static COMPARATORS: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
+    /// Set for the one GDK `sort` the JDK's `List.sort(Comparator)` runs
+    /// through for a script class's `Comparator` instance.
+    static JDK_SORT: Cell<bool> = const { Cell::new(false) };
+    /// The enclosing locals each anonymous-class instance captured, by heap
+    /// id, in the order its class's bodies read them (see [`b_anon_cap`]).
+    static ANON_CAPTURES: RefCell<HashMap<u32, Vec<Value>>> = RefCell::new(HashMap::new());
 }
 
 // ── Integer width (`Integer` vs `Long`) ────────────────────────────────────
@@ -2962,6 +2980,7 @@ fn reset_heap() {
     CLASSES.with(|c| c.borrow_mut().clear());
     DEC_LITERALS.with(|d| d.borrow_mut().clear());
     COMPARATORS.with(|c| c.borrow_mut().clear());
+    ANON_CAPTURES.with(|c| c.borrow_mut().clear());
     MEMO.with(|m| m.borrow_mut().clear());
     STATICS.with(|s| s.borrow_mut().clear());
     MAP_DEFAULTS.with(|m| m.borrow_mut().clear());
@@ -3487,27 +3506,10 @@ fn is_interface_class(qualified: &str) -> bool {
     if let Some(m) = find_class(qualified).and_then(class_meta) {
         return m.is_interface;
     }
-    matches!(
-        qualified,
-        "java.util.List"
-            | "java.util.Map"
-            | "java.util.Map$Entry"
-            | "java.util.Set"
-            | "java.util.SortedSet"
-            | "java.util.SortedMap"
-            | "java.util.Collection"
-            | "java.util.Iterator"
-            | "java.util.Queue"
-            | "java.util.Deque"
-            | "java.lang.Iterable"
-            | "java.lang.Comparable"
-            | "java.lang.CharSequence"
-            | "java.lang.Runnable"
-            | "java.lang.Appendable"
-            | "java.io.Serializable"
-            | "groovy.lang.GroovyObject"
-            | "groovy.lang.MetaClass"
-    )
+    match jdktypes::lookup(qualified) {
+        Some(t) => t.is_interface,
+        None => qualified == "groovy.lang.MetaClass",
+    }
 }
 
 /// The property map behind a `groovy.util.Expando` handle, if `v` is one.
@@ -6893,7 +6895,7 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
             as_i64(&first()).unwrap_or_else(seq::fresh_seed),
         ))),
         // `new TreeSet(comparator)`: an empty set ordered by it.
-        "TreeSet" if matches!(args, [Value::Obj(id)] if COMPARATORS.with(|c| c.borrow().contains(id))) =>
+        "TreeSet" if matches!(args, [v @ Value::Obj(id)] if COMPARATORS.with(|c| c.borrow().contains(id)) || is_comparator_instance(v)) =>
         {
             let Some(Value::Obj(id)) = args.first() else {
                 unreachable!()
@@ -7402,6 +7404,50 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
         .as_str_cow()
         .into_owned();
     let args = pop_call_args(vm, argc);
+    new_instance(vm, name, args, Vec::new())
+}
+
+/// `GNEW_ANON`: `new T(args) { … }`. Stack: the constructor arguments, the
+/// enclosing locals the anonymous class's bodies capture, their count, then
+/// the class name. The captures are the instance's before its field
+/// initializers run, which read them as its methods do ([`b_anon_cap`]).
+fn b_new_anon(vm: &mut VM, argc: u8) -> Value {
+    let name = vm
+        .stack
+        .pop()
+        .unwrap_or(Value::Undef)
+        .as_str_cow()
+        .into_owned();
+    let n = vm.stack.pop().map_or(0, |v| v.to_int()) as usize;
+    let at = vm.stack.len().saturating_sub(n);
+    let captures = vm.stack.split_off(at);
+    // A captured cell is shared with the instance now: a fresh declaration
+    // must not reuse it (see [`GCELL_RENEW`]).
+    mark_captured_cells(&captures);
+    let args = pop_call_args(vm, argc);
+    new_instance(vm, name, args, captures)
+}
+
+/// `GANON_CAP`: capture `index` of the anonymous-class instance `this` — the
+/// enclosing local's value, or its cell when the local is shared. Stack: the
+/// instance, then the index.
+fn b_anon_cap(vm: &mut VM, _argc: u8) -> Value {
+    let index = vm.stack.pop().map_or(0, |v| v.to_int()) as usize;
+    let this = vm.stack.pop().unwrap_or(Value::Undef);
+    let Value::Obj(id) = this else {
+        return Value::Undef;
+    };
+    ANON_CAPTURES.with(|c| {
+        c.borrow()
+            .get(&id)
+            .and_then(|caps| caps.get(index).cloned())
+            .unwrap_or(Value::Undef)
+    })
+}
+
+/// Instantiate class `name` with `args` (see [`b_new`]); `captures` are an
+/// anonymous class's captured locals.
+fn new_instance(vm: &mut VM, name: String, args: Vec<Value>, captures: Vec<Value>) -> Value {
     if let Some(v) = emc_constructor(vm, &name, &args) {
         return v;
     }
@@ -7473,6 +7519,9 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
         }
     }
     let handle = heap_push(HeapObj::Instance(Instance { class: cid, fields }));
+    if let (Value::Obj(id), false) = (&handle, captures.is_empty()) {
+        ANON_CAPTURES.with(|c| c.borrow_mut().insert(*id, captures));
+    }
     // Run field initializers superclass-first so a subclass initializer can rely
     // on inherited state.
     for id in traits.iter().chain(chain.iter()) {
@@ -11817,6 +11866,18 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
                 return Value::Undef;
             }
         }
+        // So is a script class's `Comparator` instance. The flag lets the call
+        // below reach the GDK sort it runs through; the comparator's own body
+        // runs with it cleared ([`call_comparator`]).
+        if !JDK_SORT.get()
+            && is_comparator_instance(&args[0])
+            && (is_list(&recv) || matches!(recv, Value::Array(_)))
+        {
+            JDK_SORT.set(true);
+            dispatch_call_inner(vm, recv, "sort", vec![args[0].clone()]);
+            JDK_SORT.set(false);
+            return Value::Undef;
+        }
     }
     // `list.remove((Object) x)`: the compiler saw the cast that selects
     // `Collection.remove(Object)`, which on a list is the element removal.
@@ -12183,7 +12244,11 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
         let result_mutates = (matches!(method, "sort" | "unique")
             && args
                 .iter()
-                .all(|a| closure_meta(a).is_some() || matches!(a, Value::Bool(true))))
+                .all(|a| {
+                    closure_meta(a).is_some()
+                        || is_comparator_instance(a)
+                        || matches!(a, Value::Bool(true))
+                }))
             // `reverse(true)` is the mutating spelling — it reverses the
             // receiver and answers it, so `a.is(a.reverse(true))`. Unlike
             // `sort`, the *no-argument* form copies, so only the explicit
@@ -19596,8 +19661,11 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
             let mut items = iteration_elements(&arg0);
             if method == "sort" {
                 // `Collections.sort(list, comparator)` takes a comparator
-                // closure, whatever its parameter count.
-                let order = match args.get(1).filter(|c| closure_meta(c).is_some()) {
+                // closure, whatever its parameter count, or a `Comparator`.
+                let order = match args
+                    .get(1)
+                    .filter(|c| closure_meta(c).is_some() || is_comparator_instance(c))
+                {
                     Some(c) => OrderBy::Comparator(c),
                     None => OrderBy::Natural,
                 };
@@ -21418,13 +21486,34 @@ fn set_kind(v: &Value) -> Option<SetKind> {
 /// What the comparator closure `cmp` answers for `a` against `b`, as an
 /// ordering (its sign).
 fn comparator_order(vm: &mut VM, cmp: u32, a: &Value, b: &Value) -> std::cmp::Ordering {
-    match invoke_closure(vm, &Value::Obj(cmp), &[a.clone(), b.clone()]) {
+    match call_comparator(vm, &Value::Obj(cmp), a, b) {
         Ok(v) => as_i64(&v).unwrap_or(0).cmp(&0),
         Err(e) => {
             fault(vm, e);
             std::cmp::Ordering::Equal
         }
     }
+}
+
+/// An instance of a script class that implements `java.util.Comparator`
+/// (`class D implements Comparator`, `new Comparator() { … }`).
+fn is_comparator_instance(v: &Value) -> bool {
+    as_instance(v)
+        .and_then(|i| class_meta(i.class))
+        .is_some_and(|m| class_assignable("java.util.Comparator", &m.name))
+}
+
+/// `cmp.compare(a, b)` for a comparator closure or a `Comparator` instance.
+fn call_comparator(vm: &mut VM, cmp: &Value, a: &Value, b: &Value) -> Result<Value, String> {
+    let args = [a.clone(), b.clone()];
+    if is_comparator_instance(cmp) {
+        let sorting = JDK_SORT.replace(false);
+        let out = call_user_method(vm, cmp, "compare", &args)
+            .unwrap_or_else(|| Err("groovyrs: Comparator without compare".to_string()));
+        JDK_SORT.set(sorting);
+        return out;
+    }
+    invoke_closure(vm, cmp, &args)
 }
 
 /// `add` / `<<` / `contains` / `remove` / `addAll` on a `TreeSet` ordered by a
@@ -22693,6 +22782,9 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
         return match name {
             "name" | "typeName" | "canonicalName" => Value::str(qualified),
             "simpleName" => Value::str(simple_name_of(&qualified)),
+            "superclass" => class_superclass(&qualified),
+            "interfaces" => class_interfaces(&qualified),
+            "interface" => Value::bool(is_interface_class(&qualified)),
             // A statically named JDK class also carries its constants
             // (`Integer.MAX_VALUE`, `Math.PI`).
             _ => match static_field(&simple_name_of(&qualified), name) {
@@ -23471,7 +23563,11 @@ impl<'a> OrderBy<'a> {
     /// Read the trailing closure argument (if any) as an ordering rule. Groovy
     /// picks key-extractor vs comparator from the closure's parameter count.
     fn of(args: &'a [Value]) -> Self {
-        match args.last().filter(|a| closure_meta(a).is_some()) {
+        let last = args.last();
+        if let Some(cmp) = last.filter(|a| is_comparator_instance(a)) {
+            return OrderBy::Comparator(cmp);
+        }
+        match last.filter(|a| closure_meta(a).is_some()) {
             Some(clo) if closure_meta(clo).map(|m| m.params).unwrap_or(1) >= 2 => {
                 OrderBy::Comparator(clo)
             }
@@ -23493,7 +23589,7 @@ impl<'a> OrderBy<'a> {
                 compare_values(vm, &ka, &kb)
             }
             OrderBy::Comparator(clo) => {
-                let r = invoke_closure(vm, clo, &[a.clone(), b.clone()])?;
+                let r = call_comparator(vm, clo, a, b)?;
                 Ok(r.to_int().cmp(&0))
             }
         }
@@ -25490,17 +25586,38 @@ fn class_superclass(qualified: &str) -> Value {
     heap_push(HeapObj::ClassRef(parent.to_string()))
 }
 
-/// `Class.getInterfaces()` of a script class: the types it names in
-/// `implements`, in declaration order.
+/// `Class.getInterfaces()`: a script class's `implements` types in
+/// declaration order (a JDK one by its qualified name), then
+/// `groovy.lang.GroovyObject` when no script superclass already brings it; a
+/// JDK type's direct interfaces from [`jdktypes`].
 fn class_interfaces(qualified: &str) -> Value {
-    let names = find_class(qualified)
-        .and_then(class_meta)
-        .map(|m| m.interfaces)
-        .unwrap_or_default();
+    let names: Vec<String> = match find_class(qualified).and_then(class_meta) {
+        Some(m) => {
+            let mut names: Vec<String> = m
+                .interfaces
+                .iter()
+                .map(|n| match jdktypes::resolve(n) {
+                    Some(q) if find_class(n).is_none() => q.to_string(),
+                    _ => crate::throwable::qualified(n),
+                })
+                .collect();
+            let inherits = m
+                .superclass
+                .as_deref()
+                .is_some_and(|s| find_class(s).is_some());
+            if !m.is_interface && !inherits {
+                names.push("groovy.lang.GroovyObject".to_string());
+            }
+            names
+        }
+        None => jdktypes::lookup(qualified)
+            .map(|t| t.interfaces.iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default(),
+    };
     glist(
         names
-            .iter()
-            .map(|n| heap_push(HeapObj::ClassRef(crate::throwable::qualified(n))))
+            .into_iter()
+            .map(|n| heap_push(HeapObj::ClassRef(n)))
             .collect(),
     )
 }
@@ -25679,4 +25796,11 @@ pub fn is_jdk_type_name(name: &str) -> bool {
 /// written `new Comparator() { … }` implements it rather than extending it.
 pub fn is_jdk_interface(name: &str) -> bool {
     jdktypes::lookup(name).is_some_and(|t| t.is_interface)
+}
+
+/// The name of the class the running script compiles into (see
+/// [`set_script_class`]): what an anonymous class written at the script's top
+/// level, or in one of its functions, is named after.
+pub fn script_class_name() -> String {
+    script_class()
 }

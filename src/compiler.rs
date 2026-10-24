@@ -258,6 +258,24 @@ struct Compiler {
     /// body). Every value the body returns is converted to it — see
     /// [`Compiler::emit_return_coercion`].
     ret_ty: Option<String>,
+    /// Every anonymous class's declaration, by its generated name. Its bodies
+    /// are lowered from [`Compiler::pending_anon`] once its `new` has been, so
+    /// they know which enclosing locals they capture.
+    anon_decls: HashMap<String, Stmt>,
+    /// Anonymous classes whose `new` has been lowered and whose bodies have
+    /// not, with what they capture.
+    pending_anon: VecDeque<PendingAnon>,
+    /// The anonymous classes already queued (a `finally` body is lowered once
+    /// per exit path, and its `new` with it).
+    anon_queued: HashSet<String>,
+    /// While lowering an anonymous class's members: the enclosing locals it
+    /// captured, in [`crate::host::GANON_CAP`] index order, and which of them
+    /// arrive as cells.
+    anon_caps: Option<(Vec<String>, HashSet<String>)>,
+    /// The members of the class enclosing the anonymous class being lowered,
+    /// reached through its captured `this$0` (Groovy's outer instance): a bare
+    /// name the anonymous class does not declare resolves there.
+    anon_outer: Option<std::rc::Rc<OuterMembers>>,
     /// The enclosing `try` blocks of the frame being lowered.
     tries: Vec<TryScope>,
     /// The enclosing `finally` bodies of the frame being lowered.
@@ -673,7 +691,29 @@ struct PendingClosure {
     line: u32,
     class_fields: Option<HashSet<String>>,
     class_methods: Option<HashSet<String>>,
+    /// The anonymous class's enclosing members, for a closure written in one
+    /// of its bodies (see [`Compiler::anon_outer`]).
+    anon_outer: Option<std::rc::Rc<OuterMembers>>,
 }
+
+/// An anonymous class whose `new` has been lowered: its name, the enclosing
+/// locals its bodies capture (in index order) and which of them are cells,
+/// and the enclosing class's members when it captured `this$0`.
+struct PendingAnon {
+    name: String,
+    captures: Vec<String>,
+    cells: HashSet<String>,
+    outer: Option<std::rc::Rc<OuterMembers>>,
+}
+
+/// The field and method names of the class enclosing an anonymous class.
+struct OuterMembers {
+    fields: HashSet<String>,
+    methods: HashSet<String>,
+}
+
+/// The name an anonymous class's bodies read their enclosing instance by.
+const OUTER_THIS: &str = "this$0";
 
 /// Compile a parsed [`Program`]'s body to a runnable fusevm chunk.
 pub fn compile(prog: &Program) -> Result<Chunk, String> {
@@ -1108,6 +1148,27 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         text_locals: vec![text_only_locals(&prog.body)],
         preloaded_lhs: false,
         ret_ty: None,
+        anon_decls: prog
+            .body
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    StmtKind::Class {
+                        anonymous: true,
+                        ..
+                    }
+                )
+            })
+            .filter_map(|s| match &s.kind {
+                StmtKind::Class { name, .. } => Some((name.clone(), s.clone())),
+                _ => None,
+            })
+            .collect(),
+        pending_anon: VecDeque::new(),
+        anon_queued: HashSet::new(),
+        anon_caps: None,
+        anon_outer: None,
     };
     // Arm the host's exception machinery for this run. Emitted only by a program
     // that uses `try`/`throw`, and it is what lets a runtime `Throwable` (a zero
@@ -1225,6 +1286,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             fields,
             ctors,
             methods,
+            anonymous: false,
             ..
         } = &stmt.kind
         {
@@ -1244,13 +1306,21 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     // A closure's own nested closures are lowered (and so numbered) right
     // after it, before its siblings — the depth-first order Groovy generates
     // closure classes in.
-    while let Some(pc) = c.pending_closures.pop_front() {
-        let before = c.pending_closures.len();
-        c.emit_closure(pc)?;
-        let nested: Vec<PendingClosure> = c.pending_closures.drain(before..).collect();
-        for n in nested.into_iter().rev() {
-            c.pending_closures.push_front(n);
+    // An anonymous class's bodies are lowered after its `new` (which may sit in
+    // a closure), and may themselves hold closures and anonymous classes.
+    loop {
+        while let Some(pc) = c.pending_closures.pop_front() {
+            let before = c.pending_closures.len();
+            c.emit_closure(pc)?;
+            let nested: Vec<PendingClosure> = c.pending_closures.drain(before..).collect();
+            for n in nested.into_iter().rev() {
+                c.pending_closures.push_front(n);
+            }
         }
+        let Some(pa) = c.pending_anon.pop_front() else {
+            break;
+        };
+        c.emit_anon_class(pa)?;
     }
     crate::host::set_closure_class_names(std::mem::take(&mut c.closure_class_names));
     let end = c.b.current_pos();
@@ -1754,6 +1824,7 @@ impl Compiler {
         // A closure reads even its own class's fields through the accessors.
         let prev_own = self.cur_class_own_fields.take();
         let prev_methods = std::mem::replace(&mut self.cur_class_methods, pc.class_methods);
+        let prev_outer = std::mem::replace(&mut self.anon_outer, pc.anon_outer);
         let prev_tries = std::mem::take(&mut self.tries);
         let prev_finallys = std::mem::take(&mut self.finallys);
         // A closure's captures keep the width they had where it was written, so
@@ -1803,6 +1874,7 @@ impl Compiler {
         self.cur_class_fields = prev_fields;
         self.cur_class_own_fields = prev_own;
         self.cur_class_methods = prev_methods;
+        self.anon_outer = prev_outer;
         self.tries = prev_tries;
         self.finallys = prev_finallys;
         self.exit_width_scope(prev_widths);
@@ -2278,6 +2350,175 @@ impl Compiler {
         Ok(())
     }
 
+    /// Lower `new C(args) { … }`: the arguments, then the enclosing locals the
+    /// anonymous class's bodies capture — each one's own slot value, which is
+    /// its cell when the local is shared, so a write on either side is seen by
+    /// the other as Groovy's `Reference` makes it — and the enclosing instance
+    /// as `this$0` when a body reaches one of that instance's members.
+    fn new_anonymous(
+        &mut self,
+        class: &str,
+        args: &[Expr],
+        line: u32,
+        anon: &AnonBody,
+    ) -> Result<(), String> {
+        let own_fields = self.inherited_names(class, |i| &i.fields);
+        let own_methods = self.inherited_names(class, |i| &i.methods);
+        let field_names: Vec<String> = own_fields.iter().cloned().collect();
+        let mut free: Vec<String> = Vec::new();
+        let mut note = |names: Vec<String>| {
+            for n in names {
+                if !free.contains(&n) {
+                    free.push(n);
+                }
+            }
+        };
+        for f in &anon.fields {
+            if let Some(init) = &f.init {
+                let body = [Stmt::new(line, StmtKind::Expr(init.clone()))];
+                note(free_vars(&field_names, &body));
+            }
+        }
+        for m in &anon.methods {
+            let mut bound = m.params.clone();
+            bound.extend(field_names.iter().cloned());
+            note(free_vars(&bound, &m.body));
+        }
+        let mut captures: Vec<String> = free
+            .iter()
+            .filter(|n| {
+                n.as_str() != "this"
+                    && !own_methods.contains(*n)
+                    && (self.is_local(n) || self.cells.contains(*n))
+            })
+            .cloned()
+            .collect();
+        let uses_outer = self.is_local("this")
+            && free.iter().any(|n| {
+                !own_fields.contains(n)
+                    && !own_methods.contains(n)
+                    && !captures.contains(n)
+                    && (self.field_of_class(n) || self.method_of_class(n))
+            });
+        let outer = uses_outer.then(|| {
+            std::rc::Rc::new(OuterMembers {
+                fields: self.cur_class_fields.clone().unwrap_or_default(),
+                methods: self.cur_class_methods.clone().unwrap_or_default(),
+            })
+        });
+        if uses_outer {
+            captures.push(OUTER_THIS.to_string());
+        }
+        let argc = self.emit_args(args, line)?;
+        for cap in &captures {
+            if cap == OUTER_THIS {
+                self.emit_this();
+            } else {
+                let get = self.load_op_for(cap);
+                self.b.emit(get, line);
+            }
+        }
+        self.b.emit(Op::LoadInt(captures.len() as i64), line);
+        let c = self.b.add_constant(Value::str(class.to_string()));
+        self.b.emit(Op::LoadConst(c), line);
+        self.emit_call_builtin(crate::host::GNEW_ANON, argc, line)?;
+        if self.anon_queued.insert(class.to_string()) {
+            let cells = captures
+                .iter()
+                .filter(|n| self.cells.contains(*n))
+                .cloned()
+                .collect();
+            self.pending_anon.push_back(PendingAnon {
+                name: class.to_string(),
+                captures,
+                cells,
+                outer,
+            });
+        }
+        Ok(())
+    }
+
+    /// Lower a queued anonymous class's field initializers, constructor and
+    /// methods, with its captures in reach (see [`Compiler::anon_caps`]).
+    fn emit_anon_class(&mut self, pa: PendingAnon) -> Result<(), String> {
+        let Some(stmt) = self.anon_decls.get(&pa.name).cloned() else {
+            return Ok(());
+        };
+        let StmtKind::Class {
+            name,
+            superclass,
+            fields,
+            ctors,
+            methods,
+            ..
+        } = &stmt.kind
+        else {
+            return Ok(());
+        };
+        let prev_caps = self.anon_caps.replace((pa.captures, pa.cells));
+        let prev_outer = std::mem::replace(&mut self.anon_outer, pa.outer);
+        let out = self.class_bodies(
+            stmt.line,
+            name,
+            superclass.as_deref(),
+            fields,
+            ctors,
+            methods,
+        );
+        self.anon_caps = prev_caps;
+        self.anon_outer = prev_outer;
+        out
+    }
+
+    /// Inside an anonymous class's member, bind each captured local to a frame
+    /// slot from `first` on, read from the instance; answer the ones that are
+    /// cells, which the body reads and writes through.
+    fn load_anon_captures(&mut self, first: u16, line: u32) -> HashSet<String> {
+        let Some((caps, cells)) = self.anon_caps.clone() else {
+            return HashSet::new();
+        };
+        for (j, cap) in caps.iter().enumerate() {
+            let slot = first + j as u16;
+            if let Some(scope) = self.scope.as_mut() {
+                scope.vars.entry(cap.clone()).or_insert(slot);
+                scope.next_slot = scope.next_slot.max(slot + 1);
+            }
+            self.b.emit(Op::GetSlot(0), line);
+            self.b.emit(Op::LoadInt(j as i64), line);
+            self.b
+                .emit(Op::CallBuiltin(crate::host::GANON_CAP, 0), line);
+            self.b.emit(Op::SetSlot(slot), line);
+        }
+        cells
+    }
+
+    /// Does the bare `name` inside an anonymous class's body resolve to the
+    /// enclosing instance's field (or, with `method`, its method)? Only a name
+    /// the anonymous class does not declare and no local shadows.
+    fn outer_member(&self, name: &str, method: bool) -> bool {
+        let Some(outer) = &self.anon_outer else {
+            return false;
+        };
+        if !self.is_local(OUTER_THIS) || self.is_local(name) {
+            return false;
+        }
+        if method {
+            !self.method_of_class(name) && outer.methods.contains(name)
+        } else {
+            !self.field_of_class(name) && outer.fields.contains(name)
+        }
+    }
+
+    /// `this$0.name` — a read of the enclosing instance's property.
+    fn outer_property(name: &str, line: u32) -> Expr {
+        Expr::Property {
+            recv: Box::new(Expr::Var(OUTER_THIS.to_string())),
+            name: name.to_string(),
+            line,
+            safe: false,
+        }
+    }
+
     /// The transitive set of field (or method) names for `class`, unioned across
     /// its superclass chain via [`Compiler::class_index`]. `select` picks the
     /// field or method list from each ancestor's [`ClassInfo`].
@@ -2353,7 +2594,8 @@ impl Compiler {
             self.b.emit(Op::SetSlot(i as u16), line);
         }
         self.emit_param_coercions(param_types, 1, line);
-        let prev_cells = self.enter_cell_scope(params, body, &HashSet::new(), line);
+        let captured = self.load_anon_captures(params.len() as u16 + 1, line);
+        let prev_cells = self.enter_cell_scope(params, body, &captured, line);
         self.fn_body(body)?;
         self.exit_cell_scope(prev_cells);
         self.b.emit(Op::LoadUndef, self.cur_line);
@@ -2397,6 +2639,7 @@ impl Compiler {
         let prev_tries = std::mem::take(&mut self.tries);
         let prev_finallys = std::mem::take(&mut self.finallys);
         let prev_cells = std::mem::take(&mut self.cells);
+        self.cells = self.load_anon_captures(1, line);
         let saved_line = self.cur_line;
         self.cur_line = line;
         self.expr(init)?;
@@ -2973,6 +3216,16 @@ impl Compiler {
                 // A bare field name inside a method/constructor is `this.field`.
                 if self.is_field(name) {
                     return self.assign_field(name, *op, value);
+                }
+                // An enclosing instance's field, from an anonymous class.
+                if self.outer_member(name, false) {
+                    let set = StmtKind::SetProperty {
+                        recv: Expr::Var(OUTER_THIS.to_string()),
+                        name: name.clone(),
+                        op: *op,
+                        value: value.clone(),
+                    };
+                    return self.stmt(&Stmt::new(self.cur_line, set));
                 }
                 // An undeclared `x = 1L` is a script binding, and it is a `Long`
                 // for the same reason a declared one is. A plain `=` re-binds
@@ -3842,6 +4095,7 @@ impl Compiler {
                 class: "IllegalStateException".into(),
                 args: vec![message],
                 line: self.cur_line,
+                anon: None,
             };
             self.throw_stmt(&exc, self.cur_line)?;
             arm_exits.push(skip);
@@ -4018,6 +4272,15 @@ impl Compiler {
         // nothing and answered `null + 1`.
         if self.is_field(name) {
             return self.assign_field(name, incdec_op(inc), &ONE);
+        }
+        if self.outer_member(name, false) {
+            let set = StmtKind::SetProperty {
+                recv: Expr::Var(OUTER_THIS.to_string()),
+                name: name.to_string(),
+                op: incdec_op(inc),
+                value: ONE,
+            };
+            return self.stmt(&Stmt::new(self.cur_line, set));
         }
         self.emit_name_load(name, self.cur_line)?;
         self.b.emit(Op::LoadInt(1), self.cur_line);
@@ -4227,6 +4490,8 @@ impl Compiler {
                 // A bare field name inside a method/constructor is `this.field`.
                 if self.is_field(name) {
                     self.emit_field_get(name)?;
+                } else if self.outer_member(name, false) {
+                    self.expr(&Self::outer_property(name, self.cur_line))?;
                 } else if self.class_index.contains_key(name) && !self.is_local(name) {
                     // A script class named as a value is its `java.lang.Class`,
                     // the receiver a `static` method call dispatches on.
@@ -4279,7 +4544,15 @@ impl Compiler {
                 self.b
                     .emit(Op::CallBuiltin(crate::host::GINSTANCEOF, 0), self.cur_line);
             }
-            Expr::New { class, args, line } => {
+            Expr::New {
+                class,
+                args,
+                line,
+                anon: Some(anon),
+            } => self.new_anonymous(class, args, *line, anon)?,
+            Expr::New {
+                class, args, line, ..
+            } => {
                 // Push the constructor args, then the class name on top.
                 let argc = self.emit_args(args, *line)?;
                 let c = self.b.add_constant(Value::str(class.clone()));
@@ -4799,6 +5072,16 @@ impl Compiler {
                 captures.push("this".to_string());
             }
         }
+        // In an anonymous class's body, a closure reaching the enclosing
+        // instance's members needs that instance too.
+        if self.anon_outer.is_some() && !captures.iter().any(|c| c == OUTER_THIS) {
+            let uses_outer = free_vars(&effective, body)
+                .iter()
+                .any(|n| self.outer_member(n, false) || self.outer_member(n, true));
+            if uses_outer {
+                captures.push(OUTER_THIS.to_string());
+            }
+        }
         // Push each captured value (read from the enclosing frame) so the
         // make-closure builtin can store it in the handle.
         for cap in &captures {
@@ -4847,6 +5130,7 @@ impl Compiler {
             line: self.cur_line,
             class_fields: self.cur_class_fields.clone(),
             class_methods: self.cur_class_methods.clone(),
+            anon_outer: self.anon_outer.clone(),
         });
         // The owner tag `b_make_closure` reads: the enclosing instance for a
         // literal written directly in a method, `true` for one nested in another
@@ -5060,6 +5344,16 @@ impl Compiler {
         // resolves it on the instance at run time, which finds a method the
         // implementing class declares for a trait, answers through
         // `methodMissing`, or raises `MissingMethodException` naming the class.
+        // From an anonymous class, a method of the enclosing instance.
+        if !self.is_method(name) && self.outer_member(name, true) {
+            return self.expr(&Expr::MethodCall {
+                recv: Box::new(Expr::Var(OUTER_THIS.to_string())),
+                method: name.to_string(),
+                args: args.to_vec(),
+                line,
+                safe: false,
+            });
+        }
         let unbound_member_call =
             self.closure_depth == 0 && self.is_local("this") && self.nothing_binds(name);
         if (self.is_method(name) || unbound_member_call) && !self.is_local(name) {
@@ -6510,9 +6804,39 @@ fn free_in_expr(e: &Expr, bound: &HashSet<String>, cx: &mut FreeCtx) {
             free_in_expr(recv, bound, cx);
             free_in_expr(index, bound, cx);
         }
-        Expr::New { args, .. } => {
+        Expr::New { args, anon, .. } => {
             for a in args {
                 free_in_expr(a, bound, cx);
+            }
+            // An anonymous class's bodies capture what they read of this scope,
+            // as a closure's body does; its own fields and a method's
+            // parameters and locals are its own.
+            if let Some(anon) = anon {
+                let fields: Vec<&String> = anon.fields.iter().map(|f| &f.name).collect();
+                let bodies = anon
+                    .fields
+                    .iter()
+                    .filter_map(|f| f.init.clone())
+                    .map(|init| (Vec::new(), vec![Stmt::new(0, StmtKind::Expr(init))]))
+                    .chain(
+                        anon.methods
+                            .iter()
+                            .map(|m| (m.params.clone(), m.body.clone())),
+                    );
+                for (params, body) in bodies {
+                    let mut own: HashSet<String> = params.into_iter().collect();
+                    own.extend(fields.iter().map(|f| f.to_string()));
+                    collect_bound_stmts(&body, &mut own);
+                    let mut inner = bound.clone();
+                    inner.extend(own.iter().cloned());
+                    cx.closure_bound.push(own);
+                    cx.depth += 1;
+                    for s in &body {
+                        free_in_stmt(s, &inner, cx);
+                    }
+                    cx.depth -= 1;
+                    cx.closure_bound.pop();
+                }
             }
         }
         Expr::Closure {

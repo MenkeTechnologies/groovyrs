@@ -16,6 +16,8 @@ pub(crate) struct JdkType {
     pub(crate) is_interface: bool,
     /// Every supertype, superclasses and interfaces, transitively.
     pub(crate) supers: Vec<&'static str>,
+    /// The interfaces it names itself, in `getInterfaces()` order.
+    pub(crate) interfaces: Vec<&'static str>,
 }
 
 fn table() -> &'static HashMap<&'static str, JdkType> {
@@ -29,15 +31,18 @@ fn table() -> &'static HashMap<&'static str, JdkType> {
                 let name = cols.next()?;
                 let is_interface = cols.next()? == "I";
                 let _superclass = cols.next()?;
-                let supers = match cols.next()? {
-                    "-" => Vec::new(),
-                    s => s.split(',').collect(),
+                let mut list = || match cols.next() {
+                    None | Some("-") => Vec::new(),
+                    Some(s) => s.split(',').collect(),
                 };
+                let supers = list();
+                let interfaces = list();
                 Some((
                     name,
                     JdkType {
                         is_interface,
                         supers,
+                        interfaces,
                     },
                 ))
             })

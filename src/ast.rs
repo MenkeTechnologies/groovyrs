@@ -193,6 +193,10 @@ pub enum StmtKind {
         /// but a bare call to one inside a sibling `default` method must still
         /// compile to `this.m()`, which is what this list drives.
         abstract_methods: Vec<String>,
+        /// An anonymous class (`new Comparator() { … }`), named `Outer$N` by
+        /// the parser and hoisted like a nested type. Its bodies are lowered
+        /// where its one `new` is, because they capture that scope's locals.
+        anonymous: bool,
     },
     /// A property assignment to a receiver: `recv.name = value` (e.g. `p.x = 10`
     /// or `this.v = x`). Routes through the host property-set builtin, honouring a
@@ -343,6 +347,13 @@ pub struct Method {
     pub ret_ty: String,
     /// Declared `static` — what a `MetaMethod` reports through `isStatic()`.
     pub is_static: bool,
+}
+
+/// The members of an anonymous class, at its `new` (see [`Expr::New`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnonBody {
+    pub fields: Vec<Field>,
+    pub methods: Vec<Method>,
 }
 
 /// Compound-assignment operator. `Assign` is a plain `=`.
@@ -747,6 +758,10 @@ pub enum Expr {
         class: String,
         args: Vec<Expr>,
         line: u32,
+        /// The members of an anonymous class this `new` instantiates (its
+        /// declaration is hoisted under `class`): kept here as well so the
+        /// free-variable walk sees which enclosing locals its bodies capture.
+        anon: Option<Box<AnonBody>>,
     },
     /// The `this` reference inside a method or constructor body — the receiver
     /// instance, held in frame slot 0.

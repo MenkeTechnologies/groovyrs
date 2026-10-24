@@ -989,6 +989,20 @@ reported as parse or compile errors, never silently mis-run.
   a `Class` subject answer through it (`case CharSequence:` matches `String`,
   `case Comparator:` a script class that implements it).
 
+- **Anonymous inner classes.** `new T(args) { members }` is a class named
+  after its enclosing class in source order (`Script$1`, `Outer$2`,
+  `Script$1$1` inside another), extending `T` or, for an interface (a script
+  `interface`/`trait`, or a JDK one such as `Comparator` or `Runnable`),
+  implementing it; `args` go to `T`'s constructor. Its bodies capture the
+  enclosing locals they read — shared, so a write on either side is seen by
+  the other, as Groovy's `Reference` makes it — and reach the enclosing
+  instance's fields and methods (`this$0`). A script class instance that
+  implements `Comparator` sorts, orders a `TreeSet`, and answers `max`/`min`/
+  `toSorted`/`Collections.sort` as a comparator closure does, and
+  `list.sort(it)` is the JDK's `void` `List.sort`. An instance with no
+  `toString` prints its class name without Groovy's identity hash, as every
+  script class instance does here.
+
 ## Aborts a Groovy program survives — open
 
 Round 7 removed the recursion aborts (see the `StackOverflowError` entry above)
@@ -1252,8 +1266,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   `MissingMethodException`. The `Long` spelling of the same call is modeled (see
   `GMETHOD_WIDE`); only the `BigInteger` coercion is missing.
 - **`import`/`package`** are tolerated (skipped) but do nothing.
-- **Anonymous inner classes** (`new Comparator() { int compare(a, b) { … } }`)
-  are parse errors; `{ a, b -> … } as Comparator` is the working spelling.
 - **Command-argument chains** (`println a, b`, `foo bar baz`). A member call
   with its parentheses left off parses (`sb.append 'x'`, `m.put 'k', 1`), its
   argument starting with a literal, a name, `new`, `true`, `false` or `null`. A

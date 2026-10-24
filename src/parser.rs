@@ -55,6 +55,7 @@ pub fn parse(src: &str) -> Result<Program, String> {
         compact_ctor: None,
         depth: 0,
         switch_exprs: 0,
+        class_names: vec![(crate::host::script_class_name(), 0)],
     };
     p.program()
 }
@@ -106,6 +107,12 @@ struct Parser {
     /// carries the switch expression's value, and everywhere else it is an
     /// ordinary identifier that a program may use as a name.
     switch_exprs: usize,
+    /// The classes whose bodies enclose the code being parsed, innermost
+    /// last, each with how many anonymous classes it has named so far — the
+    /// script's own class at the bottom. Groovy numbers an anonymous class
+    /// after its enclosing class, in source order: `Script$1`, `Outer$2`,
+    /// and `Script$1$1` for one written inside another.
+    class_names: Vec<(String, u32)>,
 }
 
 impl Parser {
@@ -250,6 +257,7 @@ impl Parser {
             self.skip_terminators();
         }
         body.append(&mut self.hoisted);
+        resolve_anonymous_supertypes(&mut body);
         Ok(Program { body, imports })
     }
 
@@ -1189,6 +1197,7 @@ impl Parser {
                     class: name.clone(),
                     args: Vec::new(),
                     line: self.line(),
+                    anon: None,
                 }),
                 is_static: true,
                 is_property: true,
@@ -1207,6 +1216,7 @@ impl Parser {
             ctors,
             methods,
             abstract_methods,
+            anonymous: false,
         })
     }
 
@@ -1223,6 +1233,7 @@ impl Parser {
         let mut ctors = Vec::new();
         let mut methods = Vec::new();
         let mut abstract_methods = Vec::new();
+        self.class_names.push((name.to_string(), 0));
         self.skip_terminators();
         while !self.is(&Tok::RBrace) && !self.is(&Tok::Eof) {
             self.class_member(
@@ -1236,8 +1247,70 @@ impl Parser {
             self.expect_terminator()?;
             self.skip_terminators();
         }
+        self.class_names.pop();
         self.eat(&Tok::RBrace)?;
         Ok((fields, ctors, methods, abstract_methods))
+    }
+
+    /// `new T(args) { members }` — an anonymous class. It is named after the
+    /// enclosing class (`Script$1`, `Outer$2`, `Script$1$1`), hoisted like a
+    /// nested type, and extends or implements `T` (settled once every class
+    /// is known, by [`resolve_anonymous_supertypes`]). Groovy gives it a
+    /// constructor handing `args` to the super constructor.
+    fn anonymous_class(
+        &mut self,
+        written: String,
+        args: Vec<Expr>,
+        line: u32,
+    ) -> Result<Expr, String> {
+        let name = {
+            let (outer, count) = self
+                .class_names
+                .last_mut()
+                .expect("the script class is always enclosing");
+            *count += 1;
+            format!("{outer}${count}")
+        };
+        let (fields, mut ctors, methods, abstract_methods) = self.class_body(&name, false)?;
+        if !args.is_empty() {
+            let params: Vec<String> = (0..args.len()).map(|i| format!("$arg{i}")).collect();
+            let call = Expr::SuperCtor {
+                args: params.iter().map(|p| Expr::Var(p.clone())).collect(),
+                line,
+                own: false,
+            };
+            ctors.push(Ctor {
+                param_types: vec!["def".to_string(); params.len()],
+                params,
+                body: vec![Stmt::new(line, StmtKind::Expr(call))],
+            });
+        }
+        let anon = AnonBody {
+            fields: fields.clone(),
+            methods: methods.clone(),
+        };
+        self.hoisted.push(Stmt::new(
+            line,
+            StmtKind::Class {
+                name: name.clone(),
+                superclass: Some(written),
+                interfaces: Vec::new(),
+                generated: Generated::default(),
+                is_interface: false,
+                is_trait: false,
+                fields,
+                ctors,
+                methods,
+                abstract_methods,
+                anonymous: true,
+            },
+        ));
+        Ok(Expr::New {
+            class: name,
+            args,
+            line,
+            anon: Some(Box::new(anon)),
+        })
     }
 
     /// `record Name(T a, U b) [implements I] { members }` — Groovy's record
@@ -1356,6 +1429,7 @@ impl Parser {
             ctors,
             methods,
             abstract_methods,
+            anonymous: false,
         })
     }
 
@@ -1482,6 +1556,7 @@ impl Parser {
         let mut ctors = Vec::new();
         let mut methods = Vec::new();
         let mut abstract_methods = Vec::new();
+        self.class_names.push((name.clone(), 0));
         while !self.is(&Tok::RBrace) && !self.is(&Tok::Eof) {
             self.class_member(
                 &name,
@@ -1494,6 +1569,7 @@ impl Parser {
             self.expect_terminator()?;
             self.skip_terminators();
         }
+        self.class_names.pop();
         self.eat(&Tok::RBrace)?;
 
         let names: Vec<&str> = constants.iter().map(|(n, _, _)| n.as_str()).collect();
@@ -1569,6 +1645,7 @@ impl Parser {
                         class: name.clone(),
                         args,
                         line: *line,
+                        anon: None,
                     }),
                     is_static: true,
                     is_property: false,
@@ -1616,6 +1693,7 @@ impl Parser {
             ctors,
             methods: all_methods,
             abstract_methods,
+            anonymous: false,
         })
     }
 
@@ -3852,7 +3930,7 @@ impl Parser {
             // text, re-parsed here through the ordinary expression grammar.
             Tok::GStr(parts) => {
                 self.advance();
-                gstring_expr(&parts)
+                gstring_expr(&parts, self)
             }
             Tok::True => {
                 self.advance();
@@ -3921,6 +3999,7 @@ impl Parser {
                         class,
                         args: dims,
                         line,
+                        anon: None,
                     });
                 }
                 let args = if self.is(&Tok::LParen) {
@@ -3928,7 +4007,15 @@ impl Parser {
                 } else {
                     Vec::new()
                 };
-                Ok(Expr::New { class, args, line })
+                if self.is(&Tok::LBrace) {
+                    return self.anonymous_class(class, args, line);
+                }
+                Ok(Expr::New {
+                    class,
+                    args,
+                    line,
+                    anon: None,
+                })
             }
             Tok::Ident(name) => {
                 if name == "println" || name == "print" {
@@ -4638,7 +4725,10 @@ impl Parser {
             Tok::Str(s) => Member::Static(s.clone()),
             // The lexer folds a `"…"` with no interpolation to `Tok::Str`, so a
             // `GStr` always carries at least one embedded expression.
-            Tok::GStr(parts) => Member::Dynamic(gstring_expr(parts)?),
+            Tok::GStr(parts) => {
+                let parts = parts.clone();
+                Member::Dynamic(gstring_expr(&parts, self)?)
+            }
             _ => return Ok(None),
         };
         self.advance();
@@ -4741,12 +4831,12 @@ enum Member {
 
 /// The [`Expr::GString`] for a lexed `GStr` token: each embedded expression's
 /// source text is parsed with the ordinary expression grammar.
-fn gstring_expr(parts: &[GPart]) -> Result<Expr, String> {
+fn gstring_expr(parts: &[GPart], outer: &mut Parser) -> Result<Expr, String> {
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
         out.push(match part {
             GPart::Text(t) => GStringPart::Text(t.clone()),
-            GPart::Expr(src) => GStringPart::Expr(parse_interpolation(src)?),
+            GPart::Expr(src) => GStringPart::Expr(parse_interpolation(src, outer)?),
         });
     }
     Ok(Expr::GString(out))
@@ -5217,11 +5307,12 @@ fn method_pointer(recv: Expr, name: String, line: u32) -> Expr {
 
 /// Parse the source of one `${ … }` / `$name` placeholder into an expression.
 /// It runs the same lexer and expression grammar as the enclosing script, so an
-/// interpolation is not a second, weaker language.
-fn parse_interpolation(src: &str) -> Result<Expr, String> {
+/// interpolation is not a second, weaker language. An anonymous class written
+/// in one is numbered and hoisted with the enclosing parser's.
+fn parse_interpolation(src: &str, outer: &mut Parser) -> Result<Expr, String> {
     // `${-> expr}` is a closure literal whose braces are the placeholder's own.
     if src.trim_start().starts_with("->") {
-        return parse_interpolation(&format!("{{ {src} }}"));
+        return parse_interpolation(&format!("{{ {src} }}"), outer);
     }
     let tokens = crate::lexer::lex(src)?;
     let mut p = Parser {
@@ -5241,13 +5332,18 @@ fn parse_interpolation(src: &str) -> Result<Expr, String> {
         compact_ctor: None,
         depth: 0,
         switch_exprs: 0,
+        class_names: std::mem::take(&mut outer.class_names),
     };
     p.skip_newlines();
     // `${}` holds no expression: Groovy reads it as `null`.
     if p.is(&Tok::Eof) {
+        outer.class_names = p.class_names;
         return Ok(Expr::Null);
     }
-    let e = p.expression()?;
+    let e = p.expression();
+    outer.class_names = std::mem::take(&mut p.class_names);
+    outer.hoisted.append(&mut p.hoisted);
+    let e = e?;
     p.skip_newlines();
     if !p.is(&Tok::Eof) {
         return Err(format!(
@@ -5392,6 +5488,51 @@ fn qualify_nested_types(toks: &mut Vec<Token>) {
                 toks.drain(i + 1..i + 3);
             }
             _ => i += 1,
+        }
+    }
+}
+
+/// An anonymous class extends the type its `new` names — unless that type is
+/// an interface (a script `interface` or `trait`, or a JDK interface such as
+/// `Comparator`), which it implements instead. `new Object() { … }` extends
+/// nothing more than any class does.
+fn resolve_anonymous_supertypes(body: &mut [Stmt]) {
+    let mut script_classes = std::collections::HashSet::new();
+    let mut script_interfaces = std::collections::HashSet::new();
+    for s in body.iter() {
+        if let StmtKind::Class {
+            name,
+            is_interface,
+            is_trait,
+            ..
+        } = &s.kind
+        {
+            script_classes.insert(name.clone());
+            if *is_interface || *is_trait {
+                script_interfaces.insert(name.clone());
+            }
+        }
+    }
+    for s in body.iter_mut() {
+        let StmtKind::Class {
+            superclass,
+            interfaces,
+            anonymous: true,
+            ..
+        } = &mut s.kind
+        else {
+            continue;
+        };
+        let Some(written) = superclass.clone() else {
+            continue;
+        };
+        let interface = script_interfaces.contains(&written)
+            || (!script_classes.contains(&written) && crate::host::is_jdk_interface(&written));
+        if interface {
+            *superclass = None;
+            interfaces.push(written);
+        } else if matches!(written.as_str(), "Object" | "java.lang.Object") {
+            *superclass = None;
         }
     }
 }

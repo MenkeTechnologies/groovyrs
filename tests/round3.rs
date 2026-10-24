@@ -4299,6 +4299,9 @@ t(18) { new ConfigSlurper().parse('s.t = [1, 2]\ns.t << 3').s.t }
 /// Region time zones from the tz database with the JDK short names, custom `GMT±h` ids, legacy three-letter ids, `java.sql.Timestamp` and `GregorianCalendar`.
 #[test]
 fn round7_time_zones_calendar() {
+    if !tz_database_present() {
+        return;
+    }
     let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
 def f = 'yyyy-MM-dd HH:mm:ss z Z'
 def ny = TimeZone.getTimeZone('America/New_York')
@@ -4396,6 +4399,9 @@ t(41) { def c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.
 /// Region time zones across history, daylight time and the far future (the zone file's POSIX rule).
 #[test]
 fn round7_time_zone_sweep() {
+    if !tz_database_present() {
+        return;
+    }
     let src = r####"def f = 'yyyy-MM-dd HH:mm:ss.SSS z Z'
 def ids = ['America/New_York', 'Europe/London', 'Australia/Lord_Howe', 'Asia/Kathmandu', 'America/St_Johns', 'Pacific/Chatham', 'Africa/Casablanca', 'America/Santiago', 'Asia/Tehran', 'America/Godthab', 'Antarctica/Troll', 'Etc/GMT+5', 'CST', 'AET', 'EST5EDT', 'Europe/Moscow', 'Pacific/Kiritimati']
 def instants = [0L, 1700000000000L, 1690000000000L, 4102444800000L, 7258118400000L, -1000000000000L, 1711846800000L, 1711850400000L, 4118000000000L, 7273800000000L]
@@ -4616,4 +4622,16 @@ public void R.v(int[],P)
 [[I, P]
 "####;
     check(src, expected);
+}
+
+/// Whether the system tz database the zone tests read is installed
+/// (`$TZDIR`, else `/usr/share/zoneinfo`). Without it those tests skip, saying
+/// why, rather than fail on a machine that cannot answer them.
+fn tz_database_present() -> bool {
+    let dir = std::env::var("TZDIR").unwrap_or_else(|_| "/usr/share/zoneinfo".into());
+    let present = std::path::Path::new(&dir).join("America/New_York").exists();
+    if !present {
+        eprintln!("skipped: no tz database at {dir}");
+    }
+    present
 }

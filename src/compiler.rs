@@ -310,6 +310,11 @@ struct Compiler {
     /// native lowering, so a shifting loop keeps its JIT trace. Tracked and
     /// scoped alongside [`Compiler::wide_vars`].
     obj_vars: HashSet<String>,
+    /// The names bound to a value that may be a `Long`, `Short` or `Byte` box —
+    /// one read out of a collection, a call or a property. A bitwise operator
+    /// on one takes the [`crate::host::GBITOP`] builtin, which keeps a `Long`
+    /// a `Long`; fusevm's native op would answer an `Integer`.
+    boxable_vars: HashSet<String>,
     /// The names of the script's own top-level classes and interfaces: a
     /// closure stored into a variable declared as one is coerced to it, as
     /// `closure as Type` is.
@@ -630,6 +635,7 @@ struct WidthScope {
     returns: HashSet<String>,
     pinned: HashSet<String>,
     objs: HashSet<String>,
+    boxable: HashSet<String>,
     typed: HashMap<String, String>,
 }
 
@@ -1074,6 +1080,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         typed_vars: HashMap::new(),
         inline_finally_depth: 0,
         obj_vars: HashSet::new(),
+        boxable_vars: HashSet::new(),
         script_types: HashSet::new(),
         sam_types,
         wide_sites: HashSet::new(),
@@ -1593,6 +1600,7 @@ impl Compiler {
             returns: self.wide_returns.clone(),
             pinned: self.pinned_wide.clone(),
             objs: self.obj_vars.clone(),
+            boxable: self.boxable_vars.clone(),
             typed: self.typed_vars.clone(),
         };
         for p in params {
@@ -1600,6 +1608,7 @@ impl Compiler {
             self.wide_returns.remove(p);
             self.pinned_wide.remove(p);
             self.obj_vars.remove(p);
+            self.boxable_vars.remove(p);
             self.typed_vars.remove(p);
         }
         saved
@@ -1611,6 +1620,7 @@ impl Compiler {
         self.wide_returns = saved.returns;
         self.pinned_wide = saved.pinned;
         self.obj_vars = saved.objs;
+        self.boxable_vars = saved.boxable;
         self.typed_vars = saved.typed;
     }
 
@@ -1713,6 +1723,17 @@ impl Compiler {
         // A closure's captures keep the width they had where it was written, so
         // only its own parameters reset; its locals are restored on the way out.
         let prev_widths = self.enter_width_scope(&pc.params);
+        // A closure's arguments come from wherever it is called — a collection
+        // element is the usual one — so each may be a box.
+        for (p, ty) in pc.params.iter().zip(
+            pc.param_types
+                .iter()
+                .chain(std::iter::repeat(&String::new())),
+        ) {
+            if !COERCED_TYPES.contains(&ty.as_str()) {
+                self.boxable_vars.insert(p.clone());
+            }
+        }
         let saved_line = self.cur_line;
         self.cur_line = pc.line;
         // Inside a closure body a free name the compiler cannot bind may be a
@@ -2967,6 +2988,9 @@ impl Compiler {
                     self.set_var_obj("", name, Some(value));
                 } else {
                     self.obj_vars.remove(name);
+                    if self.may_be_box(value) {
+                        self.boxable_vars.insert(name.clone());
+                    }
                 }
                 Ok(())
             }
@@ -5434,6 +5458,44 @@ impl Compiler {
         } else {
             self.obj_vars.remove(name);
         }
+        if init.is_some_and(|e| self.may_be_box(e)) && !COERCED_TYPES.contains(&ty) {
+            self.boxable_vars.insert(name.to_string());
+        } else {
+            self.boxable_vars.remove(name);
+        }
+    }
+
+    /// May this expression's value be a `Long`, `Short` or `Byte` box? (See
+    /// [`Compiler::boxable_vars`].) A value read out of a collection, a call
+    /// or a property may; arithmetic on one keeps the box.
+    fn may_be_box(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Index { .. }
+            | Expr::MethodCall { .. }
+            | Expr::Property { .. }
+            | Expr::DynProperty { .. }
+            | Expr::DynMethodCall { .. }
+            | Expr::Call { .. }
+            | Expr::CallValue { .. } => true,
+            Expr::Var(name) => self.boxable_vars.contains(name),
+            Expr::Recorded { inner, .. } => self.may_be_box(inner),
+            Expr::Binary {
+                op:
+                    BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Mod
+                    | BinOp::BitAnd
+                    | BinOp::BitOr
+                    | BinOp::BitXor,
+                lhs,
+                rhs,
+            } => self.may_be_box(lhs) || self.may_be_box(rhs),
+            Expr::Unary { op: UnOp::Neg, rhs } => self.may_be_box(rhs),
+            Expr::Ternary { then, els, .. } => self.may_be_box(then) || self.may_be_box(els),
+            Expr::Elvis { lhs, rhs } => self.may_be_box(lhs) || self.may_be_box(rhs),
+            _ => false,
+        }
     }
 
     /// Can the compiler see that this expression's value is a closure or a class
@@ -5623,7 +5685,10 @@ impl Compiler {
         // same way an object-receiver `>>` takes `GSHR`; `int & int` keeps its
         // native lowering and its JIT trace.
         if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor)
-            && (self.bit_operand_is_object(lhs) || self.bit_operand_is_object(rhs))
+            && (self.bit_operand_is_object(lhs)
+                || self.bit_operand_is_object(rhs)
+                || self.may_be_box(lhs)
+                || self.may_be_box(rhs))
         {
             self.emit_binary_lhs(pre, lhs)?;
             self.expr(rhs)?;
@@ -5639,7 +5704,7 @@ impl Compiler {
         }
         // A `>>` whose left operand may be a `BigInteger` needs the builtin for
         // the same reason: the native shift reads the handle as `0`.
-        if matches!(op, BinOp::Shr) && self.bit_operand_is_object(lhs) {
+        if matches!(op, BinOp::Shr) && (self.bit_operand_is_object(lhs) || self.may_be_box(lhs)) {
             self.emit_binary_lhs(pre, lhs)?;
             self.expr(rhs)?;
             self.b

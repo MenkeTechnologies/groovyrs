@@ -263,9 +263,17 @@ fn file_method(
         ("exists", []) => Value::bool(p.exists()),
         ("isFile", []) => Value::bool(p.is_file()),
         ("isDirectory", []) => Value::bool(p.is_dir()),
+        // `File.length()` and `lastModified()` are `long`s.
         ("length" | "size", []) => {
-            Value::int(std::fs::metadata(path).map_or(0, |m| m.len() as i64))
+            boxed::long_value(std::fs::metadata(path).map_or(0, |m| m.len() as i64))
         }
+        ("lastModified", []) => boxed::long_value(
+            std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_millis() as i64),
+        ),
         ("delete", []) => Value::bool(if p.is_dir() {
             std::fs::remove_dir(path).is_ok()
         } else {

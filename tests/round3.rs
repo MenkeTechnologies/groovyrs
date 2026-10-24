@@ -5565,3 +5565,97 @@ java.lang.Long
 "####;
     check(src, expected);
 }
+
+/// A `Long` read out of a collection, a call or a property stays a `Long`
+/// through `&`, `|`, `^`, `>>` and `<<`, and the JDK methods that answer a
+/// `long` (`Date.getTime`, `File.length` / `lastModified`, `System.nanoTime`,
+/// a `long[]` element) answer a `Long`.
+#[test]
+fn round10_long_kind_from_runtime_paths() {
+    let src = r####"def l = [5L, 6L]
+def x = l[0]
+println((x & 1).getClass().simpleName)
+println((x | 2).getClass().simpleName)
+println((x ^ 3).getClass().simpleName)
+println((x >> 1).getClass().simpleName)
+println((l[1] & 2).getClass().simpleName)
+println((l[1] << 1).getClass().simpleName)
+println(((byte) 5 & 1).getClass().simpleName)
+println(((short) 5 >> 1).getClass().simpleName)
+def y = x + 1
+println((y & 7).getClass().simpleName)
+println((7 & y))
+println([1L, 2L].collect { (it & 1).getClass().simpleName })
+def s = "12"
+def n = s.toLong()
+println((n & 4).getClass().simpleName)
+def m = 'toLong'
+println("3"."$m"().getClass().simpleName)
+println(System.currentTimeMillis().getClass().simpleName)
+def t = System.nanoTime()
+println(t.getClass().simpleName)
+println(Long.parseLong('4').getClass().simpleName)
+println("abc".length().getClass().simpleName)
+println(Math.abs(-3L).getClass().simpleName)
+println(Math.max(1L, 2).getClass().simpleName)
+println([3L,1L].max().getClass().simpleName)
+println(([1L] as long[])[0].getClass().simpleName)
+println((1L..3L).sum().getClass().simpleName)
+println(Long.MAX_VALUE.intdiv(1L << 40).getClass().simpleName)
+println(10L.intdiv(3).getClass().simpleName)
+println(10.intdiv(3L).getClass().simpleName)
+println((10L % 3).getClass().simpleName)
+println((-x).getClass().simpleName)
+println((x ** 2).getClass().simpleName)
+println(x.abs().getClass().simpleName)
+println(x.next().getClass().simpleName)
+println(Integer.toBinaryString(5).getClass().simpleName)
+println(Long.valueOf('9').getClass().simpleName)
+println("5".toLong().getClass().simpleName)
+println(5.toLong().getClass().simpleName)
+println(new Date(0).getTime().getClass().simpleName)
+println new File(".").length().getClass().simpleName
+println new File(".").lastModified().getClass().simpleName
+println new File("no-such-file-here").lastModified()
+"####;
+    let expected = r####"Long
+Long
+Long
+Long
+Long
+Long
+Integer
+Integer
+Long
+6
+[Long, Long]
+Long
+Long
+Long
+Long
+Long
+Integer
+Long
+Long
+Long
+Long
+Long
+Long
+Long
+Long
+Long
+Long
+Long
+Long
+Long
+String
+Long
+Long
+Long
+Long
+Long
+Long
+0
+"####;
+    check(src, expected);
+}

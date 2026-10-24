@@ -1093,12 +1093,12 @@ JVM 21.0.12):
 
 - A `Long`, `Short` or `Byte` small enough to be an `Integer` is a box
   (`src/host/boxed.rs`) once it leaves compiled code; inside it, a `long` is a
-  plain integer whose width the compiler tracks. A native `&`, `|`, `^` or
-  `>>` on a `Long` box answers an `Integer` of the right value (Groovy: a
-  `Long`), and a method injected or a value converted through a path the
-  compiler cannot see may still answer an `Integer` where Groovy answers a
-  `Long` (`def m = 'toLong'; '1'."$m"()` is a `Long` here; a `Long`-returning
-  JDK method other than the modeled conversions is not).
+  plain integer whose width the compiler tracks. A bitwise operator whose
+  operand may be a box (a value read out of a collection, a call, a property,
+  or a closure parameter) takes the box-aware builtin and keeps a `Long` a
+  `Long`; on a script function's untyped parameter holding a `Long` box the
+  native operator answers an `Integer` of the right value (Groovy: a `Long`).
+  A `long`-returning JDK method groovyrs does not model answers an `Integer`.
 - `ConfigSlurper` walks the script itself (there is no run-time compiler):
   `new`, loops, `switch`, `try` and statements other than assignments, blocks,
   `def` locals, and `if`/`return` inside a closure body fault. A config

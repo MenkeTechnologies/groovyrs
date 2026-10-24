@@ -10145,6 +10145,20 @@ fn map_default(vm: &mut VM, map: &Value, key: &str, subject: &Value) -> Value {
 /// `recv[index]`, shared by the `[…]` subscript builtin and by the `getAt(…)`
 /// method — Groovy defines the subscript *as* `getAt`, so both are one path.
 fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
+    // A `long[]`, `short[]` or `byte[]` element reads as its wrapper class.
+    let kind = match array_elem(&recv) {
+        Some(ArrayElem::Long) => Some(boxed::IntKind::Long),
+        Some(ArrayElem::Short) => Some(boxed::IntKind::Short),
+        Some(ArrayElem::Byte) => Some(boxed::IntKind::Byte),
+        _ => None,
+    };
+    match (kind, index_read_raw(vm, recv, index)) {
+        (Some(kind), Value::Int(n)) => boxed::of_kind(kind, n),
+        (_, out) => out,
+    }
+}
+
+fn index_read_raw(vm: &mut VM, recv: Value, index: Value) -> Value {
     if ANY_DATE.with(Cell::get) {
         if let Some(v) = date::dispatch(&recv, "getAt", std::slice::from_ref(&index)) {
             return v;
@@ -18228,6 +18242,7 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
                 },
                 Value::Float(f) => *f as i64,
                 Value::Int(n) => *n,
+                _ if boxed::as_box(&v).is_some() => boxed::as_box(&v).map_or(0, |(_, n)| n),
                 // A `Float` truncates toward zero at its own width, so
                 // `3.7f as Integer` is `3` — the `as_dec` arm below would have
                 // refused a handle it does not recognise.

@@ -1009,7 +1009,7 @@ pub(super) fn text(v: &Value) -> Option<String> {
 pub(super) fn dispatch(recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
     if let Some(ms) = date_millis(recv) {
         return Some(match (method, args) {
-            ("getTime", []) => Value::int(ms),
+            ("getTime", []) => boxed::long_value(ms),
             ("format", [p]) => Value::str(format(ms, &groovy_str(p), &Zone::local())),
             ("format", [p, z]) => {
                 let zone = zone_of(z).unwrap_or_else(Zone::local);
@@ -1211,7 +1211,7 @@ fn calendar_method(recv: &Value, cal: Cal, method: &str, args: &[Value]) -> Opti
     Some(match (method, args) {
         ("get" | "getAt", [field]) => Value::int(cal_field(&f, as_i64(field)?, offsets)?),
         ("getTime", []) => new_date(cal.ms),
-        ("getTimeInMillis", []) => Value::int(cal.ms),
+        ("getTimeInMillis", []) => boxed::long_value(cal.ms),
         ("setTimeInMillis", [t]) => {
             set_cal_millis(recv, as_i64(t)?);
             Value::Undef

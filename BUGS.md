@@ -1072,8 +1072,10 @@ JVM 21.0.12):
   runs for some names (`sort`, `toSorted`). A non-reflected `MetaMethod`'s
   `toString` carries a handle-derived hash. `invokeMethod`/`methodMissing` on
   a metaclass and `GroovySystem.metaClassRegistry` are not modeled.
-- A `GString`'s `metaClass` is an `ExpandoMetaClass` (Groovy: `HandleMetaClass`)
-  and its `iterator()` a `java.util.Iterator` (Groovy: `ArrayList$Itr`).
+  A method injected through a JDK value's metaclass (`s.metaClass.m = { … }`
+  for a `String` `s`) reaches every value of its class: a string has no
+  identity here, where Groovy gives that one object its own metaclass
+  (`'other'.m()` is a `MissingMethodException` there).
 
 - `2L in [1, 2]` is `true`: a `Long` and an `Integer` are one `Value::Int`, so
   `List.contains`' `Long.equals(Integer)` cannot fail (Groovy: `false`). Casts

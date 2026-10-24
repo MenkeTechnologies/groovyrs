@@ -4938,3 +4938,98 @@ null
     let src = "def x = new groovy.xml.XmlParser().parseText('<r><e/></r>')\nprintln x.name().getClass().name\nprintln(x.name() == 'r')\nprintln(x.e[0].name() == 'e')\n";
     check(src, "java.lang.String\ntrue\ntrue\n");
 }
+
+/// `obj.metaClass` / `getMetaClass()` is a `HandleMetaClass` over the value;
+/// `X.metaClass` is one too until an injection (or a `.static` view) installs
+/// an `ExpandoMetaClass` for `X`. A string iterates through `asCollection`,
+/// an `ArrayList$Itr`.
+#[test]
+fn round9_handle_meta_class_and_string_iterator() {
+    let src = r####"def g = "a${1}b"
+println g.metaClass.getClass().name
+println "x".metaClass.getClass().name
+println 5.metaClass.getClass().name
+println([1].metaClass.getClass().name)
+println([a: 1].metaClass.getClass().name)
+println String.metaClass.getClass().name
+println Integer.metaClass.getClass().name
+class P {}
+println new P().metaClass.getClass().name
+println P.metaClass.getClass().name
+println g.iterator().getClass().name
+println "xy".iterator().collect()
+println g.iterator().collect()
+println g.getMetaClass().getClass().name
+println "x".getMetaClass().getClass().name
+println(g.metaClass.theClass.name)
+println("x".metaClass.theClass.name)
+"####;
+    let expected = r####"org.codehaus.groovy.runtime.HandleMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+java.util.ArrayList$Itr
+[x, y]
+[a, 1, b]
+org.codehaus.groovy.runtime.HandleMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+org.codehaus.groovy.runtime.GStringImpl
+java.lang.String
+"####;
+    check(src, expected);
+    let src = r####"println String.metaClass.getClass().name
+String.metaClass.shout = { -> delegate.toUpperCase() }
+println String.metaClass.getClass().name
+println "x".metaClass.getClass().name
+println "x".shout()
+def s = "inst"
+s.metaClass.whisper = { -> 'w' }
+println s.metaClass.getClass().name
+println Integer.metaClass.getClass().name
+class P {}
+P.metaClass.hi = { -> 'hi' }
+println P.metaClass.getClass().name
+println new P().metaClass.getClass().name
+def p = new P()
+p.metaClass.yo = { -> 'yo' }
+println p.metaClass.getClass().name
+println p.yo()
+"####;
+    let expected = r####"org.codehaus.groovy.runtime.HandleMetaClass
+groovy.lang.ExpandoMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+X
+org.codehaus.groovy.runtime.HandleMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+groovy.lang.ExpandoMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+org.codehaus.groovy.runtime.HandleMetaClass
+yo
+"####;
+    check(src, expected);
+    let src = r####"def s = "inst"
+s.metaClass.whisper = { -> "w" }
+println String.metaClass.getClass().name
+String.metaClass.static.st = { -> 1 }
+println String.metaClass.getClass().name
+Integer.metaClass.static.st = { -> 1 }
+println Integer.metaClass.getClass().name
+Long.metaClass.constructor = { -> 1L }
+println Long.metaClass.getClass().name
+println String.metaClass.static.getClass().name
+println Short.metaClass.static.getClass().name
+"####;
+    let expected = r####"org.codehaus.groovy.runtime.HandleMetaClass
+groovy.lang.ExpandoMetaClass
+groovy.lang.ExpandoMetaClass
+groovy.lang.ExpandoMetaClass
+groovy.lang.ExpandoMetaClass$ExpandoMetaProperty
+groovy.lang.ExpandoMetaClass$ExpandoMetaProperty
+"####;
+    check(src, expected);
+}

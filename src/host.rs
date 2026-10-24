@@ -734,6 +734,10 @@ thread_local! {
     /// The heap length when each class's metaclass was first injected into:
     /// a script-class instance older than that keeps its original metaclass.
     static EMC_BORN: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
+    /// The classes whose registry metaclass is an `ExpandoMetaClass`: one a
+    /// class-level injection or a `.static` view replaced. `X.metaClass` is a
+    /// `HandleMetaClass` over any other.
+    static EMC_CLASSES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// Set once any injection exists, so dispatch pays one flag read without.
     static ANY_EMC: Cell<bool> = const { Cell::new(false) };
     /// Set once a `JsonSlurper` or `JsonBuilder` exists.
@@ -1657,14 +1661,8 @@ fn java_class_name(v: &Value) -> String {
     {
         return class;
     }
-    // `obj.metaClass` is a `HandleMetaClass` over the object's own; a class's
-    // is the `ExpandoMetaClass` its injections live in.
-    if let Some((_, instance, _)) = as_meta_class(v) {
-        return if instance.is_some() {
-            "org.codehaus.groovy.runtime.HandleMetaClass".to_string()
-        } else {
-            "groovy.lang.ExpandoMetaClass".to_string()
-        };
+    if let Some(name) = meta_class_class_name(v) {
+        return name.to_string();
     }
     // A closure literal is an instance of the class Groovy generates for it.
     if let Some(name) = closure_meta(v).as_ref().and_then(closure_class_name) {
@@ -2487,6 +2485,9 @@ enum HeapObj {
         instance: Option<u32>,
         /// The `.static` view: the methods are static ones.
         statics: bool,
+        /// Taken from a value (`"x".metaClass`) rather than a class: always a
+        /// `HandleMetaClass` over the value's class.
+        of_value: bool,
     },
     /// A `groovy.lang.MetaProperty` that `hasProperty` answers: `class` is the
     /// concrete class Groovy uses (`MetaBeanProperty` or `CachedField`), `ty`
@@ -2908,6 +2909,7 @@ fn reset_heap() {
     EMC_INSTANCE.with(|m| m.borrow_mut().clear());
     EMC_CTORS.with(|m| m.borrow_mut().clear());
     EMC_BORN.with(|m| m.borrow_mut().clear());
+    EMC_CLASSES.with(|m| m.borrow_mut().clear());
     ANY_EMC.with(|a| a.set(false));
     MAP_PROXIES.with(|m| m.borrow_mut().clear());
     SCRIPT_THIS.with(|s| s.borrow_mut().take());
@@ -3670,6 +3672,7 @@ fn as_meta_class(v: &Value) -> Option<(String, Option<u32>, bool)> {
                 class,
                 instance,
                 statics,
+                ..
             }) => Some((class.clone(), *instance, *statics)),
             _ => None,
         }),
@@ -3680,6 +3683,7 @@ fn as_meta_class(v: &Value) -> Option<(String, Option<u32>, bool)> {
 /// `recv.metaClass`: the class's metaclass for a class reference or a JDK
 /// value, the object's own for a script class instance.
 fn meta_class_of(recv: &Value) -> Value {
+    let of_value = as_class_ref(recv).is_none();
     let (class, instance) = match as_class_ref(recv) {
         Some(name) => (name, None),
         None => {
@@ -3695,6 +3699,47 @@ fn meta_class_of(recv: &Value) -> Value {
         class,
         instance,
         statics: false,
+        of_value,
+    })
+}
+
+/// Whether a [`HeapObj::MetaClass`] handle was taken from a value.
+fn is_value_meta_class(v: &Value) -> bool {
+    let Value::Obj(id) = v else {
+        return false;
+    };
+    HEAP.with(|h| {
+        matches!(
+            h.borrow().get(*id as usize),
+            Some(HeapObj::MetaClass { of_value: true, .. })
+        )
+    })
+}
+
+/// The class name a [`HeapObj::MetaClass`] handle reports: a value's is a
+/// `HandleMetaClass`, a class's the `ExpandoMetaClass` once one replaced its
+/// registry metaclass, and a `.static` view an `ExpandoMetaProperty`.
+fn meta_class_class_name(v: &Value) -> Option<&'static str> {
+    let Value::Obj(id) = v else {
+        return None;
+    };
+    HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::MetaClass {
+            class,
+            instance,
+            statics,
+            of_value,
+        }) => Some(if *statics {
+            "groovy.lang.ExpandoMetaClass$ExpandoMetaProperty"
+        } else if *of_value
+            || instance.is_some()
+            || !EMC_CLASSES.with(|e| e.borrow().contains(class))
+        {
+            "org.codehaus.groovy.runtime.HandleMetaClass"
+        } else {
+            "groovy.lang.ExpandoMetaClass"
+        }),
+        _ => None,
     })
 }
 
@@ -3835,6 +3880,11 @@ fn emc_register(mc: &Value, name: &str, clo: Value) {
     let Some((class, instance, statics)) = as_meta_class(mc) else {
         return;
     };
+    // An injection through a class's metaclass replaces its registry one; one
+    // through a value's `HandleMetaClass` is that value's own in Groovy.
+    if instance.is_none() && !is_value_meta_class(mc) {
+        EMC_CLASSES.with(|e| e.borrow_mut().insert(class.clone()));
+    }
     if name == "constructor" {
         EMC_CTORS.with(|m| m.borrow_mut().entry(class).or_default().push(clo));
         ANY_EMC.with(|a| a.set(true));
@@ -11067,6 +11117,9 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
             _ => {}
         }
     }
+    if method == "getMetaClass" && args.is_empty() {
+        return meta_class_of(&recv);
+    }
     if let ("respondsTo", [Value::Str(name), rest @ ..]) = (method, args.as_slice()) {
         if let Some(v) = responds_to(&recv, name, rest) {
             return v;
@@ -13841,11 +13894,20 @@ fn get_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
         }
     }
     if let Some((class, instance, _)) = as_meta_class(recv) {
+        if name == "theClass" {
+            return heap_push(HeapObj::ClassRef(class));
+        }
         if name == "static" {
+            // Asking a class metaclass for its static view installs an
+            // `ExpandoMetaClass` for the class.
+            if instance.is_none() {
+                EMC_CLASSES.with(|e| e.borrow_mut().insert(class.clone()));
+            }
             return heap_push(HeapObj::MetaClass {
                 class,
                 instance,
                 statics: true,
+                of_value: false,
             });
         }
         return heap_push(HeapObj::EmcSlot {
@@ -15300,8 +15362,10 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             items: a.to_vec(),
             pos: 0,
         }),
+        // `DefaultGroovyMethods.iterator(Object)` walks `asCollection`, which is
+        // the `ArrayList` of a string's characters.
         (Value::Str(s), "iterator") => heap_push(HeapObj::Iter {
-            class: "java.util.Iterator",
+            class: "java.util.ArrayList$Itr",
             items: s.chars().map(|c| Value::str(c.to_string())).collect(),
             pos: 0,
         }),

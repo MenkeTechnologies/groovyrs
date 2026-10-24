@@ -357,7 +357,9 @@ reported as parse or compile errors, never silently mis-run.
   name (`r.'@a:k'`), answers `namespaceURI()` / `lookupNamespace(p)` and a
   `NamespaceAwareHashMap` of attributes (`{uri}local` keys, no `xmlns`);
   a parser names nodes with `groovy.namespace.QName`s (`{urn:d}r`,
-  `localPart`, `prefix`, `==` against `prefix:local`), and `new
+  `localPart`, `prefix`, `==` against `prefix:local`) and keys a namespaced
+  attribute by its `QName`, whose `equals`, `matches` (with `*` wildcards),
+  `hashCode` and `QName.valueOf` follow `groovy.namespace.QName`, and `new
   XmlSlurper(false, false)` / `XmlParser(false, false)` keep names as written.
   Malformed text raises Xerces' messages, and the `[Fatal Error] :line:col:`
   line on standard error names Xerces' column.
@@ -1096,8 +1098,10 @@ JVM 21.0.12):
   prefixed name (`'x:item'(…)`).
 - `XmlSlurper` / `XmlParser`: `setKeepIgnorableWhitespace`, `GPathResult`
   `replaceNode`/`appendNode`, `XmlUtil.serialize`, DTDs and validation are not
-  modeled. A parser `attributes()` map keys a namespaced attribute by the
-  string `{uri}local` where Groovy's key is a `QName`. `node.'**'` on a parser
+  modeled. A `QName` map key is stored by namespace and local part, and the
+  first `QName` stored under that pair is the key every map answers for it, so
+  two maps keyed by `QName('u', 'l', 'p')` and `QName('u', 'l')` report one prefix
+  (Groovy keeps each map's own). `node.'**'` on a parser
   node walks elements only (Groovy's `depthFirst()` also lists mixed-content
   text, and `depthFirst()` itself does here).
 - `Date` / `TimeZone`: the default zone is the region `$TZ` or `/etc/localtime`

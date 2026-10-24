@@ -602,11 +602,14 @@ fn node_name(id: u32) -> String {
     with_node(id, |n| n.local.clone())
 }
 
-/// A parser node's `name()`: a `QName` in a namespace-aware parse, else the
-/// name as written.
+/// A parser node's `name()`: a `QName` for an element in a namespace, the
+/// local name for one in none, and the name as written when the parse is not
+/// namespace-aware (`XmlParser.getElementName`).
 fn parser_name(id: u32) -> Value {
     with_node(id, |n| {
-        if n.aware {
+        if n.aware && n.uri.is_empty() {
+            Value::str(n.local.clone())
+        } else if n.aware {
             wrap(XmlVal::QName {
                 uri: n.uri.clone(),
                 local: n.local.clone(),
@@ -760,6 +763,28 @@ fn attrs_map(id: u32, linked: bool) -> Value {
             .collect()
     });
     if linked {
+        // `XmlParser` keys a namespaced attribute by its `QName`.
+        let keys: Vec<String> = with_node(id, |n| {
+            n.attrs
+                .iter()
+                .map(|a| {
+                    if a.uri.is_empty() {
+                        return a.key();
+                    }
+                    let prefix = a.qname.split_once(':').map_or("", |(p, _)| p);
+                    mapkey::encode(&wrap(XmlVal::QName {
+                        uri: a.uri.clone(),
+                        local: a.local.clone(),
+                        prefix: prefix.to_string(),
+                    }))
+                })
+                .collect()
+        });
+        let entries = keys
+            .into_iter()
+            .zip(entries)
+            .map(|(k, (_, v))| (k, v))
+            .collect();
         return gmap_kind(entries, MapKind::Linked);
     }
     // `XmlSlurper.startElement` adds the attributes last to first, which
@@ -970,6 +995,7 @@ pub(super) fn property(v: &Value, name: &str) -> Option<Value> {
             "localPart" => local.clone(),
             "namespaceURI" => uri.clone(),
             "prefix" => prefix.clone(),
+            "qualifiedName" => qualified_name(prefix, local),
             _ => return None,
         }));
     }
@@ -1055,19 +1081,18 @@ pub(super) fn dispatch(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) 
             return Some(parse_result(vm, &x, &text));
         }
         (XmlVal::Slurper(_) | XmlVal::Parser(_), ..) => return None,
-        (XmlVal::QName { .. }, "matches" | "equals", [other]) => {
+        (XmlVal::QName { .. }, "equals", [other]) => {
             return Some(Value::bool(qname_equal(recv, other).unwrap_or(false)));
+        }
+        (XmlVal::QName { .. }, "matches", [other]) => {
+            return Some(Value::bool(qname_matches(recv, other).unwrap_or(false)));
         }
         (XmlVal::QName { uri, local, prefix }, _, []) => {
             return Some(match method {
                 "getLocalPart" => Value::str(local.clone()),
                 "getNamespaceURI" => Value::str(uri.clone()),
                 "getPrefix" => Value::str(prefix.clone()),
-                "getQualifiedName" => Value::str(if prefix.is_empty() {
-                    local.clone()
-                } else {
-                    format!("{prefix}:{local}")
-                }),
+                "getQualifiedName" => Value::str(qualified_name(prefix, local)),
                 "toString" => Value::str(text(&x)?),
                 _ => return None,
             })
@@ -1088,8 +1113,9 @@ pub(super) fn dispatch(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) 
         return Some(match (method, args) {
             ("name", []) => parser_name(id),
             ("attributes", []) => attrs_map(id, true),
-            ("attribute", [n]) => parser_attr(id, &groovy_str(n))
-                .map(Value::str)
+            // `attributes().get(key)`: a namespaced attribute answers its `QName`.
+            ("attribute", [n]) => omap_get(&attrs_map(id, true), &mapkey::encode(n))
+                .flatten()
                 .unwrap_or(Value::Undef),
             ("text", []) => Value::str(node_text(id)),
             ("value" | "children", []) => node_value(id),
@@ -1300,9 +1326,10 @@ fn gpath_method(
     })
 }
 
-/// `QName.equals`: another `QName` with the same namespace and local name, or
-/// the string of its qualified name (`prefix:local`, the local name alone
-/// when it has no prefix). `None` when `a` is no `QName`.
+/// `QName.equals`: another `QName` with the same namespace and local part, or
+/// a `prefix:local` string whose prefix is this name's prefix or namespace.
+/// A string without a `:` (or ending in one) is never equal. `None` when `a`
+/// is no `QName`.
 pub(super) fn qname_equal(a: &Value, b: &Value) -> Option<bool> {
     let XmlVal::QName { uri, local, prefix } = as_xml(a)? else {
         return None;
@@ -1313,13 +1340,104 @@ pub(super) fn qname_equal(a: &Value, b: &Value) -> Option<bool> {
     {
         return Some(uri == u2 && local == l2);
     }
-    if !matches!(b, Value::Str(_)) {
+    let Value::Str(s) = b else {
+        return Some(false);
+    };
+    Some(match split_qualified(s) {
+        Some((p, l)) => (p == prefix || p == uri) && l == local,
+        None => false,
+    })
+}
+
+/// `QName.matches`: [`qname_equal`] with `*` as a wildcard namespace,
+/// prefix or local part, and a bare local name matching an unprefixed name.
+fn qname_matches(a: &Value, b: &Value) -> Option<bool> {
+    let XmlVal::QName { uri, local, prefix } = as_xml(a)? else {
+        return None;
+    };
+    let wild = |x: &str, y: &str| x == y || x == "*" || y == "*";
+    if let Some(XmlVal::QName {
+        uri: u2, local: l2, ..
+    }) = as_xml(b)
+    {
+        return Some(wild(&uri, &u2) && wild(&local, &l2));
+    }
+    let Value::Str(s) = b else {
+        return Some(false);
+    };
+    if s.is_empty() {
         return Some(false);
     }
-    let s = groovy_str(b);
-    Some(if prefix.is_empty() {
-        s == local
-    } else {
-        s == format!("{prefix}:{local}")
+    if !s.contains(':') && prefix.is_empty() {
+        return Some(**s == local);
+    }
+    Some(match split_qualified(s) {
+        Some((p, l)) => (p == prefix || p == uri || p == "*") && (l == local || l == "*"),
+        None => false,
     })
+}
+
+/// A `prefix:local` string split at its last `:`; `None` without one, or
+/// with nothing after it.
+fn split_qualified(s: &str) -> Option<(&str, &str)> {
+    let (p, l) = s.rsplit_once(':')?;
+    (!l.is_empty()).then_some((p, l))
+}
+
+/// `QName.valueOf`: `{uri}local`, or a bare local name.
+fn qname_value_of(text: &str) -> Result<Value, &'static str> {
+    const INVALID: &str = "invalid QName literal";
+    if text.is_empty() {
+        return Err(INVALID);
+    }
+    let Some(rest) = text.strip_prefix('{') else {
+        return Ok(wrap(XmlVal::QName {
+            uri: String::new(),
+            local: text.to_string(),
+            prefix: String::new(),
+        }));
+    };
+    match rest.find('}') {
+        Some(end) if end + 1 < rest.len() => Ok(wrap(XmlVal::QName {
+            uri: rest[..end].to_string(),
+            local: rest[end + 1..].to_string(),
+            prefix: String::new(),
+        })),
+        _ => Err(INVALID),
+    }
+}
+
+/// `QName.getQualifiedName`: `prefix:local`, or the local part alone.
+fn qualified_name(prefix: &str, local: &str) -> String {
+    if prefix.is_empty() {
+        local.to_string()
+    } else {
+        format!("{prefix}:{local}")
+    }
+}
+
+/// `QName`'s static methods.
+pub(super) fn static_call(vm: &mut VM, method: &str, args: &[Value]) -> Option<Value> {
+    match (method, args) {
+        ("valueOf", [text]) => Some(match qname_value_of(&groovy_str(text)) {
+            Ok(v) => v,
+            Err(message) => {
+                raise(vm, "IllegalArgumentException", message);
+                Value::Undef
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// `QName.hashCode`: `29 * namespaceURI.hashCode() + localPart.hashCode()`.
+pub(super) fn qname_hash(v: &Value) -> Option<i32> {
+    let XmlVal::QName { uri, local, .. } = as_xml(v)? else {
+        return None;
+    };
+    Some(
+        string_hash(&uri)
+            .wrapping_mul(29)
+            .wrapping_add(string_hash(&local)),
+    )
 }

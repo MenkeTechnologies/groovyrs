@@ -51,6 +51,17 @@ pub(super) fn encode(v: &Value) -> String {
                 });
                 return enc;
             }
+            // A `QName` equals and hashes by namespace and local part, so
+            // `QName('u', 'l', 'p')` finds the entry `QName('u', 'l')` keys.
+            if let Some(xml::XmlVal::QName { uri, local, .. }) = xml::as_xml(v) {
+                let enc = format!("{MARK}q{uri}{MARK}{local}");
+                OBJECTS.with(|o| {
+                    o.borrow_mut()
+                        .entry(enc.clone())
+                        .or_insert_with(|| v.clone());
+                });
+                return enc;
+            }
             if let Some(f) = as_float_handle(v) {
                 return format!("{MARK}F{:08x}", f.to_bits());
             }

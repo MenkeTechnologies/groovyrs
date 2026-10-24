@@ -7993,6 +7993,13 @@ fn inspect_shape(v: &Value) -> String {
     if let Some((_, text)) = as_buffer(v) {
         return format!("\"{}\"", inspect_escape(&text, '"'));
     }
+    // A `QName` inspects as its `toString`.
+    if let Some(text) = xml::as_xml(v)
+        .and_then(|x| xml::text(&x))
+        .filter(|_| xml::qname_hash(v).is_some())
+    {
+        return text;
+    }
     if as_gstring(v).is_some() {
         return format!("\"{}\"", inspect_escape(&groovy_str(v), '"'));
     }
@@ -8452,6 +8459,9 @@ fn shape_hash_code(v: &Value) -> i32 {
     if let Some((msb, lsb)) = as_uuid(v) {
         return uuid_hash(msb, lsb);
     }
+    if let Some(h) = xml::qname_hash(v) {
+        return h;
+    }
     // `Optional.hashCode` is `Objects.hashCode(value)`: `0` when empty.
     if let Some(o) = as_optional(v) {
         return o.map_or(0, |x| object_hash_code(&x));
@@ -8635,6 +8645,10 @@ fn value_is_a(value: &Value, class: &str) -> bool {
     }
     // Built-in Groovy/Java types (short or common fully-qualified names).
     let short = class.rsplit('.').next().unwrap_or(class);
+    // A `QName` is a `Serializable` value class of its own.
+    if let Some(name @ "groovy.namespace.QName") = xml::class_name(value) {
+        return class == name || matches!(short, "QName" | "Object" | "Serializable");
+    }
     if let Some(answer) = seq::is_a(value, short) {
         return answer;
     }
@@ -10921,6 +10935,10 @@ fn xml_equal(a: &Value, b: &Value) -> Option<bool> {
     }
     if let Some(eq) = xml::qname_equal(a, b) {
         return Some(eq);
+    }
+    // Nothing else equals a `QName`.
+    if xml::qname_equal(b, a).is_some() {
+        return Some(false);
     }
     let (view, other) = match (xml::gpath_text(a), xml::gpath_text(b)) {
         (Some(x), Some(y)) => return Some(x == y),
@@ -18345,6 +18363,11 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
     }
     if (class, method) == ("Tuple", "tuple") {
         return seq::tuple_of(args);
+    }
+    if class == "QName" {
+        if let Some(v) = xml::static_call(vm, method, args) {
+            return Some(v);
+        }
     }
     if matches!(
         class,

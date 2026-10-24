@@ -4835,3 +4835,106 @@ Asia/Kolkata raw=19800000 save=0 use=false
 "####;
     check(src, expected);
 }
+
+/// `XmlParser` keys a namespaced attribute by its `QName`, which equals,
+/// matches and hashes as `groovy.namespace.QName` does: by namespace and local
+/// part, a `prefix:local` string with the prefix or the namespace, `*`
+/// wildcards in `matches` only.
+#[test]
+fn round9_qname_attribute_keys() {
+    let src = r####"import groovy.xml.XmlParser
+import groovy.xml.XmlSlurper
+import groovy.namespace.QName
+def x = new XmlParser().parseText('<r xmlns:a="urn:a"><e a:k="1" b="2"/></r>')
+def at = x.e[0].attributes()
+println at.getClass().name
+println at.keySet()*.getClass()*.name
+println at.keySet()*.toString()
+println at[new QName('urn:a', 'k')]
+println at[new QName('urn:a', 'k', 'zz')]
+println at['{urn:a}k']
+println at['a:k']
+println at.containsKey(new QName('urn:a', 'k'))
+at.each { k, v -> println "${k.getClass().simpleName} $k=$v" }
+println at.collect { k, v -> k instanceof QName ? k.prefix : '-' }
+def k = at.keySet().iterator().next()
+println([k.localPart, k.namespaceURI, k.prefix, k.qualifiedName])
+println(k == new QName('urn:a', 'k', 'q'))
+println(k.equals('a:k'))
+println(k.equals('urn:a:k'))
+println(k.matches('*:k'))
+println(k.hashCode() == new QName('urn:a', 'k').hashCode())
+println at
+println x.e[0]
+println at.inspect()
+def y = new XmlParser(false, false).parseText('<e a:k="1"/>')
+println y.attributes().keySet()*.getClass()*.simpleName
+def s = new XmlSlurper().parseText('<r xmlns:a="urn:a"><e a:k="1" b="2"/></r>')
+println s.e[0].attributes()
+println s.e[0].attributes().keySet()*.getClass()*.simpleName
+def m = [:]; m[new QName('u', 'l')] = 1; m[new QName('u', 'l', 'p')] = 2
+println m
+println m.size()
+def q2 = new QName('k')
+println([q2 == 'k', q2.equals('k'), q2.matches('k'), q2.equals(':k'), q2.matches('*:k'), q2.matches(':k')])
+def r2 = new QName('urn:a', 'k', 'a')
+println([r2 == 'a:k', r2.equals('urn:a:k'), r2.matches('urn:a:k'), r2.matches('*:k'), r2.matches('a:*'), r2.matches(new QName('*', 'k')), r2.equals(new QName('*', 'k')), r2.matches('k'), r2.equals('a:'), r2.matches(new QName('urn:a', '*'))])
+println(new QName('', 'k', 'p').matches('k'))
+println([q2.hashCode(), r2.hashCode(), new QName('urn:a','k').hashCode()])
+println(r2 instanceof QName)
+println(r2.qualifiedName)
+println(q2.qualifiedName)
+println(QName.valueOf('{urn:x}y').namespaceURI)
+println(QName.valueOf('y').localPart)
+println r2.class.name
+def m2 = [(r2): 1]
+println m2[new QName('urn:a', 'k')]
+println m2.keySet()[0].prefix
+println('a:k' == r2)
+println x.e[0].attribute('{urn:a}k')
+"####;
+    let expected = r####"java.util.LinkedHashMap
+[groovy.namespace.QName, java.lang.String]
+[{urn:a}k, b]
+1
+1
+null
+null
+true
+QName {urn:a}k=1
+String b=2
+[a, -]
+[k, urn:a, a, a:k]
+true
+true
+true
+true
+true
+[{urn:a}k:1, b:2]
+e[attributes={{urn:a}k=1, b=2}; value=[]]
+[{urn:a}k:'1', 'b':'2']
+[String]
+[b:2, {urn:a}k:1]
+[String, String]
+[{u}l:2]
+1
+[false, false, true, true, true, true]
+[true, true, true, true, true, true, false, false, false, true]
+false
+[107, -1059850845, -1059850845]
+true
+a:k
+k
+urn:x
+y
+groovy.namespace.QName
+1
+a
+false
+null
+"####;
+    check(src, expected);
+    // An element in no namespace is named by a `String` (`XmlParser.getElementName`).
+    let src = "def x = new groovy.xml.XmlParser().parseText('<r><e/></r>')\nprintln x.name().getClass().name\nprintln(x.name() == 'r')\nprintln(x.e[0].name() == 'e')\n";
+    check(src, "java.lang.String\ntrue\ntrue\n");
+}

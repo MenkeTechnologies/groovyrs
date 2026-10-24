@@ -6322,3 +6322,150 @@ FFFFFFFFFFFFFFFF
 "####;
     check(src, expected);
 }
+
+/// `round()` answers a `BigDecimal` for a `BigDecimal` (`setScale(0,
+/// HALF_UP)`), a `Long` for a `Double` and an `Integer` for a `Float`; the
+/// division, scale, overflow, `?=`, `?[]`, multiple-assignment and range forms
+/// beside it already agreed.
+#[test]
+fn round10_round_types_and_numeric_edges() {
+    let src = r####"println 1.5.round().getClass().name
+println 2.5.round()
+println((-2.5).round())
+println 1.25.round(1)
+println 1.25.round(1).getClass().name
+println 2.5d.round().getClass().name
+println 2.5f.round().getClass().name
+println 3.7G.round().getClass().name
+println 1.5.setScale(0, java.math.RoundingMode.HALF_UP).getClass().name
+"####;
+    let expected = r####"java.math.BigDecimal
+3
+-3
+1.3
+java.math.BigDecimal
+java.lang.Long
+java.lang.Integer
+java.math.BigDecimal
+java.math.BigDecimal
+"####;
+    check(src, expected);
+    let src = r####"def r = { c -> try { def v = c(); "${v} ${v?.getClass()?.simpleName}" } catch (e) { e.class.simpleName + ': ' + e.message } }
+println r { 1.0 / 0 }
+println r { 1 / 0 }
+println r { 1.0d / 0 }
+println r { 10.intdiv(0) }
+println r { 2.0G.divide(3) }
+println r { 2.0.divide(3G, 5, java.math.RoundingMode.HALF_UP) }
+println r { (2.0 / 3).precision() }
+println r { 1e3 }
+println r { 1.23e-5 / 2 }
+println r { 0.1 + 0.2 }
+println r { 0.1d + 0.2d }
+println r { 1.0 * 1.00 }
+println r { (1.0 * 1.00).scale() }
+println r { 3.toBigDecimal() / 4 }
+println r { 1 / 8 }
+println r { 1 / 7 }
+println r { -1 / 7 }
+println r { 1.000 / 2 }
+println r { 100 / 10 }
+println r { (100 / 10).scale() }
+println r { 1.5.round() }
+println r { 2.5.setScale(0, java.math.RoundingMode.HALF_EVEN) }
+println r { (-7) % 3 }
+println r { (-7).mod(3) }
+println r { 7.5 % 2 }
+println r { Long.MAX_VALUE * 2 }
+println r { Integer.MIN_VALUE - 1 }
+println r { -Integer.MIN_VALUE }
+println r { Math.abs(Integer.MIN_VALUE) }
+println r { (byte) 127 + (byte) 1 }
+println r { 'a' * 3 }
+println r { [1, 2] * 2 }
+println r { def (a, b) = [1]; [a, b] }
+println r { def a, b; (a, b) = 'xy'; [a, b] }
+println r { def x = 1; def y = 2; (x, y) = [y, x]; [x, y] }
+println r { def m = [a: [b: 1]]; m?.a?.b }
+println r { def n = null; n?.a?.b }
+println r { def l = null; l?[0] }
+println r { def l = [[1, 2]]; l?[0]?[1] }
+println r { def s = null; s ?= 'v'; s }
+println r { def s = ''; s ?= 'v'; s }
+println r { def m = [:]; m.k ?= 3; m }
+println r { def l = [null]; l[0] ?= 4; l }
+println r { (1..3).collect { it } as int[] }
+println r { (1..10).findAll { it % 3 == 0 } }
+println r { ('a'..'e')[1..-2] }
+println r { (1..10)[-1] }
+println r { (1..<1).toList() }
+println r { def x = 5; x in 1..10 }
+println r { (1..10).every { it > 0 } }
+println r { (10..1).find { it < 5 } }
+println r { (1..4).inject { a, b -> a * b } }
+println r { (1..3).withIndex().collect { v, i -> v * i } }
+println r { 1..3 == [1, 2, 3] }
+println r { (1..3).equals([1, 2, 3]) }
+println r { [1, 2, 3] == (1..3) }
+println r { (1..3).hashCode() == [1, 2, 3].hashCode() }
+"####;
+    let expected = r####"ArithmeticException: Division by zero
+ArithmeticException: Division by zero
+Infinity Double
+ArithmeticException: / by zero
+ArithmeticException: Non-terminating decimal expansion; no exact representable decimal result.
+0.66667 BigDecimal
+10 Integer
+1E+3 BigDecimal
+0.00000615 BigDecimal
+0.3 BigDecimal
+0.30000000000000004 Double
+1.000 BigDecimal
+3 Integer
+0.75 BigDecimal
+0.125 BigDecimal
+0.1428571429 BigDecimal
+-0.1428571429 BigDecimal
+0.500 BigDecimal
+10 BigDecimal
+0 Integer
+2 BigDecimal
+2 BigDecimal
+-1 Integer
+2 Integer
+1.5 BigDecimal
+-2 Long
+2147483647 Integer
+-2147483648 Integer
+-2147483648 Integer
+128 Integer
+aaa String
+[1, 2, 1, 2] ArrayList
+[1, null] ArrayList
+[x, y] ArrayList
+[2, 1] ArrayList
+1 Integer
+null null
+null null
+2 Integer
+v String
+v String
+[k:3] LinkedHashMap
+[4] ArrayList
+[1, 2, 3] int[]
+[3, 6, 9] ArrayList
+[b, c, d] ArrayList
+10 Integer
+[] ArrayList
+true Boolean
+true Boolean
+4 Integer
+24 Integer
+[0, 2, 6] ArrayList
+true Boolean
+true Boolean
+true Boolean
+false Boolean
+"####;
+    check(src, expected);
+}

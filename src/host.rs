@@ -16581,7 +16581,8 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             float_text_to_decimal(vm, &decimal::format_double(*f))
         }
         (Value::Float(f), "abs") => Value::float(f.abs()),
-        (Value::Float(f), "round") if args.is_empty() => Value::int(java_round(*f)),
+        // `Double.round()` is `Math.round(double)`, a `long`.
+        (Value::Float(f), "round") if args.is_empty() => boxed::long_value(java_round(*f)),
         // `d.round(n)` keeps `n` decimal places and stays a `double`; `trunc(n)`
         // is the same cut without the rounding.
         (Value::Float(f), "round" | "trunc") => {
@@ -16666,9 +16667,12 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // `(-5.5f).abs()`, `5.55f.round(1)` and `5.55f.trunc()` are all
                 // `Float`. `round()` with no argument is not one of them — it
                 // answers an `int` for a `Float` where it answers a `long` for a
-                // `Double`, which is what the delegated `Double` arm already
-                // does here.
+                // `Double`.
                 "abs" if args.is_empty() => float_value(f.abs()),
+                // `Math.round(float)`, an `int` (saturating at its bounds).
+                "round" if args.is_empty() => Value::int(
+                    java_round(f64::from(f)).clamp(i64::from(i32::MIN), i64::from(i32::MAX)),
+                ),
                 "round" if args.len() == 1 => narrow_delegate(vm, f, method, args),
                 "trunc" => narrow_delegate(vm, f, method, args),
                 // `Float.equals(Object)` is typed and compares `floatToIntBits`,
@@ -16835,7 +16839,8 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         None => raise_missing_method(vm, recv, method, args),
                     }
                 }
-                "round" if args.is_empty() => Value::int(decimal::round_to_i64(&d)),
+                // `round()` is `setScale(0, HALF_UP)`: a `BigDecimal` in Groovy 6.
+                "round" if args.is_empty() => dec_value(decimal::round_half_up(&d, 0)),
                 // `round(n)` keeps `n` decimal places (half-up, Groovy's mode);
                 // `trunc(n)` cuts them off. Both stay `BigDecimal`s, except that
                 // the no-argument `trunc` answers a `BigInteger`.

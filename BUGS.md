@@ -399,7 +399,10 @@ reported as parse or compile errors, never silently mis-run.
 - **`ConfigSlurper`** — dotted and block assignments, `environments { env { … }
   }`, auto-created `ConfigObject`s, `flatten`, `toProperties`, `isSet`,
   `merge`, and literals, interpolation, arithmetic, Elvis and method calls
-  over earlier settings.
+  over earlier settings. A closure literal in the script is a closure value
+  whose body the config walker runs when it is called — inside a value
+  (`nums = (1..3).collect { it * 2 }`) or stored and called later — and it
+  reports the class Groovy generates (`Script_<md5 of the text>$_run_closure1`).
 - **`Expando`** — `properties`, `toString` / `equals` closures, and its
   metaclass's `respondsTo` / `hasProperty`.
 - **Strings and operators** — `\` line continuation in triple-quoted strings,
@@ -1081,9 +1084,12 @@ JVM 21.0.12):
   `List.contains`' `Long.equals(Integer)` cannot fail (Groovy: `false`). Casts
   to `byte`/`short`/`long` likewise answer `java.lang.Integer` from
   `getClass()` once the value leaves the expression the compiler sees.
-- `ConfigSlurper` walks the script itself (there is no run-time compiler): a
-  closure inside a config value (`nums = (1..3).collect { it * 2 }`), `new`,
-  and statements other than assignments, blocks and `def` locals fault.
+- `ConfigSlurper` walks the script itself (there is no run-time compiler):
+  `new`, loops, `switch`, `try` and statements other than assignments, blocks,
+  `def` locals, and `if`/`return` inside a closure body fault. A config
+  closure's `owner`, `delegate` and `thisObject` are not modeled (Groovy: the
+  script instance, or the enclosing block's closure), and it sees the `def`
+  locals as they were when it was created.
   `ConfigSlurper.parse(Class)`, `setBinding` and `registerConditionalBlock`
   are not modeled.
 - `JsonSlurper.parse` reads a `File`, a reader or a `byte[]`; a URL,

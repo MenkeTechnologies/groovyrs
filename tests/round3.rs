@@ -5033,3 +5033,117 @@ groovy.lang.ExpandoMetaClass$ExpandoMetaProperty
 "####;
     check(src, expected);
 }
+
+/// A closure literal in a `ConfigSlurper` script: run where a value uses it
+/// (`collect`, `sort`, `groupBy`), stored and called later, nested, with
+/// `return` and `if`, and named `Script_<md5 of the text>$_run_closureN` in
+/// the order Groovy generates its classes.
+#[test]
+fn round9_config_slurper_closures() {
+    let src = r####"def cfg = new ConfigSlurper().parse('''
+nums = (1..3).collect { it * 2 }
+evens = [1,2,3,4].findAll { it % 2 == 0 }
+name = "abc".collect { it.toUpperCase() }.join()
+total = [1,2,3].inject(0) { a, b -> a + b }
+sorted = [3,1,2].sort { a, b -> b <=> a }
+db { url = [h: 'x'].collectEntries { k, v -> [(k): v * 2] } }
+fn = { x -> x + 1 }
+''')
+println cfg.nums
+println cfg.evens
+println cfg.name
+println cfg.total
+println cfg.sorted
+println cfg.db.url
+println cfg.fn(41)
+println cfg.fn.getClass().name.replaceAll(/\d+/, 'N')
+"####;
+    let expected = r####"[2, 4, 6]
+[2, 4]
+ABC
+6
+[3, 2, 1]
+[h:xx]
+42
+Script_ebfeNeNaNdNbNcdefabNebdNaN$_run_closureN
+"####;
+    check(src, expected);
+    let src = r####"def text = '''
+a = { 1 }
+b { c = { 2 }; d = [1].collect { x -> { -> x } } }
+e = { -> { -> 3 } }
+'''
+def cfg = new ConfigSlurper().parse(text)
+println cfg.a.getClass().name
+println cfg.b.c.getClass().name
+println cfg.b.d[0].getClass().name
+println cfg.e.getClass().name
+println cfg.e().getClass().name
+println text.md5()
+println cfg.a()
+println cfg.e()()
+println cfg.b.d[0]()
+"####;
+    let expected = r####"Script_5d8e9711cf7a2a1057bb2841ffe39f33$_run_closure1
+Script_5d8e9711cf7a2a1057bb2841ffe39f33$_run_closure2$_closure4
+Script_5d8e9711cf7a2a1057bb2841ffe39f33$_run_closure2$_closure5$_closure6
+Script_5d8e9711cf7a2a1057bb2841ffe39f33$_run_closure3
+Script_5d8e9711cf7a2a1057bb2841ffe39f33$_run_closure3$_closure7
+5d8e9711cf7a2a1057bb2841ffe39f33
+1
+3
+1
+"####;
+    check(src, expected);
+    let src = r####"def cfg = new ConfigSlurper('prod').parse('''
+def base = 10
+factor = 3
+scaled = [1, 2].collect { it * factor + base }
+pick = { x -> if (x > 1) { return 'big' }; 'small' }
+twice = { f, v -> f(f(v)) }
+inc = { it + 1 }
+nested = [[1, 2], [3]].collect { row -> row.collect { c -> c * 10 } }
+server {
+  port = 8000
+  urls = ['a', 'b'].collect { "http://$it:$port" }
+}
+environments {
+  prod { mode = ['x'].collect { it.toUpperCase() } }
+}
+s = [3, 1, 2].sort { a, b -> a <=> b }
+any = [1, 2, 3].any { it > 2 }
+grp = ['ab', 'c', 'de'].groupBy { it.size() }
+idx = [5, 6].findIndexOf { it == 6 }
+''')
+println cfg.scaled
+println cfg.pick(1) + ' ' + cfg.pick(5)
+println cfg.twice(cfg.inc, 1)
+println cfg.inc(41)
+println cfg.nested
+println cfg.server.urls
+println cfg.mode
+println cfg.s
+println cfg.any
+println cfg.grp
+println cfg.idx
+println cfg.inc.maximumNumberOfParameters
+println cfg.pick.maximumNumberOfParameters
+println cfg.twice.parameterTypes.size()
+"####;
+    let expected = r####"[13, 16]
+small big
+3
+42
+[[10, 20], [30]]
+[http://a:8000, http://b:8000]
+[X]
+[1, 2, 3]
+true
+[2:[ab, de], 1:[c]]
+1
+1
+1
+2
+"####;
+    check(src, expected);
+}

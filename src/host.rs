@@ -964,8 +964,11 @@ pub fn set_closure_class_names(names: HashMap<u16, String>) {
 /// `K$_m_closure2`, `script$_run_closure2$_closure10`), or `None` for a
 /// closure a combinator derived.
 fn closure_class_name(meta: &ClosureMeta) -> Option<String> {
-    if meta.derived.is_some() {
-        return None;
+    if let Some(d) = &meta.derived {
+        return match &**d {
+            Derived::Config(c) => Some(c.class_name().to_string()),
+            _ => None,
+        };
     }
     let name = CLOSURE_CLASSES.with(|t| t.borrow().get(&meta.name_idx).cloned())?;
     Some(if name.starts_with('$') {
@@ -2780,6 +2783,9 @@ enum Derived {
     /// Groovy rendering of the arguments. The cache lives in [`MEMO`], keyed by
     /// this closure's own heap id, so it is shared by every holder of the handle.
     Memoized { base: Value },
+    /// A closure literal in a `ConfigSlurper` script, whose body the config
+    /// walker runs (see [`config::call_closure`]).
+    Config(std::rc::Rc<config::ConfigClosure>),
 }
 
 /// A class instance: its class id (into `CLASSES`) and its field values keyed by
@@ -5210,6 +5216,7 @@ fn derived_closure(params: u8, varargs: bool, d: Derived) -> Value {
         }
         Derived::Composed { first, .. } => base_min(first),
         Derived::Memoized { base } => base_min(base),
+        Derived::Config(c) => c.min_arity() as u8,
     }
     .min(params);
     heap_push(HeapObj::Closure(ClosureMeta {
@@ -5290,6 +5297,7 @@ fn invoke_derived(
             MEMO.with(|m| m.borrow_mut().insert((id, key), out.clone()));
             Ok(out)
         }
+        Derived::Config(c) => config::call_closure(vm, c, args),
     }
 }
 

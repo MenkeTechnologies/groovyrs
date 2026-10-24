@@ -378,4 +378,21 @@ impl TzData {
     pub(super) fn uses_dst(&self) -> bool {
         self.rule.as_ref().is_some_and(|r| r.dst.is_some())
     }
+
+    /// How far the recurring rule's daylight time is from its standard time,
+    /// in seconds, whichever of the two the tz source calls standard.
+    pub(super) fn rule_savings(&self) -> Option<i64> {
+        let rule = self.rule.as_ref()?;
+        let (dst, _, _) = rule.dst.as_ref()?;
+        Some((dst.offset - rule.std.offset).abs())
+    }
+
+    /// The second each period starts at: `t` for the one in effect at UTC
+    /// second `t`, then every later transition of the table.
+    pub(super) fn periods_from(&self, t: i64) -> Vec<i64> {
+        let i = self.transitions.partition_point(|&x| x <= t);
+        std::iter::once(t)
+            .chain(self.transitions[i..].iter().copied())
+            .collect()
+    }
 }

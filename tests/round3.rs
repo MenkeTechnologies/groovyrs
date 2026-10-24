@@ -4766,3 +4766,72 @@ fn round8_duplicate_declarations_are_compile_errors() {
     let fine = "if (true) { def y = 1 }; def y = 2\nfor (i in 1..2) { def z = i }; for (i in 1..2) { def z = i }\nfor (int k = 0; k < 1; k++) {}; for (int k = 0; k < 1; k++) {}\ntry { def e = 1 } catch (e) { }\nprintln y";
     check(fine, "2\n");
 }
+
+/// `java.util.TimeZone` is the JDK's `ZoneInfo`: an instant is daylight time
+/// when its offset is not the JDK's standard offset, which folds negative
+/// daylight saving into the standard offset of each zone line using it (Dublin
+/// 1968-71, Windhoek since 1990, Casablanca since 2018), and the metazone's
+/// explicit daylight offset names it in a pattern (Inuvik 1975). Before 1900
+/// the raw offset applies.
+#[test]
+fn round9_zoneinfo_standard_offsets() {
+    if !tz_database_present() {
+        return;
+    }
+    let src = r####"def ms = ['1969-06-01': -18446400000L, '1970-01-15': 1252800000L, '1972-01-15': 64324800000L,
+  '1995-07-15': 805809600000L, '2020-01-15': 1579089600000L, '2020-07-15': 1594814400000L,
+  '1946-07-15': -740491200000L, '1947-01-15': -724593600000L, '1960-01-15': -314366400000L,
+  '2024-03-20': 1710936000000L, '2024-07-01': 1719835200000L, '1975-07-01': 173448000000L,
+  '1975-12-01': 186667200000L, '1990-07-01': 646833600000L, '1890-06-01': -2511432000000L,
+  '1910-06-01': -1880366400000L]
+[
+  ['Europe/Dublin', ['1969-06-01', '1970-01-15', '1972-01-15']],
+  ['Europe/London', ['1969-06-01', '1970-01-15', '1972-01-15']],
+  ['Africa/Windhoek', ['1995-07-15', '2020-01-15', '2020-07-15']],
+  ['Europe/Prague', ['1946-07-15', '1947-01-15', '1960-01-15']],
+  ['Africa/Casablanca', ['2024-03-20', '2024-07-01']],
+  ['America/Inuvik', ['1975-07-01', '1975-12-01', '1990-07-01']],
+  ['Africa/Abidjan', ['1890-06-01', '1910-06-01']],
+  ['Asia/Kolkata', ['1890-06-01']],
+].each { id, days ->
+  def z = TimeZone.getTimeZone(id)
+  println "$id raw=${z.rawOffset} save=${z.DSTSavings} use=${z.useDaylightTime()}"
+  days.each { d ->
+    def date = new Date(ms[d])
+    def c = Calendar.getInstance(z)
+    c.time = date
+    println "  $d ${date.format('z Z', z)} ${z.inDaylightTime(date)} ${z.getOffset(date.time)} zo=${c.get(Calendar.ZONE_OFFSET)} dst=${c.get(Calendar.DST_OFFSET)}"
+  }
+}
+"####;
+    let expected = r####"Europe/Dublin raw=0 save=3600000 use=true
+  1969-06-01 IST +0100 true 3600000 zo=0 dst=3600000
+  1970-01-15 IST +0100 true 3600000 zo=0 dst=3600000
+  1972-01-15 GMT +0000 false 0 zo=0 dst=0
+Europe/London raw=0 save=3600000 use=true
+  1969-06-01 GMT +0100 false 3600000 zo=3600000 dst=0
+  1970-01-15 GMT +0100 false 3600000 zo=3600000 dst=0
+  1972-01-15 GMT +0000 false 0 zo=0 dst=0
+Africa/Windhoek raw=3600000 save=0 use=false
+  1995-07-15 CAT +0100 false 3600000 zo=3600000 dst=0
+  2020-01-15 WAT +0200 true 7200000 zo=3600000 dst=3600000
+  2020-07-15 WAT +0200 true 7200000 zo=3600000 dst=3600000
+Europe/Prague raw=3600000 save=3600000 use=true
+  1946-07-15 CEST +0200 true 7200000 zo=3600000 dst=3600000
+  1947-01-15 CET +0000 false 0 zo=0 dst=0
+  1960-01-15 CET +0100 false 3600000 zo=3600000 dst=0
+Africa/Casablanca raw=0 save=0 use=false
+  2024-03-20 WET +0000 false 0 zo=0 dst=0
+  2024-07-01 WEST +0100 true 3600000 zo=0 dst=3600000
+America/Inuvik raw=-25200000 save=0 use=false
+  1975-07-01 MST -0700 true -25200000 zo=-28800000 dst=3600000
+  1975-12-01 MST -0800 false -28800000 zo=-28800000 dst=0
+  1990-07-01 MDT -0600 true -21600000 zo=-25200000 dst=3600000
+Africa/Abidjan raw=0 save=0 use=false
+  1890-06-01 GMT +0000 false 0 zo=0 dst=0
+  1910-06-01 GMT -0016 false -968000 zo=-968000 dst=0
+Asia/Kolkata raw=19800000 save=0 use=false
+  1890-06-01 IST +0530 false 19800000 zo=19800000 dst=0
+"####;
+    check(src, expected);
+}

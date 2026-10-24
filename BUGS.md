@@ -367,6 +367,18 @@ reported as parse or compile errors, never silently mis-run.
   (normalized to `GMT+05:00`) and the JDK's legacy three-letter ids
   (`PST`, `EST`), and formats `z` with the JDK's own short names (dumped from
   the oracle into `src/host/meta/zones.tsv` by `gen_zones.groovy`).
+  A zone answers as the JDK's `ZoneInfo` does: the tz database gives the
+  offset, and an instant is daylight time when that offset is not the JDK's
+  standard offset — dumped into the same table, because the JDK compiles the
+  tz source with negative daylight saving folded into the standard offset of
+  each zone line that uses it (Irish Standard Time 1968-71, Windhoek's winter
+  time since 1990, Morocco since 2018), which neither the rearguard nor the
+  vanguard tz build preserves. Before 1900 the raw offset applies, a pattern's
+  `z` tests the CLDR metazone's explicit daylight offset where it has one,
+  and `getRawOffset`, `getDSTSavings`, `useDaylightTime` and
+  `observesDaylightTime` follow `ZoneInfo`. Checked against the oracle over
+  every zone id the system database and the JDK share, sampled every five
+  days from 1890 to 2100.
   `toTimestamp()` / `new java.sql.Timestamp(ms)` and `Calendar.getInstance` /
   `new GregorianCalendar` / `toCalendar()` are modeled.
 - **`respondsTo` on script classes and `CachedClass`** — a script class answers
@@ -1088,10 +1100,11 @@ JVM 21.0.12):
   string `{uri}local` where Groovy's key is a `QName`. `node.'**'` on a parser
   node walks elements only (Groovy's `depthFirst()` also lists mixed-content
   text, and `depthFirst()` itself does here).
-- `Date` / `TimeZone`: the default zone is the C library's. `Europe/Dublin`'s
-  Irish Standard Time is daylight time, as the JDK reports it; that correction is
-  specific to Ireland, so any other zone the JDK normalizes the same way is
-  reported the tz database's way round.
+- `Date` / `TimeZone`: the default zone is the region `$TZ` or `/etc/localtime`
+  names, or the C library's when no tz-database file backs it. The standard
+  offsets come from the JDK's tz build (2026e for the pinned JDK 21.0.13), the
+  offsets from the system database, so the two must be the same tz release
+  for a zone whose standard offset changed between them to agree.
   `Calendar` covers `get`/`set`/`add`/`clear`, the
   field constants and `getActualMaximum`; week fields, `roll` and lenient
   overflow beyond `set`/`add` are not modeled, nor are `Date.parse` text

@@ -1,7 +1,8 @@
 //! `java.util.Date`, `java.util.TimeZone` and `groovy.time.TimeCategory`.
 //!
-//! A `Date` is its millisecond instant. The local zone is the C library's
-//! (`localtime_r` / `mktime`), which is the zone the JVM defaults to as well; an
+//! A `Date` is its millisecond instant. The local zone is the region `$TZ` or
+//! `/etc/localtime` names — the zone the JVM defaults to as well — or the C
+//! library's (`localtime_r`) when no tz-database file backs it; an
 //! explicit `TimeZone` is a fixed `GMT±hh:mm` offset, a region from the
 //! system tz database (see [`tz`]), or `GMT` for an id neither knows, as the
 //! JDK answers. `java.sql.Timestamp` and `GregorianCalendar` ride the same
@@ -24,7 +25,8 @@ pub(super) struct Zone {
 
 #[derive(Clone)]
 enum ZoneKind {
-    /// The JVM default: the C library's local zone.
+    /// The JVM default when no tz-database region backs it: the C library's
+    /// local zone.
     Local,
     /// A fixed offset east of UTC, in seconds.
     Fixed(i64),
@@ -32,37 +34,60 @@ enum ZoneKind {
     Region(std::rc::Rc<tz::TzData>),
 }
 
+/// What a zone answers at one instant.
+struct ZoneAt {
+    /// The UTC offset, seconds east.
+    offset: i64,
+    /// The standard offset in effect, seconds east.
+    std: i64,
+    /// `inDaylightTime`: the offset is not the standard one.
+    dst: bool,
+    /// The short name `SimpleDateFormat`'s `z` prints.
+    format_name: String,
+    /// The short name `Date.toString` prints.
+    name: String,
+}
+
+/// `ZoneInfoFile.UTC1900`: `ZoneInfo`'s transition table starts here, and an
+/// earlier instant reads the zone's raw offset, as standard time.
+const UTC1900_MS: i64 = -2_208_988_800_000;
+/// `ZoneInfoFile.LDT2100`: a zone without a recurring rule ends its table with
+/// an entry at this local standard time, back to the raw offset.
+const LDT2100_SECS: i64 = 4_102_444_800;
+
 impl Zone {
     fn local() -> Zone {
-        Zone {
-            id: default_zone_id(),
-            kind: ZoneKind::Local,
-        }
+        let id = default_zone_id();
+        let kind = match tz::load(legacy_region(&id).unwrap_or(&id)) {
+            Some(data) if jdk_zone(&id).is_some() => ZoneKind::Region(data),
+            _ => ZoneKind::Local,
+        };
+        Zone { id, kind }
     }
 
-    /// The offset (seconds east of UTC), short name and daylight flag at
-    /// the instant `ms`.
-    fn at(&self, ms: i64) -> (i64, String, bool) {
+    /// The offset, standard offset, daylight flag and short names at the
+    /// instant `ms`.
+    fn at(&self, ms: i64) -> ZoneAt {
+        let plain = |offset: i64, name: String, dst: bool| ZoneAt {
+            offset,
+            std: if dst { offset - 3600 } else { offset },
+            dst,
+            format_name: name.clone(),
+            name,
+        };
         match &self.kind {
             ZoneKind::Local => {
                 let (off, abbr, dst) = local_offset(ms);
-                (off, jdk_short_name(&self.id, dst).unwrap_or(abbr), dst)
+                plain(off, jdk_short_name(&self.id, dst).unwrap_or(abbr), dst)
             }
-            ZoneKind::Fixed(off) => (*off, self.id.clone(), false),
-            ZoneKind::Region(data) => {
-                let mut lt = data.at(ms.div_euclid(1000));
-                // Ireland keeps negative daylight saving in the tz source: Irish
-                // Standard Time is its standard time and winter GMT the
-                // "daylight" one. The JDK's compiler turns that the right way up,
-                // so every `IST` stretch — the year-round one of 1968-71 too —
-                // is daylight time there.
-                if matches!(self.id.as_str(), "Europe/Dublin" | "Eire") && lt.abbr == "IST" {
-                    lt.dst = true;
+            ZoneKind::Fixed(off) => plain(*off, self.id.clone(), false),
+            ZoneKind::Region(data) => match jdk_zone(&self.id) {
+                Some(jz) => jz.at(data, ms),
+                None => {
+                    let lt = data.at(ms.div_euclid(1000));
+                    plain(lt.offset, java_short_name(&lt.abbr, lt.offset), lt.dst)
                 }
-                let name = jdk_short_name(&self.id, lt.dst)
-                    .unwrap_or_else(|| java_short_name(&lt.abbr, lt.offset));
-                (lt.offset, name, lt.dst)
-            }
+            },
         }
     }
 
@@ -71,16 +96,19 @@ impl Zone {
     fn instant_of_local(&self, local: i64) -> i64 {
         let mut guess = local;
         for _ in 0..3 {
-            let (off, _, _) = self.at(guess);
-            guess = local - off * 1000;
+            guess = local - self.at(guess).offset * 1000;
         }
         guess
     }
 
+    /// `getRawOffset()`, in seconds.
     fn raw_offset(&self) -> i64 {
         match &self.kind {
             ZoneKind::Fixed(off) => *off,
-            ZoneKind::Region(data) => data.raw_offset(),
+            ZoneKind::Region(data) => match jdk_zone(&self.id) {
+                Some(jz) => jz.raw_offset(),
+                None => data.raw_offset(),
+            },
             ZoneKind::Local => {
                 let now = now_millis();
                 let (off, _, dst) = local_offset(now);
@@ -92,20 +120,167 @@ impl Zone {
             }
         }
     }
+
+    /// `getDSTSavings()`, in seconds: what the recurring rule's daylight time
+    /// adds, or nothing for a zone without one.
+    fn dst_savings(&self) -> i64 {
+        match &self.kind {
+            ZoneKind::Region(data) => data.rule_savings().unwrap_or(0),
+            ZoneKind::Fixed(_) => 0,
+            ZoneKind::Local => i64::from(self.use_daylight_time()) * 3600,
+        }
+    }
+
+    /// `useDaylightTime()`: the zone has a recurring daylight-time rule.
+    fn use_daylight_time(&self) -> bool {
+        match &self.kind {
+            ZoneKind::Region(data) => data.uses_dst(),
+            ZoneKind::Fixed(_) => false,
+            ZoneKind::Local => {
+                local_offset(now_millis()).2 || local_offset(now_millis() + 182 * DAY).2
+            }
+        }
+    }
+
+    /// `observesDaylightTime()`: a recurring rule, or daylight time now or at
+    /// any later transition of the table.
+    fn observes_daylight_time(&self) -> bool {
+        if self.use_daylight_time() {
+            return true;
+        }
+        match &self.kind {
+            ZoneKind::Region(data) => {
+                let now = now_millis();
+                data.periods_from(now.div_euclid(1000))
+                    .into_iter()
+                    .any(|start| self.at(start * 1000).dst)
+            }
+            _ => false,
+        }
+    }
 }
 
-/// The JDK's own short names, dumped from the oracle by
-/// `meta/gen_zones.groovy`: id, standard name, daylight name.
+/// The JDK's own facts about each zone id, dumped from the oracle by
+/// `meta/gen_zones.groovy`: its short names, the explicit CLDR daylight
+/// offset `SimpleDateFormat` tests against, and its standard-offset history.
 const ZONE_NAMES: &str = include_str!("meta/zones.tsv");
 
+/// One `zones.tsv` row.
+struct JdkZone {
+    std_name: &'static str,
+    dst_name: &'static str,
+    /// The metazone's explicit daylight offset, seconds east.
+    explicit_dst: Option<i64>,
+    /// The first standard offset, then `(epoch second, offset)` per change.
+    std0: i64,
+    std_changes: Vec<(i64, i64)>,
+}
+
+impl JdkZone {
+    fn parse(fields: &[&'static str]) -> Option<JdkZone> {
+        let [_, std_name, dst_name, explicit, std0, changes @ ..] = fields else {
+            return None;
+        };
+        let explicit_dst = match *explicit {
+            "-" => None,
+            text => Some(parse_zone_offset(text)?),
+        };
+        let std_changes = changes
+            .iter()
+            .map(|c| {
+                let (t, off) = c.split_once(':')?;
+                Some((t.parse().ok()?, off.parse().ok()?))
+            })
+            .collect::<Option<_>>()?;
+        Some(JdkZone {
+            std_name,
+            dst_name,
+            explicit_dst,
+            std0: std0.parse().ok()?,
+            std_changes,
+        })
+    }
+
+    /// `ZoneInfoFile.getStandardOffset`: the standard offset at UTC second `t`.
+    fn std_at(&self, t: i64) -> i64 {
+        let i = self.std_changes.partition_point(|&(at, _)| at <= t);
+        match i {
+            0 => self.std0,
+            _ => self.std_changes[i - 1].1,
+        }
+    }
+
+    /// The last standard offset: `ZoneInfo`'s `rawOffset` field.
+    fn last_std(&self) -> i64 {
+        self.std_changes.last().map_or(self.std0, |&(_, off)| off)
+    }
+
+    /// `ZoneInfo.getRawOffset`: the last standard offset, or the one in
+    /// effect now while a standard-offset change is still to come
+    /// (`willGMTOffsetChange`).
+    fn raw_offset(&self) -> i64 {
+        let now = now_millis().div_euclid(1000);
+        match self.std_changes.last() {
+            Some(&(at, _)) if at > now => self.std_at(now),
+            _ => self.last_std(),
+        }
+    }
+
+    /// The zone at `ms` the way `ZoneInfo` answers: the tz database's offset,
+    /// daylight time wherever that offset is not the JDK's standard offset,
+    /// the raw offset before 1900, and the raw offset again after the 2100
+    /// closing entry of a zone with no recurring rule.
+    fn at(&self, data: &tz::TzData, ms: i64) -> ZoneAt {
+        let raw = self.last_std();
+        let past_table = !data.uses_dst() && ms.div_euclid(1000) >= LDT2100_SECS - raw;
+        let (offset, std) = if ms < UTC1900_MS || past_table {
+            (raw, raw)
+        } else {
+            let t = ms.div_euclid(1000);
+            (data.at(t).offset, self.std_at(t))
+        };
+        let dst = offset != std;
+        // `SimpleDateFormat` names daylight time by the metazone's explicit
+        // daylight offset when it has one, whatever the transition says.
+        let daylight = self.explicit_dst.map_or(dst, |d| d == offset);
+        let name = |daylight: bool| {
+            if daylight {
+                self.dst_name
+            } else {
+                self.std_name
+            }
+            .to_string()
+        };
+        ZoneAt {
+            offset,
+            std,
+            dst,
+            format_name: name(daylight),
+            name: name(dst),
+        }
+    }
+}
+
+/// `ZoneOffset.of` for the `+hh[:mm]` / `-hh[:mm]` forms, in seconds.
+fn parse_zone_offset(text: &str) -> Option<i64> {
+    let (sign, body) = match text.split_at_checked(1)? {
+        ("+", b) => (1, b),
+        ("-", b) => (-1, b),
+        _ => return None,
+    };
+    let mut parts = body.split(':');
+    let h: i64 = parts.next()?.parse().ok()?;
+    let m: i64 = parts.next().map_or(Some(0), |m| m.parse().ok())?;
+    Some(sign * (h * 3600 + m * 60))
+}
+
 thread_local! {
-    static ZONE_INDEX: RefCell<Option<HashMap<&'static str, (&'static str, &'static str)>>> =
+    static ZONE_INDEX: RefCell<Option<HashMap<&'static str, std::rc::Rc<JdkZone>>>> =
         const { RefCell::new(None) };
 }
 
-/// The short name (`z`) the JDK gives zone `id` in standard or daylight
-/// time. It does not change with history, so 1906 New York is `EST` too.
-fn jdk_short_name(id: &str, dst: bool) -> Option<String> {
+/// The JDK's row for zone `id`.
+fn jdk_zone(id: &str) -> Option<std::rc::Rc<JdkZone>> {
     ZONE_INDEX.with(|z| {
         let mut slot = z.borrow_mut();
         let index = slot.get_or_insert_with(|| {
@@ -113,15 +288,19 @@ fn jdk_short_name(id: &str, dst: bool) -> Option<String> {
                 .lines()
                 .filter(|l| !l.starts_with('#'))
                 .filter_map(|l| {
-                    let mut f = l.split('\t');
-                    Some((f.next()?, (f.next()?, f.next()?)))
+                    let fields: Vec<&'static str> = l.split('\t').collect();
+                    Some((*fields.first()?, std::rc::Rc::new(JdkZone::parse(&fields)?)))
                 })
                 .collect()
         });
-        index
-            .get(id)
-            .map(|(s, d)| if dst { d.to_string() } else { s.to_string() })
+        index.get(id).cloned()
     })
+}
+
+/// The short name (`z`) the JDK gives zone `id` in standard or daylight
+/// time. It does not change with history, so 1906 New York is `EST` too.
+fn jdk_short_name(id: &str, dst: bool) -> Option<String> {
+    jdk_zone(id).map(|z| if dst { z.dst_name } else { z.std_name }.to_string())
 }
 
 /// A tz abbreviation as Java's short zone name: a numeric one (`+04`) has no
@@ -197,6 +376,8 @@ struct Fields {
     weekday: i64, // 0 = Sunday
     offset_secs: i64,
     zone: String,
+    /// The name `Date.toString` prints, which reads the daylight flag alone.
+    date_zone: String,
 }
 
 pub(super) fn date_millis(v: &Value) -> Option<i64> {
@@ -328,7 +509,8 @@ fn local_offset(ms: i64) -> (i64, String, bool) {
 }
 
 fn fields(ms: i64, zone: &Zone) -> Fields {
-    let (offset, name, _) = zone.at(ms);
+    let at = zone.at(ms);
+    let offset = at.offset;
     let local = ms + offset * 1000;
     let days = local.div_euclid(DAY);
     let rem = local.rem_euclid(DAY);
@@ -343,7 +525,8 @@ fn fields(ms: i64, zone: &Zone) -> Fields {
         millis: rem % 1000,
         weekday: (days + 4).rem_euclid(7),
         offset_secs: offset,
-        zone: name,
+        zone: at.format_name,
+        date_zone: at.name,
     }
 }
 
@@ -373,7 +556,11 @@ const DAYS: [&str; 7] = [
 
 /// `SimpleDateFormat(pattern).format(date)` in `zone`.
 fn format(ms: i64, pattern: &str, zone: &Zone) -> String {
-    let f = fields(ms, zone);
+    format_fields(&fields(ms, zone), pattern)
+}
+
+/// [`format`] over broken-down fields.
+fn format_fields(f: &Fields, pattern: &str) -> String {
     let chars: Vec<char> = pattern.chars().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -441,7 +628,11 @@ fn format(ms: i64, pattern: &str, zone: &Zone) -> String {
 
 /// `Date.toString()`: `EEE MMM dd HH:mm:ss zzz yyyy` in the local zone.
 pub(super) fn to_string(ms: i64) -> String {
-    format(ms, "EEE MMM dd HH:mm:ss zzz yyyy", &Zone::local())
+    // `Date.toString` names the zone by its daylight flag, where a `z` in a
+    // pattern also tests the metazone's explicit daylight offset.
+    let mut f = fields(ms, &Zone::local());
+    f.zone = std::mem::take(&mut f.date_zone);
+    format_fields(&f, "EEE MMM dd HH:mm:ss zzz yyyy")
 }
 
 /// `Timestamp.toString()`: `yyyy-mm-dd hh:mm:ss.f`, the fraction's trailing
@@ -845,15 +1036,11 @@ pub(super) fn dispatch(recv: &Value, method: &str, args: &[Value]) -> Option<Val
         return Some(match (method, args) {
             ("getID", []) => Value::str(z.id.clone()),
             ("getRawOffset", []) => Value::int(z.raw_offset() * 1000),
-            ("getOffset", [t]) => Value::int(z.at(as_i64(t)?).0 * 1000),
-            ("inDaylightTime", [d]) => Value::bool(z.at(date_millis(d)?).2),
-            ("useDaylightTime" | "observesDaylightTime", []) => Value::bool(match &z.kind {
-                ZoneKind::Region(data) => data.uses_dst(),
-                ZoneKind::Fixed(_) => false,
-                ZoneKind::Local => {
-                    local_offset(now_millis()).2 || local_offset(now_millis() + 182 * DAY).2
-                }
-            }),
+            ("getOffset", [t]) => Value::int(z.at(as_i64(t)?).offset * 1000),
+            ("inDaylightTime", [d]) => Value::bool(z.at(date_millis(d)?).dst),
+            ("useDaylightTime", []) => Value::bool(z.use_daylight_time()),
+            ("observesDaylightTime", []) => Value::bool(z.observes_daylight_time()),
+            ("getDSTSavings", []) => Value::int(z.dst_savings() * 1000),
             ("toString", []) => Value::str(text(recv)?),
             _ => return None,
         });
@@ -1002,9 +1189,10 @@ fn local_millis(
 /// The methods of a `GregorianCalendar`.
 fn calendar_method(recv: &Value, cal: Cal, method: &str, args: &[Value]) -> Option<Value> {
     let f = fields(cal.ms, &cal.zone);
-    let (off, _, dst) = cal.zone.at(cal.ms);
-    let raw = cal.zone.raw_offset();
-    let offsets = (raw * 1000, if dst { (off - raw) * 1000 } else { 0 });
+    // `ZONE_OFFSET` and `DST_OFFSET`: the standard offset in effect then, and
+    // what daylight time adds to it.
+    let at = cal.zone.at(cal.ms);
+    let offsets = (at.std * 1000, (at.offset - at.std) * 1000);
     let rebuild = |y: i64, mo0: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64| {
         cal.zone
             .instant_of_local(local_millis(y, mo0, d, h, mi, s, ms))

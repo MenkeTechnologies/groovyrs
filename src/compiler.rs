@@ -2533,6 +2533,15 @@ impl Compiler {
     /// through their own builtins for the same reason the bare-name form does:
     /// Groovy's `/` promotes to `BigDecimal` and its `%` has a zero-divisor
     /// guard, neither of which the raw arithmetic op carries.
+    /// Box a statically-`Long` value a closure answers: whoever called it (a
+    /// GDK method, mostly) receives it outside compiled code.
+    fn box_closure_result(&mut self, e: &Expr) -> Result<(), String> {
+        if self.closure_depth > 0 && self.is_wide(e) {
+            self.emit_call_builtin(crate::host::GBOX_LONG, 0, self.cur_line)?;
+        }
+        Ok(())
+    }
+
     /// Box a statically-`Long` value a plain assignment stores into a
     /// property, field or subscript (see [`Compiler::value_expr`]).
     fn box_stored(&mut self, op: AssignOp, value: &Expr) -> Result<(), String> {
@@ -2798,6 +2807,7 @@ impl Compiler {
                 self.cur_line = last.line;
                 self.stmt_expr(e)?;
                 self.emit_return_coercion(e)?;
+                self.box_closure_result(e)?;
                 self.b.emit(Op::ReturnValue, last.line);
             }
             // A trailing declaration is a value too: Groovy returns what it
@@ -3083,6 +3093,7 @@ impl Compiler {
                 if let Some(e) = value {
                     self.expr(e)?;
                     self.emit_return_coercion(e)?;
+                    self.box_closure_result(e)?;
                 }
                 self.emit_finallys(|_| true)?;
                 if self.scope.is_some() {
@@ -4830,7 +4841,7 @@ impl Compiler {
             && !self.is_local(name)
         {
             for a in args {
-                self.expr(a)?;
+                self.value_expr(a)?;
             }
             let id = if name == "printf" {
                 crate::host::GPRINTF

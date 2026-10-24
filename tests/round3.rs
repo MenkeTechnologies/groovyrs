@@ -5850,3 +5850,475 @@ org.codehaus.groovy.runtime.HandleMetaClass
 "####;
     check(src, expected);
 }
+
+/// Fresh areas, round 10: `<=>`/`<` of a number and a one-character string
+/// (its `char`), `switch` on a class (`isAssignableFrom`), a `Long` a closure
+/// answers, `withDefault(autoGrow, autoShrink)`, `%t` date conversions and
+/// `%x` at a `Long`/`Short`/`Byte` width — with the arithmetic, `**`, switch,
+/// `?=`, `?[]`, multiple-assignment, format, sort/unique and range forms that
+/// already agreed pinned beside them.
+#[test]
+fn round10_fresh_areas() {
+    let src = r####"def r = { c -> try { def v = c(); "${v} ${v?.getClass()?.simpleName}" } catch (e) { e.class.simpleName + ': ' + e.message } }
+println r { 1 / 3 }
+println r { 10 / 4 }
+println r { 1.0 / 3 }
+println r { 2 / 3.0 }
+println r { 1G / 3 }
+println r { 10.0 / 4 }
+println r { 1 / 3d }
+println r { (1 / 3).scale() }
+println r { (2.50 / 2).scale() }
+println r { 1.5 * 2 }
+println r { 1.10 + 2.205 }
+println r { 3.0.setScale(1) / 7 }
+println r { 100 / 7.0 }
+println r { 7.intdiv(2) }
+println r { -7.intdiv(2) }
+println r { -7 % 3 }
+println r { 2147483647 + 1 }
+println r { 2147483647L + 1 }
+println r { Integer.MAX_VALUE * 2 }
+println r { 9223372036854775807L + 1 }
+println r { 9223372036854775807 + 1 }
+println r { 2 ** 10 }
+println r { 2 ** 31 }
+println r { 2 ** 62 }
+println r { 2 ** 64 }
+println r { 2 ** -1 }
+println r { 2.0 ** 2 }
+println r { 2 ** 0.5 }
+println r { 10L ** 2 }
+println r { 3G ** 2 }
+println r { 1.5 ** 2 }
+println r { 2.5G ** 3 }
+println r { (-8) ** (1/3) }
+println r { 0 ** 0 }
+println r { 4 ** 0.5 }
+println r { 1 <=> 2.0 }
+println r { 2.5 <=> 2 }
+println r { 'a' <=> 'b' }
+println r { 'b' <=> 'a' }
+println r { null <=> 1 }
+println r { 1 <=> null }
+println r { 3G <=> 3.0 }
+println r { 'abc' <=> 'abd' }
+println r { [1,2] <=> [1,3] }
+println r { 1 <=> '1' }
+println r { 1.0d <=> 1 }
+println r { Float.NaN <=> 1 }
+println r { true <=> false }
+"####;
+    let expected = r####"0.3333333333 BigDecimal
+2.5 BigDecimal
+0.3333333333 BigDecimal
+0.6666666667 BigDecimal
+0.3333333333 BigDecimal
+2.5 BigDecimal
+0.3333333333333333 Double
+10 Integer
+2 Integer
+3.0 BigDecimal
+3.305 BigDecimal
+0.4285714286 BigDecimal
+14.2857142857 BigDecimal
+3 Integer
+-3 Integer
+-1 Integer
+-2147483648 Integer
+2147483648 Long
+-2 Integer
+-9223372036854775808 Long
+-9223372036854775808 Long
+1024 Integer
+2147483648 BigInteger
+4611686018427387904 BigInteger
+18446744073709551616 BigInteger
+0.5 Double
+4.00 BigDecimal
+1.4142135623730951 Double
+100 Long
+9 BigInteger
+2.25 BigDecimal
+15.625 BigDecimal
+NaN Double
+1 Integer
+2 Integer
+-1 Integer
+1 Integer
+-1 Integer
+1 Integer
+-1 Integer
+1 Integer
+0 Integer
+-1 Integer
+IllegalArgumentException: Cannot compare java.util.ArrayList with value '[1, 2]' and java.util.ArrayList with value '[1, 3]'
+-1 Integer
+0 Integer
+1 Integer
+1 Integer
+"####;
+    check(src, expected);
+    let src = r####"def r = { c -> try { c() } catch (e) { e.class.simpleName + ': ' + e.message } }
+println r { 1 <=> '1' }
+println r { '1' <=> 1 }
+println r { 2 <=> '1' }
+println r { 1 <=> 'a' }
+println r { '10' <=> 9 }
+println r { 1.5 <=> '1.5' }
+println r { 97 <=> 'a' }
+println r { 1 < '1' }
+println r { 'a' > 96 }
+println r { [3, 'a'].sort() }
+println r { 1 == '1' }
+println r { "${1}" <=> 1 }
+"####;
+    let expected = r####"-1
+1
+-1
+-1
+IllegalArgumentException: Cannot compare java.lang.String with value '10' and java.lang.Integer with value '9'
+IllegalArgumentException: Cannot compare java.math.BigDecimal with value '1.5' and java.lang.String with value '1.5'
+0
+true
+true
+[3, a]
+false
+1
+"####;
+    check(src, expected);
+    let src = r####"def sw = { x ->
+  switch (x) {
+    case null: return 'null'
+    case Integer: return 'int'
+    case ~/a.*/: return 'regex'
+    case 10..20: return 'range'
+    case [100, 200]: return 'list'
+    case { it instanceof String && it.size() > 3 }: return 'closure'
+    case String: return 'string'
+    case 1.5: return 'dec'
+    default: return 'default'
+  }
+}
+[null, 5, 'abc', 15G, 100L, 'hello', 'xy', 1.50, 2.5d, [1]].each { println "$it -> ${sw(it)}" }
+def sw2 = { x -> switch (x) { case 1, 2 -> 'one-two'; case 3..5 -> 'three-five'; case String -> "s:$x"; default -> 'other' } }
+[1, 2, 4, 'q', 9].each { println sw2(it) }
+def y = switch (7) { case Integer -> { def z = 7 * 2; yield z } default -> 0 }
+println y
+def fall = { x -> def out = []; switch (x) { case 1: out << 1; case 2: out << 2; break; case 3: out << 3 }; out }
+println([fall(1), fall(2), fall(3), fall(4)])
+switch ('b') { case 'abc': println 'contains'; break; default: println 'no' }
+switch (['a']) { case [['a']]: println 'nested'; break; default: println 'nn' }
+switch (5) { case [1..3, 4..6]: println 'in ranges?'; break; default: println 'nr' }
+switch (3.0) { case 3: println 'num eq'; break; default: println 'ne' }
+switch ('A') { case 'a': println 'ci'; break; default: println 'cs' }
+switch (Integer) { case Integer: println 'class'; break; default: println 'nc' }
+enum C { R, G }
+switch (C.G) { case C.R: println 'R'; break; case C.G: println 'G'; break }
+def a = null
+a ?= 5
+println a
+a ?= 7
+println a
+def b = 0
+b ?= 9
+println b
+def m = null
+println m?[0]
+def l = [1, 2]
+println l?[1]
+def mp = [k: 'v']
+println mp?['k']
+def (p, q) = [1, 2]
+println "$p $q"
+(p, q) = [q, p]
+println "$p $q"
+def (r, s, t) = [1, 2]
+println "$r $s $t"
+def (u, v) = [1, 2, 3]
+println "$u $v"
+def (int i1, String s1) = [3, 'x']
+println "$i1 $s1"
+def (w1, w2) = 'ab'.toList()
+println "$w1 $w2"
+def (x1, x2) = 1..2
+println "$x1 $x2"
+"####;
+    let expected = r####"null -> null
+5 -> int
+abc -> regex
+15 -> range
+100 -> default
+hello -> closure
+xy -> string
+1.50 -> dec
+2.5 -> default
+[1] -> default
+one-two
+one-two
+three-five
+s:q
+other
+14
+[[1, 2], [2], [3], []]
+no
+nested
+nr
+num eq
+cs
+class
+G
+5
+5
+9
+null
+2
+v
+1 2
+2 1
+1 2 null
+1 2
+3 x
+a b
+1 2
+"####;
+    check(src, expected);
+    let src = r####"interface I {}
+class A implements I {}
+class B extends A {}
+switch (B) { case I: println "iface"; break; default: println "x" }
+switch (B) { case A: println "super"; break; default: println "x" }
+switch (A) { case B: println "bad"; break; default: println "notsub" }
+switch (Integer) { case Number: println "num"; break; default: println "x" }
+"####;
+    let expected = r####"iface
+super
+notsub
+num
+"####;
+    check(src, expected);
+    let src = r####"def r = { c -> try { c() } catch (e) { e.class.simpleName + ': ' + e.message } }
+println r { sprintf('%5.2f|%-6s|%04d|%x|%o|%e|%,d|%+d|%b|%c|%%|%n', 3.14159, 'ab', 42, 255, 8, 12345.678, 1234567, 5, null, 65).replace('\n', 'NL') }
+println r { String.format('%s %S %10.3e %g', [1,2], 'abc', 0.000123456, 1.5) }
+println r { sprintf('%d', 3.5) }
+println r { sprintf('%.3s', 'abcdef') }
+println r { sprintf('%08.3f', -3.5) }
+println r { sprintf('%2$s %1$s', 'a', 'b') }
+println r { sprintf('%x', -1L) }
+println r { sprintf('%X', 255G) }
+println r { sprintf('%.2f', 2.675G) }
+println r { sprintf('%10s|%-10s|', 'r', 'l') }
+println r { sprintf('%d', 'x') }
+println r { sprintf('%s') }
+println r { sprintf('%(d', -5) }
+println r { sprintf('% d', 5) }
+println r { sprintf('%#x', 255) }
+println r { sprintf('%h', 'hi') }
+println r { [3, 1, 2].sort { a, b -> b <=> a } }
+println r { ['bb', 'a', 'ccc'].sort { it.size() } }
+println r { ['bb', 'a', 'ccc'].sort(false) { -it.size() } }
+println r { [3, 1, 2].toSorted() }
+println r { [3, 1, 2].toSorted { a, b -> b <=> a } }
+println r { [3, 1, 2].sort({ a, b -> a <=> b } as Comparator) }
+println r { [1, 2, 2, 3, 1].unique() }
+println r { [1, 2, 3, 4].unique { it % 2 } }
+println r { [1, 2, 3, 4].unique { a, b -> a % 2 <=> b % 2 } }
+println r { [1, 2, 2].unique(false) }
+println r { [1, 2, 2].toUnique() }
+println r { ['a', 'B', 'b'].toUnique { it.toLowerCase() } }
+println r { def l = [3, 1, 2]; def s = l.sort(); [l, s, l.is(s)] }
+println r { def l = [1, 1, 2]; l.unique(); l }
+println r { [b: 2, a: 1].sort() }
+println r { [b: 2, a: 1].sort { it.value } }
+println r { ['x', null, 'a'].sort() }
+println r { [1, 'a', 2].sort() }
+println r { [[2, 1], [1, 2]].sort { it[0] } }
+println r { [3, 1, 2].max { a, b -> a <=> b } }
+println r { [3, 1, 2].min { it } }
+println r { ['aa', 'b'].max { it.size() } }
+println r { def m = [:].withDefault { it * 2 }; [m[3], m, m.size()] }
+println r { def m = [:].withDefault { 0 }; m.a++; m.a++; m }
+println r { def m = [a: 1].withDefault { k -> k.toUpperCase() }; [m.b, m.get('c'), m.containsKey('c'), m] }
+println r { def l = [].withDefault { it * 10 }; [l[2], l] }
+println r { def m = [:].withDefault(true, false) { 5 }; [m.x, m] }
+println r { def m = [:].withDefault(false, true) { null }; [m.x, m] }
+println r { (1..10).step(3) }
+println r { (10..1).step(3) }
+println r { (1..<10).step(4) }
+println r { ('a'..'e').step(2) }
+println r { (1..5).reverse() }
+println r { (5..1).toList() }
+println r { ('a'..'d').toList() }
+println r { ('A'..<'D').collect() }
+println r { (1.5..4) }
+println r { (1.5..4).toList() }
+println r { (1..10).by(2) }
+println r { 1..-1 }
+println r { (1..-1).size() }
+println r { (0..<0).size() }
+println r { (1..5).contains(3.5) }
+println r { 3.5 in 1..5 }
+println r { (1..5)[1..2] }
+println r { (1..5).subList(1, 3) }
+println r { ('a'..'c') + ['d'] }
+println r { (1L..3L).collect { it.getClass().simpleName } }
+println r { (1..5).sum() }
+println r { (1..5).step(2).getClass().simpleName }
+println r { (1..10).step(0) }
+println r { (1..3).step(-1) }
+println r { (1G..3G).toList()*.getClass()*.simpleName }
+println r { ('aa'..'ad').toList() }
+"####;
+    let expected = r####" 3.14|ab    |0042|ff|10|1.234568e+04|1,234,567|+5|false|A|%|NL
+[1, 2] ABC  1.235e-04 1.50000
+IllegalFormatConversionException: d != java.math.BigDecimal
+abc
+-003.500
+b a
+ffffffffffffffff
+FF
+2.68
+         r|l         |
+IllegalFormatConversionException: d != java.lang.String
+MissingFormatArgumentException: Format specifier '%s'
+(5)
+ 5
+0xff
+d01
+[3, 2, 1]
+[a, bb, ccc]
+[ccc, bb, a]
+[1, 2, 3]
+[3, 2, 1]
+null
+[1, 2, 3]
+[1, 2]
+[1, 2]
+[1, 2]
+[1, 2]
+[a, B]
+[[1, 2, 3], [1, 2, 3], true]
+[1, 2]
+[a:1, b:2]
+[a:1, b:2]
+[null, a, x]
+[1, 2, a]
+[[1, 2], [2, 1]]
+3
+1
+aa
+[6, [3:6], 1]
+[a:2]
+[B, C, true, [a:1, b:B, c:C]]
+[20, [null, null, 20]]
+[5, [x:5]]
+[null, [:]]
+[1, 4, 7, 10]
+[10, 7, 4, 1]
+[1, 5, 9]
+[a, c, e]
+[5, 4, 3, 2, 1]
+[5, 4, 3, 2, 1]
+[a, b, c, d]
+[A, B, C]
+1.5..4
+[1.5, 2.5, 3.5]
+1..10.by(2)
+1..-1
+3
+0
+false
+false
+[2, 3]
+2..3
+[a, b, c, d]
+[Long, Long, Long]
+15
+ArrayList
+GroovyRuntimeException: Infinite loop detected due to step size of 0
+[3, 2, 1]
+[BigInteger, BigInteger, BigInteger]
+[aa, ab, ac, ad]
+"####;
+    check(src, expected);
+    let src = r####"def m = [:].withDefault(false, true) { null }
+println([m.x, m])
+def n = [:].withDefault(false, false) { 7 }
+println([n.x, n, n.size()])
+def o = [:].withDefault(true, true) { it == "a" ? null : 1 }
+println([o.a, o.b, o])
+"####;
+    let expected = r####"[null, [:]]
+[7, [:], 0]
+[null, 1, [a:null, b:1]]
+"####;
+    check(src, expected);
+    let src = r####"def m = [:].withDefault(false, true) { 1 }
+m.a = 1; m.b = null
+println m
+def n = [:].withDefault(true, true) { 1 }
+n.a = 1; n.put("b", null); n.c = 2; n.c = null
+println n
+"####;
+    let expected = r####"[b:null]
+[b:null, c:null]
+"####;
+    check(src, expected);
+    let src = r####"def r = { c -> try { c() } catch (e) { e.class.simpleName + ': ' + e.message } }
+def d = Calendar.getInstance(TimeZone.getTimeZone('Asia/Tokyo'))
+d.timeInMillis = 1720613456789L
+'HIklMSLNpzZsQBbhAaCYyjmdeRTrDFc'.each { s -> println r { String.format("%t$s|%T$s", d, d) } }
+println r { String.format('%tY', 5) }
+println r { String.format('%tY', 'x') }
+println r { String.format('%10tY|%-6tm|', d, d) }
+println r { String.format('%tq', d) }
+println r { String.format('%.2tY', d) }
+println r { sprintf('%1$tY-%1$tm-%1$td', d) }
+printf('%x %x %x %x\n', -1L, -1, (short) -1, (byte) -1)
+println String.format('%x|%o|%h|%d', -1L, -1L, -1L, 5L)
+def v = [-1L]
+println sprintf('%X', v[0])
+"####;
+    let expected = r####"21|21
+09|09
+21|21
+9|9
+10|10
+56|56
+789|789
+789000000|789000000
+pm|PM
++0900|+0900
+JST|JST
+1720613456|1720613456
+1720613456789|1720613456789
+July|JULY
+Jul|JUL
+Jul|JUL
+Wednesday|WEDNESDAY
+Wed|WED
+20|20
+2024|2024
+24|24
+192|192
+07|07
+10|10
+10|10
+21:10|21:10
+21:10:56|21:10:56
+09:10:56 PM|09:10:56 PM
+07/10/24|07/10/24
+2024-07-10|2024-07-10
+Wed Jul 10 21:10:56 JST 2024|WED JUL 10 21:10:56 JST 2024
+IllegalFormatConversionException: Y != java.lang.Integer
+IllegalFormatConversionException: Y != java.lang.String
+      2024|07    |
+UnknownFormatConversionException: Conversion = 'tq'
+IllegalFormatPrecisionException: 2
+2024-07-10
+ffffffffffffffff ffffffff ffff ff
+ffffffffffffffff|1777777777777777777777|0|5
+FFFFFFFFFFFFFFFF
+"####;
+    check(src, expected);
+}

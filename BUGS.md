@@ -1240,6 +1240,12 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   `MissingMethodException`. The `Long` spelling of the same call is modeled (see
   `GMETHOD_WIDE`); only the `BigInteger` coercion is missing.
 - **`import`/`package`** are tolerated (skipped) but do nothing.
+- **Anonymous inner classes** (`new Comparator() { int compare(a, b) { … } }`)
+  are parse errors; `{ a, b -> … } as Comparator` is the working spelling.
+- **`switch` on a JDK class** matches a `case` naming the class or a JDK
+  superclass (`case Number:` for `Integer`), and a script class's own
+  supertypes and interfaces; a JDK interface label (`case CharSequence:` for
+  `String`) does not match.
 - **Command-argument chains** (`println a, b`, `foo bar baz`). A member call
   with its parentheses left off parses (`sb.append 'x'`, `m.put 'k', 1`), its
   argument starting with a literal, a name, `new`, `true`, `false` or `null`. A

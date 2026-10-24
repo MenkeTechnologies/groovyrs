@@ -35,6 +35,8 @@ pub struct Spec {
     pub width: Option<usize>,
     pub precision: Option<usize>,
     pub conv: char,
+    /// The date/time suffix of a `%t` / `%T` conversion (`Y` in `%tY`).
+    pub time: Option<char>,
 }
 
 impl Spec {
@@ -56,6 +58,9 @@ pub enum Piece {
 pub enum Error {
     /// `UnknownFormatConversionException: Conversion = 'q'`
     UnknownConversion(char),
+    /// `UnknownFormatConversionException: Conversion = 'tq'` — a `%t` with an
+    /// unknown suffix.
+    UnknownTimeConversion(String),
     /// `DuplicateFormatFlagsException: Flags = '-'`
     DuplicateFlag(char),
     /// `MissingFormatWidthException: %-s` — `-` or `0` with no width.
@@ -70,7 +75,9 @@ impl Error {
     /// The throwable's simple class name, as [`crate::throwable`] registers it.
     pub fn class(&self) -> &'static str {
         match self {
-            Error::UnknownConversion(_) => "UnknownFormatConversionException",
+            Error::UnknownConversion(_) | Error::UnknownTimeConversion(_) => {
+                "UnknownFormatConversionException"
+            }
             Error::DuplicateFlag(_) => "DuplicateFormatFlagsException",
             Error::MissingWidth(_) => "MissingFormatWidthException",
             Error::FlagMismatch(..) => "FormatFlagsConversionMismatchException",
@@ -81,6 +88,7 @@ impl Error {
     pub fn message(&self) -> String {
         match self {
             Error::UnknownConversion(c) => format!("Conversion = '{c}'"),
+            Error::UnknownTimeConversion(s) => format!("Conversion = '{s}'"),
             Error::DuplicateFlag(f) => format!("Flags = '{f}'"),
             Error::MissingWidth(t) => t.clone(),
             Error::FlagMismatch(conv, flag) => format!("Conversion = {conv}, Flags = {flag}"),
@@ -107,6 +115,7 @@ fn allowed_flags(conv: char) -> &'static str {
         's' | 'S' => "-",
         'c' | 'C' | 'b' | 'B' | 'h' | 'H' => "-",
         '%' => "-",
+        't' | 'T' => "-",
         _ => "",
     }
 }
@@ -209,6 +218,18 @@ pub fn parse(spec: &str) -> Result<Vec<Piece>, Error> {
             return Err(Error::UnknownConversion(' '));
         };
         text.push(conv);
+        // `%tY`: a date/time conversion and its suffix.
+        let mut time = None;
+        if matches!(conv, 't' | 'T') {
+            let Some(suffix) = it.next() else {
+                return Err(Error::UnknownConversion(conv));
+            };
+            if !"HIklMSLNpzZsQBbhAaCYyjmdeRTrDFc".contains(suffix) {
+                return Err(Error::UnknownTimeConversion(format!("{conv}{suffix}")));
+            }
+            text.push(suffix);
+            time = Some(suffix);
+        }
         if !matches!(
             conv,
             'b' | 'B'
@@ -231,6 +252,8 @@ pub fn parse(spec: &str) -> Result<Vec<Piece>, Error> {
                 | 'A'
                 | 'n'
                 | '%'
+                | 't'
+                | 'T'
         ) {
             return Err(Error::UnknownConversion(conv));
         }
@@ -242,6 +265,7 @@ pub fn parse(spec: &str) -> Result<Vec<Piece>, Error> {
             width,
             precision,
             conv,
+            time,
         };
         validate(&spec)?;
         out.push(Piece::Conv(spec));

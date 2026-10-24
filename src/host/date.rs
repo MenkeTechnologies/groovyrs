@@ -1598,3 +1598,77 @@ pub(super) fn construct_named(class: &str, args: &[Value]) -> Option<Value> {
         _ => None,
     }
 }
+
+/// `java.util.Formatter`'s `%t` conversion `suffix` of a `Date`, a `Calendar`
+/// (in its zone) or a `Long` count of milliseconds (in the default zone).
+/// `None` for any other argument, which the JDK refuses.
+pub(super) fn time_conversion(arg: &Value, suffix: char) -> Option<String> {
+    let (ms, zone) = if let Some(c) = cal_of(arg) {
+        (c.ms, c.zone)
+    } else if let Some(ms) = date_millis(arg) {
+        (ms, Zone::local())
+    } else {
+        match boxed::int_view(arg)? {
+            (boxed::IntKind::Long, n) => (n, Zone::local()),
+            _ => return None,
+        }
+    };
+    let f = fields(ms, &zone);
+    let hour12 = if f.hour % 12 == 0 { 12 } else { f.hour % 12 };
+    let day_of_year = days_from_civil(f.year, f.month, f.day) - days_from_civil(f.year, 1, 1) + 1;
+    let month = MONTHS[(f.month - 1) as usize];
+    let day = DAYS[f.weekday as usize];
+    let offset = || {
+        let o = f.offset_secs / 60;
+        let sign = if o < 0 { '-' } else { '+' };
+        format!("{sign}{:02}{:02}", o.abs() / 60, o.abs() % 60)
+    };
+    Some(match suffix {
+        'H' => format!("{:02}", f.hour),
+        'I' => format!("{hour12:02}"),
+        'k' => f.hour.to_string(),
+        'l' => hour12.to_string(),
+        'M' => format!("{:02}", f.minute),
+        'S' => format!("{:02}", f.second),
+        'L' => format!("{:03}", f.millis),
+        'N' => format!("{:09}", f.millis * 1_000_000),
+        'p' => if f.hour < 12 { "am" } else { "pm" }.to_string(),
+        'z' => offset(),
+        'Z' => f.date_zone.clone(),
+        's' => ms.div_euclid(1000).to_string(),
+        'Q' => ms.to_string(),
+        'B' => month.to_string(),
+        'b' | 'h' => month[..3].to_string(),
+        'A' => day.to_string(),
+        'a' => day[..3].to_string(),
+        'C' => format!("{:02}", f.year.div_euclid(100)),
+        'Y' => format!("{:04}", f.year),
+        'y' => format!("{:02}", f.year.rem_euclid(100)),
+        'j' => format!("{day_of_year:03}"),
+        'm' => format!("{:02}", f.month),
+        'd' => format!("{:02}", f.day),
+        'e' => f.day.to_string(),
+        'R' => format!("{:02}:{:02}", f.hour, f.minute),
+        'T' => format!("{:02}:{:02}:{:02}", f.hour, f.minute, f.second),
+        'r' => format!(
+            "{hour12:02}:{:02}:{:02} {}",
+            f.minute,
+            f.second,
+            if f.hour < 12 { "AM" } else { "PM" }
+        ),
+        'D' => format!("{:02}/{:02}/{:02}", f.month, f.day, f.year.rem_euclid(100)),
+        'F' => format!("{:04}-{:02}-{:02}", f.year, f.month, f.day),
+        'c' => format!(
+            "{} {} {:02} {:02}:{:02}:{:02} {} {:04}",
+            &day[..3],
+            &month[..3],
+            f.day,
+            f.hour,
+            f.minute,
+            f.second,
+            f.date_zone,
+            f.year
+        ),
+        _ => return None,
+    })
+}

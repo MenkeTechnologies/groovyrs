@@ -725,7 +725,9 @@ thread_local! {
     /// The default-value closure a map got from `map.withDefault { … }`, keyed by
     /// the map's heap id. A missing-key read then answers that closure's result
     /// and stores it, which is what `groovy.lang.MapWithDefault` does.
-    static MAP_DEFAULTS: RefCell<HashMap<u32, Value>> = RefCell::new(HashMap::new());
+    /// With it, `withDefault(autoGrow, autoShrink)`'s two flags: whether a
+    /// default is stored, and whether a `null` one is dropped instead.
+    static MAP_DEFAULTS: RefCell<HashMap<u32, (Value, bool, bool)>> = RefCell::new(HashMap::new());
     /// The default closure a list got from `withDefault` / `withLazyDefault`
     /// (`false`) or `withEagerDefault` (`true`), keyed by its heap id: see
     /// [`list_default_get`].
@@ -5088,6 +5090,18 @@ fn similar_map_kind(kind: MapKind) -> MapKind {
 /// (updating an existing key keeps its position; a new key appends). Returns
 /// `false` if `v` is not an ordered map.
 fn omap_set(v: &Value, key: String, val: Value) -> bool {
+    // `MapWithDefault.put` on an auto-shrinking map: storing the value the
+    // default would give removes the key instead.
+    if let Value::Obj(vid) = v {
+        if let Some((clo, _, true)) = MAP_DEFAULTS.with(|m| m.borrow().get(vid).cloned()) {
+            let default =
+                with_vm(|vm| invoke_closure(vm, &clo, &[mapkey::decode(&key)]).ok()).flatten();
+            if default.is_some_and(|d| java_equals(&d, &val)) {
+                omap_retain(v, |k| k != key);
+                return true;
+            }
+        }
+    }
     match map_backing(v) {
         Value::Obj(id) => {
             // A wrapper view refuses by its own policy, then by its target's.
@@ -8116,6 +8130,22 @@ fn b_is_case_type(vm: &mut VM, _argc: u8) -> Value {
     if let Some(v) = class_is_case(vm, &class, &subject) {
         return v;
     }
+    // `Class.isCase(Class)` is `isAssignableFrom`: `switch (Integer) { case
+    // Number: }` matches.
+    if let Some(source) = as_class_ref(&subject) {
+        let want = simple_name_of(&class);
+        if class_assignable(&crate::throwable::qualified(&class), &source) {
+            return Value::bool(true);
+        }
+        let mut cur = Some(source);
+        while let Some(c) = cur {
+            if simple_name_of(&c) == want {
+                return Value::bool(true);
+            }
+            cur = as_class_ref(&class_superclass(&c));
+        }
+        return Value::bool(want == "Object");
+    }
     Value::bool(value_is_a(&subject, &class))
 }
 
@@ -10178,7 +10208,7 @@ fn map_default(vm: &mut VM, map: &Value, key: &str, subject: &Value) -> Value {
     let Value::Obj(id) = map else {
         return Value::Undef;
     };
-    let Some(clo) = MAP_DEFAULTS.with(|m| m.borrow().get(id).cloned()) else {
+    let Some((clo, grow, _shrink)) = MAP_DEFAULTS.with(|m| m.borrow().get(id).cloned()) else {
         return Value::Undef;
     };
     // The closure receives the KEY AS WRITTEN, not the string it is stored
@@ -10188,7 +10218,11 @@ fn map_default(vm: &mut VM, map: &Value, key: &str, subject: &Value) -> Value {
     // default sees is the caller's own value.
     match invoke_closure(vm, &clo, std::slice::from_ref(subject)) {
         Ok(v) => {
-            omap_set(map, key.to_string(), v.clone());
+            // `MapWithDefault.get`: only an auto-growing map stores the default
+            // (a `null` one too).
+            if grow {
+                omap_set(&map_backing(map), key.to_string(), v.clone());
+            }
             v
         }
         Err(e) => {
@@ -11457,6 +11491,8 @@ fn boxed_arg_kept(recv: &Value, method: &str, i: usize, nargs: usize) -> bool {
     match method {
         "equals" | "contains" | "indexOf" | "lastIndexOf" | "isCase" | "leftShift" | "push"
         | "offer" | "plus" | "containsValue" => true,
+        // A format argument's class decides `%x` (its width) and `%h`.
+        "format" | "sprintf" | "printf" => true,
         // `add(element)`, `add(index, element)`, `set(index, element)`.
         "add" | "set" => i + 1 == nargs,
         "containsKey" | "get" | "getAt" | "remove" => map || set,
@@ -14242,7 +14278,13 @@ fn dispatch_map_iteration(
             };
             let view = heap_push(HeapObj::MapWithDefault(target));
             if let Value::Obj(id) = view {
-                MAP_DEFAULTS.with(|m| m.borrow_mut().insert(id, clo.clone()));
+                // `withDefault(autoGrow, autoShrink) { … }`; the one-argument
+                // form grows and does not shrink.
+                let (grow, shrink) = match args {
+                    [g, s, _] => (g.is_truthy(), s.is_truthy()),
+                    _ => (true, false),
+                };
+                MAP_DEFAULTS.with(|m| m.borrow_mut().insert(id, (clo.clone(), grow, shrink)));
             }
             Some(Ok(view))
         }
@@ -19969,6 +20011,15 @@ fn java_format(vm: &mut VM, spec: &str, args: &[Value]) -> String {
 
 /// Render one conversion, padded. `None` means a throwable was raised.
 fn format_one(vm: &mut VM, spec: &crate::format::Spec, arg: &Value) -> Option<String> {
+    // A `Long`, `Short` or `Byte` box formats as its number; only `%x`/`%o`
+    // (its two's-complement width) and `%h` (its hash) read its class.
+    let unboxed;
+    let arg = if matches!(spec.conv, 'o' | 'x' | 'X' | 'h' | 'H' | 't' | 'T') {
+        arg
+    } else {
+        unboxed = boxed::unbox(arg.clone());
+        &unboxed
+    };
     let null = matches!(arg, Value::Undef);
     let refuse = |vm: &mut VM| -> Option<String> {
         raise(
@@ -19984,6 +20035,23 @@ fn format_one(vm: &mut VM, spec: &crate::format::Spec, arg: &Value) -> Option<St
         return Some(pad_conversion(spec, &truncated("null", spec.precision), ""));
     }
     match spec.conv {
+        't' | 'T' => {
+            let suffix = spec.time.unwrap_or('Y');
+            let Some(text) = date::time_conversion(arg, suffix) else {
+                raise(
+                    vm,
+                    "IllegalFormatConversionException",
+                    &format!("{suffix} != {}", java_class_name(arg)),
+                );
+                return None;
+            };
+            let text = if spec.conv == 'T' {
+                text.to_uppercase()
+            } else {
+                text
+            };
+            Some(pad_conversion(spec, &text, ""))
+        }
         'b' | 'B' => {
             let text = match arg {
                 Value::Undef => "false".to_string(),
@@ -20065,7 +20133,7 @@ fn format_one(vm: &mut VM, spec: &crate::format::Spec, arg: &Value) -> Option<St
                 let digits = cased(&digits, spec.conv, None);
                 return Some(signed_number(spec, &digits, b.is_negative(), prefix));
             }
-            let Value::Int(n) = arg else {
+            let Some((kind, n)) = boxed::int_view(arg) else {
                 return refuse(vm);
             };
             for f in "+ (".chars() {
@@ -20076,11 +20144,15 @@ fn format_one(vm: &mut VM, spec: &crate::format::Spec, arg: &Value) -> Option<St
                 }
             }
             // Two's complement at the argument's own width: an `Integer` wraps
-            // at 32 bits (`%x` of `-1` is `ffffffff`), a `Long` at 64.
-            let text = match i32::try_from(*n) {
-                Ok(small) => radix_text(small as u32 as u64, radix),
-                Err(_) => radix_text(*n as u64, radix),
+            // at 32 bits (`%x` of `-1` is `ffffffff`), a `Long` at 64, a `Short`
+            // at 16 and a `Byte` at 8.
+            let bits = match kind {
+                boxed::IntKind::Long => n as u64,
+                boxed::IntKind::Short => u64::from(n as u16),
+                boxed::IntKind::Byte => u64::from(n as u8),
+                boxed::IntKind::Integer => u64::from(n as u32),
             };
+            let text = radix_text(bits, radix);
             let text = cased(&text, spec.conv, None);
             Some(pad_conversion(spec, &text, prefix))
         }
@@ -23147,11 +23219,53 @@ fn b_cmp(vm: &mut VM, _argc: u8) -> Value {
         raise(vm, "IllegalArgumentException", &message);
         return Value::Undef;
     }
+    // A number against a string: `DefaultTypeTransformation.compareTo` reads
+    // a one-character string as its `char` and refuses any other.
+    if let Some(order) = number_string_order(&a, &b) {
+        return match order {
+            Some(o) => Value::int(o as i64),
+            None => {
+                let (sa, sb) = (java_to_string(vm, &a), java_to_string(vm, &b));
+                let message = format!(
+                    "Cannot compare {} with value '{sa}' and {} with value '{sb}'",
+                    java_class_name(&a),
+                    java_class_name(&b),
+                );
+                raise(vm, "IllegalArgumentException", &message);
+                Value::Undef
+            }
+        };
+    }
     match natural_order(&a, &b) {
         std::cmp::Ordering::Less => Value::int(-1),
         std::cmp::Ordering::Greater => Value::int(1),
         std::cmp::Ordering::Equal => Value::int(0),
     }
+}
+
+/// `a <=> b` for a number and a `String` (or `GString`): `Some(Some(order))`
+/// against a one-character string, compared as its `char` code, `Some(None)`
+/// against any other (which Groovy refuses), `None` for any other pair.
+fn number_string_order(a: &Value, b: &Value) -> Option<Option<std::cmp::Ordering>> {
+    let text =
+        |v: &Value| (matches!(v, Value::Str(_)) || as_gstring(v).is_some()).then(|| groovy_str(v));
+    let char_code = |s: &str| {
+        let mut it = s.chars();
+        match (it.next(), it.next()) {
+            (Some(c), None) => Some(f64::from(u32::from(c))),
+            _ => None,
+        }
+    };
+    let (num, s, flip) = match (is_number(a), text(b), is_number(b), text(a)) {
+        (true, Some(s), _, _) => (a, s, false),
+        (_, _, true, Some(s)) => (b, s, true),
+        _ => return None,
+    };
+    let Some(code) = char_code(&s) else {
+        return Some(None);
+    };
+    let order = java_compare_f64(as_f64(num), code);
+    Some(Some(if flip { order.reverse() } else { order }))
 }
 
 /// True for a value Java would not accept as `Comparable`: a collection, a map,
@@ -23197,6 +23311,19 @@ fn operator_order(a: &Value, b: &Value) -> Option<Result<std::cmp::Ordering, Str
         })
         .unwrap_or_else(|| "Cannot compare".to_string());
         return Some(Err(message));
+    }
+    match number_string_order(a, b) {
+        Some(Some(order)) => return Some(Ok(order)),
+        Some(None) => {
+            return Some(Err(format!(
+                "Cannot compare {} with value '{}' and {} with value '{}'",
+                java_class_name(a),
+                groovy_str(a),
+                java_class_name(b),
+                groovy_str(b)
+            )))
+        }
+        None => {}
     }
     None
 }

@@ -5659,3 +5659,97 @@ Long
 "####;
     check(src, expected);
 }
+
+/// `Date.parse` is `SimpleDateFormat.parse`: `Z` (RFC 822), `X` (ISO 8601),
+/// `z` (`GMT±hh:mm` or a zone name from the JDK's zone strings, first match
+/// winning), month and day names, quoted text, abutting numeric fields, the
+/// two-digit-year window, and a wall time a change repeats or skips read as
+/// `GregorianCalendar` reads it.
+#[test]
+fn round10_date_parse_zones_and_names() {
+    if !tz_database_present() {
+        return;
+    }
+    let src = r####"def p = { pat, txt, z = 'UTC' -> try { Date.parse(pat, txt, TimeZone.getTimeZone(z)).time } catch (e) { e.class.simpleName + ': ' + e.message } }
+println p('yyyy-MM-dd HH:mm Z', '1969-06-01 12:00 +0000')
+println p('yyyy-MM-dd HH:mm Z', '1969-06-01 12:00 -0530')
+println p('yyyy-MM-dd HH:mm:ss Z', '2024-03-10 02:30:00 +0100')
+println p('yyyy-MM-dd HH:mm z', '2024-03-10 02:30 GMT')
+println p('yyyy-MM-dd HH:mm z', '2024-03-10 02:30 PST')
+println p('yyyy-MM-dd HH:mm z', '2024-03-10 02:30 GMT+02:00')
+println p('yyyy-MM-dd HH:mm X', '2024-03-10 02:30 Z')
+println p('yyyy-MM-dd HH:mm XXX', '2024-03-10 02:30 +05:30')
+println p("yyyy-MM-dd'T'HH:mm:ssZ", '2024-03-10T02:30:00+0000')
+println p('yyyy-MM-dd HH:mm Z', '2024-03-10 02:30 junk')
+println p('dd MMM yyyy', '05 Mar 2024')
+println p('EEE, dd MMM yyyy HH:mm:ss Z', 'Sun, 10 Mar 2024 02:30:00 +0000')
+println p('yyyy-MM-dd HH:mm Z', '2024-03-10 02:30 +01')
+['GMT','UTC','PST','PDT','EST','EDT','CST','CDT','CET','CEST','BST','JST','AEST','MSK','HST','AKST','WET','EET','Pacific Standard Time','Central European Summer Time','pst'].each { n ->
+  println "$n ${p('yyyy-MM-dd HH:mm z', "2024-07-10 12:00 $n")} ${p('yyyy-MM-dd HH:mm z', "2024-01-10 12:00 $n")}"
+}
+println p('yyyyMMddHHmmss', '20240310023000')
+println p('yyMMdd', '991231')
+println p('yy-MM-dd', '24-01-02')
+println p('hh:mm a, dd/MM/yyyy', '12:30 AM, 05/03/2024')
+println p('hh:mm a, dd/MM/yyyy', '12:30 pm, 05/03/2024')
+println p('yyyy-MM-dd HH:mm', '2024-03-10 02:30', 'America/New_York')
+println p('yyyy-MM-dd HH:mm', '2024-11-03 01:30', 'America/New_York')
+println p('yyyy-MM-dd HH:mm', '2024-03-10 02:30', 'Asia/Tokyo')
+println p('yyyy-MM-dd', '2024-13-40')
+println p('MMMM d, yyyy', 'March 5, 2024')
+println p('d MMM yyyy', '5 SEPT 2024')
+println p('yyyy-MM-dd HH:mm:ss.SSS', '2024-03-10 02:30:00.123')
+println p('yyyy', '2024abc')
+println p('yyyy-MM-dd HH:mm z', '2024-07-10 12:00 GMT-7')
+"####;
+    let expected = r####"-18446400000
+-18426600000
+1710034200000
+1710037800000
+1710066600000
+1710030600000
+1710037800000
+1710018000000
+1710037800000
+ParseException: Unparseable date: "2024-03-10 02:30 junk"
+1709596800000
+1710037800000
+ParseException: Unparseable date: "2024-03-10 02:30 +01"
+GMT 1720612800000 1704888000000
+UTC 1720612800000 1704888000000
+PST 1720641600000 1704916800000
+PDT 1720638000000 1704913200000
+EST 1720630800000 1704906000000
+EDT 1720627200000 1704902400000
+CST 1720634400000 1704909600000
+CDT 1720630800000 1704906000000
+CET 1720609200000 1704884400000
+CEST 1720605600000 1704880800000
+BST 1720609200000 1704884400000
+JST 1720580400000 1704855600000
+AEST 1720576800000 1704852000000
+MSK 1720602000000 1704877200000
+HST 1720648800000 1704924000000
+AKST 1720645200000 1704920400000
+WET 1720612800000 1704888000000
+EET 1720605600000 1704880800000
+Pacific Standard Time 1720641600000 1704916800000
+Central European Summer Time 1720605600000 1704880800000
+pst 1720641600000 1704916800000
+1710037800000
+946598400000
+1704153600000
+1709598600000
+1709641800000
+1710055800000
+1730615400000
+1710005400000
+1739059200000
+1709596800000
+ParseException: Unparseable date: "5 SEPT 2024"
+1710037800123
+1704067200000
+ParseException: Unparseable date: "2024-07-10 12:00 GMT-7"
+"####;
+    check(src, expected);
+}

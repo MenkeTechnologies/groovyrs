@@ -1134,8 +1134,10 @@ JVM 21.0.12):
   for a zone whose standard offset changed between them to agree.
   `Calendar` covers `get`/`set`/`add`/`clear`, the
   field constants and `getActualMaximum`; week fields, `roll` and lenient
-  overflow beyond `set`/`add` are not modeled, nor are `Date.parse` text
-  fields (`MMM`, `EEE`) and `clearTime()`.
+  overflow beyond `set`/`add` are not modeled, nor is `clearTime()`.
+  `Date.parse` reads the numeric fields, month and day names, `a`, quoted
+  text and the zone letters `z`/`Z`/`X`; `G`, `w`, `D` and the other rarely
+  used letters are read as plain numbers or not at all.
 - A string-heavy loop costs about 3% more instructions than before
   interpolations became `GString` objects (debug build, 300 000
   interpolations into a `def` local read as text: 27.1 G before `GString`,

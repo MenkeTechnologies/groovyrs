@@ -93,12 +93,29 @@ impl Zone {
 
     /// The instant whose local time in this zone is `local` (milliseconds
     /// of local wall time since the epoch).
+    ///
+    /// `ZoneInfo.getOffsetsByWall`, as `GregorianCalendar` asks it: a period
+    /// begins at its first instant's wall time in its own offset, so a time a
+    /// change repeats reads in the later offset and one it skips in the
+    /// earlier. The candidate offsets are the ones in effect a day either side.
     fn instant_of_local(&self, local: i64) -> i64 {
-        let mut guess = local;
-        for _ in 0..3 {
-            guess = local - self.at(guess).offset * 1000;
-        }
-        guess
+        let mut candidates: Vec<i64> = [-DAY, 0, DAY]
+            .iter()
+            .map(|d| self.at(local + d).offset)
+            .collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+        let consistent: Vec<i64> = candidates
+            .iter()
+            .copied()
+            .filter(|&o| self.at(local - o * 1000).offset == o)
+            .collect();
+        let offset = consistent
+            .first()
+            .or(candidates.first())
+            .copied()
+            .unwrap_or(0);
+        local - offset * 1000
     }
 
     /// `getRawOffset()`, in seconds.
@@ -644,15 +661,174 @@ fn timestamp_string(ms: i64) -> String {
     format!("{base}.{}", if trimmed.is_empty() { "0" } else { trimmed })
 }
 
-/// `Date.parse(pattern, text)` for the numeric fields, in the local zone.
-fn parse(pattern: &str, text: &str) -> Option<i64> {
+/// The zone a parse read from the text.
+enum ParsedZone {
+    /// None: the formatter's zone decides.
+    Default,
+    /// A numeric offset (`Z`, `X`, `GMT+hh:mm`), seconds east, as standard
+    /// time.
+    Offset(i64),
+    /// A zone named by one of its names: the zone, and the daylight saving
+    /// the name says (`None` when the zone itself decides — a name it uses
+    /// for both, or a daylight name of a zone with no saving).
+    Named(Zone, Option<i64>),
+}
+
+/// The JDK's `DateFormatSymbols.getZoneStrings()` for `Locale.US`, in its own
+/// order, dumped by `meta/gen_zone_strings.groovy`: id, long and short
+/// standard names, long and short daylight names.
+const ZONE_STRINGS: &str = include_str!("meta/zone_strings.tsv");
+
+/// `SimpleDateFormat.matchZoneString`: which of a row's four names (1-4) the
+/// text at `at` starts with, ignoring case.
+fn match_zone_string(t: &[char], at: usize, names: &[&str]) -> Option<usize> {
+    (1..=4).find(|&i| {
+        let name: Vec<char> = names.get(i).unwrap_or(&"").chars().collect();
+        !name.is_empty()
+            && t.len() >= at + name.len()
+            && t[at..at + name.len()]
+                .iter()
+                .zip(&name)
+                .all(|(a, b)| a.to_lowercase().eq(b.to_lowercase()))
+    })
+}
+
+/// `SimpleDateFormat.subParseZoneString`: a zone name at `at`, tried against
+/// the formatter's own zone, the default zone, and then the JDK's table in
+/// order. Answers
+/// the zone read and where the text continues.
+fn parse_zone_name(t: &[char], at: usize, own: &Zone) -> Option<(ParsedZone, usize)> {
+    let rows: Vec<Vec<&str>> = ZONE_STRINGS
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| l.split('\t').collect())
+        .collect();
+    // The formatter's zone, then the default zone, then the table in order.
+    let default_id = default_zone_id();
+    let row_of = |id: &str| rows.iter().find(|r| r.first() == Some(&id));
+    let (row, i) = [row_of(&own.id), row_of(&default_id)]
+        .into_iter()
+        .flatten()
+        .find_map(|r| match_zone_string(t, at, r).map(|i| (r, i)))
+        .or_else(|| {
+            rows.iter()
+                .find_map(|r| match_zone_string(t, at, r).map(|i| (r, i)))
+        })?;
+    let zone = zone_named(row[0]);
+    let same_name = i <= 2 && row[i].eq_ignore_ascii_case(row.get(i + 2).unwrap_or(&""));
+    let saving = if i >= 3 { zone.dst_savings() } else { 0 };
+    let dst = if same_name || (i >= 3 && saving == 0) {
+        None
+    } else {
+        Some(saving)
+    };
+    Some((ParsedZone::Named(zone, dst), at + row[i].chars().count()))
+}
+
+/// `SimpleDateFormat.subParseNumericZone`: `hh[[:]mm]` after the sign, with
+/// `count` the `X` width (0 for `z`/`Z`) and `colon` whether a `:` separates
+/// the minutes. Answers the offset in seconds and where the text continues.
+fn parse_numeric_zone(
+    t: &[char],
+    at: usize,
+    sign: i64,
+    count: usize,
+    colon: bool,
+) -> Option<(i64, usize)> {
+    let digit = |i: usize| t.get(i).and_then(|c| c.to_digit(10)).map(i64::from);
+    let mut j = at;
+    let mut hours = digit(j)?;
+    j += 1;
+    match digit(j) {
+        Some(d) => {
+            hours = hours * 10 + d;
+            j += 1;
+        }
+        // Two hour digits are required unless a `:` follows a `z`/`Z` hour.
+        None if count > 0 || !colon => return None,
+        None => {}
+    }
+    if hours > 23 {
+        return None;
+    }
+    let mut minutes = 0;
+    if count != 1 {
+        if colon {
+            if t.get(j) != Some(&':') {
+                return None;
+            }
+            j += 1;
+        }
+        minutes = digit(j)? * 10 + digit(j + 1)?;
+        j += 2;
+        if minutes > 59 {
+            return None;
+        }
+    }
+    Some((sign * (hours * 60 + minutes) * 60, j))
+}
+
+/// Match one of `names` at `at`, ignoring case, the longest that matches —
+/// `SimpleDateFormat.matchString`. Answers its index and its length.
+fn match_name(t: &[char], at: usize, names: &[&str]) -> Option<(usize, usize)> {
+    names
+        .iter()
+        .enumerate()
+        .filter_map(|(i, name)| {
+            let len = name.chars().count();
+            let matches = t.len() >= at + len
+                && t[at..at + len]
+                    .iter()
+                    .zip(name.chars())
+                    .all(|(a, b)| a.to_lowercase().eq(b.to_lowercase()));
+            matches.then_some((i, len))
+        })
+        .max_by_key(|&(_, len)| len)
+}
+
+/// The numeric pattern letters: a field abutting one of these reads exactly
+/// its own width of digits.
+fn is_numeric_field(c: char, n: usize) -> bool {
+    matches!(
+        c,
+        'y' | 'd' | 'H' | 'h' | 'k' | 'K' | 'm' | 's' | 'S' | 'D' | 'u' | 'w' | 'W' | 'F'
+    ) || (c == 'M' && n <= 2)
+}
+
+/// `SimpleDateFormat(pattern).parse(text)` in `zone`: the numeric fields,
+/// month and day names, `a`, quoted text, and the zone letters `z`, `Z`
+/// and `X`. Trailing text after the pattern is ignored, as `DateFormat.parse`
+/// ignores it.
+fn parse(pattern: &str, text: &str, zone: &Zone) -> Option<i64> {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
     let (mut i, mut j) = (0, 0);
     let (mut y, mut mo, mut d, mut h, mut mi, mut s, mut ms) = (1970, 1, 1, 0, 0, 0, 0);
     let mut pm = false;
+    let mut parsed_zone = ParsedZone::Default;
     while i < p.len() {
         let c = p[i];
+        if c == '\'' {
+            // `''` is a quote; `'…'` is literal text.
+            if p.get(i + 1) == Some(&'\'') {
+                if t.get(j) != Some(&'\'') {
+                    return None;
+                }
+                i += 2;
+                j += 1;
+                continue;
+            }
+            i += 1;
+            while i < p.len() && p[i] != '\'' {
+                if t.get(j) != Some(&p[i]) {
+                    return None;
+                }
+                i += 1;
+                j += 1;
+            }
+            i += 1;
+            continue;
+        }
         if !c.is_ascii_alphabetic() {
             if t.get(j) != Some(&c) {
                 return None;
@@ -666,22 +842,112 @@ fn parse(pattern: &str, text: &str) -> Option<i64> {
             n += 1;
         }
         i += n;
-        if c == 'a' {
-            let word: String = t.get(j..j + 2)?.iter().collect();
-            pm = word.eq_ignore_ascii_case("PM");
-            j += 2;
-            continue;
+        match c {
+            'a' => {
+                let (k, len) = match_name(&t, j, &["AM", "PM"])?;
+                pm = k == 1;
+                j += len;
+                continue;
+            }
+            'M' if n >= 3 => {
+                let short: Vec<&str> = MONTHS.iter().map(|m| &m[..3]).collect();
+                let (k, len) = match_name(&t, j, &MONTHS).or_else(|| match_name(&t, j, &short))?;
+                mo = k as i64 + 1;
+                j += len;
+                continue;
+            }
+            'E' => {
+                let short: Vec<&str> = DAYS.iter().map(|d| &d[..3]).collect();
+                let (_, len) = match_name(&t, j, &DAYS).or_else(|| match_name(&t, j, &short))?;
+                j += len;
+                continue;
+            }
+            'z' | 'Z' => {
+                let sign = match t.get(j) {
+                    Some('+') => 1,
+                    Some('-') => -1,
+                    _ => 0,
+                };
+                if sign != 0 {
+                    let (off, next) = parse_numeric_zone(&t, j + 1, sign, 0, false)?;
+                    parsed_zone = ParsedZone::Offset(off);
+                    j = next;
+                    continue;
+                }
+                let gmt = t.len() >= j + 3
+                    && t[j..j + 3]
+                        .iter()
+                        .collect::<String>()
+                        .eq_ignore_ascii_case("GMT");
+                if gmt {
+                    j += 3;
+                    let sign = match t.get(j) {
+                        Some('+') => 1,
+                        Some('-') => -1,
+                        _ => 0,
+                    };
+                    if sign == 0 {
+                        parsed_zone = ParsedZone::Offset(0);
+                        continue;
+                    }
+                    let (off, next) = parse_numeric_zone(&t, j + 1, sign, 0, true)?;
+                    parsed_zone = ParsedZone::Offset(off);
+                    j = next;
+                    continue;
+                }
+                let (pz, next) = parse_zone_name(&t, j, zone)?;
+                parsed_zone = pz;
+                j = next;
+                continue;
+            }
+            'X' => {
+                let sign = match t.get(j)? {
+                    'Z' => {
+                        parsed_zone = ParsedZone::Offset(0);
+                        j += 1;
+                        continue;
+                    }
+                    '+' => 1,
+                    '-' => -1,
+                    _ => return None,
+                };
+                let (off, next) = parse_numeric_zone(&t, j + 1, sign, n, n == 3)?;
+                parsed_zone = ParsedZone::Offset(off);
+                j = next;
+                continue;
+            }
+            _ => {}
         }
+        // A numeric field abutting another reads exactly its own width.
+        let abutting = p.get(i).is_some_and(|&nc| {
+            let mut nn = 1;
+            while p.get(i + nn) == Some(&nc) {
+                nn += 1;
+            }
+            is_numeric_field(nc, nn)
+        });
         let start = j;
-        while j < t.len() && t[j].is_ascii_digit() {
+        while j < t.len() && t[j].is_ascii_digit() && !(abutting && j - start == n) {
             j += 1;
         }
         let v: i64 = t[start..j].iter().collect::<String>().parse().ok()?;
         match c {
-            'y' => y = if n == 2 { 2000 + v } else { v },
+            // A two-digit year falls in the 100 years starting 80 years ago.
+            'y' if n <= 2 && j - start == 2 => {
+                let start_year = civil(now_millis().div_euclid(DAY)).0 - 80;
+                let mut year = start_year / 100 * 100 + v;
+                if year < start_year {
+                    year += 100;
+                }
+                y = year;
+            }
+            'y' => y = v,
             'M' => mo = v,
             'd' => d = v,
-            'H' | 'h' => h = v,
+            'H' => h = v,
+            'h' => h = v % 12,
+            'k' => h = v % 24,
+            'K' => h = v,
             'm' => mi = v,
             's' => s = v,
             'S' => ms = v,
@@ -691,16 +957,16 @@ fn parse(pattern: &str, text: &str) -> Option<i64> {
     if pm && h < 12 {
         h += 12;
     }
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    tm.tm_year = (y - 1900) as i32;
-    tm.tm_mon = (mo - 1) as i32;
-    tm.tm_mday = d as i32;
-    tm.tm_hour = h as i32;
-    tm.tm_min = mi as i32;
-    tm.tm_sec = s as i32;
-    tm.tm_isdst = -1;
-    let secs = unsafe { libc::mktime(&mut tm) };
-    Some(secs as i64 * 1000 + ms)
+    let local = local_millis(y, mo - 1, d, h, mi, s, ms);
+    Some(match parsed_zone {
+        ParsedZone::Offset(off) => local - off * 1000,
+        ParsedZone::Named(z, None) => z.instant_of_local(local),
+        ParsedZone::Named(z, Some(dst)) => {
+            let std = z.at(local - z.at(local).std * 1000).std;
+            local - (std + dst) * 1000
+        }
+        ParsedZone::Default => zone.instant_of_local(local),
+    })
 }
 
 /// A custom `GMT±h[h][[:]mm]` id's offset in seconds, as `ZoneInfoFile`
@@ -1069,17 +1335,23 @@ pub(super) fn dispatch(recv: &Value, method: &str, args: &[Value]) -> Option<Val
 /// `Date`'s statics: `Date.parse(pattern, text)`.
 pub(super) fn static_call(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Option<Value> {
     match (class, method, args) {
-        ("Date", "parse", [p, t]) => match parse(&groovy_str(p), &groovy_str(t)) {
-            Some(ms) => Some(new_date(ms)),
-            None => {
-                raise(
-                    vm,
-                    "ParseException",
-                    &format!("Unparseable date: \"{}\"", groovy_str(t)),
-                );
-                Some(Value::Undef)
+        ("Date", "parse", [p, t, rest @ ..]) if rest.len() <= 1 => {
+            let zone = match rest.first() {
+                Some(z) => zone_of(z)?,
+                None => Zone::local(),
+            };
+            match parse(&groovy_str(p), &groovy_str(t), &zone) {
+                Some(ms) => Some(new_date(ms)),
+                None => {
+                    raise(
+                        vm,
+                        "ParseException",
+                        &format!("Unparseable date: \"{}\"", groovy_str(t)),
+                    );
+                    Some(Value::Undef)
+                }
             }
-        },
+        }
         ("TimeZone", "getTimeZone", [id]) => Some(time_zone(&groovy_str(id))),
         ("TimeZone", "getDefault", []) => Some(heap_push(HeapObj::TimeZone(Zone::local()))),
         ("Calendar" | "GregorianCalendar", "getInstance", zone) if zone.len() <= 1 => {

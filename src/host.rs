@@ -2336,6 +2336,8 @@ mod date;
 mod digest;
 #[path = "host/file.rs"]
 mod file;
+#[path = "host/jdktypes.rs"]
+mod jdktypes;
 #[path = "host/json.rs"]
 mod json;
 #[path = "host/mapkey.rs"]
@@ -8127,14 +8129,20 @@ fn b_is_case_type(vm: &mut VM, _argc: u8) -> Value {
         .as_str_cow()
         .into_owned();
     let subject = vm.stack.pop().unwrap_or(Value::Undef);
-    if let Some(v) = class_is_case(vm, &class, &subject) {
+    class_case_matches(vm, &class, &subject)
+}
+
+/// `DefaultGroovyMethods.isCase(Class, Object)`: a script class's own
+/// `static isCase` first; a `Class` subject matches by `isAssignableFrom`
+/// (`switch (Integer) { case Number: }`, and through the JDK's hierarchy
+/// `case CharSequence:` for `String`); any other subject by `instanceof`.
+fn class_case_matches(vm: &mut VM, class: &str, subject: &Value) -> Value {
+    if let Some(v) = class_is_case(vm, class, subject) {
         return v;
     }
-    // `Class.isCase(Class)` is `isAssignableFrom`: `switch (Integer) { case
-    // Number: }` matches.
-    if let Some(source) = as_class_ref(&subject) {
-        let want = simple_name_of(&class);
-        if class_assignable(&crate::throwable::qualified(&class), &source) {
+    if let Some(source) = as_class_ref(subject) {
+        let want = simple_name_of(class);
+        if class_assignable(&crate::throwable::qualified(class), &source) {
             return Value::bool(true);
         }
         let mut cur = Some(source);
@@ -8146,7 +8154,7 @@ fn b_is_case_type(vm: &mut VM, _argc: u8) -> Value {
         }
         return Value::bool(want == "Object");
     }
-    Value::bool(value_is_a(&subject, &class))
+    Value::bool(value_is_a(subject, class))
 }
 
 /// `GIS_CASE`: Groovy's `switch` case matching, which dispatches on the *label*,
@@ -8173,10 +8181,7 @@ fn b_is_case(vm: &mut VM, _argc: u8) -> Value {
 /// is an ordinary expression and arrives here as a `ClassRef`.
 fn is_case(vm: &mut VM, label: &Value, subject: &Value) -> Value {
     if let Some(class) = as_class_ref(label) {
-        if let Some(v) = class_is_case(vm, &class, subject) {
-            return v;
-        }
-        return Value::bool(value_is_a(subject, &class));
+        return class_case_matches(vm, &class, subject);
     }
     // A `Range` label contains — `case 1..5:` and `x in 1..5` both ask that.
     if let Some(r) = as_range(label) {
@@ -11479,6 +11484,9 @@ fn dispatch_boxed(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Op
 /// count is read as a number.
 fn boxed_arg_kept(recv: &Value, method: &str, i: usize, nargs: usize) -> bool {
     if as_instance(recv).is_some()
+        // A script class receiver is a call of one of its `static` methods,
+        // whose parameters see what the caller passed, as an instance's do.
+        || as_class_ref(recv).is_some_and(|c| find_class(&c).is_some())
         || closure_meta(recv).is_some()
         || is_script_this(recv)
         || as_proxy(recv).is_some()
@@ -17075,6 +17083,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 }
                 "getInterfaces" if args.is_empty() => class_interfaces(&qualified),
                 "isInstance" if args.len() == 1 => Value::bool(value_is_a(&args[0], &qualified)),
+                "isCase" if args.len() == 1 => class_case_matches(vm, &qualified, &args[0]),
                 "isAssignableFrom" if args.len() == 1 => {
                     let other = as_class_ref(&args[0]).unwrap_or_default();
                     Value::bool(class_assignable(&qualified, &other))
@@ -19021,7 +19030,7 @@ fn b_classref(vm: &mut VM, _argc: u8) -> Value {
         .into_owned();
     let qualified = match jdk_class_package(&name) {
         Some(pkg) => format!("{pkg}.{name}"),
-        None => name,
+        None => jdktypes::resolve(&name).map_or(name, str::to_string),
     };
     heap_push(HeapObj::ClassRef(qualified))
 }
@@ -25496,16 +25505,29 @@ fn class_interfaces(qualified: &str) -> Value {
     )
 }
 
-/// `target.isAssignableFrom(source)` over script classes, and equality or
-/// `Object` for anything else.
+/// `target.isAssignableFrom(source)` over script classes, over the JDK types
+/// [`jdktypes`] knows, and over a script class whose declared supertypes name
+/// JDK types (`class D implements Comparator`); equality or `Object` for
+/// anything else.
 fn class_assignable(target: &str, source: &str) -> bool {
     if target == source || target == "java.lang.Object" {
         return true;
     }
-    let (Some(t), Some(s)) = (find_class(target), find_class(source)) else {
+    if let Some(answer) = jdktypes::assignable(target, source) {
+        return answer;
+    }
+    let Some(s) = find_class(source) else {
         return false;
     };
-    class_chain(s).contains(&t) || interface_closure(s).contains(&t)
+    if let Some(t) = find_class(target) {
+        return class_chain(s).contains(&t) || interface_closure(s).contains(&t);
+    }
+    class_chain(s)
+        .into_iter()
+        .chain(interface_closure(s))
+        .filter_map(class_meta)
+        .flat_map(|m| m.superclass.into_iter().chain(m.interfaces))
+        .any(|parent| jdktypes::assignable(target, &parent) == Some(true))
 }
 
 /// A script class used as a `case` label that declares a `static isCase(x)`:
@@ -25644,4 +25666,17 @@ fn step_fractional(
             None => Value::float(as_f64(&cur) + as_f64(by)),
         };
     }
+}
+
+/// Does `name` spell a JDK or Groovy type Groovy imports by default (or a
+/// qualified one) whose hierarchy [`jdktypes`] knows? The compiler reads a
+/// `case Comparable:` label as a type check through this.
+pub fn is_jdk_type_name(name: &str) -> bool {
+    jdktypes::resolve(name).is_some()
+}
+
+/// Is `name` a JDK interface (`Comparator`, `Runnable`)? An anonymous class
+/// written `new Comparator() { … }` implements it rather than extending it.
+pub fn is_jdk_interface(name: &str) -> bool {
+    jdktypes::lookup(name).is_some_and(|t| t.is_interface)
 }

@@ -981,6 +981,14 @@ reported as parse or compile errors, never silently mis-run.
   values in that clause are read at failure time, so a variable `&&` short-
   circuited past still reports.
 
+- **The JDK type hierarchy.** `src/host/meta/jdk_types.tsv`, generated from
+  the oracle JVM by `gen_jdk_types.groovy`, gives every JDK and Groovy type
+  groovyrs names its interface flag and all its supertypes. A default-imported
+  type name (`Comparable`, `Iterable`, `ArrayList`) is its `Class` value;
+  `Class.isAssignableFrom`, `Class.isCase`, `x in SomeClass` and a `switch` on
+  a `Class` subject answer through it (`case CharSequence:` matches `String`,
+  `case Comparator:` a script class that implements it).
+
 ## Aborts a Groovy program survives — open
 
 Round 7 removed the recursion aborts (see the `StackOverflowError` entry above)
@@ -1098,8 +1106,12 @@ JVM 21.0.12):
   plain integer whose width the compiler tracks. A bitwise operator whose
   operand may be a box (a value read out of a collection, a call, a property,
   or a closure parameter) takes the box-aware builtin and keeps a `Long` a
-  `Long`; on a script function's untyped parameter holding a `Long` box the
-  native operator answers an `Integer` of the right value (Groovy: a `Long`).
+  `Long`, as it does for an untyped (or non-converting typed) parameter of a
+  function, method or constructor. A `Long` a function, method or closure
+  answers — its declared return type `long`, or an untyped one returning a
+  statically-`Long` value — leaves as a box; a caller that knows the width
+  reads it back natively, which costs a typed-`long` recursion about 13% more
+  instructions (`long fib(long n)`, fib(25): 5.65 G before, 6.37 G after).
   A `long`-returning JDK method groovyrs does not model answers an `Integer`.
 - `ConfigSlurper` walks the script itself (there is no run-time compiler):
   `new`, loops, `switch`, `try` and statements other than assignments, blocks,
@@ -1242,10 +1254,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
 - **`import`/`package`** are tolerated (skipped) but do nothing.
 - **Anonymous inner classes** (`new Comparator() { int compare(a, b) { … } }`)
   are parse errors; `{ a, b -> … } as Comparator` is the working spelling.
-- **`switch` on a JDK class** matches a `case` naming the class or a JDK
-  superclass (`case Number:` for `Integer`), and a script class's own
-  supertypes and interfaces; a JDK interface label (`case CharSequence:` for
-  `String`) does not match.
 - **Command-argument chains** (`println a, b`, `foo bar baz`). A member call
   with its parentheses left off parses (`sb.append 'x'`, `m.put 'k', 1`), its
   argument starting with a literal, a name, `new`, `true`, `false` or `null`. A

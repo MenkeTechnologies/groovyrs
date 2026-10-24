@@ -1153,12 +1153,28 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     }
     // A call to a user function is a `Long` when every `return` in its body is,
     // which a forward reference needs known before the call is lowered.
+    // A `long` return type makes every return one, whatever it is written as;
+    // overloads of one name must all agree.
+    let mut narrow_fns: HashSet<String> = HashSet::new();
     for stmt in &prog.body {
-        if let StmtKind::Function { name, body, .. } = &stmt.kind {
-            if c.body_returns_wide(body) {
+        if let StmtKind::Function {
+            name, body, ret_ty, ..
+        } = &stmt.kind
+        {
+            let wide = match ret_ty.as_str() {
+                "long" | "Long" => true,
+                ty if COERCED_TYPES.contains(&ty) => false,
+                _ => c.body_returns_wide(body),
+            };
+            if wide {
                 c.wide_returns.insert(name.clone());
+            } else {
+                narrow_fns.insert(name.clone());
             }
         }
+    }
+    for name in &narrow_fns {
+        c.wide_returns.remove(name);
     }
     // Install a `null` cell for every boxed script binding before the body runs,
     // so a read that reaches one before its declaration finds a cell rather than
@@ -1479,13 +1495,7 @@ impl Compiler {
         // parameters arrive with no width the compiler can see, so they start
         // narrow whatever the enclosing scope calls that name.
         let prev_widths = self.enter_width_scope(params);
-        // A typed parameter is a typed variable inside the body: `int n` gives
-        // `n - 1` a static `int` type, as a declared local would.
-        for (p, ty) in params.iter().zip(param_types) {
-            if ty != "def" {
-                self.note_var_width(ty, p, None);
-            }
-        }
+        self.note_param_shapes(params, param_types);
         self.cur_line = line;
 
         // Prologue: the caller pushed args left-to-right (param0 deepest,
@@ -1619,6 +1629,27 @@ impl Compiler {
         saved
     }
 
+    /// Record what a function's or member's parameters statically are. A typed
+    /// parameter is a typed variable inside the body (`int n` gives `n - 1` a
+    /// static `int` type, as a declared local would). Any other parameter
+    /// receives whatever the caller passed — a `Long` box, a `BigInteger` — so
+    /// a bitwise operator on it takes the box-aware builtin, as a closure
+    /// parameter's does: `def f(x) { x & 1 }` answers a `Long` for `f(5L)`.
+    fn note_param_shapes(&mut self, params: &[String], param_types: &[String]) {
+        let untyped = String::from("def");
+        for (p, ty) in params
+            .iter()
+            .zip(param_types.iter().chain(std::iter::repeat(&untyped)))
+        {
+            if ty != "def" {
+                self.note_var_width(ty, p, None);
+            }
+            if !COERCED_TYPES.contains(&ty.as_str()) {
+                self.boxable_vars.insert(p.clone());
+            }
+        }
+    }
+
     /// Restore the width state a body was entered with.
     fn exit_width_scope(&mut self, saved: WidthScope) {
         self.wide_vars = saved.vars;
@@ -1737,6 +1768,10 @@ impl Compiler {
         ) {
             if !COERCED_TYPES.contains(&ty.as_str()) {
                 self.boxable_vars.insert(p.clone());
+            }
+            // `{ long y -> y * 2 }`: a typed parameter is a typed variable.
+            if !ty.is_empty() && ty != "def" {
+                self.note_var_width(ty, p, None);
             }
         }
         let saved_line = self.cur_line;
@@ -2308,6 +2343,8 @@ impl Compiler {
         let prev_methods = self.cur_class_methods.replace(method_set.clone());
         let prev_tries = std::mem::take(&mut self.tries);
         let prev_finallys = std::mem::take(&mut self.finallys);
+        let prev_widths = self.enter_width_scope(params);
+        self.note_param_shapes(params, param_types);
         let saved_line = self.cur_line;
         self.cur_line = line;
 
@@ -2327,6 +2364,7 @@ impl Compiler {
         self.cur_class_methods = prev_methods;
         self.tries = prev_tries;
         self.finallys = prev_finallys;
+        self.exit_width_scope(prev_widths);
         self.cur_line = saved_line;
         Ok(())
     }
@@ -2420,7 +2458,9 @@ impl Compiler {
             name,
             "int" | "long" | "short" | "byte" | "double" | "float" | "char" | "boolean"
         );
-        (primitive || crate::host::jdk_class_package(name).is_some())
+        (primitive
+            || crate::host::jdk_class_package(name).is_some()
+            || crate::host::is_jdk_type_name(name))
             && !self.is_local(name)
             && !self.class_index.contains_key(name)
     }
@@ -2533,10 +2573,22 @@ impl Compiler {
     /// through their own builtins for the same reason the bare-name form does:
     /// Groovy's `/` promotes to `BigDecimal` and its `%` has a zero-divisor
     /// guard, neither of which the raw arithmetic op carries.
-    /// Box a statically-`Long` value a closure answers: whoever called it (a
-    /// GDK method, mostly) receives it outside compiled code.
-    fn box_closure_result(&mut self, e: &Expr) -> Result<(), String> {
-        if self.closure_depth > 0 && self.is_wide(e) {
+    /// Box a statically-`Long` value a closure, function or method answers:
+    /// whoever called it (a GDK method, a property read, `getClass()`)
+    /// receives it outside compiled code. A declared return type decides
+    /// first — `long f()` answers a `Long` whatever it returns, `int f()` an
+    /// `Integer` — and an untyped one answers the width of what it returns.
+    /// A script's top level answers nothing anyone observes.
+    fn box_result(&mut self, e: &Expr) -> Result<(), String> {
+        if self.scope.is_none() {
+            return Ok(());
+        }
+        let wide = match self.ret_ty.as_deref() {
+            Some("long" | "Long") => true,
+            Some(ty) if COERCED_TYPES.contains(&ty) => false,
+            _ => self.is_wide(e),
+        };
+        if wide {
             self.emit_call_builtin(crate::host::GBOX_LONG, 0, self.cur_line)?;
         }
         Ok(())
@@ -2807,7 +2859,7 @@ impl Compiler {
                 self.cur_line = last.line;
                 self.stmt_expr(e)?;
                 self.emit_return_coercion(e)?;
-                self.box_closure_result(e)?;
+                self.box_result(e)?;
                 self.b.emit(Op::ReturnValue, last.line);
             }
             // A trailing declaration is a value too: Groovy returns what it
@@ -2816,6 +2868,7 @@ impl Compiler {
                 self.stmt(last)?;
                 self.emit_name_load(name, last.line)?;
                 self.emit_return_coercion(&Expr::Var(name.clone()))?;
+                self.box_result(&Expr::Var(name.clone()))?;
                 self.b.emit(Op::ReturnValue, last.line);
             }
             // A trailing assignment is an expression statement in Groovy, so
@@ -2828,6 +2881,7 @@ impl Compiler {
                 let var = Expr::Var(name.clone());
                 self.expr(&var)?;
                 self.emit_return_coercion(&var)?;
+                self.box_result(&var)?;
                 self.b.emit(Op::ReturnValue, last.line);
             }
             StmtKind::SetProperty { .. }
@@ -3093,7 +3147,7 @@ impl Compiler {
                 if let Some(e) = value {
                     self.expr(e)?;
                     self.emit_return_coercion(e)?;
-                    self.box_closure_result(e)?;
+                    self.box_result(e)?;
                 }
                 self.emit_finallys(|_| true)?;
                 if self.scope.is_some() {
@@ -3928,6 +3982,7 @@ impl Compiler {
         self.class_index.contains_key(name)
             || crate::throwable::is_builtin(name)
             || BUILTIN_TYPE_NAMES.contains(&name)
+            || crate::host::is_jdk_type_name(name)
     }
 
     /// Emit the in-place update `name = name ± 1` (leaving nothing on the stack).
@@ -4323,7 +4378,17 @@ impl Compiler {
                 let keep = if *post { Keep::Old } else { Keep::New };
                 self.write_target(target, incdec_op(*inc), &ONE, keep)?;
             }
-            Expr::Call { name, args, line } => self.call(name, args, *line)?,
+            Expr::Call { name, args, line } => {
+                self.call(name, args, *line)?;
+                // A user function that answers a `Long` boxes it on the way
+                // out; a caller that knows the width statically reads the
+                // number back natively (`| 0` reads a box as its number), so
+                // its own arithmetic stays on the native wide path.
+                if self.fn_names.contains(name) && self.wide_returns.contains(name) {
+                    self.b.emit(Op::LoadInt(0), *line);
+                    self.b.emit(Op::BitOr, *line);
+                }
+            }
             Expr::List(elems) => {
                 // Groovy lists are references — `def b = a` names one
                 // `ArrayList` twice, and `b.add(4)` is visible through `a` — so
@@ -5514,7 +5579,16 @@ impl Compiler {
                 lhs,
                 rhs,
             } => self.may_be_box(lhs) || self.may_be_box(rhs),
-            Expr::Unary { op: UnOp::Neg, rhs } => self.may_be_box(rhs),
+            // A shift answers at the width of the value shifted.
+            Expr::Binary {
+                op: BinOp::Shl | BinOp::Shr | BinOp::UShr,
+                lhs,
+                ..
+            } => self.may_be_box(lhs),
+            Expr::Unary {
+                op: UnOp::Neg | UnOp::BitNot,
+                rhs,
+            } => self.may_be_box(rhs),
             Expr::Ternary { then, els, .. } => self.may_be_box(then) || self.may_be_box(els),
             Expr::Elvis { lhs, rhs } => self.may_be_box(lhs) || self.may_be_box(rhs),
             _ => false,

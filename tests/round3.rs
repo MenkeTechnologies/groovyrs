@@ -5798,3 +5798,55 @@ true
 "####;
     check(src, expected);
 }
+
+/// A method injected through a value's metaclass is that object's own: a
+/// string literal (interned, so every load of it is one object) and the
+/// references to it see it, a string built at run time does not; a list or
+/// map is its heap identity; an integer is its value.
+#[test]
+fn round10_per_instance_metaclass_injection() {
+    let src = r####"def r = { c -> try { c() } catch (e) { e.class.simpleName } }
+def s = "inst"
+s.metaClass.whisper = { -> "w:" + delegate }
+println r { s.whisper() }
+println r { "inst".whisper() }
+def t = "in" + "st"
+println r { t.whisper() }
+def u = s
+println r { u.whisper() }
+println r { [s][0].whisper() }
+println r { "other".whisper() }
+println r { s.toUpperCase().whisper() }
+def l = [1]
+l.metaClass.foo = { -> 'f' }
+println r { l.foo() }
+println r { [1].foo() }
+def m = [a: 1]
+m.metaClass.bar = { -> 'b' }
+println r { m.bar() }
+println r { [a: 1].bar() }
+def n = 5
+n.metaClass.baz = { -> 'z' }
+println r { n.baz() }
+println r { 6.baz() }
+println s.metaClass.getClass().name
+println r { s.metaClass.respondsTo(s, 'whisper').size() }
+"####;
+    let expected = r####"w:inst
+w:inst
+MissingMethodException
+w:inst
+w:inst
+MissingMethodException
+MissingMethodException
+f
+MissingMethodException
+b
+MissingMethodException
+z
+MissingMethodException
+org.codehaus.groovy.runtime.HandleMetaClass
+1
+"####;
+    check(src, expected);
+}

@@ -315,6 +315,10 @@ struct Compiler {
     /// on one takes the [`crate::host::GBITOP`] builtin, which keeps a `Long`
     /// a `Long`; fusevm's native op would answer an `Integer`.
     boxable_vars: HashSet<String>,
+    /// The constant-pool index of each string literal: one literal text is one
+    /// pooled `String`, so every load of it is the same object — Java interns
+    /// its literals, and a method injected into one is seen through all.
+    string_literals: HashMap<String, u16>,
     /// The names of the script's own top-level classes and interfaces: a
     /// closure stored into a variable declared as one is coerced to it, as
     /// `closure as Type` is.
@@ -1081,6 +1085,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         inline_finally_depth: 0,
         obj_vars: HashSet::new(),
         boxable_vars: HashSet::new(),
+        string_literals: HashMap::new(),
         script_types: HashSet::new(),
         sam_types,
         wide_sites: HashSet::new(),
@@ -4125,7 +4130,14 @@ impl Compiler {
                     .emit(Op::CallBuiltin(crate::host::GBIGINT, 1), self.cur_line);
             }
             Expr::Str(s) => {
-                let c = self.b.add_constant(Value::str(s.clone()));
+                let c = match self.string_literals.get(s) {
+                    Some(&c) => c,
+                    None => {
+                        let c = self.b.add_constant(Value::str(s.clone()));
+                        self.string_literals.insert(s.clone(), c);
+                        c
+                    }
+                };
                 self.b.emit(Op::LoadConst(c), self.cur_line);
             }
             // A `GString` pushes each rendered part and joins them through the

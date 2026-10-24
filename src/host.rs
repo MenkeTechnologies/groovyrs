@@ -745,6 +745,10 @@ thread_local! {
     /// class-level injection or a `.static` view replaced. `X.metaClass` is a
     /// `HandleMetaClass` over any other.
     static EMC_CLASSES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Injections into one string or integer, by [`value_identity`] and
+    /// method: the value itself (kept so its identity is never reused) and the
+    /// closure.
+    static EMC_VALUE: RefCell<HashMap<(String, String), (Value, Value)>> = RefCell::new(HashMap::new());
     /// Set once any injection exists, so dispatch pays one flag read without.
     static ANY_EMC: Cell<bool> = const { Cell::new(false) };
     /// Set once a `JsonSlurper` or `JsonBuilder` exists.
@@ -2534,6 +2538,9 @@ enum HeapObj {
         /// Taken from a value (`"x".metaClass`) rather than a class: always a
         /// `HandleMetaClass` over the value's class.
         of_value: bool,
+        /// The string or integer it was taken from, which has no heap identity:
+        /// a method injected through it is that value's own.
+        receiver: Option<Value>,
     },
     /// A `groovy.lang.MetaProperty` that `hasProperty` answers: `class` is the
     /// concrete class Groovy uses (`MetaBeanProperty` or `CachedField`), `ty`
@@ -2961,6 +2968,7 @@ fn reset_heap() {
     EMC_CTORS.with(|m| m.borrow_mut().clear());
     EMC_BORN.with(|m| m.borrow_mut().clear());
     EMC_CLASSES.with(|m| m.borrow_mut().clear());
+    EMC_VALUE.with(|m| m.borrow_mut().clear());
     ANY_EMC.with(|a| a.set(false));
     MAP_PROXIES.with(|m| m.borrow_mut().clear());
     SCRIPT_THIS.with(|s| s.borrow_mut().take());
@@ -3738,20 +3746,47 @@ fn meta_class_of(recv: &Value) -> Value {
     let (class, instance) = match as_class_ref(recv) {
         Some(name) => (name, None),
         None => {
-            let own = matches!(recv, Value::Obj(_)) && as_instance(recv).is_some();
+            // Any heap value — an instance, a list, a map — has an identity of
+            // its own for a method injected through its metaclass.
             let id = match recv {
-                Value::Obj(id) if own => Some(*id),
+                Value::Obj(id) => Some(*id),
                 _ => None,
             };
             (java_class_name(recv), id)
         }
     };
+    let receiver = matches!(recv, Value::Str(_) | Value::Int(_)).then(|| recv.clone());
     heap_push(HeapObj::MetaClass {
         class,
         instance,
         statics: false,
         of_value,
+        receiver,
     })
+}
+
+/// The string or integer a value metaclass was taken from.
+fn meta_class_receiver(v: &Value) -> Option<Value> {
+    let Value::Obj(id) = v else {
+        return None;
+    };
+    HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::MetaClass { receiver, .. }) => receiver.clone(),
+        _ => None,
+    })
+}
+
+/// The identity of a string or an integer for a per-value injection. A
+/// `String` is its buffer: one literal, and every copy of a reference to it,
+/// is one object, where a string built at run time is a new one — as in Java,
+/// whose literals are interned. An `Integer` is its value, which is what
+/// Java's `Integer` cache makes it from -128 to 127.
+fn value_identity(v: &Value) -> String {
+    match v {
+        Value::Str(s) => format!("s{:x}", std::sync::Arc::as_ptr(s) as usize),
+        Value::Int(n) => format!("i{n}"),
+        _ => String::new(),
+    }
 }
 
 /// Whether a [`HeapObj::MetaClass`] handle was taken from a value.
@@ -3780,6 +3815,7 @@ fn meta_class_class_name(v: &Value) -> Option<&'static str> {
             instance,
             statics,
             of_value,
+            ..
         }) => Some(if *statics {
             "groovy.lang.ExpandoMetaClass$ExpandoMetaProperty"
         } else if *of_value
@@ -3946,6 +3982,14 @@ fn emc_register(mc: &Value, name: &str, clo: Value) {
         (Some(id), false) => {
             EMC_INSTANCE.with(|m| m.borrow_mut().insert((id, name.to_string()), clo))
         }
+        (None, false) if meta_class_receiver(mc).is_some() => {
+            let recv = meta_class_receiver(mc).unwrap_or(Value::Undef);
+            EMC_VALUE.with(|m| {
+                m.borrow_mut()
+                    .insert((value_identity(&recv), name.to_string()), (recv, clo))
+            });
+            None
+        }
         (None, false) => {
             // The first injection replaces the class's metaclass; an instance
             // built before then keeps the one it was built with.
@@ -3963,6 +4007,12 @@ fn emc_register(mc: &Value, name: &str, clo: Value) {
 /// class's and each superclass's (a JDK value's class, then `Object`); for a
 /// class reference, the class's static ones.
 fn emc_lookup(recv: &Value, method: &str) -> Option<Value> {
+    if matches!(recv, Value::Str(_) | Value::Int(_)) {
+        let key = (value_identity(recv), method.to_string());
+        if let Some((_, c)) = EMC_VALUE.with(|m| m.borrow().get(&key).cloned()) {
+            return Some(c);
+        }
+    }
     if let Some(class) = as_class_ref(recv) {
         return EMC_STATICS.with(|m| m.borrow().get(&(class, method.to_string())).cloned());
     }
@@ -11608,6 +11658,20 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
                     return v;
                 }
                 if let Some(v) = metamethod::responds_to(&java_class_name(obj), name, rest) {
+                    // A method injected into the value or its class answers too.
+                    if ANY_EMC.with(Cell::get) && emc_lookup(obj, name).is_some() {
+                        let mut items = as_list(&v).unwrap_or_default();
+                        items.push(metamethod::method_value(
+                            name,
+                            false,
+                            &java_class_name(obj),
+                            "java.lang.Object",
+                            Vec::new(),
+                            "org.codehaus.groovy.runtime.metaclass.ClosureMetaMethod",
+                            None,
+                        ));
+                        return glist(items);
+                    }
                     return v;
                 }
             }
@@ -14409,6 +14473,7 @@ fn get_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
                 instance,
                 statics: true,
                 of_value: false,
+                receiver: None,
             });
         }
         return heap_push(HeapObj::EmcSlot {

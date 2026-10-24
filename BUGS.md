@@ -1086,10 +1086,12 @@ JVM 21.0.12):
   runs for some names (`sort`, `toSorted`). A non-reflected `MetaMethod`'s
   `toString` carries a handle-derived hash. `invokeMethod`/`methodMissing` on
   a metaclass and `GroovySystem.metaClassRegistry` are not modeled.
-  A method injected through a JDK value's metaclass (`s.metaClass.m = { … }`
-  for a `String` `s`) reaches every value of its class: a string has no
-  identity here, where Groovy gives that one object its own metaclass
-  (`'other'.m()` is a `MissingMethodException` there).
+  A method injected through a value's metaclass is that object's own (a
+  string is its buffer, literals interned; a list or map its handle). An
+  integer is its value, which matches Java only inside the `Integer` cache
+  (-128..127): `def n = 1000; n.metaClass.m = {…}; 1000.m()` answers here
+  and raises in Groovy. A list a GDK method answered (an unshared array) has
+  no identity and takes the injection for its class.
 
 - A `Long`, `Short` or `Byte` small enough to be an `Integer` is a box
   (`src/host/boxed.rs`) once it leaves compiled code; inside it, a `long` is a

@@ -38,6 +38,16 @@ pub(super) fn encode(v: &Value) -> String {
         Value::Float(f) => format!("{MARK}f{:016x}", f.to_bits()),
         Value::Bool(b) => format!("{MARK}b{}", u8::from(*b)),
         Value::Undef => format!("{MARK}n"),
+        _ if boxed::as_box(v).is_some() => {
+            // A `Long`, `Short` or `Byte` key is not the `Integer` of its number.
+            let (kind, n) = boxed::as_box(v).unwrap_or((boxed::IntKind::Long, 0));
+            let tag = match kind {
+                boxed::IntKind::Short => 'S',
+                boxed::IntKind::Byte => 'B',
+                _ => 'L',
+            };
+            format!("{MARK}{tag}{n}")
+        }
         _ => {
             // A `GString` key is not the `String` of its text: its
             // `hashCode` differs, so `[("${k}"): 1]` does not contain `'a'`.
@@ -106,6 +116,15 @@ pub(super) fn decode(k: &str) -> Value {
     let rest = chars.as_str();
     match tag {
         Some('i') => rest.parse::<i64>().map_or(Value::Undef, Value::int),
+        Some(tag @ ('L' | 'S' | 'B')) => {
+            let kind = match tag {
+                'S' => boxed::IntKind::Short,
+                'B' => boxed::IntKind::Byte,
+                _ => boxed::IntKind::Long,
+            };
+            rest.parse::<i64>()
+                .map_or(Value::Undef, |n| boxed::of_kind(kind, n))
+        }
         Some('f') => {
             u64::from_str_radix(rest, 16).map_or(Value::Undef, |b| Value::float(f64::from_bits(b)))
         }

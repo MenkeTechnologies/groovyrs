@@ -5314,3 +5314,254 @@ true
 "####;
     check(src, expected);
 }
+
+/// `Long`, `Short` and `Byte` values small enough to be `Integer`s keep their
+/// class: `getClass()`, `equals` (`2L in [1, 2]` is `false`), `hashCode`,
+/// `instanceof`, map keys and set members, arithmetic (a `Long` stays one,
+/// a `Short`/`Byte` widens to `Integer`), bitwise operators and collections.
+#[test]
+fn round9_boxed_integer_kinds() {
+    let src = r####"println("L1: " + ((2L in [1,2])))
+println("L2: " + (([1,2].contains(2L))))
+println("L3: " + ((((byte)5).getClass().name)))
+println("L4: " + ((((short)5).getClass().name)))
+println("L5: " + ((((long)5).getClass().name)))
+def b = (byte) 7; println b.getClass().name
+def s = (short) 7; println s.getClass().name
+def l = (long) 7; println l.getClass().name
+def xs = [(byte)1, (short)1, 1L, 1]
+println("L10: " + (xs*.getClass()*.simpleName))
+println("L11: " + (xs.unique().size()))
+println("L12: " + (((byte)1 == 1)))
+println("L13: " + ((((byte)1).equals(1))))
+println("L14: " + ((1.equals(1L))))
+println("L15: " + ((1L.equals(1))))
+println("L16: " + (([1L] as Set == [1] as Set)))
+println("L17: " + ((([1L] as Set).contains(1))))
+println("L18: " + (([a:1L].containsValue(1))))
+println("L19: " + ((((Long)3).hashCode())))
+println("L20: " + (((5 as long).getClass().name)))
+println("L21: " + (((5 as byte).getClass().name)))
+println("L22: " + (((5 as short).getClass().name)))
+println("L23: " + ((Long.valueOf(5).getClass().name)))
+def m = [:]; m[1L] = 'L'; m[1] = 'I'; println m.size()
+switch (2L) { case 2: println 'int-case'; break; default: println 'no' }
+println("L26: " + (([1, 2, 3].indexOf(2L))))
+println("L27: " + ((new HashSet([1, 1L, (short)1, (byte)1]).size())))
+def ll = 3L; println ll.getClass().name
+println("L29: " + (((ll + 1).getClass().name)))
+println("L30: " + ((((byte)1 + (byte)1).getClass().name)))
+println("L31: " + (([1L, 2L].sum().getClass().name)))
+println("L32: " + (Integer.valueOf(4).equals((short)4)))
+println("L33: " + ((2L.isCase(2))))
+println("L34: " + (([2L].isCase(2))))
+println("L35: " + (([1,2,3] - [2L])))
+println("L36: " + (([1,2,3].count(2L))))
+println("L37: " + (([5L,6L].collect{ it.getClass().simpleName })))
+"####;
+    let expected = r####"L1: false
+L2: false
+L3: java.lang.Byte
+L4: java.lang.Short
+L5: java.lang.Long
+java.lang.Byte
+java.lang.Short
+java.lang.Long
+L10: [Byte, Short, Long, Integer]
+L11: 1
+L12: true
+L13: false
+L14: false
+L15: false
+L16: true
+L17: false
+L18: false
+L19: 3
+L20: java.lang.Long
+L21: java.lang.Byte
+L22: java.lang.Short
+L23: java.lang.Long
+2
+int-case
+L26: -1
+L27: 4
+java.lang.Long
+L29: java.lang.Long
+L30: java.lang.Integer
+L31: java.lang.Long
+L32: false
+L33: true
+L34: false
+L35: [1, 3]
+L36: 1
+L37: [Long, Long]
+"####;
+    check(src, expected);
+    let src = r####"def show = { v -> "${v} ${v?.getClass()?.simpleName}" }
+println show(2L)
+println show((byte) 5)
+println show((short) 5)
+println show(5 as long)
+println show(5 as Byte)
+println show(Long.valueOf(7))
+println show(Short.valueOf((short) 3))
+println show(Byte.valueOf((byte) 3))
+println show("12".toLong())
+println show(12.longValue())
+println show(12.shortValue())
+println show(12.byteValue())
+println show(Math.round(2.5d))
+def l = [1L, 2L]
+println l*.getClass()*.simpleName
+println l.sum().getClass().simpleName
+println((l[0] + 1).getClass().simpleName)
+println((l[0] * 2).getClass().simpleName)
+println(((byte)1 + (byte)2).getClass().simpleName)
+println(((short)1 * 3).getClass().simpleName)
+println((-(5L)).getClass().simpleName)
+println(2L in [1, 2])
+println(2 in [1L, 2L])
+println([1, 2].contains(2L))
+println([1L, 2L].contains(2L))
+println([1, 2].indexOf(2L))
+println([1L, 2L].indexOf(2L))
+println([1, 2, 3].count(2L))
+println([1, 2, 3] - [2L])
+println(2L == 2)
+println(2L.equals(2))
+println(2.equals(2L))
+println(2L.equals(2L))
+println((short) 2 == 2)
+println(((short) 2).equals(2))
+println(((byte) 2).equals((byte) 2))
+println(2L <=> 3)
+println((-1L).hashCode())
+println((-1).hashCode())
+println(((byte) -1).hashCode())
+println(5000000000L.hashCode())
+println([(1L): 'a', (1): 'b'].size())
+def m = [:]; m[1L] = 'L'; m[1] = 'I'; println m
+println m[1L]
+println m.keySet()*.getClass()*.simpleName
+switch (2L) { case 2: println 'case-int'; break; default: println 'case-none' }
+switch (2) { case 2L: println 'case-long'; break; default: println 'case-none2' }
+println(0L ? 't' : 'f')
+println((byte) 0 ? 't' : 'f')
+println "${3L}"
+println([3L, 1L, 2L].sort())
+println([3L, 1, 2L].max().getClass().simpleName)
+println(2L.class.name)
+println((long) 3 instanceof Long)
+println((long) 3 instanceof Integer)
+println(((short) 3) instanceof Short)
+println((byte) 200)
+println((short) 70000)
+println([(byte) 1, (short) 1, 1L, 1].unique().size())
+println([1L, 2L].collect { it * 2 }*.getClass()*.simpleName)
+println(1L..3L)
+println((1L..3L).collect { it.getClass().simpleName })
+println([5L].inspect())
+println(String.format('%d|%d|%d', 5L, (byte) 6, (short) 7))
+long x = 4
+println(x.getClass().simpleName)
+def y = x
+println([y].first().getClass().simpleName)
+def f(long p) { p.getClass().simpleName }
+println(f(3))
+def g(def p) { p.getClass().simpleName }
+println(g(3L))
+println([a: 1L].a.getClass().simpleName)
+println([1L].toSet().first().getClass().simpleName)
+println(Long.MAX_VALUE.getClass().simpleName)
+"####;
+    let expected = r####"2 Long
+5 Byte
+5 Short
+5 Long
+5 Byte
+7 Long
+3 Short
+3 Byte
+12 Long
+12 Long
+12 Short
+12 Byte
+3 Long
+[Long, Long]
+Long
+Long
+Long
+Integer
+Integer
+Long
+false
+false
+false
+true
+-1
+1
+1
+[1, 3]
+true
+false
+false
+true
+true
+false
+true
+-1
+0
+-1
+-1
+705032705
+2
+[1:L, 1:I]
+L
+[Long, Integer]
+case-int
+case-long
+f
+f
+3
+[1, 2, 3]
+Long
+java.lang.Long
+true
+false
+true
+-56
+4464
+1
+[Long, Long]
+1..3
+[Long, Long, Long]
+[5]
+5|6|7
+Long
+Long
+Long
+Long
+Long
+Long
+Long
+"####;
+    check(src, expected);
+    let src = r####"def list = []
+for (long i = 0; i < 70000; i++) list << i
+println list.sum()
+println list.sum().getClass().name
+println([1L, 2L].collect { it * 2 }*.getClass()*.simpleName)
+println(((short) 3) & 1)
+println((1L << 40))
+def b = (byte) 5
+println(b | 2)
+"####;
+    let expected = r####"2449965000
+java.lang.Long
+[Long, Long]
+1
+1099511627776
+7
+"####;
+    check(src, expected);
+}

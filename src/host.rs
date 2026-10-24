@@ -497,6 +497,11 @@ pub const GSTRING_TEXT: u16 = 788;
 /// value still renders when it is read.
 pub const GSTRING_STORED: u16 = 789;
 
+/// Builtin id for a statically-`Long` value leaving compiled code — an
+/// element, an argument, a stored value: a `Long` small enough to be an
+/// `Integer` becomes the box that keeps its class (see `boxed`).
+pub const GBOX_LONG: u16 = 790;
+
 /// The method name `list.remove((Object) x)` compiles to: the cast selects
 /// `Collection.remove(Object)` over `List.remove(int)`, which only the call
 /// site can see. Not an identifier, so no script can name it.
@@ -618,6 +623,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GSPRINTF, b_sprintf);
     vm.register_builtin(GNAME_GET, b_name_get);
     vm.register_builtin(GNAME_SET, b_name_set);
+    vm.register_builtin(GBOX_LONG, b_box_long);
     // A fresh VM install starts with an empty object heap: `Value::Obj` handles
     // are chunk-relative (a closure carries a name-pool index, an instance a
     // class id), so a handle from a prior run must never survive into a new
@@ -809,6 +815,9 @@ thread_local! {
     /// number but not on a `String` (`'a'++` is `b`) or a user class, so a
     /// non-numeric operand at one of these sites calls the method instead.
     static INCDEC_SITES: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    /// The op indices of the `+ 0` before a native bitwise op (see
+    /// [`set_unbox_sites`]).
+    static UNBOX_SITES: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
 
 thread_local! {
@@ -1014,6 +1023,12 @@ pub fn set_incdec_sites(sites: HashSet<usize>) {
     INCDEC_SITES.with(|s| *s.borrow_mut() = sites);
 }
 
+/// Publish the compiler's unbox sites for this chunk: the `+ 0` a native
+/// bitwise operand passes through, which answers a box's plain number.
+pub fn set_unbox_sites(sites: HashSet<usize>) {
+    UNBOX_SITES.with(|s| *s.borrow_mut() = sites);
+}
+
 /// Whether the op at `ip` was compiled as `Long` arithmetic.
 fn wide_site(ip: usize) -> bool {
     WIDE_SITES.with(|s| s.borrow().contains(&ip))
@@ -1103,7 +1118,11 @@ fn wrap_to_width(value: i64, wide: bool) -> Value {
 /// own width. Answers `None` for an op or an operand this rule does not cover,
 /// which then takes [`numeric_hook`]'s ordinary path.
 fn int_arith(op: NumOp, a: &Value, b: &Value, ip: usize) -> Option<Value> {
-    let wide = arith_is_wide(ip, a, b);
+    int_arith_at(op, a, b, arith_is_wide(ip, a, b))
+}
+
+/// [`int_arith`] at a width already decided: 64 bits when `wide`.
+fn int_arith_at(op: NumOp, a: &Value, b: &Value, wide: bool) -> Option<Value> {
     if let (NumOp::Neg, Value::Int(x)) = (op, a) {
         return Some(wrap_to_width(x.wrapping_neg(), wide));
     }
@@ -1128,6 +1147,14 @@ fn int_arith(op: NumOp, a: &Value, b: &Value, ip: usize) -> Option<Value> {
 /// The site is what separates an `Integer` overflow from a `Long` one — see the
 /// `Integer` width commentary above. Everything else is [`numeric_hook`].
 pub fn sited_numeric_hook(call: fusevm::NumericCall<'_>) -> Result<Value, String> {
+    // The `+ 0` before a native bitwise op hands any operand on as it is,
+    // a box read back to its number.
+    if UNBOX_SITES.with(|s| s.borrow().contains(&call.ip)) {
+        return Ok(boxed::unbox(call.a.clone()));
+    }
+    if boxed::as_box(call.a).is_some() || boxed::as_box(call.b).is_some() {
+        return boxed_arith(call.op, call.a, call.b, wide_site(call.ip));
+    }
     if let Some(v) = int_arith(call.op, call.a, call.b, call.ip) {
         return Ok(v);
     }
@@ -1368,7 +1395,10 @@ fn raise_missing_method_as(
 /// `Number`, and `true & 1` raises `MissingMethodException` naming
 /// `java.lang.Boolean`.
 fn is_number(v: &Value) -> bool {
-    matches!(v, Value::Int(_) | Value::Float(_)) || is_dec_handle(v) || as_float_handle(v).is_some()
+    matches!(v, Value::Int(_) | Value::Float(_))
+        || boxed::as_box(v).is_some()
+        || is_dec_handle(v)
+        || as_float_handle(v).is_some()
 }
 
 /// Is `v` an `Integer`/`Long`/`BigInteger` — a number whose bits Java will
@@ -1376,7 +1406,7 @@ fn is_number(v: &Value) -> bool {
 /// question and counts a `Boolean`; this one answers the *operator* question
 /// and does not.
 fn is_integral_number(v: &Value) -> bool {
-    matches!(v, Value::Int(_)) || as_bigint(v).is_some()
+    matches!(v, Value::Int(_)) || boxed::as_box(v).is_some() || as_bigint(v).is_some()
 }
 
 /// Raise what Groovy raises when a bitwise, shift or `**` operator is applied to
@@ -1691,6 +1721,9 @@ fn java_class_name(v: &Value) -> String {
             }
             return crate::throwable::qualified(&meta.name);
         }
+    }
+    if let Some((kind, _)) = boxed::as_box(v) {
+        return kind.class_name().to_string();
     }
     // An integer outside 32-bit range is a `Long`; inside it, Groovy's default
     // `Integer`. The one case this misreads is a `Long` small enough to be an
@@ -2284,6 +2317,8 @@ fn interned_class_name(name: &str) -> &'static str {
 
 #[path = "host/bignum.rs"]
 mod bignum;
+#[path = "host/boxed.rs"]
+mod boxed;
 #[path = "host/config.rs"]
 mod config;
 #[path = "host/date.rs"]
@@ -4315,7 +4350,9 @@ fn bigint_value(d: BigDecimal) -> Value {
 /// decides whether an exact arithmetic result stays a `BigInteger`: Groovy
 /// widens to `BigDecimal` only when a real decimal takes part.
 fn is_integral(v: &Value) -> bool {
-    matches!(v, Value::Int(_) | Value::Bool(_)) || as_bigint(v).is_some()
+    matches!(v, Value::Int(_) | Value::Bool(_))
+        || boxed::as_box(v).is_some()
+        || as_bigint(v).is_some()
 }
 
 /// The `BigDecimal` view of any Groovy number: a decimal as itself, an
@@ -4324,6 +4361,7 @@ fn is_integral(v: &Value) -> bool {
 fn as_exact_dec(v: &Value) -> Option<BigDecimal> {
     match v {
         Value::Int(n) => Some(decimal::from_i64(*n)),
+        _ if boxed::as_box(v).is_some() => boxed::as_box(v).map(|(_, n)| decimal::from_i64(n)),
         Value::Bool(b) => Some(decimal::from_i64(*b as i64)),
         _ => as_dec(v),
     }
@@ -4470,6 +4508,7 @@ fn b_bigint(vm: &mut VM, _argc: u8) -> Value {
 /// `asBoolean()`, which is a user method and so re-enters the VM.
 fn groovy_truthy(vm: &mut VM, v: &Value) -> bool {
     match v {
+        _ if boxed::as_box(v).is_some() => boxed::as_box(v).is_some_and(|(_, n)| n != 0),
         // Groovy: a String is truthy when non-empty. fusevm additionally treats
         // "0" as false (a shell convention), which Groovy does not.
         Value::Str(s) => !s.is_empty(),
@@ -7290,6 +7329,13 @@ fn b_new(vm: &mut VM, argc: u8) -> Value {
     if let Some(v) = emc_constructor(vm, &name, &args) {
         return v;
     }
+    // A JDK constructor reads its numbers as numbers; a script class receives
+    // its arguments as they are.
+    let args = if resolve_class_name(&name).is_none() {
+        args.into_iter().map(boxed::unbox).collect()
+    } else {
+        args
+    };
     // The *actual* arity, which is what picks the constructor. It is `argc` for
     // an ordinary call and the parked list's length for a spread one, where the
     // opcode carries a count of zero because the real one is a run-time value.
@@ -8446,6 +8492,10 @@ fn checked_equal(vm: &mut VM, eq: impl FnOnce() -> bool) -> bool {
 /// [`values_equal`] for one pair, its members compared through the guarded
 /// entry point.
 fn values_equal_shape(a: &Value, b: &Value) -> bool {
+    // `==` compares a `Long`, `Short` or `Byte` by its number.
+    if boxed::as_box(a).is_some() || boxed::as_box(b).is_some() {
+        return values_equal_shape(&boxed::unbox(a.clone()), &boxed::unbox(b.clone()));
+    }
     if let Some(eq) = xml_equal(a, b) {
         return eq;
     }
@@ -8866,6 +8916,9 @@ fn shape_hash_code(v: &Value) -> i32 {
     if let Some(f) = as_float_handle(v) {
         return (if f.is_nan() { f32::NAN } else { f }).to_bits() as i32;
     }
+    if let Some((kind, n)) = boxed::as_box(v) {
+        return boxed::int_hash(kind, n);
+    }
     match v {
         Value::Str(s) => string_hash(s),
         Value::Int(n) => integer_hash(*n),
@@ -9019,7 +9072,11 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         "CharSequence" => matches!(value, Value::Str(_)) || is_builder(value),
         "StringBuilder" | "StringBuffer" | "StringWriter" | "Appendable" => as_buffer(value)
             .is_some_and(|(c, _)| simple_name_of(c) == short || short == "Appendable"),
-        "Integer" | "Int" | "Long" | "Short" | "Byte" => matches!(value, Value::Int(_)),
+        "Integer" | "Int" | "Long" | "Short" | "Byte" => {
+            boxed::int_view(value).is_some_and(|(kind, _)| {
+                Some(kind) == boxed::kind_named(short).or(Some(boxed::IntKind::Integer))
+            })
+        }
         // An unsuffixed Groovy decimal is a `BigDecimal` (a host-heap handle);
         // only a `d`/`f`-suffixed literal is an IEEE `Double`. A `BigInteger`
         // is a separate type and satisfies neither the other's test.
@@ -9033,6 +9090,7 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         "Float" => as_float_handle(value).is_some(),
         "Number" => {
             matches!(value, Value::Int(_) | Value::Float(_))
+                || boxed::as_box(value).is_some()
                 || as_dec(value).is_some()
                 || as_float_handle(value).is_some()
         }
@@ -9116,7 +9174,8 @@ fn is_jdk_scalar(v: &Value) -> bool {
     matches!(
         v,
         Value::Str(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_)
-    ) || as_dec(v).is_some()
+    ) || boxed::as_box(v).is_some()
+        || as_dec(v).is_some()
         || as_float_handle(v).is_some()
 }
 
@@ -10045,6 +10104,7 @@ fn set_property(vm: &mut VM, recv: Value, name: String, value: Value) -> Value {
 fn b_index(vm: &mut VM, _argc: u8) -> Value {
     let index = vm.stack.pop().unwrap_or(Value::Undef);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    let index = index_operand(&recv, index);
     index_read(vm, recv, index)
 }
 
@@ -10377,6 +10437,7 @@ fn b_setindex(vm: &mut VM, _argc: u8) -> Value {
     let value = vm.stack.pop().unwrap_or(Value::Undef);
     let index = vm.stack.pop().unwrap_or(Value::Undef);
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    let index = index_operand(&recv, index);
     if array_index_past_end(vm, &recv, &index) {
         return Value::Undef;
     }
@@ -11226,6 +11287,109 @@ fn b_method_wide(vm: &mut VM, argc: u8) -> Value {
 /// (they re-enter the VM to run a closure body) and falling back to the pure GDK
 /// dispatch. Shared by [`b_method`] and [`b_method_safe`].
 fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
+    let maybe_box = |v: &Value| matches!(v, Value::Status(_) | Value::Ref(_));
+    if maybe_box(&recv) || args.iter().any(maybe_box) {
+        if let Some(out) = dispatch_boxed(vm, &recv, method, &args) {
+            return out;
+        }
+        let nargs = args.len();
+        let args = args
+            .into_iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if boxed_arg_kept(&recv, method, i, nargs) {
+                    a
+                } else {
+                    boxed::unbox(a)
+                }
+            })
+            .collect();
+        return dispatch_call_unboxed(vm, recv, method, args);
+    }
+    dispatch_call_unboxed(vm, recv, method, args)
+}
+
+/// A call whose receiver is a `Long`, `Short` or `Byte` box, or whose numeric
+/// receiver takes a box argument. The box's own `getClass`, `equals`,
+/// `hashCode` and `toString` answer here; anything else runs on the numbers,
+/// and a `Long` taking part keeps the arithmetic methods' answer a `Long`.
+/// `None` when the receiver is not a number, so the arguments are only
+/// unboxed where the method reads a number ([`boxed_arg_kept`]).
+fn dispatch_boxed(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
+    if let Some((kind, n)) = boxed::as_box(recv) {
+        match (method, args) {
+            ("getClass", []) => return Some(class_ref_of(recv)),
+            ("equals", [other]) => {
+                return Some(Value::bool(boxed::int_view(other) == Some((kind, n))))
+            }
+            ("hashCode", []) => return Some(Value::int(i64::from(boxed::int_hash(kind, n)))),
+            ("toString", []) => return Some(Value::str(n.to_string())),
+            _ => {}
+        }
+    } else if !is_number(recv) {
+        return None;
+    }
+    // `Number.equals` is `false` across classes: `4.equals((short) 4)`.
+    if let ("equals", [other]) = (method, args) {
+        return Some(Value::bool(boxed::int_view(recv) == boxed::int_view(other)));
+    }
+    let long = boxed::is_long_box(recv) || args.iter().any(boxed::is_long_box);
+    let unboxed: Vec<Value> = args.iter().cloned().map(boxed::unbox).collect();
+    let out = dispatch_call_unboxed(vm, boxed::unbox(recv.clone()), method, unboxed);
+    let at_width = matches!(
+        method,
+        "plus"
+            | "minus"
+            | "multiply"
+            | "mod"
+            | "intdiv"
+            | "abs"
+            | "next"
+            | "previous"
+            | "negative"
+            | "and"
+            | "or"
+            | "xor"
+            | "leftShift"
+            | "rightShift"
+            | "rightShiftUnsigned"
+            | "bitwiseNegate"
+    );
+    Some(rebox_long(
+        long && at_width && is_integral_number(recv),
+        out,
+    ))
+}
+
+/// Whether argument `i` of a call on a non-number keeps its `Long`, `Short`
+/// or `Byte` box: user code (a script class's method, a closure) receives
+/// every argument as it is, and a JDK collection keeps the ones it stores or
+/// compares with `equals` (an element, a value, a map key) — an index or a
+/// count is read as a number.
+fn boxed_arg_kept(recv: &Value, method: &str, i: usize, nargs: usize) -> bool {
+    if as_instance(recv).is_some()
+        || closure_meta(recv).is_some()
+        || is_script_this(recv)
+        || as_proxy(recv).is_some()
+        || as_expando(recv).is_some()
+    {
+        return true;
+    }
+    let map = as_omap(recv).is_some() || matches!(recv, Value::Hash(_));
+    let set = as_set(recv).is_some();
+    match method {
+        "equals" | "contains" | "indexOf" | "lastIndexOf" | "isCase" | "leftShift" | "push"
+        | "offer" | "plus" | "containsValue" => true,
+        // `add(element)`, `add(index, element)`, `set(index, element)`.
+        "add" | "set" => i + 1 == nargs,
+        "containsKey" | "get" | "getAt" | "remove" => map || set,
+        "put" => true,
+        "putAt" => map || i == 1,
+        _ => false,
+    }
+}
+
+fn dispatch_call_unboxed(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
     if matches!(method, "sum" | "average") {
         let prev = NO_STACK.replace(true);
         let out = dispatch_call_inner(vm, recv, method, args);
@@ -14116,6 +14280,7 @@ fn entry_args(clo: &Value, key: &str, value: &Value) -> Vec<Value> {
 /// keeps `BigDecimal` scale, and a `double` operand promotes to a double
 /// (Groovy's numeric-tower `+`).
 fn groovy_sum_add(a: &Value, b: &Value) -> Value {
+    let long = boxed::is_long_box(a) || boxed::is_long_box(b);
     // `as_i64` reads a `Boolean` as 0/1, and `Boolean` has no `plus` at all —
     // `[true, false].sum()` is a `MissingMethodException`, not `1`. Excluded
     // here so the pair reaches the overload table below.
@@ -14125,8 +14290,8 @@ fn groovy_sum_add(a: &Value, b: &Value) -> Value {
             // Wrapped at the operands' width, as `+` is: two `Integer`s
             // overflow at 32 bits (`[Integer.MAX_VALUE, 1].sum()` is
             // `Integer.MIN_VALUE`), a `Long` at 64.
-            let wide = i32::try_from(x).is_err() || i32::try_from(y).is_err();
-            return wrap_to_width(x.wrapping_add(y), wide);
+            let wide = long || i32::try_from(x).is_err() || i32::try_from(y).is_err();
+            return rebox_long(long, wrap_to_width(x.wrapping_add(y), wide));
         }
     }
     if let Some(Ok(v)) = decimal_operator(NumOp::Add, a, b) {
@@ -14576,7 +14741,13 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 .ok()
                 .filter(|n| method == "toLong" || (i32::MIN as i64..=i32::MAX as i64).contains(n));
             match parsed {
-                Some(n) => Value::int(n),
+                Some(n) => {
+                    if method == "toLong" {
+                        boxed::long_value(n)
+                    } else {
+                        Value::int(n)
+                    }
+                }
                 None => raise_number_format(vm, t),
             }
         }
@@ -16232,18 +16403,20 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             }
         }
         (Value::Int(n), "bitwiseNegate") if args.is_empty() => Value::int(!*n),
-        (Value::Int(n), "toLong" | "longValue") => Value::int(*n),
+        (Value::Int(n), "toLong" | "longValue") => boxed::long_value(*n),
         // `intValue()` is Java's narrowing conversion, so `3000000000L.intValue()`
         // is `-1294967296`.
         (Value::Int(n), "toInteger" | "intValue") => Value::int(i64::from(*n as i32)),
-        (Value::Int(n), "byteValue") if args.is_empty() => Value::int(i64::from(*n as i8)),
-        (Value::Int(n), "shortValue") if args.is_empty() => Value::int(i64::from(*n as i16)),
+        (Value::Int(n), "byteValue") if args.is_empty() => boxed::of_kind(boxed::IntKind::Byte, *n),
+        (Value::Int(n), "shortValue") if args.is_empty() => {
+            boxed::of_kind(boxed::IntKind::Short, *n)
+        }
         (Value::Int(n), "toDouble" | "doubleValue" | "toFloat" | "floatValue") => {
             float_or_double(method, *n as f64)
         }
         // Narrowing conversions keep the low bits, as Java's do.
-        (Value::Int(n), "byteValue") => Value::int(i64::from(*n as i8)),
-        (Value::Int(n), "shortValue") => Value::int(i64::from(*n as i16)),
+        (Value::Int(n), "byteValue") => boxed::of_kind(boxed::IntKind::Byte, *n),
+        (Value::Int(n), "shortValue") => boxed::of_kind(boxed::IntKind::Short, *n),
         (Value::Int(n), "toBigDecimal") => dec_value(BigDecimal::from(*n)),
         (Value::Int(n), "toBigInteger") => bigint_value(BigDecimal::from(*n)),
         // `Integer.equals(Object)` is `false` for anything that is not an
@@ -16294,12 +16467,12 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `Number.byteValue()` / `shortValue()` narrow the `int` the double
         // truncates to.
         (Value::Float(f), "byteValue") if args.is_empty() => {
-            Value::int(i64::from(java_double_to_int(*f) as i8))
+            boxed::of_kind(boxed::IntKind::Byte, java_double_to_int(*f))
         }
         (Value::Float(f), "shortValue") if args.is_empty() => {
-            Value::int(i64::from(java_double_to_int(*f) as i16))
+            boxed::of_kind(boxed::IntKind::Short, java_double_to_int(*f))
         }
-        (Value::Float(f), "toLong" | "longValue") => Value::int(*f as i64),
+        (Value::Float(f), "toLong" | "longValue") => boxed::long_value(*f as i64),
         (Value::Float(f), "toDouble" | "doubleValue" | "toFloat" | "floatValue") => {
             float_or_double(method, *f)
         }
@@ -16501,11 +16674,13 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 "bitLength" if args.is_empty() && as_bigint(recv).is_some() => {
                     Value::int(decimal::bit_length(&d).unwrap_or(0))
                 }
-                "longValue" | "toLong" => Value::int(decimal::low_i64(&d)),
+                "longValue" | "toLong" => boxed::long_value(decimal::low_i64(&d)),
                 "intValue" | "toInteger" => Value::int(i64::from(decimal::low_i32(&d))),
-                "byteValue" if args.is_empty() => Value::int(i64::from(decimal::low_i32(&d) as i8)),
+                "byteValue" if args.is_empty() => {
+                    boxed::of_kind(boxed::IntKind::Byte, i64::from(decimal::low_i32(&d)))
+                }
                 "shortValue" if args.is_empty() => {
-                    Value::int(i64::from(decimal::low_i32(&d) as i16))
+                    boxed::of_kind(boxed::IntKind::Short, i64::from(decimal::low_i32(&d)))
                 }
                 // `compareTo` is scale-insensitive (`1.0G.compareTo(1.00G)` is
                 // `0`) and answers a sign, not a difference.
@@ -17042,9 +17217,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                         None => args.get(1).cloned().unwrap_or(Value::Undef),
                     }
                 }
+                // `Map.containsValue` is `Object.equals`: `[a: 1L].containsValue(1)` is
+                // `false`.
                 "containsValue" => {
                     let want = args.first().cloned().unwrap_or(Value::Undef);
-                    Value::bool(entries.iter().any(|(_, v)| values_equal(v, &want)))
+                    Value::bool(entries.iter().any(|(_, v)| java_equals(v, &want)))
                 }
                 // A map is a heap handle, so its mutators write through it and
                 // need no compiler-emitted writeback.
@@ -17129,7 +17306,20 @@ fn b_power(vm: &mut VM, _argc: u8) -> Value {
     let mask = vm.stack.pop().map(|m| m.to_int()).unwrap_or(0);
     let exp = vm.stack.pop().unwrap_or(Value::Undef);
     let base = vm.stack.pop().unwrap_or(Value::Undef);
-    power_of(vm, &base, &exp, mask & 1 != 0, mask & 2 != 0)
+    // A `Long` box is as wide as a statically-`Long` operand.
+    let (base_long, exp_long) = (boxed::is_long_box(&base), boxed::is_long_box(&exp));
+    let (base, exp) = (boxed::unbox(base), boxed::unbox(exp));
+    let out = power_of(
+        vm,
+        &base,
+        &exp,
+        mask & 1 != 0 || base_long,
+        mask & 2 != 0 || exp_long,
+    );
+    match out {
+        Value::Int(n) if base_long && !exp_long => boxed::long_value(n),
+        other => other,
+    }
 }
 
 /// The `double` half of Groovy's `**`, which is `DefaultGroovyMethods.power`:
@@ -17334,6 +17524,12 @@ fn b_shl(vm: &mut VM, _argc: u8) -> Value {
     let wide = shift_is_wide(vm);
     let rhs = vm.stack.pop().unwrap_or(Value::Undef);
     let lhs = vm.stack.pop().unwrap_or(Value::Undef);
+    let (long, lhs, rhs) = shift_operands(lhs, rhs);
+    let out = shl_values(vm, wide || long, lhs, rhs);
+    rebox_long(long, out)
+}
+
+fn shl_values(vm: &mut VM, wide: bool, lhs: Value, rhs: Value) -> Value {
     take_mutated();
     // `list << x` is `List.leftShift`, an in-place append that answers the list.
     // Route it through the ordinary method dispatch rather than repeating the
@@ -17425,7 +17621,9 @@ fn b_bitop(vm: &mut VM, _argc: u8) -> Value {
         .into_owned();
     let rhs = vm.stack.pop().unwrap_or(Value::Undef);
     let lhs = vm.stack.pop().unwrap_or(Value::Undef);
-    bit_op_values(vm, &op, &lhs, &rhs)
+    let long = boxed::is_long_box(&lhs) || boxed::is_long_box(&rhs);
+    let out = bit_op_values(vm, &op, &boxed::unbox(lhs), &boxed::unbox(rhs));
+    rebox_long(long, out)
 }
 
 /// The body of [`b_bitop`], shared with the `a.and(b)` method spellings.
@@ -17461,7 +17659,9 @@ fn bit_op_values(vm: &mut VM, op: &str, lhs: &Value, rhs: &Value) -> Value {
 /// two's-complement `not`, which is `-x - 1` at any width.
 fn b_bitnot(vm: &mut VM, _argc: u8) -> Value {
     let v = vm.stack.pop().unwrap_or(Value::Undef);
-    bit_not_value(vm, &v)
+    let long = boxed::is_long_box(&v);
+    let out = bit_not_value(vm, &boxed::unbox(v));
+    rebox_long(long, out)
 }
 
 /// `InvokerHelper.bitwiseNegate`: an integer's complement, a `String`'s
@@ -17585,6 +17785,12 @@ fn b_shr(vm: &mut VM, _argc: u8) -> Value {
     let wide = shift_is_wide(vm);
     let rhs = vm.stack.pop().unwrap_or(Value::Undef);
     let lhs = vm.stack.pop().unwrap_or(Value::Undef);
+    let (long, lhs, rhs) = shift_operands(lhs, rhs);
+    let out = shr_values(vm, wide || long, lhs, rhs);
+    rebox_long(long, out)
+}
+
+fn shr_values(vm: &mut VM, wide: bool, lhs: Value, rhs: Value) -> Value {
     // `a >> b` on two closures is `Closure.andThen`: `a` runs first, and the
     // result takes `a`'s arity.
     if let (Some(la), Some(_)) = (closure_meta(&lhs), closure_meta(&rhs)) {
@@ -17672,6 +17878,12 @@ fn b_ushr(vm: &mut VM, _argc: u8) -> Value {
     let wide = shift_is_wide(vm);
     let rhs = vm.stack.pop().unwrap_or(Value::Undef);
     let lhs = vm.stack.pop().unwrap_or(Value::Undef);
+    let (long, lhs, rhs) = shift_operands(lhs, rhs);
+    let out = ushr_values(vm, wide || long, lhs, rhs);
+    rebox_long(long, out)
+}
+
+fn ushr_values(vm: &mut VM, wide: bool, lhs: Value, rhs: Value) -> Value {
     match (plain_int(&lhs), shift_count(&rhs)) {
         (Some(a), Some(b)) => java_shift("rightShiftUnsigned", wide, a, b),
         // Not two integers. Groovy has four different answers for that, none of
@@ -17732,7 +17944,7 @@ fn b_cast(vm: &mut VM, _argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    let v = cast_operand(vm.stack.pop().unwrap_or(Value::Undef), &ty);
     as_type(vm, v, &ty)
 }
 
@@ -17761,7 +17973,7 @@ fn b_param_convert(vm: &mut VM, _argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    let v = cast_operand(vm.stack.pop().unwrap_or(Value::Undef), &ty);
     params::convert_param(vm, &ty, v)
 }
 
@@ -17788,7 +18000,7 @@ fn b_cast_assign(vm: &mut VM, _argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    let v = cast_operand(vm.stack.pop().unwrap_or(Value::Undef), &ty);
     cast_assign(vm, v, &ty)
 }
 
@@ -18023,8 +18235,14 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
                 },
             };
             // A narrowing cast keeps the target's low bits, so `2147483648L as
-            // int` is `-2147483648` and `300 as byte` is `44`.
-            Value::int(narrow_to(ty, n))
+            // int` is `-2147483648` and `300 as byte` is `44`; a `Short` or
+            // `Byte` is a box of its own class.
+            match boxed::kind_named(ty) {
+                Some(kind @ (boxed::IntKind::Short | boxed::IntKind::Byte)) => {
+                    boxed::of_kind(kind, n)
+                }
+                _ => Value::int(narrow_to(ty, n)),
+            }
         }
         // `as float` / `as Float` lands on `java.lang.Float`, `as double` /
         // `as Double` on `Double`; the reading of the source value is the same.
@@ -18199,7 +18417,7 @@ fn b_java_cast(vm: &mut VM, _argc: u8) -> Value {
         .unwrap_or(Value::Undef)
         .as_str_cow()
         .into_owned();
-    let v = vm.stack.pop().unwrap_or(Value::Undef);
+    let v = cast_operand(vm.stack.pop().unwrap_or(Value::Undef), &ty);
     java_cast(vm, v, &ty)
 }
 
@@ -18253,12 +18471,15 @@ fn java_cast(vm: &mut VM, v: Value, ty: &str) -> Value {
             let Some(n) = java_cast_number(&v) else {
                 return raise_java_cast(vm, &v, &target);
             };
-            Value::int(match simple.as_str() {
-                "int" | "Integer" => i64::from(n.int_value()),
-                "short" | "Short" => i64::from(n.int_value() as i16),
-                "byte" | "Byte" => i64::from(n.int_value() as i8),
-                _ => n.long_value(),
-            })
+            // A `long` stays a plain integer: the compiler tracks a `long` cast
+            // statically and boxes it where it leaves compiled code.
+            match boxed::kind_named(&simple) {
+                Some(kind @ (boxed::IntKind::Short | boxed::IntKind::Byte)) => {
+                    boxed::of_kind(kind, i64::from(n.int_value()))
+                }
+                Some(boxed::IntKind::Integer) => Value::int(i64::from(n.int_value())),
+                _ => Value::int(n.long_value()),
+            }
         }
         "double" | "Double" | "float" | "Float" => {
             let target = cast_class_name(&simple);
@@ -18763,6 +18984,7 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
     Some(match (class, method) {
         // `Math.round` is half-up on a double and answers a `long`; every other
         // `Math` entry point is IEEE and answers a `double`.
+        ("Math", "round") if as_float_handle(&arg0).is_none() => boxed::long_value(java_round(f0)),
         ("Math", "round") => Value::int(java_round(f0)),
         ("Math", "abs") => {
             let widths = call_widths();
@@ -19005,7 +19227,10 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
                 _ => true,
             };
             match parsed.filter(|n| fits(*n)) {
-                Some(n) => Value::int(n),
+                Some(n) => match boxed::kind_named(class) {
+                    Some(kind) => boxed::of_kind(kind, n),
+                    None => Value::int(n),
+                },
                 None => raise_number_format(vm, &text),
             }
         }
@@ -20020,6 +20245,9 @@ fn b_range(vm: &mut VM, _argc: u8) -> Value {
     let inclusive = matches!(vm.stack.pop(), Some(Value::Bool(true)));
     let to = vm.stack.pop().unwrap_or(Value::Undef);
     let from = vm.stack.pop().unwrap_or(Value::Undef);
+    // A `Long` box at either end makes a `Long` range, as a `L` literal does.
+    let long = long || boxed::is_long_box(&from) || boxed::is_long_box(&to);
+    let (from, to) = (boxed::unbox(from), boxed::unbox(to));
     let range = if excl_left {
         exclusive_left_range(from, to, inclusive, long)
     } else {
@@ -20358,6 +20586,10 @@ fn range_elements(r: &RangeVal) -> Vec<Value> {
             Some(next) => cur = next,
             None => break,
         }
+    }
+    // A `Long` range's elements are `Long`s.
+    if r.long {
+        return out.into_iter().map(|v| rebox_long(true, v)).collect();
     }
     out
 }
@@ -21254,10 +21486,15 @@ fn make_set(items: Vec<Value>, kind: SetKind) -> Value {
 /// four times slower for twice the input.
 /// Set membership: [`values_equal`], except that a `GString` and a `String`
 /// are never one element — their `hashCode`s differ, so a `HashSet` holding
-/// one does not find the other.
+/// one does not find the other, and an integer box is one element only
+/// with a value of its own class.
 fn set_equal(a: &Value, b: &Value) -> bool {
     if as_gstring(a).is_some() != as_gstring(b).is_some() {
         return false;
+    }
+    // Nor are a `Long`, `Short` or `Byte` and an `Integer` of one number.
+    if boxed::as_box(a).is_some() || boxed::as_box(b).is_some() {
+        return boxed::int_view(a) == boxed::int_view(b);
     }
     values_equal(a, b)
 }
@@ -22476,8 +22713,8 @@ fn print_args(vm: &mut VM, argc: u8, newline: bool) -> Value {
 /// `3.5`), and any decimal operand forces decimal division (`10.0/4 → 2.5`). A
 /// `double` operand keeps the IEEE path instead.
 fn b_div(vm: &mut VM, _argc: u8) -> Value {
-    let b = vm.stack.pop().unwrap_or(Value::Undef);
-    let a = vm.stack.pop().unwrap_or(Value::Undef);
+    let b = boxed::unbox(vm.stack.pop().unwrap_or(Value::Undef));
+    let a = boxed::unbox(vm.stack.pop().unwrap_or(Value::Undef));
     // `10 / [2]`: a number divided by a one-element list divides by the element.
     let b = match (&a, deref_list(&b)) {
         (x, Value::Array(items)) if (is_number(x) || is_dec_handle(x)) && items.len() == 1 => {
@@ -23120,6 +23357,7 @@ fn extreme_value(
 fn as_num(v: &Value) -> Option<f64> {
     match v {
         Value::Int(n) => Some(*n as f64),
+        _ if boxed::as_box(v).is_some() => boxed::as_box(v).map(|(_, n)| n as f64),
         Value::Float(f) => Some(*f),
         Value::Bool(b) => Some(*b as i64 as f64),
         // A `Float` is a `Number`, so `<=>` orders it against every other one —
@@ -23139,7 +23377,7 @@ fn as_i64(v: &Value) -> Option<i64> {
     match v {
         Value::Int(n) => Some(*n),
         Value::Bool(b) => Some(*b as i64),
-        _ => None,
+        _ => boxed::as_box(v).map(|(_, n)| n),
     }
 }
 
@@ -23147,6 +23385,7 @@ fn as_i64(v: &Value) -> Option<i64> {
 fn as_f64(v: &Value) -> f64 {
     match v {
         Value::Int(n) => *n as f64,
+        _ if boxed::as_box(v).is_some() => boxed::as_box(v).map_or(0.0, |(_, n)| n as f64),
         Value::Float(f) => *f,
         Value::Bool(b) => *b as i64 as f64,
         // A `Float` widens to the double it names — the same widening every
@@ -23418,6 +23657,9 @@ fn instance_default_str(v: &Value, inst: &Instance) -> String {
 /// fusevm's shell-flavoured `as_str_cow`): booleans as `true`/`false`, whole
 /// decimals with a trailing `.0`, `Undef`/`null` as `null`.
 pub fn groovy_str(v: &Value) -> String {
+    if let Some((_, n)) = boxed::as_box(v) {
+        return n.to_string();
+    }
     if let Some(text) = gstring_cached(v) {
         return text;
     }
@@ -24183,6 +24425,86 @@ fn date_operator(op: NumOp, a: &Value, b: &Value) -> Option<Value> {
 }
 
 pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
+    if boxed::as_box(a).is_some() || boxed::as_box(b).is_some() {
+        return boxed_arith(op, a, b, false);
+    }
+    numeric_hook_plain(op, a, b)
+}
+
+/// A shift's operands with any box read back to its number, and whether the
+/// shifted value was a `Long` box (which shifts at 64 bits and stays a
+/// `Long`). The right operand is only a count when the left is a number:
+/// `list << 2L` appends the `Long` itself.
+fn shift_operands(lhs: Value, rhs: Value) -> (bool, Value, Value) {
+    let long = boxed::is_long_box(&lhs);
+    let lhs = boxed::unbox(lhs);
+    let rhs = if is_number(&lhs) {
+        boxed::unbox(rhs)
+    } else {
+        rhs
+    };
+    (long, lhs, rhs)
+}
+
+/// The value a cast to `ty` converts: a box read back to its number, except
+/// for a supertype that keeps it as it is (`Object`, `Number`).
+fn cast_operand(v: Value, ty: &str) -> Value {
+    let keep = boxed::as_box(&v).is_none()
+        || matches!(
+            simple_name_of(ty).as_str(),
+            "Object" | "Number" | "Comparable" | "Serializable"
+        );
+    if keep {
+        v
+    } else {
+        boxed::unbox(v)
+    }
+}
+
+/// A subscript with a box read back to its number, except on a map or an
+/// instance, where `m[1L]` and `m[1]` are two keys.
+fn index_operand(recv: &Value, index: Value) -> Value {
+    if as_omap(recv).is_some() || matches!(recv, Value::Hash(_)) || as_instance(recv).is_some() {
+        index
+    } else {
+        boxed::unbox(index)
+    }
+}
+
+/// `GBOX_LONG`: the value on the stack as a `Long`, when it is a plain integer.
+fn b_box_long(vm: &mut VM, _argc: u8) -> Value {
+    match vm.stack.pop().unwrap_or(Value::Undef) {
+        Value::Int(n) => boxed::long_value(n),
+        other => other,
+    }
+}
+
+/// `v` as a `Long` when a `Long` box took part in computing it.
+fn rebox_long(long: bool, v: Value) -> Value {
+    match v {
+        Value::Int(n) if long => boxed::long_value(n),
+        other => other,
+    }
+}
+
+/// Arithmetic with a `Long`, `Short` or `Byte` box taking part: on the numbers,
+/// at 64 bits when a `Long` does, and a `Long` again when one did — a `Short`
+/// or `Byte` widens to `Integer`, as Java's binary numeric promotion does.
+fn boxed_arith(op: NumOp, a: &Value, b: &Value, wide_site: bool) -> Result<Value, String> {
+    let long = boxed::is_long_box(a) || boxed::is_long_box(b);
+    let (a, b) = (boxed::unbox(a.clone()), boxed::unbox(b.clone()));
+    let wide = long || wide_site || arith_is_wide(usize::MAX, &a, &b);
+    let out = match int_arith_at(op, &a, &b, wide) {
+        Some(v) => v,
+        None => numeric_hook_plain(op, &a, &b)?,
+    };
+    Ok(match out {
+        Value::Int(n) if long => boxed::long_value(n),
+        other => other,
+    })
+}
+
+fn numeric_hook_plain(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // Unary minus is the one operator that does NOT widen a `java.lang.Float`:
     // Java's `-float` is a `float`, and Groovy's `NumberMath` follows it, so
     // `(-1.5f).getClass()` is `java.lang.Float`. Every binary operator widens,

@@ -86,8 +86,13 @@ pub(super) fn param_fit(ty: &str, v: &Value) -> Option<u32> {
     if ty.ends_with("[]") {
         return (array_elem(v).is_some() && value_is_a(v, ty)).then_some(0);
     }
-    let int32 = matches!(v, Value::Int(n) if i32::try_from(*n).is_ok());
-    let is_int = matches!(v, Value::Int(_));
+    // The integer kind: an `Integer`, a `Long` (by magnitude or a box), or a
+    // `Short`/`Byte` box, which widens to the larger integer parameters.
+    let kind = boxed::int_view(v).map(|(k, _)| k);
+    let int32 = kind == Some(boxed::IntKind::Integer);
+    let is_int = kind.is_some();
+    let short = kind == Some(boxed::IntKind::Short);
+    let byte = kind == Some(boxed::IntKind::Byte);
     let is_double = matches!(v, Value::Float(_));
     let is_float = as_float_handle(v).is_some();
     let is_big = as_bigint(v).is_some();
@@ -99,8 +104,10 @@ pub(super) fn param_fit(ty: &str, v: &Value) -> Option<u32> {
         _ => None,
     };
     match ty {
-        "int" | "Integer" | "short" | "Short" | "byte" | "Byte" => fit(int32, is_big),
-        "long" | "Long" => fit(is_int && !int32, is_int),
+        "int" | "Integer" => fit(int32, is_big || short || byte),
+        "short" | "Short" => fit(int32 || short, is_big || byte),
+        "byte" | "Byte" => fit(int32 || byte, is_big),
+        "long" | "Long" => fit(kind == Some(boxed::IntKind::Long), is_int),
         "double" | "Double" => fit(is_double, is_number),
         "float" | "Float" => fit(is_float, is_number && !is_double),
         "BigDecimal" => fit(is_dec, is_number),
@@ -149,7 +156,7 @@ pub(super) fn convert_param(vm: &mut VM, ty: &str, v: Value) -> Value {
     if param_fit(target, &v) != Some(1) {
         return v;
     }
-    as_type(vm, v, target)
+    as_type(vm, boxed::unbox(v), target)
 }
 
 /// What a call's arguments select among every declaration of its name, of

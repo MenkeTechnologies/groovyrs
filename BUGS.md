@@ -1091,10 +1091,14 @@ JVM 21.0.12):
   identity here, where Groovy gives that one object its own metaclass
   (`'other'.m()` is a `MissingMethodException` there).
 
-- `2L in [1, 2]` is `true`: a `Long` and an `Integer` are one `Value::Int`, so
-  `List.contains`' `Long.equals(Integer)` cannot fail (Groovy: `false`). Casts
-  to `byte`/`short`/`long` likewise answer `java.lang.Integer` from
-  `getClass()` once the value leaves the expression the compiler sees.
+- A `Long`, `Short` or `Byte` small enough to be an `Integer` is a box
+  (`src/host/boxed.rs`) once it leaves compiled code; inside it, a `long` is a
+  plain integer whose width the compiler tracks. A native `&`, `|`, `^` or
+  `>>` on a `Long` box answers an `Integer` of the right value (Groovy: a
+  `Long`), and a method injected or a value converted through a path the
+  compiler cannot see may still answer an `Integer` where Groovy answers a
+  `Long` (`def m = 'toLong'; '1'."$m"()` is a `Long` here; a `Long`-returning
+  JDK method other than the modeled conversions is not).
 - `ConfigSlurper` walks the script itself (there is no run-time compiler):
   `new`, loops, `switch`, `try` and statements other than assignments, blocks,
   `def` locals, and `if`/`return` inside a closure body fault. A config
@@ -1150,9 +1154,6 @@ JVM 21.0.12):
   root's preferred scale is `scale / 2`, so `4.0G.sqrt(mc)` is `2`. JDK 27
   changed it to the ceiling and prints `2.0` (and words the unlimited-precision
   failure `Computed root not exact.`), so the same script differs by JVM.
-- `Integer.equals(Long)` is `false` only where the compiler sees the `Long`
-  (a `L` literal, a `long`/`Long`-typed or `L`-initialised variable); a `Long`
-  that only the run time produces is one `Value::Int` with an `Integer`.
 - A compound write or `++`/`--` on a *property* evaluates its receiver once
   (`f().x += 1`, `f().x++`, `++f().x` call `f` one time); Groovy 6 evaluates
   it twice, once to read and once to write. A subscript target

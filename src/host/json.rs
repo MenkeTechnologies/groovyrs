@@ -28,6 +28,7 @@ fn write_json(vm: &mut VM, v: &Value, out: &mut String) {
         return;
     }
     if matches!(v, Value::Int(_) | Value::Float(_))
+        || boxed::as_box(v).is_some()
         || is_dec_handle(v)
         || as_float_handle(v).is_some()
     {

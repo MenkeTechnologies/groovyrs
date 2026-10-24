@@ -328,6 +328,11 @@ struct Compiler {
     /// published as [`crate::host::set_incdec_sites`]: a non-numeric operand
     /// there is `next()`/`previous()`, not `plus`/`minus`.
     incdec_sites: HashSet<usize>,
+    /// The op indices of the `+ 0` a native bitwise operand passes through,
+    /// published as [`crate::host::set_unbox_sites`]: fusevm reads a native
+    /// `&`/`|`/`^`/`>>` operand with `to_int`, which cannot see into a `Short`
+    /// or `Byte` box, so a box reaching one is read back to its number there.
+    unbox_sites: HashSet<usize>,
     /// The declared parameter types of every closure literal that types one,
     /// keyed by its body's name-pool index and handed to the host as
     /// [`crate::host::set_closure_param_types`].
@@ -1073,6 +1078,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
         sam_types,
         wide_sites: HashSet::new(),
         incdec_sites: HashSet::new(),
+        unbox_sites: HashSet::new(),
         closure_param_types: HashMap::new(),
         closure_min_params: HashMap::new(),
         imports: prog
@@ -1239,6 +1245,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
     }
     crate::host::set_wide_sites(std::mem::take(&mut c.wide_sites));
     crate::host::set_incdec_sites(std::mem::take(&mut c.incdec_sites));
+    crate::host::set_unbox_sites(std::mem::take(&mut c.unbox_sites));
     crate::host::set_closure_param_types(std::mem::take(&mut c.closure_param_types));
     crate::host::set_closure_min_params(std::mem::take(&mut c.closure_min_params));
     crate::host::set_fn_typed(std::mem::take(&mut c.fn_typed));
@@ -2500,6 +2507,15 @@ impl Compiler {
     /// through their own builtins for the same reason the bare-name form does:
     /// Groovy's `/` promotes to `BigDecimal` and its `%` has a zero-divisor
     /// guard, neither of which the raw arithmetic op carries.
+    /// Box a statically-`Long` value a plain assignment stores into a
+    /// property, field or subscript (see [`Compiler::value_expr`]).
+    fn box_stored(&mut self, op: AssignOp, value: &Expr) -> Result<(), String> {
+        if matches!(op, AssignOp::Assign) && self.is_wide(value) {
+            self.emit_call_builtin(crate::host::GBOX_LONG, 0, self.cur_line)?;
+        }
+        Ok(())
+    }
+
     fn emit_compound_value(
         &mut self,
         op: AssignOp,
@@ -2591,6 +2607,7 @@ impl Compiler {
                     safe: false,
                 };
                 self.emit_compound_value(op, &target, value)?;
+                self.box_stored(op, value)?;
                 self.keep_stack_top(&kept, keep == Keep::New);
                 let c = self.b.add_constant(Value::str(name.clone()));
                 self.b.emit(Op::LoadConst(c), self.cur_line);
@@ -2609,6 +2626,7 @@ impl Compiler {
                     self.keep_stack_top(&kept, keep == Keep::Old);
                 }
                 self.emit_compound_value(op, target, value)?;
+                self.box_stored(op, value)?;
                 self.keep_stack_top(&kept, keep == Keep::New);
                 self.expr(name)?;
                 self.emit_call_builtin(crate::host::GNAME_TEXT, 0, self.cur_line)?;
@@ -2618,13 +2636,14 @@ impl Compiler {
             Expr::Index { recv, index, .. } => {
                 // Stack: recv (deepest), index, value.
                 self.expr(recv)?;
-                self.expr(index)?;
+                self.value_expr(index)?;
                 if !matches!(op, AssignOp::Assign) {
                     self.b.emit(Op::Dup2, self.cur_line);
                     self.emit_call_builtin(crate::host::GINDEX, 0, self.cur_line)?;
                     self.keep_stack_top(&kept, keep == Keep::Old);
                 }
                 self.emit_compound_value(op, target, value)?;
+                self.box_stored(op, value)?;
                 self.keep_stack_top(&kept, keep == Keep::New);
                 self.emit_call_builtin(crate::host::GSETINDEX, 0, self.cur_line)?;
                 match &**recv {
@@ -3874,6 +3893,19 @@ impl Compiler {
     /// Emit the in-place update `name = name ± 1` (leaving nothing on the stack).
     /// Used by both `++`/`--` in statement position and as the update step of the
     /// value-position pre/post forms.
+    /// Read a box on the stack back to its number before a native bitwise op
+    /// (see [`Compiler::unbox_sites`]): `+ 0`, which stays native for a plain
+    /// integer and reaches the host only for a box. An integer literal needs
+    /// none.
+    fn emit_unbox(&mut self, operand: &Expr) {
+        if matches!(operand, Expr::Int(..)) {
+            return;
+        }
+        self.b.emit(Op::LoadInt(0), self.cur_line);
+        let pos = self.b.emit(Op::Add, self.cur_line);
+        self.unbox_sites.insert(pos);
+    }
+
     /// Emit the native op a compound assignment applies, answering its index.
     /// A `++`/`--` site is recorded so a non-numeric operand there calls
     /// `next()`/`previous()` (see [`Compiler::incdec_sites`]).
@@ -4139,7 +4171,7 @@ impl Compiler {
             }
             Expr::InstanceOf { value, class } => {
                 // `value instanceof Class` — stack: [value, classname].
-                self.expr(value)?;
+                self.value_expr(value)?;
                 let cidx = self.b.add_constant(Value::str(class.clone()));
                 self.b.emit(Op::LoadConst(cidx), self.cur_line);
                 self.b
@@ -4155,7 +4187,7 @@ impl Compiler {
             Expr::Index { recv, index, line } => {
                 // `recv[index]` — stack: recv (deepest), index.
                 self.expr(recv)?;
-                self.expr(index)?;
+                self.value_expr(index)?;
                 self.emit_call_builtin(crate::host::GINDEX, 0, *line)?;
             }
             Expr::CallValue { callee, args, line } => {
@@ -4252,7 +4284,7 @@ impl Compiler {
                 // fusevm array (a *value*) on the stack. `Op::MakeArray` still
                 // gathers the elements; the builtin only wraps the result.
                 for e in elems {
-                    self.expr(e)?;
+                    self.value_expr(e)?;
                 }
                 self.b
                     .emit(Op::MakeArray(elems.len() as u16), self.cur_line);
@@ -4264,8 +4296,8 @@ impl Compiler {
                 // the interleaved key/value pairs (key first), then the entry
                 // count, and register through the make-map builtin.
                 for (k, v) in entries {
-                    self.expr(k)?;
-                    self.expr(v)?;
+                    self.value_expr(k)?;
+                    self.value_expr(v)?;
                 }
                 self.b
                     .emit(Op::LoadInt(entries.len() as i64), self.cur_line);
@@ -4357,9 +4389,12 @@ impl Compiler {
                     // A `GString` receiver of a `String` method is read only as
                     // its text, so it is built as that text.
                     if GSTRING_OWN_METHODS.contains(&method.as_str()) {
-                        self.expr(recv)?;
+                        self.value_expr(recv)?;
                     } else {
                         self.text_expr(recv)?;
+                        if self.is_wide(recv) {
+                            self.emit_call_builtin(crate::host::GBOX_LONG, 0, *line)?;
+                        }
                     }
                     let argc = self.emit_args(args, *line)?;
                     let midx = self.b.add_constant(Value::str(method.clone()));
@@ -4827,8 +4862,8 @@ impl Compiler {
                     self.emit_exc_check(line)?;
                     return Ok(());
                 }
-                for a in args {
-                    self.expr(a)?;
+                for (i, a) in args.iter().enumerate() {
+                    self.call_arg(name, args.len(), i, a)?;
                 }
                 let k = self
                     .b
@@ -4846,8 +4881,8 @@ impl Compiler {
             // raises rather than a run of the body with an `Integer`.
             if !self.fn_typed.contains_key(&key) && self.call_needs_check(name, args) {
                 let nidx = self.b.add_name(&self.fn_sub_name(name, args.len()));
-                for a in args {
-                    self.expr(a)?;
+                for (i, a) in args.iter().enumerate() {
+                    self.call_arg(name, args.len(), i, a)?;
                 }
                 let k = self.b.add_constant(Value::str(key));
                 self.b.emit(Op::LoadConst(k), line);
@@ -4866,8 +4901,8 @@ impl Compiler {
                 return Ok(());
             }
             if self.fn_typed.contains_key(&key) {
-                for a in args {
-                    self.expr(a)?;
+                for (i, a) in args.iter().enumerate() {
+                    self.call_arg(name, args.len(), i, a)?;
                 }
                 let k = self.b.add_constant(Value::str(key));
                 self.b.emit(Op::LoadConst(k), line);
@@ -4875,8 +4910,8 @@ impl Compiler {
                 return Ok(());
             }
             let nidx = self.b.add_name(&self.fn_sub_name(name, args.len()));
-            for a in args {
-                self.expr(a)?;
+            for (i, a) in args.iter().enumerate() {
+                self.call_arg(name, args.len(), i, a)?;
             }
             self.b.emit(Op::Call(nidx, args.len() as u8), line);
             self.emit_exc_check(line)?;
@@ -4950,9 +4985,44 @@ impl Compiler {
             return Ok(0);
         }
         for a in args {
-            self.expr(a)?;
+            self.value_expr(a)?;
         }
         Ok(args.len() as u8)
+    }
+
+    /// Lower argument `i` of a call to the script function `name`: a value
+    /// leaving compiled code ([`Compiler::value_expr`]) unless every
+    /// declaration at this arity types that parameter as a number, whose width
+    /// the body tracks itself (so `long fib(long n)` keeps native arithmetic).
+    fn call_arg(&mut self, name: &str, nargs: usize, i: usize, a: &Expr) -> Result<(), String> {
+        let numeric = self.fn_param_types.get(name).is_some_and(|decls| {
+            decls.iter().filter(|d| d.len() == nargs).all(|d| {
+                d.get(i).is_some_and(|t| {
+                    matches!(
+                        t.as_str(),
+                        "long" | "Long" | "int" | "Integer" | "short" | "byte" | "double" | "float"
+                    )
+                })
+            })
+        });
+        if numeric {
+            self.expr(a)
+        } else {
+            self.value_expr(a)
+        }
+    }
+
+    /// Lower `e` as a value leaving compiled code — a collection element, an
+    /// argument, a stored value — where its class can be observed: a
+    /// statically-`Long` one becomes the box that keeps it a `Long`
+    /// ([`crate::host::GBOX_LONG`]). Inside compiled code the width is the
+    /// compiler's, so arithmetic stays native.
+    fn value_expr(&mut self, e: &Expr) -> Result<(), String> {
+        self.expr(e)?;
+        if self.is_wide(e) {
+            self.emit_call_builtin(crate::host::GBOX_LONG, 0, self.cur_line)?;
+        }
+        Ok(())
     }
 
     /// Does this argument list contain a `*` spread? A call that does cannot use
@@ -5579,15 +5649,36 @@ impl Compiler {
         }
         if matches!(op, BinOp::Shr) && !self.is_wide(lhs) {
             self.emit_binary_lhs(pre, lhs)?;
+            self.emit_unbox(lhs);
             self.emit_wrap32(self.cur_line);
             self.expr(rhs)?;
+            self.emit_unbox(rhs);
             self.b.emit(Op::LoadInt(31), self.cur_line);
             self.b.emit(Op::BitAnd, self.cur_line);
             self.b.emit(Op::Shr, self.cur_line);
             return Ok(());
         }
         self.emit_binary_lhs(pre, lhs)?;
+        // `x in c` asks `c` with `equals`, which tells a `Long` from an `Integer`.
+        if matches!(op, BinOp::In) && self.is_wide(lhs) {
+            self.emit_call_builtin(crate::host::GBOX_LONG, 0, self.cur_line)?;
+        }
+        let bitwise = matches!(
+            op,
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shr
+        );
+        if bitwise {
+            self.emit_unbox(lhs);
+        }
         self.expr(rhs)?;
+        if bitwise {
+            self.emit_unbox(rhs);
+        }
+        // `list << 2L` appends the `Long` itself; a numeric left operand reads
+        // the box back as a shift count.
+        if matches!(op, BinOp::Shl) && self.is_wide(rhs) {
+            self.emit_call_builtin(crate::host::GBOX_LONG, 0, self.cur_line)?;
+        }
         // Groovy `/` is not a native op — it lowers to the GDIV builtin so
         // integer division promotes to a decimal (`7/2 → 3.5`).
         if let BinOp::Div = op {

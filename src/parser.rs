@@ -493,7 +493,54 @@ impl Parser {
                     | Tok::False
                     | Tok::Null
             );
-            if literal_arg && !matches!(name.as_str(), "this" | "super") {
+            // A lower-case name followed by another name is the command call
+            // `name(arg)` too (`item i`), unless the first is a primitive type,
+            // a contextual keyword, or the pair is a declaration with an
+            // initializer.
+            let keyword = |w: &str| {
+                matches!(
+                    w,
+                    "int"
+                        | "long"
+                        | "short"
+                        | "byte"
+                        | "double"
+                        | "float"
+                        | "char"
+                        | "boolean"
+                        | "void"
+                        | "var"
+                        | "def"
+                        | "throw"
+                        | "try"
+                        | "yield"
+                        | "assert"
+                        | "return"
+                        | "new"
+                        | "in"
+                        | "as"
+                        | "instanceof"
+                        | "final"
+                        | "static"
+                        | "public"
+                        | "private"
+                        | "protected"
+                        | "synchronized"
+                        | "abstract"
+                        | "record"
+                        | "enum"
+                        | "class"
+                        | "interface"
+                        | "trait"
+                        | "case"
+                        | "default"
+                )
+            };
+            let name_arg = name.chars().next().is_some_and(char::is_lowercase)
+                && !keyword(&name)
+                && matches!(self.peek_at(1), Tok::Ident(a) if !keyword(a))
+                && !matches!(self.peek_at(2), Tok::Assign);
+            if (literal_arg || name_arg) && !matches!(name.as_str(), "this" | "super") {
                 let col = self.col_at(0);
                 self.advance();
                 let args = self.command_args()?;
@@ -3578,6 +3625,19 @@ impl Parser {
                 self.advance();
                 let col = self.col_at(0);
                 let element = Expr::Var("it".to_string());
+                // `recv*.@attr`: the direct read on every element.
+                if self.is(&Tok::At) {
+                    self.advance();
+                    let field = self.ident_or_string()?;
+                    let inner = Expr::Property {
+                        recv: Box::new(element),
+                        name: format!("@{field}"),
+                        line,
+                        safe: true,
+                    };
+                    e = spread_collect(e, inner, line);
+                    continue;
+                }
                 let member = match self.quoted_member()? {
                     Some(Member::Dynamic(name)) => {
                         let inner = self.dynamic_member(element, name, line, true, col)?;
@@ -3727,7 +3787,26 @@ impl Parser {
                 Ok(Expr::BigInt(text))
             }
             Tok::Str(s) => {
+                let line = self.line();
+                let col = self.col_at(0);
                 self.advance();
+                // `'name'(args)` is a call of the method `name` — how a builder
+                // closure writes an element whose name is no identifier
+                // (`'x:item'(id: 1)`).
+                if self.is(&Tok::LParen) {
+                    let mut args = self.call_args()?;
+                    if self.is(&Tok::LBrace) {
+                        args.push(self.closure_literal()?);
+                    }
+                    return Ok(self.record(
+                        col,
+                        Expr::Call {
+                            name: s,
+                            args,
+                            line,
+                        },
+                    ));
+                }
                 Ok(Expr::Str(s))
             }
             Tok::Regex(src) => {

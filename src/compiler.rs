@@ -507,11 +507,24 @@ fn function_sub_names(
     (subs, table)
 }
 
+/// The members a `GString` answers itself rather than as its text: a call of
+/// one keeps its receiver a `GString`.
+const GSTRING_OWN_METHODS: &[&str] = &[
+    "getClass",
+    "getStrings",
+    "getValues",
+    "getValueCount",
+    "equals",
+    "hashCode",
+    "plus",
+    "is",
+];
+
 /// The `groovy.json` classes `import groovy.json.*` brings into scope.
 const GROOVY_JSON_CLASSES: &[&str] = &["JsonOutput", "JsonSlurper", "JsonBuilder"];
 
 /// The `groovy.xml` classes `import groovy.xml.*` brings into scope.
-const GROOVY_XML_CLASSES: &[&str] = &["MarkupBuilder"];
+const GROOVY_XML_CLASSES: &[&str] = &["MarkupBuilder", "XmlSlurper", "XmlParser"];
 
 /// The parameter types whose declaration converts a number passed to them:
 /// `def d(double x)` called with `3` sees the `Double` `3.0`.
@@ -2591,7 +2604,12 @@ impl Compiler {
                 // Java's does: `int x; println x` prints `0`, not `null`.
                 let init = init.clone().or_else(|| primitive_zero(ty));
                 if let Some(e) = &init {
-                    self.expr(e)?;
+                    // A `String`-typed local stores a `GString` as its text.
+                    if matches!(ty.as_str(), "String" | "java.lang.String") {
+                        self.text_expr(e)?;
+                    } else {
+                        self.expr(e)?;
+                    }
                     self.emit_list_adopt(e)?;
                     self.emit_typed_coercion(ty, e)?;
                     self.note_var_width(ty, name, init.as_ref());
@@ -3676,7 +3694,7 @@ impl Compiler {
     fn println(&mut self, newline: bool, arg: Option<&Expr>) -> Result<(), String> {
         let n = match arg {
             Some(e) => {
-                self.expr(e)?;
+                self.text_expr(e)?;
                 // A throw from fusevm's numeric hook (`null + 1`) has no check of
                 // its own; settle it before the print runs, or the placeholder
                 // `null` the hook answered is printed ahead of the handler.
@@ -3696,6 +3714,62 @@ impl Compiler {
         };
         self.emit_call_builtin(id, n, self.cur_line)?;
         Ok(())
+    }
+
+    /// Lower `e` where its value is only ever read as text — a `println`
+    /// argument, the receiver of a `String` method: a `GString` literal there
+    /// is built straight as its `String` ([`crate::host::GSTRING_TEXT`]),
+    /// since nothing can observe it as a `GString`, and the heap object it
+    /// would otherwise be is never made.
+    fn text_expr(&mut self, e: &Expr) -> Result<(), String> {
+        match e {
+            Expr::GString(parts) => {
+                let pushed = self.gstring_parts(parts)?;
+                self.b.emit(Op::LoadInt(pushed as i64), self.cur_line);
+                self.emit_call_builtin(crate::host::GSTRING_TEXT, 0, self.cur_line)
+            }
+            _ => self.expr(e),
+        }
+    }
+
+    /// Push a `GString` literal's strings and values, alternating — a text
+    /// before every value and one after the last, empty where two values meet
+    /// — and answer how many were pushed.
+    fn gstring_parts(&mut self, parts: &[GStringPart]) -> Result<usize, String> {
+        let mut merged: Vec<GStringPart> = Vec::new();
+        for part in parts {
+            match (merged.last_mut(), part) {
+                (Some(GStringPart::Text(acc)), GStringPart::Text(t)) => acc.push_str(t),
+                _ => merged.push(part.clone()),
+            }
+        }
+        let mut pushed = 0;
+        let mut want_text = true;
+        for part in &merged {
+            match part {
+                GStringPart::Text(t) => {
+                    let c = self.b.add_constant(Value::str(t.clone()));
+                    self.b.emit(Op::LoadConst(c), self.cur_line);
+                    want_text = false;
+                }
+                GStringPart::Expr(e) => {
+                    if want_text {
+                        let c = self.b.add_constant(Value::str(String::new()));
+                        self.b.emit(Op::LoadConst(c), self.cur_line);
+                        pushed += 1;
+                    }
+                    self.expr(e)?;
+                    want_text = true;
+                }
+            }
+            pushed += 1;
+        }
+        if want_text {
+            let c = self.b.add_constant(Value::str(String::new()));
+            self.b.emit(Op::LoadConst(c), self.cur_line);
+            pushed += 1;
+        }
+        Ok(pushed)
     }
 
     fn expr(&mut self, e: &Expr) -> Result<(), String> {
@@ -3773,42 +3847,7 @@ impl Compiler {
             // host builtin, which renders an object through its `toString()` —
             // lowering to `+` instead would miss that dispatch.
             Expr::GString(parts) => {
-                // Pushed as Groovy's `strings`/`values` alternation — a text
-                // before every value and one after the last, empty where two
-                // values meet — so the `GString` knows which part is which.
-                let mut merged: Vec<GStringPart> = Vec::new();
-                for part in parts {
-                    match (merged.last_mut(), part) {
-                        (Some(GStringPart::Text(acc)), GStringPart::Text(t)) => acc.push_str(t),
-                        _ => merged.push(part.clone()),
-                    }
-                }
-                let mut pushed = 0;
-                let mut want_text = true;
-                for part in &merged {
-                    match part {
-                        GStringPart::Text(t) => {
-                            let c = self.b.add_constant(Value::str(t.clone()));
-                            self.b.emit(Op::LoadConst(c), self.cur_line);
-                            want_text = false;
-                        }
-                        GStringPart::Expr(e) => {
-                            if want_text {
-                                let c = self.b.add_constant(Value::str(String::new()));
-                                self.b.emit(Op::LoadConst(c), self.cur_line);
-                                pushed += 1;
-                            }
-                            self.expr(e)?;
-                            want_text = true;
-                        }
-                    }
-                    pushed += 1;
-                }
-                if want_text {
-                    let c = self.b.add_constant(Value::str(String::new()));
-                    self.b.emit(Op::LoadConst(c), self.cur_line);
-                    pushed += 1;
-                }
+                let pushed = self.gstring_parts(parts)?;
                 self.b.emit(Op::LoadInt(pushed as i64), self.cur_line);
                 self.emit_call_builtin(crate::host::GSTRING, 0, self.cur_line)?;
             }
@@ -4086,7 +4125,13 @@ impl Compiler {
                     if widths != 0 {
                         self.b.emit(Op::LoadInt(i64::from(widths)), *line);
                     }
-                    self.expr(recv)?;
+                    // A `GString` receiver of a `String` method is read only as
+                    // its text, so it is built as that text.
+                    if GSTRING_OWN_METHODS.contains(&method.as_str()) {
+                        self.expr(recv)?;
+                    } else {
+                        self.text_expr(recv)?;
+                    }
                     let argc = self.emit_args(args, *line)?;
                     let midx = self.b.add_constant(Value::str(method.clone()));
                     self.b.emit(Op::LoadConst(midx), *line);
@@ -4994,6 +5039,13 @@ impl Compiler {
             let tidx = self.b.add_constant(Value::str(ty.to_string()));
             self.b.emit(Op::LoadConst(tidx), self.cur_line);
             return self.emit_call_builtin(crate::host::GCAST_ASSIGN, 0, self.cur_line);
+        }
+        // `LinkedList l = [1, 2]` stores a `LinkedList`, as `as LinkedList`
+        // builds it.
+        if SEQUENCE_TYPES.contains(&ty) && !matches!(value, Expr::Null) {
+            let tidx = self.b.add_constant(Value::str(ty.to_string()));
+            self.b.emit(Op::LoadConst(tidx), self.cur_line);
+            return self.emit_call_builtin(crate::host::GCAST, 0, self.cur_line);
         }
         if !COERCED_TYPES.contains(&ty) {
             return Ok(());
@@ -6524,6 +6576,16 @@ fn compound_op(op: AssignOp) -> Op {
 /// same conversion a Java-style `(Type) value` cast performs. `int i = 3.7` is
 /// `3`, `double d = 3` is `3.0`, `String s = 5` is `"5"`, `int c = 'a' as
 /// char` is `97`. Other declared types are left alone.
+/// The `java.util` sequence classes a store to a variable declared as one
+/// converts a collection to.
+const SEQUENCE_TYPES: &[&str] = &[
+    "LinkedList",
+    "Vector",
+    "Stack",
+    "ArrayDeque",
+    "PriorityQueue",
+];
+
 pub(crate) const COERCED_TYPES: &[&str] = &[
     "int",
     "long",

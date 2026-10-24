@@ -2993,3 +2993,541 @@ after
 "####;
     check(src, expected);
 }
+
+/// A GString renders where text is needed (method receiver, `String` local, concatenation) and stays lazy over a mutable value or a `{ -> }` part.
+#[test]
+fn round6_gstring_text_contexts() {
+    let src = r####"def x = 5
+def g = "v$x"
+println g.toUpperCase()
+println g.getClass().name
+String s = "a$x"
+println s.getClass().name
+println "${x}".size()
+def l = [1]
+def lazy = "$l"
+l << 2
+println lazy
+def cl = "n=${-> x}"
+x = 9
+println cl
+println g == 'v5'
+println g.equals('v5')
+println g.hashCode() == 'v5'.hashCode()
+println((g + '!').getClass().name)
+"####;
+    let expected = r####"V5
+org.codehaus.groovy.runtime.GStringImpl
+java.lang.String
+1
+[1, 2]
+n=9
+true
+false
+false
+org.codehaus.groovy.runtime.GStringImpl
+"####;
+    check(src, expected);
+}
+
+/// A GString and a String of the same text are different set members: `GStringImpl.equals` is false against a `String`.
+#[test]
+fn round6_gstring_set_membership() {
+    let src = r####"def x = 1
+def s = [] as Set; s << "a${x}"
+println s.contains('a1')
+println s.contains("a${x}")
+s << 'a1'
+println s.size()
+println((['a1', "a${x}"] as Set).size())
+def h = new HashSet(); h.add("a${x}"); println h.contains('a1')
+println(['a1'].toSet().contains("a${x}"))
+println("a${x}" in ['a1'])
+"####;
+    let expected = r####"false
+true
+2
+2
+false
+false
+false
+"####;
+    check(src, expected);
+}
+
+/// A comparator `TreeSet` answers `retainAll` / `intersect` / `disjoint` / `containsAll` through its comparator.
+#[test]
+fn round6_comparator_treeset_ops() {
+    let src = r####"def mk = { def s = new TreeSet(String.CASE_INSENSITIVE_ORDER); s.addAll(['b', 'A', 'c']); s }
+def s = mk(); println s.retainAll(['C', 'a']); println s
+def i = mk().intersect(['B', 'x', 'c']); println i; println i.getClass().name
+def j = mk().intersect(['B']); j << 'b'; println j
+println(mk().disjoint(['Q']))
+println(mk().containsAll(['a', 'B']))
+println(mk().containsAll(['a', 'z']))
+"####;
+    let expected = r####"true
+[]
+[c]
+java.util.TreeSet
+[b]
+true
+true
+false
+"####;
+    check(src, expected);
+}
+
+/// `eachFile` / `eachDir` / `eachFileRecurse` / `eachDirRecurse`, `listFiles`, `renameTo`, `deleteDir`.
+#[test]
+fn round6_file_traversal() {
+    let src = r####"def base = new File(System.getProperty('java.io.tmpdir'), 'groovyrs_walk_' + System.nanoTime())
+new File(base, 'd1/d2').mkdirs()
+new File(base, 'a.txt').text = 'a'
+new File(base, 'd1/b.txt').text = 'b'
+new File(base, 'd1/d2/c.txt').text = 'c'
+def rel = { File f -> f.path.substring(base.path.size() + 1) }
+def r = []; base.eachFile { r << rel(it) }; println r.sort()
+r = []; base.eachDir { r << rel(it) }; println r.sort()
+r = []; base.eachFileRecurse { r << rel(it) }; println r.sort()
+r = []; base.eachDirRecurse { r << rel(it) }; println r.sort()
+println base.listFiles().collect { it.name }.sort()
+println new File(base, 'a.txt').renameTo(new File(base, 'z.txt'))
+println new File(base, 'z.txt').exists()
+println base.deleteDir()
+println base.exists()
+"####;
+    let expected = r####"[a.txt, d1]
+[d1]
+[a.txt, d1, d1/b.txt, d1/d2, d1/d2/c.txt]
+[d1, d1/d2]
+[a.txt, d1]
+true
+true
+true
+false
+"####;
+    check(src, expected);
+}
+
+/// `MarkupBuilder`: empty closures, `mkp.yield` / `yieldUnescaped` / `comment` / `pi`, the quoting options, quoted (prefixed) element names, and a paren-less `item i` call.
+#[test]
+fn round6_markup_extras() {
+    let src = r####"import groovy.xml.MarkupBuilder
+def run = { Closure c -> def w = new StringWriter(); def b = new MarkupBuilder(w); c(b); println w.toString(); println '--' }
+run { b -> b.r { e {} } }
+run { b -> b.p { mkp.yield 'a<b'; mkp.yieldUnescaped '<i/>'; span 'x' } }
+run { b -> b.doubleQuotes = true; b.a(href: "x'y") }
+run { b -> b.escapeAttributes = false; b.a(href: '<&>') }
+run { b -> b.r { mkp.comment 'note' } }
+run { b -> b.x(a: null, b: 1) }
+run { b -> b.'my-tag'(1) }
+run { b -> b.r { 3.times { i -> item i } } }
+run { b -> b.omitNullAttributes = true; b.x(a: null, b: 1) }
+run { b -> b.r('t') { c 1 } }
+run { b -> b.'x:root'('xmlns:x': 'urn:x') { 'x:item'(id: 1, 'v'); 'y:other'() } }
+run { b -> b.root { mkp.pi(xml: [version: '1.0']); a('x') } }
+"####;
+    let expected = r####"<r>
+  <e />
+</r>
+--
+<p>a&lt;b<i/>
+  <span>x</span>
+</p>
+--
+<a href="x'y" />
+--
+<a href='<&>' />
+--
+<r><!-- note --></r>
+--
+<x a='' b='1' />
+--
+<my-tag>1</my-tag>
+--
+<r>
+  <item>0</item>
+  <item>1</item>
+  <item>2</item>
+</r>
+--
+<x b='1' />
+--
+<r>t
+  <c>1</c>
+</r>
+--
+<x:root xmlns:x='urn:x'>
+  <x:item id='1'>v</x:item>
+  <y:other />
+</x:root>
+--
+<root>
+  <?xml version='1.0'?>
+<a>x</a>
+</root>
+--
+"####;
+    check(src, expected);
+}
+
+/// `java.util.Date`: arithmetic in days, ordering, ranges, `format` in an explicit zone, and `Date.parse`.
+#[test]
+fn round6_date_basics() {
+    let src = r####"def d = new Date(86400000L * 365)
+def utc = TimeZone.getTimeZone('UTC')
+println d.time
+println d.format('yyyy-MM-dd HH:mm:ss', utc)
+println((d + 1).format('yyyy-MM-dd', utc))
+println((d - 1).format('yyyy-MM-dd', utc))
+println((d + 10) - d)
+println d.before(d + 1)
+println(d < (d + 1))
+println(new Date(0) == new Date(0))
+println d.getClass().name
+println d.format("EEE, d MMM yyyy 'T' hh:mm a", utc)
+println d.next().format('dd', utc)
+println utc.ID
+println d.format('yyyy-MM-dd HH:mm:ss.SSS Z', TimeZone.getTimeZone('GMT+05:30'))
+println d.format('yy MMM MMMM EEEE', utc)
+println new Date(1500).compareTo(new Date(0))
+println(([new Date(1)] as Set).contains(new Date(1)))
+println((d..(d + 2)).size())
+println((d..(d + 2)).collect { it.format('MM-dd', utc) })
+println(((d + 2)..d).collect { it.format('MM-dd', utc) })
+println([d + 1, d].sort().collect { it.format('MM-dd', utc) })
+println Date.parse('yyyy-MM-dd', '2020-03-04').format('yyyy/MM/dd')
+"####;
+    let expected = r####"31536000000
+1971-01-01 00:00:00
+1971-01-02
+1970-12-31
+10
+true
+true
+true
+java.util.Date
+Fri, 1 Jan 1971 T 12:00 AM
+02
+UTC
+1971-01-01 05:30:00.000 +0530
+71 Jan January Friday
+1
+true
+3
+[01-01, 01-02, 01-03]
+[01-03, 01-02, 01-01]
+[01-01, 01-02]
+2020/03/04
+"####;
+    check(src, expected);
+}
+
+/// `groovy.time.TimeCategory` durations: their arithmetic, classes and `BaseDuration.toString`.
+#[test]
+fn round6_time_category() {
+    let src = r####"def utc = TimeZone.getTimeZone('UTC')
+use(groovy.time.TimeCategory) {
+  println 1.day
+  println 1.hour
+  println 90.minutes
+  println(2.days + 3.hours + 1.minute + 5.seconds + 7.milliseconds)
+  println 0.seconds
+  println 2.weeks
+  println((3.days - 1.day))
+  println 1.second.toMilliseconds()
+  println 2.days.days
+  println((new Date(0) + 1.week).time)
+  println((new Date(1000) - new Date(0)).getClass().name)
+  println(new Date(90061000L) - new Date(0))
+  println 1.month
+  println 2.years
+  println 1.day.getClass().name
+  println(1.day > 1.hour)
+  println((new Date(0) + 90.minutes).format('HH:mm', utc))
+  println((new Date(0) + 2.days).format('yyyy-MM-dd', utc))
+}
+println((new Date(86400000L) - new Date(0)))
+"####;
+    let expected = r####"1 days
+1 hours
+90 minutes
+2 days, 3 hours, 1 minutes, 5.007 seconds
+0
+14 days
+2 days
+1000
+2
+604800000
+groovy.time.TimeDuration
+1 days, 1 hours, 1 minutes, 1.000 seconds
+1 months
+2 years
+groovy.time.Duration
+true
+01:30
+1970-01-03
+1
+"####;
+    check(src, expected);
+}
+
+/// `XmlSlurper` GPath: child / attribute / `**` selection, the `GPathResult` classes, text, conversions, iteration, equality and parse errors.
+#[test]
+fn round6_xml_slurper() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def xml = '''<library name="city">
+  <book id="1" lang="en"><title>Dune</title><year>1965</year></book>
+  <book id="2"><title>Emma &amp; Co</title><year>1815</year></book>
+  <!-- note -->
+  <mag>Wired</mag>
+</library>'''
+def r = new groovy.xml.XmlSlurper().parseText(xml)
+t(1) { r.name() }
+t(2) { r.@name }
+t(3) { r.book.size() }
+t(4) { r.book[0].title }
+t(5) { r.book[1].title.text() }
+t(6) { r.book*.@id }
+t(7) { r.book.title*.text() }
+t(8) { r.book.find { it.@id == '2' }.year }
+t(9) { r.book.findAll { it.year.toInteger() > 1900 }.title }
+t(10) { r.getClass().name }
+t(11) { r.book.getClass().name }
+t(12) { r.book[0].@lang.getClass().name }
+t(13) { r.'**'.findAll { it.name() == 'title' }*.text() }
+t(14) { r.children().size() }
+t(15) { r.text() }
+t(16) { r.nope.size() }
+t(17) { r.book[0].attributes() }
+t(18) { r.book.@id }
+t(19) { r.mag == 'Wired' }
+t(20) { 'Wired' == r.mag }
+t(21) { r.book.year.sum { it.toInteger() } }
+t(22) { r.book[0].year.toInteger() + 1 }
+t(23) { r.depthFirst().collect { it.name() } }
+t(24) { r.breadthFirst()*.name() }
+t(25) { r.book[0].parent().name() }
+t(26) { r.book.'@id' }
+t(27) { def out = []; for (b in r.book) out << b.@id.toInteger(); out }
+t(28) { r.book[-1].title }
+t(29) { r.book[5].size() }
+t(30) { "${r.book[0]}" }
+t(31) { new groovy.xml.XmlSlurper().parseText('<a x="1 &lt; 2"><![CDATA[<raw>]]><b/></a>').with { [it.@x.text(), it.text(), it.b.size()] } }
+t(32) { new groovy.xml.XmlSlurper().parseText('<a><b></a>') }
+t(33) { new groovy.xml.XmlSlurper().parseText('junk') }
+"####;
+    let expected = r####"1: library
+2: city
+3: 2
+4: Dune
+5: Emma & Co
+6: [1, 2]
+7: [Dune, Emma & Co]
+8: 1815
+9: Dune
+10: groovy.xml.slurpersupport.NodeChild
+11: groovy.xml.slurpersupport.NodeChildren
+12: groovy.xml.slurpersupport.Attributes
+13: [Dune, Emma & Co]
+14: 3
+15: Dune1965Emma & Co1815Wired
+16: 0
+17: [id:1, lang:en]
+18: 12
+19: true
+20: false
+21: 3780
+22: 1966
+23: [library, book, title, year, book, title, year, mag]
+24: [library, book, book, mag, title, year, title, year]
+25: library
+26: 12
+27: [1, 2]
+28: Emma & Co
+29: 0
+30: Dune1965
+31: [1 < 2, <raw>, 1]
+32: org.xml.sax.SAXParseException The element type "b" must be terminated by the matching end-tag "</b>".
+33: org.xml.sax.SAXParseException Content is not allowed in prolog.
+"####;
+    check(src, expected);
+}
+
+/// List wrappers: `asSynchronized` / `asUnmodifiable` / `Collections.unmodifiableList` are live views, `asImmutable` a copy; `subList` and `as` keep the JDK class.
+#[test]
+fn round6_list_views() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def x = [1, 2, 3]
+def y = x.asSynchronized()
+y[0] = 9
+x << 4
+t(1) { "$x $y ${y.size()} ${y.getClass().name}" }
+t(2) { y.subList(1, 3) }
+t(3) { y.is(x) }
+t(4) { y == x }
+def un = x.asUnmodifiable()
+t(5) { un.add(1) }
+t(6) { un[0] = 1 }
+t(7) { x << 5; un }
+t(8) { un.getClass().name }
+def c = [1]; def cu = Collections.unmodifiableList(c); c << 2
+t(9) { cu }
+t(10) { def im = [1]; def f = im.asImmutable(); im << 2; f }
+t(11) { Collections.unmodifiableList([1, 2]).subList(0, 1) << 3 }
+t(12) { Arrays.asList(1, 2, 3).subList(0, 1).getClass().name }
+t(13) { List.of(1, 2).subList(0, 1).getClass().name }
+t(14) { new LinkedList([1, 2]).subList(0, 1).getClass().name }
+t(15) { new Vector([1, 2]).subList(0, 1).getClass().name }
+t(16) { def s = Arrays.asList(1, 2, 3).subList(0, 2); s[0] = 9; s }
+t(17) { Arrays.asList(1, 2, 3).subList(0, 2) << 9 }
+t(18) { ([1, 2] as LinkedList).getClass().name }
+t(19) { ([3, 1, 2] as PriorityQueue).getClass().name }
+t(20) { LinkedList l = [1, 2]; l.getClass().name }
+t(21) { def a = new LinkedList([1]); LinkedList b = a; b << 2; a }
+t(22) { new LinkedList([1]).asSynchronized().getClass().name }
+t(23) { new TreeSet([1]).asSynchronized().getClass().name }
+t(24) { new TreeMap([a: 1]).asUnmodifiable().getClass().name }
+t(25) { Collections.unmodifiableCollection([1]).getClass().name }
+"####;
+    let expected = r####"1: [9, 2, 3, 4] [9, 2, 3, 4] 4 java.util.Collections$SynchronizedRandomAccessList
+2: [2, 3]
+3: false
+4: true
+5: java.lang.UnsupportedOperationException null
+6: java.lang.UnsupportedOperationException null
+7: [9, 2, 3, 4, 5]
+8: java.util.Collections$UnmodifiableRandomAccessList
+9: [1, 2]
+10: [1]
+11: java.lang.UnsupportedOperationException null
+12: java.util.AbstractList$RandomAccessSubList
+13: java.util.ImmutableCollections$SubList
+14: java.util.AbstractList$SubList
+15: java.util.Collections$SynchronizedRandomAccessList
+16: [9, 2]
+17: java.lang.UnsupportedOperationException null
+18: java.util.LinkedList
+19: java.util.PriorityQueue
+20: java.util.LinkedList
+21: [1, 2]
+22: java.util.Collections$SynchronizedList
+23: java.util.Collections$SynchronizedNavigableSet
+24: java.util.Collections$UnmodifiableNavigableMap
+25: java.util.Collections$UnmodifiableCollection
+"####;
+    check(src, expected);
+}
+
+/// `respondsTo` / `hasProperty` on JDK values answer the metaclass `MetaMethod`s and `MetaProperty`s.
+#[test]
+fn round6_responds_to_jdk() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+t(1) { 'abc'.respondsTo('toUpperCase') as boolean }
+t(2) { 'abc'.respondsTo('nope') }
+t(3) { 'abc'.respondsTo('toUpperCase').size() }
+t(4) { 'abc'.respondsTo('toUpperCase')[0].name }
+t(5) { 'abc'.respondsTo('toUpperCase')[0].getClass().name }
+t(6) { [1].respondsTo('each') as boolean }
+t(7) { 5.respondsTo('plus', 1) as boolean }
+t(8) { 'abc'.respondsTo('substring', 1).size() }
+t(9) { 'abc'.respondsTo('substring').size() }
+t(10) { 'abc'.respondsTo('substring', 1, 2)[0].parameterTypes*.name }
+t(11) { 'abc'.metaClass.respondsTo('abc', 'size')[0].name }
+t(12) { 'abc'.respondsTo('toUpperCase')[0].returnType.name }
+t(13) { 'x'.respondsTo('center', 3).size() }
+t(14) { 'abc'.respondsTo('toUpperCase')[0].toString() }
+t(15) { 'abc'.respondsTo('size')[0].declaringClass.name }
+t(16) { 'abc'.respondsTo('size')[0].isStatic() }
+t(17) { new Object().respondsTo('toString').size() }
+t(18) { 'abc'.hasProperty('bytes').getClass().name }
+t(19) { 'abc'.hasProperty('bytes').type.name }
+t(20) { 'abc'.hasProperty('zzz') }
+t(21) { [1].hasProperty('empty')?.name }
+t(22) { 'abc'.respondsTo('center', 3, 'x')[0].parameterTypes }
+"####;
+    let expected = r####"1: true
+2: []
+3: 2
+4: toUpperCase
+5: org.codehaus.groovy.reflection.CachedMethod
+6: true
+7: true
+8: 1
+9: 2
+10: [int, int]
+11: size
+12: java.lang.String
+13: 1
+14: public java.lang.String java.lang.String.toUpperCase()
+15: java.lang.CharSequence
+16: false
+17: 1
+18: groovy.lang.MetaBeanProperty
+19: [B
+20: null
+21: empty
+22: [class java.lang.Number, interface java.lang.CharSequence]
+"####;
+    check(src, expected);
+}
+
+/// `XmlParser` nodes: `Node` / `NodeList` rendering, attributes, text, and the mixed-content depth-first walk.
+#[test]
+fn round6_xml_parser() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def xml = '''<library name="city">
+  <book id="1" lang="en"><title>Dune</title><year>1965</year></book>
+  <book id="2"><title>Emma &amp; Co</title><year>1815</year></book>
+  <mag>Wired <b>mag</b> tail</mag>
+</library>'''
+def p = new groovy.xml.XmlParser().parseText(xml)
+t(1) { p.name() }
+t(2) { p.@name }
+t(3) { p.book.size() }
+t(4) { p.book[0].title.text() }
+t(5) { p.book[0].getClass().name }
+t(6) { p.book.getClass().name }
+t(7) { p.book[0].attributes() }
+t(8) { p.book[0].title }
+t(9) { p.book[0] }
+t(10) { p.children().size() }
+t(11) { p.text() }
+t(12) { p.book*.@id }
+t(13) { p.book[0].attribute('lang') }
+t(14) { p.book.title*.text() }
+t(15) { p.mag[0].value() }
+t(16) { p.depthFirst()*.name() }
+t(17) { p.book[0].parent().name() }
+t(18) { p.'**'.title*.text() }
+t(19) { p.book[0].attributes().getClass().name }
+t(20) { def ids = []; p.book.each { ids << it.@id }; ids }
+t(21) { p.depthFirst().collect { it instanceof String ? "S:$it" : it.name() } }
+t(22) { p.breadthFirst().collect { it instanceof String ? "S:$it" : it.name() } }
+"####;
+    let expected = r####"1: library
+2: city
+3: 2
+4: Dune
+5: groovy.util.Node
+6: groovy.util.NodeList
+7: [id:1, lang:en]
+8: [title[attributes={}; value=[Dune]]]
+9: book[attributes={id=1, lang=en}; value=[title[attributes={}; value=[Dune]], year[attributes={}; value=[1965]]]]
+10: 3
+11: Dune1965Emma & Co1815Wired mag tail
+12: [1, 2]
+13: en
+14: [Dune, Emma & Co]
+15: [Wired , b[attributes={}; value=[mag]],  tail]
+16: groovy.lang.MissingMethodException No signature of method: name for class: java.lang.String is applicable for argument types: () values: []
+17: library
+18: [Dune, Emma & Co]
+19: java.util.LinkedHashMap
+20: [1, 2]
+21: [library, book, title, year, book, title, year, mag, S:Wired , b, S: tail]
+22: [library, book, book, mag, title, year, title, year, S:Wired , b, S: tail]
+"####;
+    check(src, expected);
+}

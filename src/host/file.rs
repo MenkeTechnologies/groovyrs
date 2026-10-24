@@ -290,6 +290,42 @@ fn file_method(
                 .map(|d| d.join(p).to_string_lossy().into_owned())
                 .unwrap_or_else(|_| path.to_string())
         }),
+        // `eachFile` / `eachDir` / `eachFileRecurse` / `eachDirRecurse`: the
+        // entries as `File`s, in the directory's own order (as `listFiles`
+        // answers), a directory before its contents when recursing.
+        ("eachFile" | "eachDir" | "eachFileRecurse" | "eachDirRecurse", [clo])
+            if closure_meta(clo).is_some() =>
+        {
+            if std::fs::read_dir(path).is_err() {
+                return Some(raise_io(vm, format!("{path} (No such file or directory)")));
+            }
+            let recurse = method.ends_with("Recurse");
+            let dirs_only = method.starts_with("eachDir");
+            walk(vm, path, clo, recurse, dirs_only);
+            Value::Undef
+        }
+        ("listFiles", []) => match std::fs::read_dir(path) {
+            Ok(entries) => garray(
+                entries
+                    .filter_map(Result::ok)
+                    .map(|e| {
+                        let child = format!(
+                            "{}/{}",
+                            path.trim_end_matches('/'),
+                            e.file_name().to_string_lossy()
+                        );
+                        heap_push(HeapObj::File(child))
+                    })
+                    .collect(),
+                ArrayElem::Ref("java.io.File"),
+            ),
+            Err(_) => Value::Undef,
+        },
+        ("deleteDir", []) => Value::bool(std::fs::remove_dir_all(path).is_ok() || !p.exists()),
+        ("renameTo", [dest]) => {
+            let to = file_path(dest).unwrap_or_else(|| groovy_str(dest));
+            Value::bool(std::fs::rename(path, to).is_ok())
+        }
         ("list", []) => match std::fs::read_dir(path) {
             Ok(entries) => garray(
                 entries
@@ -302,4 +338,35 @@ fn file_method(
         },
         _ => return None,
     })
+}
+
+/// Call `clo` on each entry of `dir` (each directory only, for `dirs_only`)
+/// in the directory's order, descending into a directory right after its own
+/// call when `recurse` — `eachFileRecurse`'s pre-order. Stops at a raise.
+fn walk(vm: &mut VM, dir: &str, clo: &Value, recurse: bool, dirs_only: bool) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    for e in entries.filter_map(Result::ok) {
+        let child = format!(
+            "{}/{}",
+            dir.trim_end_matches('/'),
+            e.file_name().to_string_lossy()
+        );
+        let is_dir = Path::new(&child).is_dir();
+        if !dirs_only || is_dir {
+            let file = heap_push(HeapObj::File(child.clone()));
+            if let Err(err) = invoke_closure(vm, clo, &[file]) {
+                fault(vm, err);
+                return false;
+            }
+            if pending_exc() {
+                return false;
+            }
+        }
+        if recurse && is_dir && !walk(vm, &child, clo, recurse, dirs_only) {
+            return false;
+        }
+    }
+    true
 }

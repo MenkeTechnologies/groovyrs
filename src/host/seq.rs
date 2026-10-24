@@ -762,14 +762,102 @@ fn wrapped_copy(v: &Value, class: &'static str, writes: Writes) -> Option<Value>
 /// receiver's elements. It is a copy, not a view, so a later write to the
 /// original is not seen through it.
 pub(super) fn unmodifiable_copy(v: &Value) -> Option<Value> {
-    let class = if as_set(v).is_some() {
-        "java.util.Collections$UnmodifiableSet"
+    wrapped_copy(v, wrapper_class(v, false)?, Writes::Frozen)
+}
+
+/// Whether `v` is a sorted set or map — what `Collections` wraps in its
+/// `Navigable` classes.
+fn is_navigable(v: &Value) -> bool {
+    matches!(as_set(v), Some((_, SetKind::Tree | SetKind::TreeBy(_))))
+        || omap_kind(v) == Some(MapKind::Tree)
+}
+
+/// The `java.util.Collections` wrapper class `unmodifiable…` (or, with
+/// `synchronized`, `synchronized…`) answers for `v`.
+fn wrapper_class(v: &Value, synchronized: bool) -> Option<&'static str> {
+    let shape = if as_set(v).is_some() {
+        if is_navigable(v) {
+            "NavigableSet"
+        } else {
+            "Set"
+        }
     } else if is_omap(v) {
-        "java.util.Collections$UnmodifiableMap"
+        if is_navigable(v) {
+            "NavigableMap"
+        } else {
+            "Map"
+        }
+    } else if as_list_raw(v).is_some() || as_range(v).is_some() || matches!(v, Value::Array(_)) {
+        // `LinkedList` is the one modeled `List` that is not `RandomAccess`.
+        if tag_of(v).is_some_and(|t| t.kind == Kind::LinkedList) {
+            "List"
+        } else {
+            "RandomAccessList"
+        }
     } else {
-        "java.util.Collections$UnmodifiableRandomAccessList"
+        return None;
     };
-    wrapped_copy(v, class, Writes::Frozen)
+    Some(match (synchronized, shape) {
+        (false, "NavigableSet") => "java.util.Collections$UnmodifiableNavigableSet",
+        (false, "Set") => "java.util.Collections$UnmodifiableSet",
+        (false, "NavigableMap") => "java.util.Collections$UnmodifiableNavigableMap",
+        (false, "Map") => "java.util.Collections$UnmodifiableMap",
+        (false, "List") => "java.util.Collections$UnmodifiableList",
+        (false, _) => "java.util.Collections$UnmodifiableRandomAccessList",
+        (true, "NavigableSet") => "java.util.Collections$SynchronizedNavigableSet",
+        (true, "Set") => "java.util.Collections$SynchronizedSet",
+        (true, "NavigableMap") => "java.util.Collections$SynchronizedNavigableMap",
+        (true, "Map") => "java.util.Collections$SynchronizedMap",
+        (true, "List") => "java.util.Collections$SynchronizedList",
+        (true, _) => "java.util.Collections$SynchronizedRandomAccessList",
+    })
+}
+
+/// `asUnmodifiable()` / `asSynchronized()` (and `Collections.unmodifiable…` /
+/// `synchronized…`): a live view of a list. A set or map is wrapped as a copy
+/// (BUGS.md: set and map wrapper views).
+pub(super) fn wrapper(v: &Value, synchronized: bool) -> Option<Value> {
+    let class = wrapper_class(v, synchronized)?;
+    let writes = if synchronized {
+        Writes::Open
+    } else {
+        Writes::Frozen
+    };
+    if as_set(v).is_some() || is_omap(v) {
+        return wrapped_copy(v, class, writes);
+    }
+    if as_range(v).is_some() {
+        return wrapped_copy(v, class, writes);
+    }
+    Some(list_view(v, class, writes))
+}
+
+/// The class and write policy a `subList` taken from `v` carries, when it is
+/// not a plain `ArrayList$SubList`.
+pub(super) fn sublist_flavor(v: &Value) -> Option<(&'static str, Writes)> {
+    if let Some(tag) = tag_of(v) {
+        return Some(match tag.kind {
+            Kind::Vector | Kind::Stack => (
+                "java.util.Collections$SynchronizedRandomAccessList",
+                Writes::Open,
+            ),
+            _ => ("java.util.AbstractList$SubList", Writes::Open),
+        });
+    }
+    let Value::Obj(id) = v else { return None };
+    if !ANY_FLAVOR.with(Cell::get) {
+        return None;
+    }
+    let flavor = FLAVORS.with(|f| f.borrow().get(id).copied())?;
+    Some(match flavor.class {
+        "java.util.Arrays$ArrayList" => {
+            ("java.util.AbstractList$RandomAccessSubList", flavor.writes)
+        }
+        c if c.starts_with("java.util.ImmutableCollections$") => {
+            ("java.util.ImmutableCollections$SubList", flavor.writes)
+        }
+        c => (c, flavor.writes),
+    })
 }
 
 /// The `java.util` factory statics that answer a wrapper collection.
@@ -827,16 +915,22 @@ pub(super) fn static_call(vm: &mut VM, class: &str, method: &str, args: &[Value]
                 Writes::Frozen,
             )
         }
-        ("unmodifiableList", 1) if class == "Collections" => wrapped_copy(
-            &arg0,
-            "java.util.Collections$UnmodifiableRandomAccessList",
-            Writes::Frozen,
-        )?,
-        ("unmodifiableCollection", 1) if class == "Collections" => wrapped_copy(
-            &arg0,
-            "java.util.Collections$UnmodifiableCollection",
-            Writes::Frozen,
-        )?,
+        ("unmodifiableList", 1) if class == "Collections" => wrapper(&arg0, false)?,
+        ("unmodifiableCollection", 1) if class == "Collections" => {
+            if as_list_raw(&arg0).is_some() {
+                list_view(
+                    &arg0,
+                    "java.util.Collections$UnmodifiableCollection",
+                    Writes::Frozen,
+                )
+            } else {
+                wrapped_copy(
+                    &arg0,
+                    "java.util.Collections$UnmodifiableCollection",
+                    Writes::Frozen,
+                )?
+            }
+        }
         ("unmodifiableSet", 1) if class == "Collections" => wrapped_copy(
             &arg0,
             "java.util.Collections$UnmodifiableSet",
@@ -847,11 +941,7 @@ pub(super) fn static_call(vm: &mut VM, class: &str, method: &str, args: &[Value]
             "java.util.Collections$UnmodifiableMap",
             Writes::Frozen,
         )?,
-        ("synchronizedList", 1) if class == "Collections" => wrapped_copy(
-            &arg0,
-            "java.util.Collections$SynchronizedRandomAccessList",
-            Writes::Open,
-        )?,
+        ("synchronizedList", 1) if class == "Collections" => wrapper(&arg0, true)?,
         ("synchronizedMap", 1) if class == "Collections" => {
             wrapped_copy(&arg0, "java.util.Collections$SynchronizedMap", Writes::Open)?
         }

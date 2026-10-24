@@ -534,8 +534,16 @@ Implemented and checked against Apache Groovy:
   generates for them (`Script$_run_closure1`).
 - **`GString`** — interpolated literals are `GStringImpl`s with Groovy's
   `equals`/`hashCode`/map-key semantics and lazy `${-> x}` values.
-- **Files and markup** — `java.io.File`'s text GDK, `StringReader`, and
-  `groovy.xml.MarkupBuilder`.
+- **Files and markup** — `java.io.File`'s text GDK and directory walks
+  (`eachFile`, `eachFileRecurse`, …), `StringReader`,
+  `groovy.xml.MarkupBuilder` (with `mkp` and its options), and
+  `XmlSlurper` / `XmlParser` with GPath navigation.
+- **Dates** — `java.util.Date` arithmetic, ordering, ranges and
+  `format`/`parse`, `TimeZone`, and `groovy.time.TimeCategory` durations.
+- **JDK metaclass answers** — `respondsTo` / `hasProperty` on a `String`,
+  number, collection or range answer Groovy's own `MetaMethod`s and
+  `MetaProperty`s; list wrappers (`asSynchronized`, `asUnmodifiable`,
+  `Collections.unmodifiableList`) are live views with the JDK class names.
 - **`groovy.json`** — `JsonOutput.toJson` / `prettyPrint`,
   `JsonSlurper.parseText` and `JsonBuilder`.
 - **Closure coercion at a typed parameter** — a closure passed where a
@@ -680,8 +688,8 @@ Implemented and checked against Apache Groovy:
   `catch (groovy.lang.MissingMethodException e)`, a multi-catch arm,
   `instanceof`, and `new`.
 
-See [`BUGS.md`](BUGS.md) for the honest known-gaps list (XML parsing, `Date`,
-a `List` implementation kind).
+See [`BUGS.md`](BUGS.md) for the known-gaps list (XML namespaces, region time
+zones, set and map wrapper views).
 
 ---
 

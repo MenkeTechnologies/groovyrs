@@ -484,6 +484,11 @@ pub const GFN_CHECK: u16 = 786;
 /// (`obj."$name"`): a `GString` name reads as the `String` it renders to.
 pub const GNAME_TEXT: u16 = 787;
 
+/// Builtin id for a `GString` literal read only as text (see the compiler's
+/// `text_expr`): the same stack as [`GSTRING`], answering the rendered
+/// `String` rather than a `GString` object.
+pub const GSTRING_TEXT: u16 = 788;
+
 /// The method name `list.remove((Object) x)` compiles to: the cast selects
 /// `Collection.remove(Object)` over `List.remove(int)`, which only the call
 /// site can see. Not an identifier, so no script can name it.
@@ -593,6 +598,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GSCRIPT_THIS, b_script_this);
     vm.register_builtin(GFN_CHECK, b_fn_check);
     vm.register_builtin(GNAME_TEXT, b_name_text);
+    vm.register_builtin(GSTRING_TEXT, b_gstring_text);
     vm.register_builtin(GJCAST, b_java_cast);
     vm.register_builtin(GLIST_ADOPT, b_list_adopt);
     vm.register_builtin(GCLASSREF, b_classref);
@@ -721,6 +727,8 @@ thread_local! {
     static ANY_EMC: Cell<bool> = const { Cell::new(false) };
     /// Set once a `JsonSlurper` or `JsonBuilder` exists.
     static ANY_JSON: Cell<bool> = const { Cell::new(false) };
+    /// Set once a `Date`, `TimeZone` or `TimeCategory` duration exists.
+    static ANY_DATE: Cell<bool> = const { Cell::new(false) };
     /// The instances `map as C` built through its proxy fallback (a key `C`
     /// has no property for): they report the generated `C1_groovyProxy`.
     static MAP_PROXIES: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
@@ -1613,6 +1621,23 @@ fn java_class_name(v: &Value) -> String {
     if markup::is_builder(v) {
         return "groovy.xml.MarkupBuilder".to_string();
     }
+    if let Some(class) = ANY_JSON
+        .with(Cell::get)
+        .then(|| xml::class_name(v))
+        .flatten()
+    {
+        return class.to_string();
+    }
+    if let Some(class) = metamethod::class_name(v) {
+        return class;
+    }
+    if let Some(class) = ANY_DATE
+        .with(Cell::get)
+        .then(|| date::class_name(v))
+        .flatten()
+    {
+        return class;
+    }
     // `obj.metaClass` is a `HandleMetaClass` over the object's own; a class's
     // is the `ExpandoMetaClass` its injections live in.
     if let Some((_, instance, _)) = as_meta_class(v) {
@@ -2236,6 +2261,8 @@ fn interned_class_name(name: &str) -> &'static str {
 
 #[path = "host/bignum.rs"]
 mod bignum;
+#[path = "host/date.rs"]
+mod date;
 #[path = "host/digest.rs"]
 mod digest;
 #[path = "host/file.rs"]
@@ -2246,21 +2273,26 @@ mod json;
 mod mapkey;
 #[path = "host/markup.rs"]
 mod markup;
+#[path = "host/metamethod.rs"]
+mod metamethod;
 #[path = "host/params.rs"]
 mod params;
 #[path = "host/seq.rs"]
 mod seq;
 #[path = "host/urlcodec.rs"]
 mod urlcodec;
+#[path = "host/xml.rs"]
+mod xml;
 
 enum HeapObj {
     Closure(ClosureMeta),
     /// The script object: `this` at the top level of a script, and the `owner`
     /// of a closure written there. Its class is the script class.
     ScriptThis,
-    /// A `GString` that holds a closure among its values: the closure runs when
-    /// the text is read, not when the string is built.
-    GString(Vec<Value>),
+    /// A `GString`: its strings and values, alternating, and — when every
+    /// value is immutable (a string, number, boolean or `null`), so rendering
+    /// it later cannot differ — the text rendered once when it was built.
+    GString(Vec<Value>, Option<String>),
     /// A `java.math.MathContext`.
     MathCtx(bignum::MathCtx),
     /// `System.out` (`err: false`) or `System.err` — a `java.io.PrintStream`.
@@ -2389,13 +2421,21 @@ enum HeapObj {
         text: String,
         pos: usize,
     },
-    /// A `groovy.xml.MarkupBuilder`: where it writes, how deep its open
-    /// elements are, and whether it has written anything yet.
-    MarkupBuilder {
-        writer: Box<Value>,
-        depth: usize,
-        started: bool,
-    },
+    /// A `groovy.xml.MarkupBuilder` (see [`markup::MarkupState`]).
+    MarkupBuilder(Box<markup::MarkupState>),
+    /// A `MarkupBuilder`'s `mkp` helper: the builder it writes into.
+    MarkupHelper(Box<Value>),
+    /// An `XmlSlurper` / `XmlParser` or a view over what one parsed (see
+    /// [`xml::XmlVal`]).
+    Xml(Box<xml::XmlVal>),
+    /// A JDK value's `MetaMethod` / `MetaProperty` (see [`metamethod::Meta`]).
+    Meta(Box<metamethod::Meta>),
+    /// A `java.util.Date`: its instant in milliseconds since the epoch.
+    Date(i64),
+    /// A `java.util.TimeZone` (see [`date::Zone`]).
+    TimeZone(date::Zone),
+    /// A `groovy.time` duration (see [`date::Dur`]).
+    Duration(Box<date::Dur>),
     /// A `groovy.json.JsonSlurper`: stateless, so a unit.
     JsonSlurper,
     /// A `groovy.json.JsonBuilder` and the content it has built so far.
@@ -2435,6 +2475,12 @@ enum HeapObj {
     /// any write through it is `UnsupportedOperationException`.
     ReversedList {
         root: Value,
+    },
+    /// A JDK wrapper *view* of a list (`Collections.unmodifiableList`,
+    /// `asSynchronized()`): reads and writes reach `target`, and the class and
+    /// write policy are the view's own flavor (see [`seq::set_flavor`]).
+    ListView {
+        target: Value,
     },
     /// A `groovy.util.Expando`: its properties live in the map handle it
     /// holds (a `HashMap`, or the map it was constructed from).
@@ -2879,13 +2925,36 @@ fn array_elem(v: &Value) -> Option<ArrayElem> {
 /// list is the whole of itself; a `SubList` is a window onto its root.
 fn list_slot(v: &Value) -> Option<(u32, usize, usize)> {
     let Value::Obj(id) = v else { return None };
-    HEAP.with(|h| match h.borrow().get(*id as usize) {
-        Some(HeapObj::ListVal { items, .. }) => Some((*id, 0, items.len())),
+    let found = HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::ListVal { items, .. }) => Some(Ok((*id, 0, items.len()))),
         Some(HeapObj::SubList {
             root, offset, len, ..
-        }) => Some((*root, *offset, *len)),
+        }) => Some(Ok((*root, *offset, *len))),
+        Some(HeapObj::ListView { target }) => Some(Err(target.clone())),
+        _ => None,
+    })?;
+    found.or_else(|target| list_slot(&target).ok_or(())).ok()
+}
+
+/// The list a wrapper view reads and writes, if `v` is one.
+fn view_target(v: &Value) -> Option<Value> {
+    let Value::Obj(id) = v else { return None };
+    HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Some(HeapObj::ListView { target }) => Some(target.clone()),
         _ => None,
     })
+}
+
+/// A wrapper view of the list `v` reporting `class`, with the write policy
+/// `writes`. A transient list becomes a handle first, so the view has storage.
+fn list_view(v: &Value, class: &'static str, writes: seq::Writes) -> Value {
+    let target = match v {
+        Value::Array(_) => glist(iteration_elements(v)),
+        other => other.clone(),
+    };
+    let view = heap_push(HeapObj::ListView { target });
+    seq::set_flavor(&view, class, writes);
+    view
 }
 
 /// The elements behind a `java.util.List` handle **without** checking a window's
@@ -2899,6 +2968,9 @@ fn as_list_raw(v: &Value) -> Option<Vec<Value>> {
         let mut items = as_list_raw(&root)?;
         items.reverse();
         return Some(items);
+    }
+    if let Some(target) = view_target(v) {
+        return as_list_raw(&target);
     }
     HEAP.with(|h| {
         let h = h.borrow();
@@ -3013,6 +3085,9 @@ fn list_mod_count(root: u32) -> u64 {
 /// every non-window value trivially is).
 fn check_comodification(v: &Value) -> bool {
     let Value::Obj(id) = v else { return true };
+    if let Some(target) = view_target(v) {
+        return check_comodification(&target);
+    }
     let stale = HEAP.with(|h| {
         let h = h.borrow();
         match h.get(*id as usize) {
@@ -3053,7 +3128,7 @@ fn list_id(v: &Value) -> Option<u32> {
         let h = h.borrow();
         match h.get(*id as usize)? {
             HeapObj::ListVal { .. } => Some(*id),
-            HeapObj::ReversedList { .. } => Some(*id),
+            HeapObj::ReversedList { .. } | HeapObj::ListView { .. } => Some(*id),
             // A window is a list while its backing storage still spans it —
             // the same condition `as_list_raw` answers `None` for.
             HeapObj::SubList {
@@ -3101,7 +3176,16 @@ fn list_store(id: u32, items: Vec<Value>, structural: bool) {
     let Some((root, offset, len)) = list_slot(&Value::Obj(id)) else {
         return;
     };
-    if seq::write_refused(root, items.len() != len) {
+    // A wrapper view refuses by its own policy, then writes its target.
+    if let Some(Value::Obj(target)) = view_target(&Value::Obj(id)) {
+        if !seq::write_refused(id, items.len() != len) {
+            list_store(target, items, structural);
+        }
+        return;
+    }
+    // A window refuses by its own flavor (taken from a wrapper) or its root's.
+    let resizes = items.len() != len;
+    if (root != id && seq::write_refused(id, resizes)) || seq::write_refused(root, resizes) {
         return;
     }
     let structural = structural || items.len() != len;
@@ -3255,13 +3339,20 @@ fn make_sublist(vm: &mut VM, recv: &Value, args: &[Value]) -> Value {
         );
         return Value::Undef;
     }
-    heap_push(HeapObj::SubList {
+    let window = heap_push(HeapObj::SubList {
         root,
         parent: *parent,
         offset: offset + from as usize,
         len: (to - from) as usize,
         exp_mod: list_mod_count(root),
-    })
+    });
+    // A wrapper's or another `List` class's `subList` is its own class, with
+    // the receiver's write policy: `unmodifiableList(l).subList(…)` is still
+    // unmodifiable, and `Arrays.asList(…).subList(…)` still fixed-size.
+    if let Some((class, writes)) = seq::sublist_flavor(recv) {
+        seq::set_flavor(&window, class, writes);
+    }
+    window
 }
 
 /// Look up a closure handle's metadata, if `v` is a closure value.
@@ -3567,6 +3658,8 @@ fn meta_class_of(recv: &Value) -> Value {
 fn responds_to(recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
     let class = as_instance(recv)
         .map(|i| i.class)
+        // A plain `new Object()` has no script class; the JDK table answers it.
+        .filter(|c| *c != u32::MAX)
         .or_else(|| as_class_ref(recv).and_then(|n| find_class(&n)))?;
     let prefix = format!("{method}/");
     let mut seen: Vec<Vec<String>> = Vec::new();
@@ -4282,6 +4375,14 @@ fn b_truth(vm: &mut VM, _argc: u8) -> Value {
 /// Rendering goes through [`render_value`], so an embedded class instance uses
 /// its `toString()` — which is what a Groovy `GString` does and what plain `+`
 /// concatenation of the pieces would not.
+/// `GSTRING_TEXT`: see [`GSTRING_TEXT`].
+fn b_gstring_text(vm: &mut VM, _argc: u8) -> Value {
+    let n = vm.stack.pop().unwrap_or(Value::Undef).to_int().max(0) as usize;
+    let start = vm.stack.len().saturating_sub(n);
+    let vals: Vec<Value> = vm.stack.drain(start..).collect();
+    Value::str(gstring_text(vm, &vals))
+}
+
 fn b_gstring(vm: &mut VM, _argc: u8) -> Value {
     let n = vm.stack.pop().unwrap_or(Value::Undef).to_int().max(0) as usize;
     let mut vals = Vec::with_capacity(n);
@@ -4293,7 +4394,15 @@ fn b_gstring(vm: &mut VM, _argc: u8) -> Value {
     // each time it is read (so a closure value — the `${-> x}` idiom — and a
     // mutated collection show their state at that moment). A range value
     // renders through its own `toString`, as for `println` and `+`.
-    heap_push(HeapObj::GString(vals))
+    let immutable = vals.iter().skip(1).step_by(2).all(|v| {
+        matches!(
+            v,
+            Value::Str(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Undef
+        ) || is_dec_handle(v)
+            || as_float_handle(v).is_some()
+    });
+    let cached = immutable.then(|| gstring_text(vm, &vals));
+    heap_push(HeapObj::GString(vals, cached))
 }
 
 /// `GTRUTH_KEEP`: push the Groovy truth of the top of the stack *above* it,
@@ -6199,6 +6308,14 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
             ANY_JSON.with(|a| a.set(true));
             return markup::new_builder(args);
         }
+        "XmlSlurper" | "XmlParser" if args.is_empty() => {
+            ANY_JSON.with(|a| a.set(true));
+            return xml::construct(simple_name_of(class).as_str(), args);
+        }
+        "Date" if args.len() <= 1 => {
+            ANY_DATE.with(|a| a.set(true));
+            return date::construct(args);
+        }
         "JsonSlurper" if args.is_empty() => {
             ANY_JSON.with(|a| a.set(true));
             heap_push(HeapObj::JsonSlurper)
@@ -7784,6 +7901,16 @@ fn checked_equal(vm: &mut VM, eq: impl FnOnce() -> bool) -> bool {
 /// [`values_equal`] for one pair, its members compared through the guarded
 /// entry point.
 fn values_equal_shape(a: &Value, b: &Value) -> bool {
+    if let Some(eq) = xml_equal(a, b) {
+        return eq;
+    }
+    if let Some(order) = ANY_DATE
+        .with(Cell::get)
+        .then(|| date::compare(a, b))
+        .flatten()
+    {
+        return order.is_eq();
+    }
     if let (Some(pa), Some(pb)) = (as_gstring(a), as_gstring(b)) {
         return with_vm(|vm| gstring_text(vm, &pa) == gstring_text(vm, &pb)).unwrap_or(false);
     }
@@ -7954,6 +8081,16 @@ fn java_equals(a: &Value, b: &Value) -> bool {
 /// [`java_equals`] for one pair, its members compared through the guarded
 /// entry point.
 fn java_equals_shape(a: &Value, b: &Value) -> bool {
+    if let Some(eq) = xml_equal(a, b) {
+        return eq;
+    }
+    if let Some(order) = ANY_DATE
+        .with(Cell::get)
+        .then(|| date::compare(a, b))
+        .flatten()
+    {
+        return order.is_eq();
+    }
     if let (Value::Obj(x), Value::Obj(y)) = (a, b) {
         if x == y {
             return true;
@@ -9119,6 +9256,13 @@ fn b_field_get(vm: &mut VM, _argc: u8) -> Value {
         .as_str_cow()
         .into_owned();
     let recv = vm.stack.pop().unwrap_or(Value::Undef);
+    if let Some(v) = ANY_JSON
+        .with(Cell::get)
+        .then(|| xml::attribute(&recv, &name))
+        .flatten()
+    {
+        return v;
+    }
     match as_instance(&recv) {
         Some(inst) if inst.fields.contains_key(&name) => {
             inst.fields.get(&name).cloned().unwrap_or(Value::Undef)
@@ -9222,6 +9366,9 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
 /// `setProperty(name, value)` and `putAt(name, value)`. Honours a user `setX`
 /// setter, else writes the field.
 fn set_property(vm: &mut VM, recv: Value, name: String, value: Value) -> Value {
+    if ANY_JSON.with(Cell::get) && markup::set_option(&recv, &name, &value) {
+        return value;
+    }
     if file::file_path(&recv).is_some() && name == "text" {
         file::dispatch(vm, &recv, "setText", std::slice::from_ref(&value));
         return value;
@@ -9372,6 +9519,11 @@ fn map_default(vm: &mut VM, map: &Value, key: &str, subject: &Value) -> Value {
 /// `recv[index]`, shared by the `[…]` subscript builtin and by the `getAt(…)`
 /// method — Groovy defines the subscript *as* `getAt`, so both are one path.
 fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
+    if ANY_JSON.with(Cell::get) {
+        if let Some(v) = xml_call(vm, &recv, "getAt", std::slice::from_ref(&index)) {
+            return v;
+        }
+    }
     if let (Some(default), Value::Int(i)) = (list_default(&recv), &index) {
         return list_default_get(vm, &recv, *i, default);
     }
@@ -9846,8 +9998,20 @@ fn b_use(vm: &mut VM, argc: u8) -> Value {
         .filter_map(|n| find_class(&n))
         .collect();
     let pushed = ids.len();
+    // `groovy.time.TimeCategory` is answered natively (see `date`).
+    let time = args
+        .iter()
+        .filter_map(as_class_ref)
+        .any(|n| n.strip_prefix("groovy.time.").unwrap_or(&n) == "TimeCategory");
+    if time {
+        ANY_DATE.with(|a| a.set(true));
+        date::time_category(true);
+    }
     CATEGORIES.with(|c| c.borrow_mut().extend(ids));
     let out = invoke_closure(vm, &body, &[]);
+    if time {
+        date::time_category(false);
+    }
     CATEGORIES.with(|c| {
         let mut c = c.borrow_mut();
         let keep = c.len().saturating_sub(pushed);
@@ -10508,12 +10672,74 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
 }
 
 fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
+    // A `GString` rendered when built answers every `String` method as its
+    // text, straight away; its own members are answered below.
+    if !matches!(
+        method,
+        "getClass"
+            | "getStrings"
+            | "getValues"
+            | "getValueCount"
+            | "equals"
+            | "hashCode"
+            | "plus"
+            | "is"
+    ) {
+        if let Some(text) = gstring_cached(&recv) {
+            return dispatch_call(vm, Value::str(text), method, args);
+        }
+    }
     if ANY_JSON.with(Cell::get) {
         if let Some(v) = dispatch_json(vm, &recv, method, &args) {
             return v;
         }
     }
+    if ANY_DATE.with(Cell::get) {
+        if let Some(v) = date::dispatch(&recv, method, &args) {
+            return v;
+        }
+    }
     dispatch_call_plain(vm, recv, method, args)
+}
+
+/// An XML parser's or view's method; what a view does not answer itself
+/// runs on its elements as a list (`r.book.each { … }`, `p.book.size()`).
+fn xml_call(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
+    xml::as_xml(recv)?;
+    if matches!(
+        method,
+        "getClass" | "hashCode" | "is" | "with" | "tap" | "identity"
+    ) {
+        return None;
+    }
+    if method == "equals" {
+        let other = args.first().cloned().unwrap_or(Value::Undef);
+        return Some(Value::bool(xml_equal(recv, &other)?));
+    }
+    if let Some(v) = xml::dispatch(vm, recv, method, args) {
+        return Some(v);
+    }
+    let items = xml::elements(recv)?;
+    Some(dispatch_call(vm, glist(items), method, args.to_vec()))
+}
+
+/// `GPathResult.equals`: a slurper view on the left equals what renders as
+/// its text; a view on the right equals only another view.
+fn xml_equal(a: &Value, b: &Value) -> Option<bool> {
+    if !ANY_JSON.with(Cell::get) {
+        return None;
+    }
+    let (view, other) = match (xml::gpath_text(a), xml::gpath_text(b)) {
+        (Some(x), Some(y)) => return Some(x == y),
+        (Some(x), None) => (x, b),
+        // `String.equals(view)` and the like: the left side decides.
+        (None, Some(_)) => return Some(false),
+        (None, None) => return None,
+    };
+    Some(match other {
+        Value::Undef => false,
+        o => with_vm(|vm| render_value(vm, o)).is_some_and(|t| t == view),
+    })
 }
 
 /// The `groovy.json` objects' methods: a builder delegate's collecting calls,
@@ -10521,6 +10747,14 @@ fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
 fn dispatch_json(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
     let recv = recv.clone();
     let args = args.to_vec();
+    if let Some(v) = xml_call(vm, &recv, method, &args) {
+        return Some(v);
+    }
+    if markup::helper_builder(&recv).is_some() {
+        if let Some(v) = markup::helper_call(vm, &recv, method, &args) {
+            return Some(v);
+        }
+    }
     if markup::is_builder(&recv)
         && !matches!(
             method,
@@ -10609,6 +10843,9 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
                 if let Some(v) = responds_to(obj, name, rest) {
                     return v;
                 }
+                if let Some(v) = metamethod::responds_to(&java_class_name(obj), name, rest) {
+                    return v;
+                }
             }
             ("hasProperty", [obj, name]) => {
                 return dispatch_call(vm, obj.clone(), "hasProperty", vec![name.clone()]);
@@ -10620,6 +10857,20 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
         if let Some(v) = responds_to(&recv, name, rest) {
             return v;
         }
+        if let Some(v) = metamethod::responds_to(&java_class_name(&recv), name, rest) {
+            return v;
+        }
+    }
+    // A JDK value's `hasProperty`: its metaclass's `MetaProperty`, or `null`.
+    if let ("hasProperty", [Value::Str(name)]) = (method, args.as_slice()) {
+        if as_instance(&recv).is_none() {
+            if let Some(v) = metamethod::has_property(&java_class_name(&recv), name) {
+                return v;
+            }
+        }
+    }
+    if let Some(v) = metamethod::dispatch(&recv, method, &args) {
+        return v;
     }
     // A method a script injected through `metaClass` wins over the class's own,
     // as an `ExpandoMetaClass` method does.
@@ -10788,7 +11039,7 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
             }
             _ => {}
         }
-        let text = gstring_text(vm, &parts);
+        let text = gstring_render(vm, &recv, &parts);
         return dispatch_call(vm, Value::str(text), method, args);
     }
     // A `List` rides a handle so two names can see one list. Every list method
@@ -10817,8 +11068,14 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
             );
         }
     }
-    if args.is_empty() && matches!(method, "asImmutable" | "asUnmodifiable") {
+    if args.is_empty() && method == "asImmutable" {
         if let Some(v) = seq::unmodifiable_copy(&recv) {
+            return v;
+        }
+    }
+    // `asUnmodifiable()` / `asSynchronized()` on a list are live views.
+    if args.is_empty() && matches!(method, "asUnmodifiable" | "asSynchronized") {
+        if let Some(v) = seq::wrapper(&recv, method == "asSynchronized") {
             return v;
         }
     }
@@ -13302,6 +13559,28 @@ fn b_prop(vm: &mut VM, _argc: u8) -> Value {
 /// The property read `recv.name`: an instance's getter, field or
 /// `propertyMissing` first, then every other receiver's property.
 fn get_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
+    if ANY_JSON.with(Cell::get) && name != "class" {
+        if let Some(v) = xml::property(recv, name) {
+            return v;
+        }
+    }
+    // A `MetaMethod`'s / `MetaProperty`'s properties are its getters.
+    if name != "class" && metamethod::as_meta(recv).is_some() {
+        let getter = format!("get{}", capitalize(name));
+        if let Some(v) = metamethod::dispatch(recv, &getter, &[]) {
+            return v;
+        }
+    }
+    // `TimeCategory`'s `3.hours`, and a date-family value's getters.
+    if ANY_DATE.with(Cell::get) && name != "class" {
+        if let Some(v) = date::number_property(recv, name) {
+            return v;
+        }
+        let getter = format!("get{}", capitalize(name));
+        if let Some(v) = date::dispatch(recv, &getter, &[]) {
+            return v;
+        }
+    }
     // A `File`'s (or reader's) properties are its getters: `f.text`, `f.name`.
     if file::file_path(recv).is_some() && name != "class" {
         let getter = format!("get{}", capitalize(name));
@@ -13315,6 +13594,11 @@ fn get_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     if name == "content" {
         if let Some(content) = json_builder(recv) {
             return content;
+        }
+    }
+    if ANY_JSON.with(Cell::get) && markup::is_builder(recv) {
+        if let Some(v) = markup::property(recv, name) {
+            return v;
         }
     }
     if let Some((class, instance, _)) = as_meta_class(recv) {
@@ -16884,6 +17168,10 @@ fn cast_assign(vm: &mut VM, v: Value, ty: &str) -> Value {
 /// The coercion `value as ty` itself, shared with the Java-style cast
 /// ([`java_cast`]) for the targets where the two agree.
 fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
+    // A value that already is the sequence class is handed back itself.
+    if seq::is_a(&v, &simple_name_of(ty)) == Some(true) {
+        return v;
+    }
     // A list handle casts through its transient array form (`as Set`, `as List`).
     let v = deref_list(&v);
     let ty_simple = simple_name_of(ty);
@@ -17143,6 +17431,13 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
         },
         // A Groovy `Range` already *is* a `java.util.List`, so the cast is
         // identity: `(1..3) as List` is still the `IntRange` `1..3`.
+        // `x as LinkedList` builds one over the elements, as `asType` does
+        // through the class's collection constructor.
+        "LinkedList" | "Vector" | "Stack" | "ArrayDeque" | "PriorityQueue"
+            if is_list(&v) || as_set(&v).is_some() || as_range(&v).is_some() =>
+        {
+            seq::construct(vm, &ty_simple, std::slice::from_ref(&v)).unwrap_or(v)
+        }
         "List" | "ArrayList" | "Collection" | "Iterable" => match &v {
             Value::Array(_) => v,
             _ if as_range(&v).is_some() => v,
@@ -17306,7 +17601,10 @@ fn java_cast(vm: &mut VM, v: Value, ty: &str) -> Value {
             let is_list = as_list_raw(&v).is_some() || as_range(&v).is_some();
             let is_set = as_set(&v).is_some();
             if is_list || (is_set && simple != "List") {
-                if is_set && matches!(simple.as_str(), "ArrayList" | "LinkedList") {
+                // A value that is not already a `LinkedList` becomes one.
+                if simple == "LinkedList" && seq::is_a(&v, "LinkedList") != Some(true) {
+                    as_type(vm, v, "LinkedList")
+                } else if is_set && simple == "ArrayList" {
                     as_type(vm, v, "List")
                 } else {
                     v
@@ -17483,7 +17781,7 @@ pub fn jdk_class_package(name: &str) -> Option<&'static str> {
         | "Tuple7" | "Tuple8" | "Tuple9" | "Tuple10" | "Tuple11" | "Tuple12" | "Tuple13"
         | "Tuple14" | "Tuple15" | "Tuple16" => "groovy.lang",
         "Collections" | "Arrays" | "List" | "Map" | "Set" | "Random" | "UUID" | "Objects"
-        | "Optional" => "java.util",
+        | "Optional" | "Date" | "TimeZone" => "java.util",
         // Named for its resolve-strategy constants (`Closure.DELEGATE_FIRST`).
         "Closure" => "groovy.lang",
         "Expando" => "groovy.util",
@@ -17504,7 +17802,9 @@ pub fn jdk_qualified_class(package: &str, name: &str) -> Option<String> {
     let known = jdk_class_package(name) == Some(package)
         || matches!(
             (package, name),
-            ("java.math", "RoundingMode") | ("java.math", "MathContext")
+            ("java.math", "RoundingMode")
+                | ("java.math", "MathContext")
+                | ("groovy.time", "TimeCategory")
         );
     known.then(|| format!("{package}.{name}"))
 }
@@ -17742,6 +18042,12 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
     }
     if (class, method) == ("Tuple", "tuple") {
         return seq::tuple_of(args);
+    }
+    if matches!(class, "Date" | "TimeZone") {
+        if let Some(v) = date::static_call(vm, class, method, args) {
+            ANY_DATE.with(|a| a.set(true));
+            return Some(v);
+        }
     }
     match (class, method, args) {
         ("JsonOutput", "toJson", [v]) => return Some(Value::str(json::to_json(vm, v))),
@@ -19135,6 +19441,13 @@ fn range_is_reverse(r: &RangeVal) -> bool {
     if is_number(&r.from) && is_number(&r.to) {
         return natural_order(&r.from, &r.to) == std::cmp::Ordering::Greater;
     }
+    if let Some(order) = ANY_DATE
+        .with(Cell::get)
+        .then(|| date::compare(&r.from, &r.to))
+        .flatten()
+    {
+        return order.is_gt();
+    }
     let (from, to) = range_bounds(r);
     from > to
 }
@@ -19160,6 +19473,8 @@ fn range_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         // Any two numbers order by value — an `Integer` against a `BigDecimal`
         // or a `Double` too, which a `1.5..4` walk compares at every step.
         _ if is_number(a) && is_number(b) => Some(natural_order(a, b)),
+        // A `Date` range is an `ObjectRange` walked a day at a time.
+        _ if ANY_DATE.with(Cell::get) => date::compare(a, b),
         _ => None,
     }
 }
@@ -19281,6 +19596,9 @@ fn successor(v: &Value, forward: bool) -> Option<Value> {
         // `Double.next()` is `plus(1)`, still a `Double` — what a `1.5d..4d`
         // walk steps by.
         Value::Float(f) => Some(Value::float(f + delta as f64)),
+        Value::Obj(_) if ANY_DATE.with(Cell::get) && date::date_millis(v).is_some() => {
+            date::arithmetic(v, &Value::int(1), forward)
+        }
         Value::Str(s) => {
             let mut chars: Vec<char> = s.chars().collect();
             let last = chars.pop()?;
@@ -19991,6 +20309,10 @@ fn dispatch_tree_by(
             }
         }
         ("contains", [probe]) => Value::bool(position(vm, &items, probe).is_some()),
+        ("containsAll", [more]) => {
+            let wanted = iteration_elements(more);
+            Value::bool(wanted.iter().all(|w| position(vm, &items, w).is_some()))
+        }
         ("remove", [probe]) => match position(vm, &items, probe) {
             Some(i) => {
                 let mut items = items;
@@ -20194,6 +20516,16 @@ fn make_set(items: Vec<Value>, kind: SetKind) -> Value {
 /// building a set from `n` elements is `n²/2` `values_equal` calls, so
 /// `(1..n).toSet()` and every set operator that re-de-duplicates its result got
 /// four times slower for twice the input.
+/// Set membership: [`values_equal`], except that a `GString` and a `String`
+/// are never one element — their `hashCode`s differ, so a `HashSet` holding
+/// one does not find the other.
+fn set_equal(a: &Value, b: &Value) -> bool {
+    if as_gstring(a).is_some() != as_gstring(b).is_some() {
+        return false;
+    }
+    values_equal(a, b)
+}
+
 fn dedup_values(items: Vec<Value>) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let mut index = SetIndex::default();
@@ -20218,12 +20550,9 @@ fn index_member(index: &SetIndex, items: &[Value], probe: &Value) -> bool {
         // equal to this one.
         Some(None) => false,
         // A candidate. `values_equal` decides, exactly as the scan would.
-        Some(Some(pos)) => items
-            .get(pos)
-            .map(|v| values_equal(v, probe))
-            .unwrap_or(false),
+        Some(Some(pos)) => items.get(pos).map(|v| set_equal(v, probe)).unwrap_or(false),
         // No answer — the index is off, or the probe is of the other key kind.
-        None => items.iter().any(|v| values_equal(v, probe)),
+        None => items.iter().any(|v| set_equal(v, probe)),
     }
 }
 
@@ -20242,11 +20571,8 @@ fn set_member(recv: &Value, items: &[Value], probe: &Value) -> bool {
     };
     match hit {
         Some(None) => false,
-        Some(Some(pos)) => items
-            .get(pos)
-            .map(|v| values_equal(v, probe))
-            .unwrap_or(false),
-        None => items.iter().any(|v| values_equal(v, probe)),
+        Some(Some(pos)) => items.get(pos).map(|v| set_equal(v, probe)).unwrap_or(false),
+        None => items.iter().any(|v| set_equal(v, probe)),
     }
 }
 
@@ -20269,7 +20595,7 @@ fn set_membership_fast(recv: &Value, probe: &Value) -> Option<bool> {
     })??;
     match candidate {
         None => Some(false),
-        Some(cand) => Some(values_equal(&cand, probe)),
+        Some(cand) => Some(set_equal(&cand, probe)),
     }
 }
 
@@ -20461,7 +20787,7 @@ fn dispatch_set_method(
             let v = first_arg(args);
             let next: Vec<Value> = items
                 .iter()
-                .filter(|k| !values_equal(k, &v))
+                .filter(|k| !set_equal(k, &v))
                 .cloned()
                 .collect();
             let changed = next.len() != items.len();
@@ -21103,6 +21429,18 @@ fn parse_java_double(s: &str) -> Option<f64> {
 /// count properties on `String`/list/map; a map's `k` also reads entry `k`. An
 /// unmodeled property raises `groovy.lang.MissingPropertyException`.
 fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
+    if name != "class" && metamethod::as_meta(recv).is_some() {
+        let getter = format!("get{}", capitalize(name));
+        if let Some(v) = metamethod::dispatch(recv, &getter, &[]) {
+            return v;
+        }
+    }
+    // A builder closure's bare `mkp` reaches the builder here.
+    if ANY_JSON.with(Cell::get) && markup::is_builder(recv) {
+        if let Some(v) = markup::property(recv, name) {
+            return v;
+        }
+    }
     if let Some(parts) = as_gstring(recv) {
         if matches!(name, "strings" | "values" | "valueCount" | "class") {
             return dispatch_call(
@@ -21502,6 +21840,13 @@ fn class_ref_of(v: &Value) -> Value {
 /// `for (x in 5)` runs once).
 fn b_iter(vm: &mut VM, _argc: u8) -> Value {
     let v = vm.stack.pop().unwrap_or(Value::Undef);
+    if let Some(items) = ANY_JSON
+        .with(Cell::get)
+        .then(|| xml::elements(&v))
+        .flatten()
+    {
+        return Value::array(items);
+    }
     match drain_iterable(vm, &v) {
         Some(Ok(items)) => Value::array(items),
         Some(Err(e)) => {
@@ -21832,6 +22177,13 @@ fn java_to_string(vm: &mut VM, v: &Value) -> String {
 /// **code-unit** order. They invert for an astral character against
 /// `U+E000..U+FFFF`, so the fallback encodes before comparing.
 fn natural_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    if let Some(order) = ANY_DATE
+        .with(Cell::get)
+        .then(|| date::compare(a, b))
+        .flatten()
+    {
+        return order;
+    }
     // `UUID.compareTo`: the two halves as signed `long`s, most significant first.
     if let (Some(x), Some(y)) = (as_uuid(a), as_uuid(b)) {
         return x.cmp(&y);
@@ -22173,13 +22525,24 @@ fn render_shape(vm: &mut VM, v: &Value) -> String {
         return json::to_json(vm, &content);
     }
     if let Some(parts) = as_gstring(v) {
-        return gstring_text(vm, &parts);
+        return gstring_render(vm, v, &parts);
     }
     if let Some(c) = bignum::math_ctx(v) {
         return bignum::math_ctx_str(&c);
     }
     if let Some((msb, lsb)) = as_uuid(v) {
         return uuid_str(msb, lsb);
+    }
+    if let Some(text) = ANY_DATE.with(Cell::get).then(|| date::text(v)).flatten() {
+        return text;
+    }
+    if let Some(text) = metamethod::text(v) {
+        return text;
+    }
+    if let Some(x) = ANY_JSON.with(Cell::get).then(|| xml::as_xml(v)).flatten() {
+        if let Some(text) = xml::text(&x) {
+            return text;
+        }
     }
     // `Expando.toString` is its property map's, Java-style (`{a=1}`).
     if let Some(props) = as_expando(v) {
@@ -22301,6 +22664,9 @@ fn instance_default_str(v: &Value, inst: &Instance) -> String {
 /// fusevm's shell-flavoured `as_str_cow`): booleans as `true`/`false`, whole
 /// decimals with a trailing `.0`, `Undef`/`null` as `null`.
 pub fn groovy_str(v: &Value) -> String {
+    if let Some(text) = gstring_cached(v) {
+        return text;
+    }
     if let Some(parts) = as_gstring(v) {
         return with_vm(|vm| gstring_text(vm, &parts)).unwrap_or_default();
     }
@@ -23013,6 +23379,25 @@ fn instance_compare(a: &Value, b: &Value) -> Option<Result<i64, String>> {
 ///     promotion gate below.
 ///
 /// `/` never reaches here — it lowers to the [`GDIV`] builtin instead.
+/// `+` / `-` and the comparisons on a `Date` or a `TimeCategory` duration.
+fn date_operator(op: NumOp, a: &Value, b: &Value) -> Option<Value> {
+    match op {
+        NumOp::Add | NumOp::Sub => date::arithmetic(a, b, matches!(op, NumOp::Add)),
+        NumOp::Lt | NumOp::Le | NumOp::Gt | NumOp::Ge | NumOp::Eq | NumOp::Ne => {
+            let order = date::compare(a, b)?;
+            Some(Value::bool(match op {
+                NumOp::Lt => order.is_lt(),
+                NumOp::Le => order.is_le(),
+                NumOp::Gt => order.is_gt(),
+                NumOp::Ge => order.is_ge(),
+                NumOp::Eq => order.is_eq(),
+                _ => order.is_ne(),
+            }))
+        }
+        _ => None,
+    }
+}
+
 pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // Unary minus is the one operator that does NOT widen a `java.lang.Float`:
     // Java's `-float` is a `float`, and Groovy's `NumberMath` follows it, so
@@ -23059,6 +23444,16 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
     // `"s" + chars` appends a `char[]`'s characters run together.
     // `GString + String` and `GString + GString` are `GString`s (anything
     // else on the right makes a `String`).
+    if ANY_DATE.with(Cell::get) {
+        if let Some(v) = date_operator(op, a, b) {
+            return Ok(v);
+        }
+    }
+    if matches!(op, NumOp::Eq | NumOp::Ne) {
+        if let Some(eq) = xml_equal(a, b) {
+            return Ok(Value::bool(eq == matches!(op, NumOp::Eq)));
+        }
+    }
     if matches!(op, NumOp::Add) {
         if let Some(parts) = as_gstring(a) {
             if let Some(joined) = gstring_plus(&parts, b) {
@@ -23640,7 +24035,7 @@ fn class_declares_field(class: u32, field: &str) -> bool {
 fn as_gstring(v: &Value) -> Option<Vec<Value>> {
     match v {
         Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
-            Some(HeapObj::GString(parts)) => Some(parts.clone()),
+            Some(HeapObj::GString(parts, _)) => Some(parts.clone()),
             _ => None,
         }),
         _ => None,
@@ -23665,7 +24060,25 @@ fn gstring_plus(parts: &[Value], other: &Value) -> Option<Value> {
             out.extend(theirs.into_iter().skip(1));
         }
     }
-    Some(heap_push(HeapObj::GString(out)))
+    Some(heap_push(HeapObj::GString(out, None)))
+}
+
+/// The text a `GString` handle renders to, if it was rendered when built
+/// (see [`HeapObj::GString`]).
+fn gstring_cached(v: &Value) -> Option<String> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::GString(_, Some(text))) => Some(text.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// The text of `GString` handle `v`: its cached rendering, else `parts`
+/// rendered now.
+fn gstring_render(vm: &mut VM, v: &Value, parts: &[Value]) -> String {
+    gstring_cached(v).unwrap_or_else(|| gstring_text(vm, parts))
 }
 
 fn gstring_text(vm: &mut VM, parts: &[Value]) -> String {

@@ -138,6 +138,11 @@ const THROWABLES: &[(&str, &str, &str)] = &[
     ("GroovyRuntimeException", "RuntimeException", "groovy.lang"),
     // A `JsonSlurper` given malformed text.
     ("JsonException", "RuntimeException", "groovy.json"),
+    // An `XmlSlurper` / `XmlParser` given malformed text.
+    ("SAXException", "Exception", "org.xml.sax"),
+    ("SAXParseException", "SAXException", "org.xml.sax"),
+    // `Date.parse(pattern, text)` given text the pattern does not match.
+    ("ParseException", "Exception", "java.text"),
     (
         "MissingMethodException",
         "GroovyRuntimeException",

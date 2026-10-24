@@ -1102,9 +1102,9 @@ JVM 21.0.12):
 - `ConfigSlurper` walks the script itself (there is no run-time compiler):
   `new`, loops, `switch`, `try` and statements other than assignments, blocks,
   `def` locals, and `if`/`return` inside a closure body fault. A config
-  closure's `owner`, `delegate` and `thisObject` are not modeled (Groovy: the
-  script instance, or the enclosing block's closure), and it sees the `def`
-  locals as they were when it was created.
+  closure sees the `def` locals as they were when it was created. Its
+  `owner` is the closure it is written in or the script object, whose
+  properties (the binding) are not modeled.
   `ConfigSlurper.parse(Class)`, `setBinding` and `registerConditionalBlock`
   are not modeled.
 - `JsonSlurper.parse` reads a `File`, a reader or a `byte[]`; a URL,

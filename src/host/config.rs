@@ -74,6 +74,12 @@ struct Run {
     /// against a config object of its own and merges that into the result
     /// after the script.
     env_settings: Option<Value>,
+    /// The script object (`Script_<md5>`): every closure's `thisObject`, and
+    /// the `owner` of one written at the top level.
+    script: Value,
+    /// The closure the statements being walked are written in — a block's
+    /// closure or a called closure — which owns a closure written there.
+    owner: Option<Value>,
 }
 
 /// A closure literal's generated class name, by the address of its body.
@@ -91,6 +97,7 @@ pub(super) struct ConfigClosure {
     locals: HashMap<String, Value>,
     scopes: Vec<Value>,
     names: std::rc::Rc<ClosureNames>,
+    script: Value,
 }
 
 impl ConfigClosure {
@@ -131,11 +138,17 @@ pub(super) fn parse(vm: &mut VM, env: Option<String>, text: &str) -> Value {
     // called, so the program stays alive for the rest of the run.
     let program: &'static crate::ast::Program = Box::leak(Box::new(program));
     let root = new_config();
+    let names = closure_names(text, &program.body);
     let mut run = Run {
         env,
         locals: HashMap::new(),
-        names: std::rc::Rc::new(closure_names(text, &program.body)),
+        names: std::rc::Rc::new(names),
         env_settings: None,
+        script: heap_push(HeapObj::ConfigScript(format!(
+            "Script_{}",
+            script_hash(text)
+        ))),
+        owner: None,
     };
     if let Err(e) = block(vm, &mut run, &program.body, std::slice::from_ref(&root)) {
         fault(vm, e);
@@ -154,11 +167,16 @@ pub(super) fn parse(vm: &mut VM, env: Option<String>, text: &str) -> Value {
 /// then numbers the closures written directly in its own body
 /// (`$_run_closure2$_closure4`), one global count, a class's children before
 /// its grandchildren.
-fn closure_names(text: &str, body: &'static [Stmt]) -> ClosureNames {
-    let hex: String = digest::md5(text.as_bytes())
+/// The md5 of a config script's text, in hex: what its class is named after.
+fn script_hash(text: &str) -> String {
+    digest::md5(text.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
-        .collect();
+        .collect()
+}
+
+fn closure_names(text: &str, body: &'static [Stmt]) -> ClosureNames {
+    let hex = script_hash(text);
     let mut names = ClosureNames::new();
     let mut count = 0;
     let mut name_level = |parent: &str, kids: Vec<&'static [Stmt]>, names: &mut ClosureNames| {
@@ -259,6 +277,7 @@ fn direct_closures(body: &'static [Stmt]) -> Vec<&'static [Stmt]> {
 /// last expression statement's value — or a `return`'s — its result.
 pub(super) fn call_closure(
     vm: &mut VM,
+    this: &Value,
     clo: &ConfigClosure,
     args: &[Value],
 ) -> Result<Value, String> {
@@ -278,6 +297,8 @@ pub(super) fn call_closure(
         locals,
         names: clo.names.clone(),
         env_settings: None,
+        script: clo.script.clone(),
+        owner: Some(this.clone()),
     };
     Ok(match body_value(vm, &mut run, clo.body, &clo.scopes)? {
         Flow::Next(v) | Flow::Return(v) => v,
@@ -370,27 +391,30 @@ fn block(
                 omap_set(&owner, name.clone(), v);
             }
             StmtKind::Expr(call @ Expr::Call { name, args, .. }) => match args.as_slice() {
-                [Expr::Closure { body, .. }] if name == "environments" => {
+                [envs @ Expr::Closure { body, .. }] if name == "environments" => {
                     let Some(env) = run.env.clone() else { continue };
+                    let envs_closure = eval(vm, run, envs, scopes)?;
+                    let prev = run.owner.replace(envs_closure);
                     for inner in body {
                         if let StmtKind::Expr(Expr::Call { name, args, .. }) = &inner.kind {
                             if *name == env {
-                                if let [Expr::Closure { body, .. }] = args.as_slice() {
+                                if let [lit @ Expr::Closure { body, .. }] = args.as_slice() {
                                     let settings =
                                         run.env_settings.get_or_insert_with(new_config).clone();
                                     let mut inner = scopes.to_vec();
                                     inner.push(settings);
-                                    block(vm, run, body, &inner)?;
+                                    run_block(vm, run, lit, body, &inner, scopes)?;
                                 }
                             }
                         }
                     }
+                    run.owner = prev;
                 }
-                [Expr::Closure { body, .. }] => {
+                [lit @ Expr::Closure { body, .. }] => {
                     let nested = get_or_create(&target, name);
                     let mut inner = scopes.to_vec();
                     inner.push(nested);
-                    block(vm, run, body, &inner)?;
+                    run_block(vm, run, lit, body, &inner, scopes)?;
                 }
                 _ => {
                     eval(vm, run, call, scopes)?;
@@ -642,8 +666,14 @@ fn eval(vm: &mut VM, run: &mut Run, e: &'static Expr, scopes: &[Value]) -> Resul
                 locals: run.locals.clone(),
                 scopes: scopes.to_vec(),
                 names: run.names.clone(),
+                script: run.script.clone(),
             };
-            config_closure_value(clo)
+            let value = config_closure_value(clo);
+            // A closure written at the top level is the script's; one written
+            // in a block or a closure belongs to that closure.
+            let owner = run.owner.clone().unwrap_or_else(|| run.script.clone());
+            set_closure_owner(&value, owner, run.script.clone());
+            value
         }
         Expr::Index { recv, index, .. } => {
             let r = eval(vm, run, recv, scopes)?;
@@ -802,7 +832,48 @@ fn closure_arg_call(
     if let Expr::Closure { body, .. } = arg {
         let mut inner = scopes.to_vec();
         inner.push(nested);
-        block(vm, run, body, &inner)?;
+        run_block(vm, run, arg, body, &inner, scopes)?;
     }
     Ok(Value::Undef)
+}
+
+/// Walk a block's body (`name { … }`) with its closure as the owner of the
+/// closures written in it.
+fn run_block(
+    vm: &mut VM,
+    run: &mut Run,
+    lit: &'static Expr,
+    body: &'static [Stmt],
+    inner: &[Value],
+    scopes: &[Value],
+) -> Result<(), String> {
+    let closure = eval(vm, run, lit, scopes)?;
+    let prev = run.owner.replace(closure);
+    let out = block(vm, run, body, inner);
+    run.owner = prev;
+    out
+}
+
+/// Set a closure's `owner` and `thisObject` (its `delegate` defaults to the
+/// owner).
+fn set_closure_owner(clo: &Value, owner: Value, this: Value) {
+    if let Value::Obj(id) = clo {
+        HEAP.with(|h| {
+            if let Some(HeapObj::Closure(meta)) = h.borrow_mut().get_mut(*id as usize) {
+                meta.owner = Some(owner);
+                meta.this_obj = Some(this);
+            }
+        });
+    }
+}
+
+/// The class of a config script object, if `v` is one.
+pub(super) fn script_class_of(v: &Value) -> Option<String> {
+    match v {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+            Some(HeapObj::ConfigScript(class)) => Some(class.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
 }

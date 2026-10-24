@@ -5753,3 +5753,48 @@ ParseException: Unparseable date: "2024-07-10 12:00 GMT-7"
 "####;
     check(src, expected);
 }
+
+/// A config closure's `owner` is the closure it is written in (a block's
+/// closure, an environment's, another closure) or the `Script_<md5>` script
+/// object at the top level; `thisObject` is the script object and the
+/// `delegate` defaults to the owner.
+#[test]
+fn round10_config_closure_owner() {
+    let src = r####"def text = '''
+a = { 1 }
+b { c = { 2 }; d = [1].collect { x -> { -> x } } }
+e = { -> { -> 3 } }
+environments { dev { f = { 4 } } }
+'''
+def cfg = new ConfigSlurper('dev').parse(text)
+def n = { v -> v?.getClass()?.name }
+println n(cfg.a.owner)
+println n(cfg.a.delegate)
+println n(cfg.a.thisObject)
+println n(cfg.b.c.owner)
+println n(cfg.b.c.delegate)
+println n(cfg.b.c.thisObject)
+println n(cfg.b.d[0].owner)
+println n(cfg.b.d[0].owner.owner)
+println n(cfg.e().owner)
+println n(cfg.f.owner)
+println n(cfg.f.owner.owner)
+println(cfg.a.owner.is(cfg.e.owner))
+println(cfg.a.owner == cfg.a.thisObject)
+"####;
+    let expected = r####"Script_2ddc2d1cbaa9043cb4155eb40eadecd4
+Script_2ddc2d1cbaa9043cb4155eb40eadecd4
+Script_2ddc2d1cbaa9043cb4155eb40eadecd4
+Script_2ddc2d1cbaa9043cb4155eb40eadecd4$_run_closure2
+Script_2ddc2d1cbaa9043cb4155eb40eadecd4$_run_closure2
+Script_2ddc2d1cbaa9043cb4155eb40eadecd4
+Script_2ddc2d1cbaa9043cb4155eb40eadecd4$_run_closure2$_closure6
+Script_2ddc2d1cbaa9043cb4155eb40eadecd4$_run_closure2
+Script_2ddc2d1cbaa9043cb4155eb40eadecd4$_run_closure3
+Script_2ddc2d1cbaa9043cb4155eb40eadecd4$_run_closure4$_closure9
+Script_2ddc2d1cbaa9043cb4155eb40eadecd4$_run_closure4
+true
+true
+"####;
+    check(src, expected);
+}

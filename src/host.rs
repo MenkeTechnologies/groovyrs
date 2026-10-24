@@ -1714,6 +1714,9 @@ fn java_class_name(v: &Value) -> String {
     if is_script_this(v) {
         return script_class();
     }
+    if let Some(class) = config::script_class_of(v) {
+        return class;
+    }
     if let Some(inst) = as_instance(v) {
         if let Some(meta) = class_meta(inst.class) {
             if matches!(v, Value::Obj(id) if MAP_PROXIES.with(|p| p.borrow().contains(id))) {
@@ -2351,6 +2354,9 @@ enum HeapObj {
     /// The script object: `this` at the top level of a script, and the `owner`
     /// of a closure written there. Its class is the script class.
     ScriptThis,
+    /// A `ConfigSlurper` script's object (`Script_<md5 of the text>`): the
+    /// `owner` and `thisObject` of the closures written in it.
+    ConfigScript(String),
     /// A `GString`: its strings and values, alternating, and — when every
     /// value is immutable (a string, number, boolean or `null`), so rendering
     /// it later cannot differ — the text rendered once when it was built.
@@ -5340,7 +5346,7 @@ fn invoke_derived(
             MEMO.with(|m| m.borrow_mut().insert((id, key), out.clone()));
             Ok(out)
         }
-        Derived::Config(c) => config::call_closure(vm, c, args),
+        Derived::Config(c) => config::call_closure(vm, this, c, args),
     }
 }
 
@@ -23733,6 +23739,9 @@ pub fn groovy_str(v: &Value) -> String {
     // derived from the handle, so it is stable but not Groovy's number.
     if let (Some(meta), Value::Obj(id)) = (closure_meta(v), v) {
         let class = closure_class_name(&meta).unwrap_or_else(|| "groovy.lang.Closure".to_string());
+        return format!("{class}@{:x}", id.wrapping_mul(0x9E37_79B1) | 0x1000_0000);
+    }
+    if let (Some(class), Value::Obj(id)) = (config::script_class_of(v), v) {
         return format!("{class}@{:x}", id.wrapping_mul(0x9E37_79B1) | 0x1000_0000);
     }
     if let Some(o) = as_optional(v) {

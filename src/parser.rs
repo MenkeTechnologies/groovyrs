@@ -1305,6 +1305,7 @@ impl Parser {
                 param_types: Vec::new(),
                 body: vec![Stmt::new(line, StmtKind::Expr(read))],
                 ret_ty: ty.clone(),
+                is_static: false,
             });
         }
         Ok(StmtKind::Class {
@@ -1767,6 +1768,7 @@ impl Parser {
                         params: kept,
                         body,
                         ret_ty: ty.clone(),
+                        is_static,
                     });
                 }
                 let Some(body) = self.opt_member_body(in_interface || is_abstract)? else {
@@ -1779,6 +1781,7 @@ impl Parser {
                     param_types: types,
                     body,
                     ret_ty: ty,
+                    is_static,
                 });
             } else {
                 self.field_decls(name, &ty, is_static, !has_visibility, is_final, fields)?;
@@ -1839,6 +1842,7 @@ impl Parser {
                         params: kept,
                         body,
                         ret_ty: ty.clone(),
+                        is_static,
                     });
                 }
                 let Some(body) = self.opt_member_body(in_interface || is_abstract)? else {
@@ -1851,6 +1855,7 @@ impl Parser {
                     param_types: types,
                     body,
                     ret_ty: ty,
+                    is_static,
                 });
             } else {
                 self.field_decls(name, &ty, is_static, !has_visibility, is_final, fields)?;
@@ -3105,8 +3110,7 @@ impl Parser {
             }
             // `value instanceof Type` — relational precedence, recorded under
             // the `instanceof` keyword's column.
-            if RELATIONAL_BP >= min_bp && matches!(self.peek(), Tok::Ident(k) if k == "instanceof")
-            {
+            if CAST_BP >= min_bp && matches!(self.peek(), Tok::Ident(k) if k == "instanceof") {
                 let col = self.col_at(0);
                 self.advance();
                 // Fully qualified is legal here too (`t instanceof
@@ -3131,7 +3135,7 @@ impl Parser {
             // `value as Type` — a coercion whose right side is a *type name*,
             // not an expression, which is why `"3" as Integer + 1` is 4 and not
             // a parse of `Integer + 1`.
-            if RELATIONAL_BP >= min_bp && matches!(self.peek(), Tok::Ident(k) if k == "as") {
+            if CAST_BP >= min_bp && matches!(self.peek(), Tok::Ident(k) if k == "as") {
                 self.advance();
                 let ty = self.type_name()?;
                 lhs = Expr::Cast {
@@ -4832,9 +4836,14 @@ const POWER_BP: u8 = 12;
 /// The binding power of the equality band — `==`, `!=`, `<=>`, `===`, `!==`.
 const EQUALITY_BP: u8 = 7;
 
-/// The binding power of the relational band — where `instanceof`, `in` and the
-/// `as` cast also sit.
+/// The binding power of the relational band — where `in` also sits.
 const RELATIONAL_BP: u8 = 8;
+
+/// Where `as` and `instanceof` bind: just above the rest of the relational
+/// band, as Groovy's grammar lists them first — `x in y as Set` casts `y`,
+/// and `a < b as int` compares against the cast. Below the shift band, so
+/// `a << b as T` casts the shift.
+const CAST_BP: u8 = RELATIONAL_BP + 1;
 
 /// The binding power a range endpoint parses at: one above the shift band,
 /// where Groovy puts `..` itself.

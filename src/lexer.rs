@@ -1184,6 +1184,11 @@ fn scan_radix_int(
 fn scan_escape(bytes: &[u8], i: usize) -> (String, usize) {
     let one = |c: char, next: usize| (c.to_string(), next);
     match bytes[i] {
+        // A backslash ending a line joins it to the next: the line break is
+        // not part of the string (`'''\` starts a multi-line string's text on
+        // its next line).
+        b'\n' => (String::new(), i + 1),
+        b'\r' if bytes.get(i + 1) == Some(&b'\n') => (String::new(), i + 2),
         b'n' => one('\n', i + 1),
         b't' => one('\t', i + 1),
         b'r' => one('\r', i + 1),

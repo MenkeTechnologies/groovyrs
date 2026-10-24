@@ -341,6 +341,8 @@ pub struct Method {
     /// run-time decision: a no-argument `isX()` declared `boolean` is the getter
     /// of the property `x`, which Groovy honours only for the primitive type.
     pub ret_ty: String,
+    /// Declared `static` — what a `MetaMethod` reports through `isStatic()`.
+    pub is_static: bool,
 }
 
 /// Compound-assignment operator. `Assign` is a plain `=`.

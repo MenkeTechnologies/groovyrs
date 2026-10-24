@@ -350,6 +350,10 @@ struct Compiler {
     /// [`boxed_names`], so a scope with no closure in it boxes nothing and its
     /// loops keep their plain slot reads.
     cells: HashSet<String>,
+    /// Per scope (innermost last): the `def` locals every read of which only
+    /// needs their text (see [`text_only_locals`]), so a `GString` stored in
+    /// one is built as a `String`.
+    text_locals: Vec<HashSet<String>>,
     /// Set by [`Compiler::emit_compound_value`] just before it calls
     /// [`Compiler::binary`]: the left operand's value is **already on the stack**
     /// (a compound assignment pushed it), so `binary` must analyse `lhs` without
@@ -509,7 +513,7 @@ fn function_sub_names(
 
 /// The members a `GString` answers itself rather than as its text: a call of
 /// one keeps its receiver a `GString`.
-const GSTRING_OWN_METHODS: &[&str] = &[
+pub(crate) const GSTRING_OWN_METHODS: &[&str] = &[
     "getClass",
     "getStrings",
     "getValues",
@@ -518,6 +522,17 @@ const GSTRING_OWN_METHODS: &[&str] = &[
     "hashCode",
     "plus",
     "is",
+    // `Object` methods that answer or inspect the receiver itself.
+    "with",
+    "tap",
+    "identity",
+    "inspect",
+    "getMetaClass",
+    "respondsTo",
+    "hasProperty",
+    // `GString` is no `String`: Groovy's own `stripIndent` answers it, not the
+    // JDK's.
+    "stripIndent",
 ];
 
 /// The `groovy.json` classes `import groovy.json.*` brings into scope.
@@ -883,6 +898,7 @@ fn compile_with(prog: &Program, debug: bool) -> Result<Chunk, String> {
             })
             .collect(),
         cells: boxed_names(&[], &prog.body),
+        text_locals: vec![text_only_locals(&prog.body)],
         preloaded_lhs: false,
         ret_ty: None,
     };
@@ -1322,6 +1338,7 @@ impl Compiler {
         line: u32,
     ) -> HashSet<String> {
         let saved = std::mem::take(&mut self.cells);
+        self.text_locals.push(text_only_locals(body));
         let mut own = boxed_names(params, body);
         // A capture already lives in a cell; boxing it again would give the
         // closure a private copy, which is the bug this whole mechanism fixes.
@@ -1362,6 +1379,7 @@ impl Compiler {
     /// Restore the boxed-binding set a body was entered from.
     fn exit_cell_scope(&mut self, saved: HashSet<String>) {
         self.cells = saved;
+        self.text_locals.pop();
     }
 
     /// Push `name`'s slot/global value without the cell deref — the raw handle.
@@ -1908,6 +1926,21 @@ impl Compiler {
             self.b.emit(Op::LoadConst(t), line);
         }
         self.b.emit(Op::MakeHash((methods.len() * 2) as u16), line);
+        // Every method's signature in declaration order, as
+        // `name\tret\tstatic\tT1,T2` — what `respondsTo` answers `MetaMethod`s
+        // from.
+        for m in methods {
+            let sig = format!(
+                "{}\t{}\t{}\t{}",
+                m.name,
+                m.ret_ty,
+                u8::from(m.is_static),
+                m.param_types.join(",")
+            );
+            let s = self.b.add_constant(Value::str(sig));
+            self.b.emit(Op::LoadConst(s), line);
+        }
+        self.b.emit(Op::MakeArray(methods.len() as u16), line);
         self.b.emit(Op::CallBuiltin(crate::host::GCLASS, 0), line);
         self.b.emit(Op::Pop, line);
     }
@@ -2604,8 +2637,18 @@ impl Compiler {
                 // Java's does: `int x; println x` prints `0`, not `null`.
                 let init = init.clone().or_else(|| primitive_zero(ty));
                 if let Some(e) = &init {
-                    // A `String`-typed local stores a `GString` as its text.
-                    if matches!(ty.as_str(), "String" | "java.lang.String") {
+                    // A `String`-typed local stores a `GString` as its text,
+                    // and so does a `def` one no read of which can tell the
+                    // difference — which keeps a loop's interpolations off
+                    // the heap.
+                    let text_only = ty == "def"
+                        && matches!(e, Expr::GString(_))
+                        && self.text_locals.last().is_some_and(|s| s.contains(name));
+                    if let (true, Expr::GString(parts)) = (text_only, e) {
+                        let pushed = self.gstring_parts(parts)?;
+                        self.b.emit(Op::LoadInt(pushed as i64), self.cur_line);
+                        self.emit_call_builtin(crate::host::GSTRING_STORED, 0, self.cur_line)?;
+                    } else if matches!(ty.as_str(), "String" | "java.lang.String") {
                         self.text_expr(e)?;
                     } else {
                         self.expr(e)?;
@@ -6341,6 +6384,96 @@ fn expr_uses_exceptions(e: &Expr) -> bool {
         Expr::Elvis { lhs, rhs } => expr_uses_exceptions(lhs) || expr_uses_exceptions(rhs),
         _ => false,
     }
+}
+
+/// The `String` methods whose answer is the same whether the receiver is a
+/// `GString` or the `String` of its text, and is never the receiver itself.
+const TEXT_METHODS: &[&str] = &[
+    "size",
+    "length",
+    "toUpperCase",
+    "toLowerCase",
+    "trim",
+    "strip",
+    "contains",
+    "startsWith",
+    "endsWith",
+    "substring",
+    "indexOf",
+    "lastIndexOf",
+    "charAt",
+    "split",
+    "tokenize",
+    "replace",
+    "replaceAll",
+    "replaceFirst",
+    "toInteger",
+    "toLong",
+    "toDouble",
+    "toBigDecimal",
+    "isNumber",
+    "isInteger",
+    "isEmpty",
+    "isBlank",
+    "center",
+    "padLeft",
+    "padRight",
+    "reverse",
+    "matches",
+    "count",
+    "toString",
+    "getAt",
+    "readLines",
+    "toList",
+    "toCharArray",
+    "getBytes",
+    "capitalize",
+    "uncapitalize",
+    "equalsIgnoreCase",
+    "compareToIgnoreCase",
+];
+
+/// The names whose every read in `body` is a text one: the receiver of a
+/// [`TEXT_METHODS`] call, `println`'s argument, or an `==`/`!=` operand.
+/// Counted by name across nested scopes, so a shadowing name only makes the
+/// answer more cautious.
+fn text_only_locals(body: &[Stmt]) -> HashSet<String> {
+    let mut total: HashMap<String, usize> = HashMap::new();
+    let mut text: HashMap<String, usize> = HashMap::new();
+    body_any(body, &mut |e| {
+        let mut text_use = |x: &Expr| {
+            if let Expr::Var(n) = x {
+                *text.entry(n.clone()).or_default() += 1;
+            }
+        };
+        match e {
+            Expr::Var(n) => *total.entry(n.clone()).or_default() += 1,
+            Expr::PostIncDec { name, .. }
+            | Expr::PreIncDec { name, .. }
+            | Expr::Call { name, .. } => {
+                *total.entry(name.clone()).or_default() += 1;
+            }
+            Expr::MethodCall { recv, method, .. } if TEXT_METHODS.contains(&method.as_str()) => {
+                text_use(recv)
+            }
+            Expr::Println { arg: Some(a), .. } => text_use(a),
+            Expr::Binary {
+                op: BinOp::Eq | BinOp::Ne,
+                lhs,
+                rhs,
+            } => {
+                text_use(lhs);
+                text_use(rhs);
+            }
+            _ => {}
+        }
+        false
+    });
+    total
+        .into_iter()
+        .filter(|(n, c)| text.get(n) == Some(c))
+        .map(|(n, _)| n)
+        .collect()
 }
 
 // ── Generic AST walk ────────────────────────────────────────────────────────

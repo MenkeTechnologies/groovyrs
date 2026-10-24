@@ -15,12 +15,39 @@
 
 use super::*;
 
-/// One parsed element.
+/// One parsed element. `name` is the qualified name as written; a
+/// namespace-aware parse also resolves its `local` part, `prefix` and `uri`
+/// and moves its `xmlns` declarations to `decls`.
 struct XNode {
     name: String,
-    attrs: Vec<(String, String)>,
+    local: String,
+    prefix: String,
+    uri: String,
+    attrs: Vec<XAttr>,
+    decls: Vec<(String, String)>,
     kids: Vec<XKid>,
     parent: Option<u32>,
+    aware: bool,
+}
+
+/// One attribute: its qualified name, local part, namespace and value.
+struct XAttr {
+    qname: String,
+    local: String,
+    uri: String,
+    value: String,
+}
+
+impl XAttr {
+    /// The key it has in an `attributes()` map: its local name, or
+    /// `{uri}local` for a namespaced one (a `QName` there).
+    fn key(&self) -> String {
+        if self.uri.is_empty() {
+            self.local.clone()
+        } else {
+            format!("{{{}}}{}", self.uri, self.local)
+        }
+    }
 }
 
 enum XKid {
@@ -31,13 +58,23 @@ enum XKid {
 thread_local! {
     /// Every element any parse produced; a handle is its index.
     static NODES: RefCell<Vec<XNode>> = const { RefCell::new(Vec::new()) };
+    /// The prefixes `declareNamespace` bound, by document root: what a
+    /// prefixed GPath name (`r.'a:x'`) is resolved through.
+    static HINTS: RefCell<HashMap<u32, Vec<(String, String)>>> = RefCell::new(HashMap::new());
 }
 
 /// A parser or a view over parsed elements.
 #[derive(Clone)]
 pub(super) enum XmlVal {
-    Slurper,
-    Parser,
+    /// A parser, and whether it is namespace-aware.
+    Slurper(bool),
+    Parser(bool),
+    /// A parser node's `groovy.namespace.QName` name.
+    QName {
+        uri: String,
+        local: String,
+        prefix: String,
+    },
     /// A slurper `NodeChild`.
     Child(u32),
     /// A slurper `NodeChildren` selection.
@@ -64,22 +101,42 @@ fn wrap(x: XmlVal) -> Value {
     heap_push(HeapObj::Xml(Box::new(x)))
 }
 
-/// `new XmlSlurper()` / `new XmlParser()`.
+/// `new XmlSlurper()` / `new XmlParser()`, and the
+/// `(validating, namespaceAware)` forms; `new QName(uri, local[, prefix])`.
 pub(super) fn construct(class: &str, args: &[Value]) -> Option<Value> {
-    if !args.is_empty() {
-        return None;
+    if class == "QName" {
+        let text = |i: usize| args.get(i).map(groovy_str).unwrap_or_default();
+        return match args.len() {
+            1 => Some(wrap(XmlVal::QName {
+                uri: String::new(),
+                local: text(0),
+                prefix: String::new(),
+            })),
+            2 | 3 => Some(wrap(XmlVal::QName {
+                uri: text(0),
+                local: text(1),
+                prefix: text(2),
+            })),
+            _ => None,
+        };
     }
+    let aware = match args {
+        [] => true,
+        [_, aware] => aware.is_truthy(),
+        _ => return None,
+    };
     Some(wrap(match class {
-        "XmlSlurper" => XmlVal::Slurper,
-        "XmlParser" => XmlVal::Parser,
+        "XmlSlurper" => XmlVal::Slurper(aware),
+        "XmlParser" => XmlVal::Parser(aware),
         _ => return None,
     }))
 }
 
 pub(super) fn class_name(v: &Value) -> Option<&'static str> {
     Some(match as_xml(v)? {
-        XmlVal::Slurper => "groovy.xml.XmlSlurper",
-        XmlVal::Parser => "groovy.xml.XmlParser",
+        XmlVal::Slurper(_) => "groovy.xml.XmlSlurper",
+        XmlVal::Parser(_) => "groovy.xml.XmlParser",
+        XmlVal::QName { .. } => "groovy.namespace.QName",
         XmlVal::Child(_) => "groovy.xml.slurpersupport.NodeChild",
         XmlVal::Children(_) => "groovy.xml.slurpersupport.NodeChildren",
         XmlVal::Attrs(_) => "groovy.xml.slurpersupport.Attributes",
@@ -89,15 +146,35 @@ pub(super) fn class_name(v: &Value) -> Option<&'static str> {
 }
 
 // ---- parsing ---------------------------------------------------------------
+//
+// Errors carry the byte offset Xerces reports them at: the character that
+// gave the error away (a mismatched end tag's last name character, a missing
+// quote, the first character after the root element), or the end of input.
+
+const EOF_IN_ENTITY: &str = "XML document structures must start and end within the same entity.";
+
+type ParseError = (String, usize);
 
 struct Reader<'a> {
     s: &'a str,
     pos: usize,
 }
 
+fn is_name_start(c: char) -> bool {
+    c.is_alphabetic() || c == '_' || c == ':'
+}
+
+fn is_name_char(c: char) -> bool {
+    is_name_start(c) || c.is_ascii_digit() || matches!(c, '-' | '.') || c.is_alphanumeric()
+}
+
 impl Reader<'_> {
     fn rest(&self) -> &str {
         &self.s[self.pos..]
+    }
+
+    fn eof(&self) -> ParseError {
+        (EOF_IN_ENTITY.to_string(), self.s.len())
     }
 
     fn skip_ws(&mut self) {
@@ -106,35 +183,35 @@ impl Reader<'_> {
     }
 
     /// Skip past the next `end`, or fail at the end of input.
-    fn skip_past(&mut self, end: &str) -> Result<(), String> {
+    fn skip_past(&mut self, end: &str) -> Result<(), ParseError> {
         match self.rest().find(end) {
             Some(i) => {
                 self.pos += i + end.len();
                 Ok(())
             }
-            None => {
-                Err("XML document structures must start and end within the same entity.".into())
-            }
+            None => Err(self.eof()),
         }
     }
 
-    fn name(&mut self) -> Result<String, String> {
+    /// An XML name; `bad` is the message for a character that cannot start
+    /// one, reported at that character.
+    fn name(&mut self, bad: &str) -> Result<String, ParseError> {
+        match self.rest().chars().next() {
+            None => return Err(self.eof()),
+            Some(c) if !is_name_start(c) => return Err((bad.to_string(), self.pos)),
+            _ => {}
+        }
         let len = self
             .rest()
-            .find(|c: char| c.is_whitespace() || matches!(c, '>' | '/' | '=' | '<'))
+            .find(|c: char| !is_name_char(c))
             .unwrap_or(self.rest().len());
-        if len == 0 {
-            return Err(
-                "The markup in the document preceding the root element must be well-formed.".into(),
-            );
-        }
         let n = self.rest()[..len].to_string();
         self.pos += len;
         Ok(n)
     }
 
     /// Skip comments, processing instructions and a doctype.
-    fn skip_misc(&mut self) -> Result<(), String> {
+    fn skip_misc(&mut self) -> Result<(), ParseError> {
         loop {
             self.skip_ws();
             let r = self.rest();
@@ -151,102 +228,157 @@ impl Reader<'_> {
     }
 }
 
-/// Replace the predefined and numeric character references.
-fn unescape(s: &str) -> String {
+/// Replace the predefined and numeric character references in `s`, which
+/// starts at byte `base` of the document.
+fn unescape(s: &str, base: usize) -> Result<String, ParseError> {
     if !s.contains('&') {
-        return s.to_string();
+        return Ok(s.to_string());
     }
     let mut out = String::new();
-    let mut rest = s;
-    while let Some(i) = rest.find('&') {
-        out.push_str(&rest[..i]);
-        rest = &rest[i..];
-        let Some(end) = rest.find(';') else { break };
-        let ent = &rest[1..end];
-        let ch = match ent {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            _ => ent
-                .strip_prefix("#x")
-                .map(|h| u32::from_str_radix(h, 16))
-                .or_else(|| ent.strip_prefix('#').map(str::parse::<u32>))
-                .and_then(Result::ok)
-                .and_then(char::from_u32),
+    let mut at = 0;
+    while let Some(i) = s[at..].find('&') {
+        out.push_str(&s[at..at + i]);
+        let start = at + i;
+        let Some(len) = s[start..].find(';') else {
+            out.push_str(&s[start..]);
+            return Ok(out);
         };
-        match ch {
-            Some(c) => {
-                out.push(c);
-                rest = &rest[end + 1..];
+        let ent = &s[start + 1..start + len];
+        let after = base + start + len + 1;
+        let ch = match ent {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            _ => {
+                if let Some(hex) = ent.strip_prefix("#x") {
+                    let bad = hex.find(|c: char| !c.is_ascii_hexdigit());
+                    match (bad, u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)) {
+                        (None, Some(c)) => c,
+                        (b, _) => {
+                            return Err((
+                                "A hexadecimal representation must immediately follow the \"&#x\" in a character reference.".to_string(),
+                                base + start + 3 + b.unwrap_or(0),
+                            ))
+                        }
+                    }
+                } else if let Some(dec) = ent.strip_prefix('#') {
+                    let bad = dec.find(|c: char| !c.is_ascii_digit());
+                    match (bad, dec.parse::<u32>().ok().and_then(char::from_u32)) {
+                        (None, Some(c)) => c,
+                        (b, _) => {
+                            return Err((
+                                "A decimal representation must immediately follow the \"&#\" in a character reference.".to_string(),
+                                base + start + 2 + b.unwrap_or(0),
+                            ))
+                        }
+                    }
+                } else {
+                    return Err((
+                        format!("The entity \"{ent}\" was referenced, but not declared."),
+                        after,
+                    ));
+                }
             }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
+        };
+        out.push(ch);
+        at = start + len + 1;
     }
-    out.push_str(rest);
-    out
+    out.push_str(&s[at..]);
+    Ok(out)
 }
+
+/// A start tag's raw attributes, in order.
+type RawAttrs = Vec<(String, String)>;
 
 fn parse_element(
     r: &mut Reader,
     nodes: &mut Vec<XNode>,
     parent: Option<u32>,
-) -> Result<u32, String> {
+    aware: bool,
+    bad_name: &str,
+) -> Result<u32, ParseError> {
     r.pos += 1; // `<`
-    let name = r.name()?;
-    let mut attrs = Vec::new();
+    let name = r.name(bad_name)?;
+    let mut attrs: RawAttrs = Vec::new();
+    let empty;
     loop {
+        let before_ws = r.pos;
         r.skip_ws();
         let rest = r.rest();
+        if rest.is_empty() {
+            return Err(r.eof());
+        }
         if rest.starts_with("/>") {
             r.pos += 2;
-            let id = nodes.len() as u32;
-            nodes.push(XNode {
-                name,
-                attrs,
-                kids: Vec::new(),
-                parent,
-            });
-            return Ok(id);
+            empty = true;
+            break;
         }
         if rest.starts_with('>') {
             r.pos += 1;
+            empty = false;
             break;
         }
-        let key = r.name()?;
+        if r.pos == before_ws {
+            return Err((
+                format!("Element type \"{name}\" must be followed by either attribute specifications, \">\" or \"/>\"."),
+                r.pos,
+            ));
+        }
+        let key = r.name(&format!(
+            "Element type \"{name}\" must be followed by either attribute specifications, \">\" or \"/>\"."
+        ))?;
         r.skip_ws();
         if !r.rest().starts_with('=') {
-            return Err(format!(
-                "Attribute name \"{key}\" associated with an element type \"{name}\" must be followed by the ' = ' character."
+            return Err((
+                format!("Attribute name \"{key}\" associated with an element type \"{name}\" must be followed by the ' = ' character."),
+                r.pos,
             ));
         }
         r.pos += 1;
         r.skip_ws();
         let quote = r.rest().chars().next().filter(|c| matches!(c, '"' | '\''));
         let Some(q) = quote else {
-            return Err(format!(
-                "Open quote is expected for attribute \"{key}\" associated with an  element type  \"{name}\"."
+            return Err((
+                format!("Open quote is expected for attribute \"{key}\" associated with an  element type  \"{name}\"."),
+                r.pos,
             ));
         };
         r.pos += 1;
-        let end = r
-            .rest()
-            .find(q)
-            .ok_or("XML document structures must start and end within the same entity.")?;
-        attrs.push((key, unescape(&r.rest()[..end])));
+        // The value is scanned up to its closing quote; a `<` met first is
+        // the error, wherever the quote is.
+        let stop = r.rest().find([q, '<']);
+        let end = match stop {
+            Some(i) if r.rest()[i..].starts_with('<') => {
+                return Err((
+                    format!("The value of attribute \"{key}\" associated with an element type \"{name}\" must not contain the '<' character."),
+                    r.pos + i,
+                ));
+            }
+            Some(i) => i,
+            None => return Err(r.eof()),
+        };
+        let raw = &r.rest()[..end];
+        let value = unescape(raw, r.pos)?;
         r.pos += end + 1;
+        attrs.push((key, value));
+    }
+    // A repeated attribute is noticed once the tag is complete.
+    for (i, (k, _)) in attrs.iter().enumerate() {
+        if attrs[..i].iter().any(|(p, _)| p == k) {
+            return Err((
+                format!("Attribute \"{k}\" was already specified for element \"{name}\"."),
+                r.pos,
+            ));
+        }
     }
     let id = nodes.len() as u32;
-    nodes.push(XNode {
-        name: name.clone(),
-        attrs,
-        kids: Vec::new(),
-        parent,
-    });
+    let node = new_node(nodes, parent, &name, attrs, aware);
+    nodes.push(node);
+    if empty {
+        return Ok(id);
+    }
     let mut text = String::new();
     let flush = |text: &mut String, nodes: &mut Vec<XNode>| {
         if !text.trim().is_empty() {
@@ -259,72 +391,202 @@ fn parse_element(
     loop {
         let rest = r.rest();
         if rest.is_empty() {
-            return Err(
-                "XML document structures must start and end within the same entity.".to_string(),
-            );
+            return Err(r.eof());
         }
         if let Some(after) = rest.strip_prefix("</") {
             flush(&mut text, nodes);
+            let start = r.pos + 2;
             let len = after
-                .find('>')
-                .ok_or("XML document structures must start and end within the same entity.")?;
-            let close = after[..len].trim();
+                .find(|c: char| !is_name_char(c))
+                .unwrap_or(after.len());
+            let close = &after[..len];
             if close != name {
-                r.pos += 2 + len;
-                return Err(format!(
-                    "The element type \"{name}\" must be terminated by the matching end-tag \"</{name}>\"."
+                // Reported at the end tag name's last character.
+                let last = close.char_indices().last().map_or(0, |(i, _)| i);
+                return Err((
+                    format!("The element type \"{name}\" must be terminated by the matching end-tag \"</{name}>\"."),
+                    start + last,
                 ));
             }
-            r.pos += 2 + len + 1;
+            r.pos = start + len;
+            r.skip_ws();
+            if !r.rest().starts_with('>') {
+                return Err(if r.rest().is_empty() {
+                    r.eof()
+                } else {
+                    (
+                        format!("The end-tag for element type \"{name}\" must end with a '>' delimiter."),
+                        r.pos,
+                    )
+                });
+            }
+            r.pos += 1;
             return Ok(id);
         }
         if rest.starts_with("<!--") {
             r.skip_past("-->")?;
         } else if let Some(cdata) = rest.strip_prefix("<![CDATA[") {
-            let end = cdata
-                .find("]]>")
-                .ok_or("XML document structures must start and end within the same entity.")?;
+            let end = cdata.find("]]>").ok_or_else(|| r.eof())?;
             text.push_str(&cdata[..end]);
             r.pos += 9 + end + 3;
         } else if rest.starts_with("<?") {
             r.skip_past("?>")?;
         } else if rest.starts_with('<') {
             flush(&mut text, nodes);
-            let child = parse_element(r, nodes, Some(id))?;
+            let child = parse_element(
+                r,
+                nodes,
+                Some(id),
+                aware,
+                "The content of elements must consist of well-formed character data or markup.",
+            )?;
             nodes[id as usize].kids.push(XKid::El(child));
         } else {
             let len = rest.find('<').unwrap_or(rest.len());
-            text.push_str(&unescape(&rest[..len]));
+            text.push_str(&unescape(&rest[..len], r.pos)?);
             r.pos += len;
         }
     }
 }
 
+/// The namespace bound to `prefix` (`""` for the default) at an element whose
+/// parent is `parent`, given the element's own declarations.
+fn resolve_prefix(
+    nodes: &[XNode],
+    parent: Option<u32>,
+    own: &[(String, String)],
+    prefix: &str,
+) -> String {
+    if let Some((_, uri)) = own.iter().find(|(p, _)| p == prefix) {
+        return uri.clone();
+    }
+    let mut cur = parent;
+    while let Some(id) = cur {
+        let n = &nodes[id as usize];
+        if let Some((_, uri)) = n.decls.iter().find(|(p, _)| p == prefix) {
+            return uri.clone();
+        }
+        cur = n.parent;
+    }
+    String::new()
+}
+
+/// An element as the parser records it: in a namespace-aware parse its
+/// `xmlns` declarations are split off and its name and attributes resolved.
+fn new_node(nodes: &[XNode], parent: Option<u32>, name: &str, raw: RawAttrs, aware: bool) -> XNode {
+    let split = |q: &str| match q.split_once(':') {
+        Some((p, l)) => (p.to_string(), l.to_string()),
+        None => (String::new(), q.to_string()),
+    };
+    if !aware {
+        return XNode {
+            name: name.to_string(),
+            local: name.to_string(),
+            prefix: String::new(),
+            uri: String::new(),
+            attrs: raw
+                .into_iter()
+                .map(|(q, value)| XAttr {
+                    local: q.clone(),
+                    qname: q,
+                    uri: String::new(),
+                    value,
+                })
+                .collect(),
+            decls: Vec::new(),
+            kids: Vec::new(),
+            parent,
+            aware,
+        };
+    }
+    let mut decls = Vec::new();
+    let mut plain = Vec::new();
+    for (q, v) in raw {
+        if q == "xmlns" {
+            decls.push((String::new(), v));
+        } else if let Some(p) = q.strip_prefix("xmlns:") {
+            decls.push((p.to_string(), v));
+        } else {
+            plain.push((q, v));
+        }
+    }
+    let (prefix, local) = split(name);
+    let uri = resolve_prefix(nodes, parent, &decls, &prefix);
+    let attrs = plain
+        .into_iter()
+        .map(|(q, value)| {
+            let (p, l) = split(&q);
+            // An unprefixed attribute is in no namespace.
+            let uri = if p.is_empty() {
+                String::new()
+            } else {
+                resolve_prefix(nodes, parent, &decls, &p)
+            };
+            XAttr {
+                qname: q,
+                local: l,
+                uri,
+                value,
+            }
+        })
+        .collect();
+    XNode {
+        name: name.to_string(),
+        local,
+        prefix,
+        uri,
+        attrs,
+        decls,
+        kids: Vec::new(),
+        parent,
+        aware,
+    }
+}
+
 /// Parse a whole document; its root element's handle, or the error and the
 /// `line:column` Xerces reports it at.
-fn parse_document(text: &str) -> Result<u32, (String, String)> {
+fn parse_document(text: &str, aware: bool) -> Result<u32, (String, String)> {
     let mut r = Reader { s: text, pos: 0 };
     let out = NODES.with(|n| {
         r.skip_misc()?;
+        if r.rest().is_empty() {
+            return Err(("Premature end of file.".to_string(), r.pos));
+        }
         if !r.rest().starts_with('<') {
-            return Err("Content is not allowed in prolog.".to_string());
+            return Err(("Content is not allowed in prolog.".to_string(), r.pos));
         }
         let mut nodes = n.borrow_mut();
-        let root = parse_element(&mut r, &mut nodes, None)?;
+        let root = parse_element(
+            &mut r,
+            &mut nodes,
+            None,
+            aware,
+            "The markup in the document preceding the root element must be well-formed.",
+        )?;
         r.skip_misc()?;
+        if r.rest() == "<" {
+            return Err(r.eof());
+        }
+        if r.rest().starts_with('<') {
+            return Err((
+                "The markup in the document following the root element must be well-formed."
+                    .to_string(),
+                r.pos + 1,
+            ));
+        }
         if !r.rest().is_empty() {
-            return Err("Content is not allowed in trailing section.".into());
+            return Err((
+                "Content is not allowed in trailing section.".to_string(),
+                r.pos,
+            ));
         }
         Ok(root)
     });
-    out.map_err(|msg| {
-        let before = &text[..r.pos.min(text.len())];
+    out.map_err(|(msg, at)| {
+        let at = at.min(text.len());
+        let before = &text[..at];
         let line = before.matches('\n').count() + 1;
-        let col = before
-            .rsplit('\n')
-            .next()
-            .map_or(0, |l| l.chars().count())
-            .max(1);
+        let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
         (msg, format!("{line}:{col}"))
     })
 }
@@ -335,39 +597,106 @@ fn with_node<R>(id: u32, f: impl FnOnce(&XNode) -> R) -> R {
     NODES.with(|n| f(&n.borrow()[id as usize]))
 }
 
+/// A slurper element's `name()`: its local name in a namespace-aware parse.
 fn node_name(id: u32) -> String {
-    with_node(id, |n| n.name.clone())
+    with_node(id, |n| n.local.clone())
 }
 
-/// The child elements of `id`, optionally only those named `name`.
-fn child_elements(id: u32, name: Option<&str>) -> Vec<u32> {
+/// A parser node's `name()`: a `QName` in a namespace-aware parse, else the
+/// name as written.
+fn parser_name(id: u32) -> Value {
+    with_node(id, |n| {
+        if n.aware {
+            wrap(XmlVal::QName {
+                uri: n.uri.clone(),
+                local: n.local.clone(),
+                prefix: n.prefix.clone(),
+            })
+        } else {
+            Value::str(n.name.clone())
+        }
+    })
+}
+
+/// What a parser node's name renders as: `{uri}local`, or the local name in
+/// no namespace.
+fn qname_text(n: &XNode) -> String {
+    if n.uri.is_empty() {
+        n.local.clone()
+    } else {
+        format!("{{{}}}{}", n.uri, n.local)
+    }
+}
+
+/// The root element of the document `id` is in.
+fn root_of(id: u32) -> u32 {
+    NODES.with(|n| {
+        let nodes = n.borrow();
+        let mut cur = id;
+        while let Some(p) = nodes[cur as usize].parent {
+            cur = p;
+        }
+        cur
+    })
+}
+
+/// How a GPath name selects: a slurper matches the local name, or a declared
+/// `prefix:local`; a parser matches what `QName.equals(String)` accepts.
+#[derive(Clone, Copy)]
+enum Select<'a> {
+    Any,
+    Slurp(&'a str),
+    Parse(&'a str),
+}
+
+fn selects(n: &XNode, sel: Select, hints: &[(String, String)]) -> bool {
+    match sel {
+        Select::Any => true,
+        Select::Slurp("*") | Select::Parse("*") => true,
+        _ if !n.aware => matches!(sel, Select::Slurp(w) | Select::Parse(w) if w == n.name),
+        Select::Slurp(want) => match want.split_once(':') {
+            Some((p, l)) => hints
+                .iter()
+                .find(|(hp, _)| hp == p)
+                .is_some_and(|(_, uri)| *uri == n.uri && l == n.local),
+            None => want == n.local,
+        },
+        Select::Parse(want) => {
+            if n.prefix.is_empty() {
+                want == n.local
+            } else {
+                want == n.name
+            }
+        }
+    }
+}
+
+/// The child elements of `id` that `sel` selects.
+fn child_elements(id: u32, sel: Select) -> Vec<u32> {
+    let hints = match sel {
+        Select::Slurp(w) if w.contains(':') => {
+            let root = root_of(id);
+            HINTS.with(|h| h.borrow().get(&root).cloned().unwrap_or_default())
+        }
+        _ => Vec::new(),
+    };
     NODES.with(|n| {
         let nodes = n.borrow();
         nodes[id as usize]
             .kids
             .iter()
             .filter_map(|k| match k {
-                XKid::El(c) if name.is_none_or_eq(&nodes[*c as usize].name) => Some(*c),
+                XKid::El(c) if selects(&nodes[*c as usize], sel, &hints) => Some(*c),
                 _ => None,
             })
             .collect()
     })
 }
 
-trait NameFilter {
-    fn is_none_or_eq(&self, name: &str) -> bool;
-}
-
-impl NameFilter for Option<&str> {
-    fn is_none_or_eq(&self, name: &str) -> bool {
-        self.map_or(true, |want| want == "*" || want == name)
-    }
-}
-
 /// `id` and its descendants, depth-first.
 fn depth_first(id: u32, out: &mut Vec<u32>) {
     out.push(id);
-    for c in child_elements(id, None) {
+    for c in child_elements(id, Select::Any) {
         depth_first(c, out);
     }
 }
@@ -377,7 +706,7 @@ fn breadth_first(id: u32) -> Vec<u32> {
     let mut out = vec![id];
     let mut i = 0;
     while i < out.len() {
-        let kids = child_elements(out[i], None);
+        let kids = child_elements(out[i], Select::Any);
         out.extend(kids);
         i += 1;
     }
@@ -401,36 +730,63 @@ fn node_text(id: u32) -> String {
     })
 }
 
+/// A slurper attribute by its qualified name as written (`@a:k`).
 fn attr(id: u32, name: &str) -> Option<String> {
     with_node(id, |n| {
         n.attrs
             .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.clone())
+            .find(|a| a.qname == name)
+            .map(|a| a.value.clone())
     })
 }
 
+/// A parser attribute by its `attributes()` key.
+fn parser_attr(id: u32, name: &str) -> Option<String> {
+    with_node(id, |n| {
+        n.attrs
+            .iter()
+            .find(|a| a.key() == name)
+            .map(|a| a.value.clone())
+    })
+}
+
+/// `attributes()`: a parser node's `LinkedHashMap`, or a slurper element's
+/// `NamespaceAwareHashMap`.
 fn attrs_map(id: u32, linked: bool) -> Value {
     let entries: Vec<(String, Value)> = with_node(id, |n| {
         n.attrs
             .iter()
-            .map(|(k, v)| (k.clone(), Value::str(v.clone())))
+            .map(|a| (a.key(), Value::str(a.value.clone())))
             .collect()
     });
-    let kind = if linked {
-        MapKind::Linked
-    } else {
+    if linked {
+        return gmap_kind(entries, MapKind::Linked);
+    }
+    // `XmlSlurper.startElement` adds the attributes last to first, which
+    // decides the order of keys sharing a hash bucket.
+    let entries: Vec<(String, Value)> = entries.into_iter().rev().collect();
+    let map = gmap_kind(
+        entries,
         MapKind::Hash {
             req: DEFAULT_HASH_REQ,
-        }
-    };
-    gmap_kind(entries, kind)
+        },
+    );
+    seq::set_flavor(
+        &map,
+        "groovy.xml.slurpersupport.NamespaceAwareHashMap",
+        seq::Writes::Open,
+    );
+    map
 }
 
 /// `Node.toString`: `name[attributes={k=v}; value=[…]]`.
 fn node_string(id: u32) -> String {
     let (name, attrs, kids) = with_node(id, |n| {
-        let attrs: Vec<String> = n.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let attrs: Vec<String> = n
+            .attrs
+            .iter()
+            .map(|a| format!("{}={}", a.key(), a.value))
+            .collect();
         let kids: Vec<Result<u32, String>> = n
             .kids
             .iter()
@@ -439,7 +795,7 @@ fn node_string(id: u32) -> String {
                 XKid::Text(t) => Err(t.clone()),
             })
             .collect();
-        (n.name.clone(), attrs.join(", "), kids)
+        (qname_text(n), attrs.join(", "), kids)
     });
     let value: Vec<String> = kids
         .into_iter()
@@ -564,7 +920,14 @@ pub(super) fn text(x: &XmlVal) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        XmlVal::Slurper | XmlVal::Parser => return None,
+        XmlVal::QName { uri, local, .. } => {
+            if uri.is_empty() {
+                local.clone()
+            } else {
+                format!("{{{uri}}}{local}")
+            }
+        }
+        XmlVal::Slurper(_) | XmlVal::Parser(_) => return None,
     })
 }
 
@@ -601,6 +964,15 @@ pub(super) fn elements(v: &Value) -> Option<Vec<Value>> {
 /// `view.name` / `view.'@name'` / `view.'**'`.
 pub(super) fn property(v: &Value, name: &str) -> Option<Value> {
     let x = as_xml(v)?;
+    // A `QName`'s properties are its getters.
+    if let XmlVal::QName { uri, local, prefix } = &x {
+        return Some(Value::str(match name {
+            "localPart" => local.clone(),
+            "namespaceURI" => uri.clone(),
+            "prefix" => prefix.clone(),
+            _ => return None,
+        }));
+    }
     if let Some(ids) = selected(&x) {
         if let Some(a) = name.strip_prefix('@') {
             return Some(wrap(XmlVal::Attrs(
@@ -616,14 +988,14 @@ pub(super) fn property(v: &Value, name: &str) -> Option<Value> {
         }
         let picked = ids
             .iter()
-            .flat_map(|i| child_elements(*i, Some(name)))
+            .flat_map(|i| child_elements(*i, Select::Slurp(name)))
             .collect();
         return Some(wrap(XmlVal::Children(picked)));
     }
     let ids = match x {
         XmlVal::Node(id) => {
             if let Some(a) = name.strip_prefix('@') {
-                return Some(attr(id, a).map(Value::str).unwrap_or(Value::Undef));
+                return Some(parser_attr(id, a).map(Value::str).unwrap_or(Value::Undef));
             }
             vec![id]
         }
@@ -639,7 +1011,7 @@ pub(super) fn property(v: &Value, name: &str) -> Option<Value> {
     }
     let picked = ids
         .iter()
-        .flat_map(|i| child_elements(*i, Some(name)))
+        .flat_map(|i| child_elements(*i, Select::Parse(name)))
         .collect();
     Some(wrap(XmlVal::NodeList(picked)))
 }
@@ -659,10 +1031,10 @@ fn index(len: usize, i: i64) -> Option<usize> {
 pub(super) fn dispatch(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
     let x = as_xml(recv)?;
     match (&x, method, args) {
-        (XmlVal::Slurper | XmlVal::Parser, "parseText", [t]) => {
+        (XmlVal::Slurper(_) | XmlVal::Parser(_), "parseText", [t]) => {
             return Some(parse_result(vm, &x, &groovy_str(t)));
         }
-        (XmlVal::Slurper | XmlVal::Parser, "parse", [src]) => {
+        (XmlVal::Slurper(_) | XmlVal::Parser(_), "parse", [src]) => {
             let text = match file::file_path(src) {
                 Some(path) => match std::fs::read_to_string(&path) {
                     Ok(t) => t,
@@ -682,7 +1054,24 @@ pub(super) fn dispatch(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) 
             };
             return Some(parse_result(vm, &x, &text));
         }
-        (XmlVal::Slurper | XmlVal::Parser, ..) => return None,
+        (XmlVal::Slurper(_) | XmlVal::Parser(_), ..) => return None,
+        (XmlVal::QName { .. }, "matches" | "equals", [other]) => {
+            return Some(Value::bool(qname_equal(recv, other).unwrap_or(false)));
+        }
+        (XmlVal::QName { uri, local, prefix }, _, []) => {
+            return Some(match method {
+                "getLocalPart" => Value::str(local.clone()),
+                "getNamespaceURI" => Value::str(uri.clone()),
+                "getPrefix" => Value::str(prefix.clone()),
+                "getQualifiedName" => Value::str(if prefix.is_empty() {
+                    local.clone()
+                } else {
+                    format!("{prefix}:{local}")
+                }),
+                "toString" => Value::str(text(&x)?),
+                _ => return None,
+            })
+        }
         _ => {}
     }
     if let Some(ids) = selected(&x) {
@@ -697,9 +1086,9 @@ pub(super) fn dispatch(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) 
     }
     if let XmlVal::Node(id) = x {
         return Some(match (method, args) {
-            ("name", []) => Value::str(node_name(id)),
+            ("name", []) => parser_name(id),
             ("attributes", []) => attrs_map(id, true),
-            ("attribute", [n]) => attr(id, &groovy_str(n))
+            ("attribute", [n]) => parser_attr(id, &groovy_str(n))
                 .map(Value::str)
                 .unwrap_or(Value::Undef),
             ("text", []) => Value::str(node_text(id)),
@@ -715,6 +1104,17 @@ pub(super) fn dispatch(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) 
             ("breadthFirst", []) => node_items(node_breadth(id)),
             ("toString", []) => Value::str(node_string(id)),
             ("get" | "getAt", [n]) if matches!(n, Value::Str(_)) => property(recv, &groovy_str(n))?,
+            // `node[qname]`: the children with that namespace and local name.
+            ("getAt", [q]) => {
+                let XmlVal::QName { uri, local, .. } = as_xml(q)? else {
+                    return None;
+                };
+                let picked = child_elements(id, Select::Any)
+                    .into_iter()
+                    .filter(|c| with_node(*c, |n| n.uri == uri && n.local == local))
+                    .collect();
+                wrap(XmlVal::NodeList(picked))
+            }
             _ => return None,
         });
     }
@@ -734,9 +1134,12 @@ pub(super) fn dispatch(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) 
 }
 
 fn parse_result(vm: &mut VM, x: &XmlVal, text: &str) -> Value {
-    match parse_document(text) {
+    match parse_document(
+        text,
+        matches!(x, XmlVal::Slurper(true) | XmlVal::Parser(true)),
+    ) {
         Ok(root) => wrap(match x {
-            XmlVal::Slurper => XmlVal::Child(root),
+            XmlVal::Slurper(_) => XmlVal::Child(root),
             _ => XmlVal::Node(root),
         }),
         Err((msg, at)) => {
@@ -781,7 +1184,48 @@ fn gpath_method(
     args: &[Value],
 ) -> Option<Value> {
     let children = |v: Vec<u32>| wrap(XmlVal::Children(v));
+    // The `NodeChild`-only members are missing on a selection.
+    if matches!(x, XmlVal::Children(_)) && matches!(method, "namespaceURI" | "lookupNamespace") {
+        return Some(raise_missing_method(vm, &wrap(x.clone()), method, args));
+    }
+    if let XmlVal::Child(id) = x {
+        match (method, args) {
+            ("namespaceURI", []) => return Some(Value::str(with_node(*id, |n| n.uri.clone()))),
+            ("lookupNamespace", [p]) => {
+                let prefix = groovy_str(p);
+                let uri = NODES.with(|n| {
+                    let nodes = n.borrow();
+                    let node = &nodes[*id as usize];
+                    resolve_prefix(&nodes, node.parent, &node.decls, &prefix)
+                });
+                return Some(if uri.is_empty() {
+                    Value::Undef
+                } else {
+                    Value::str(uri)
+                });
+            }
+            _ => {}
+        }
+    }
     Some(match (method, args) {
+        // `declareNamespace(prefix: uri, …)` binds prefixes for every GPath
+        // over the document, and answers the receiver.
+        ("declareNamespace", [m]) => {
+            let entries = as_omap(m)?;
+            if let Some(first) = ids.first() {
+                let root = root_of(*first);
+                HINTS.with(|h| {
+                    let mut h = h.borrow_mut();
+                    let hints = h.entry(root).or_default();
+                    for (k, v) in entries {
+                        let p = mapkey::text(&k);
+                        hints.retain(|(hp, _)| *hp != p);
+                        hints.push((p, groovy_str(&v)));
+                    }
+                });
+            }
+            wrap(x.clone())
+        }
         ("name", []) => match ids.first() {
             Some(id) => Value::str(node_name(*id)),
             None => Value::str(String::new()),
@@ -793,7 +1237,11 @@ fn gpath_method(
             Some(id) => attrs_map(*id, false),
             None => gmap_kind(Vec::new(), MapKind::Linked),
         },
-        ("children", []) => children(ids.iter().flat_map(|i| child_elements(*i, None)).collect()),
+        ("children", []) => children(
+            ids.iter()
+                .flat_map(|i| child_elements(*i, Select::Any))
+                .collect(),
+        ),
         ("parent", []) => children(
             ids.first()
                 .and_then(|i| with_node(*i, |n| n.parent))
@@ -849,5 +1297,29 @@ fn gpath_method(
             let joined = text(x)?;
             text_conversion(vm, &joined, method, args)?
         }
+    })
+}
+
+/// `QName.equals`: another `QName` with the same namespace and local name, or
+/// the string of its qualified name (`prefix:local`, the local name alone
+/// when it has no prefix). `None` when `a` is no `QName`.
+pub(super) fn qname_equal(a: &Value, b: &Value) -> Option<bool> {
+    let XmlVal::QName { uri, local, prefix } = as_xml(a)? else {
+        return None;
+    };
+    if let Some(XmlVal::QName {
+        uri: u2, local: l2, ..
+    }) = as_xml(b)
+    {
+        return Some(uri == u2 && local == l2);
+    }
+    if !matches!(b, Value::Str(_)) {
+        return Some(false);
+    }
+    let s = groovy_str(b);
+    Some(if prefix.is_empty() {
+        s == local
+    } else {
+        s == format!("{prefix}:{local}")
     })
 }

@@ -537,13 +537,17 @@ Implemented and checked against Apache Groovy:
 - **Files and markup** — `java.io.File`'s text GDK and directory walks
   (`eachFile`, `eachFileRecurse`, …), `StringReader`,
   `groovy.xml.MarkupBuilder` (with `mkp` and its options), and
-  `XmlSlurper` / `XmlParser` with GPath navigation.
+  `XmlSlurper` / `XmlParser` with GPath navigation and namespaces.
 - **Dates** — `java.util.Date` arithmetic, ordering, ranges and
-  `format`/`parse`, `TimeZone`, and `groovy.time.TimeCategory` durations.
+  `format`/`parse`, `TimeZone` with region ids from the system tz database,
+  `java.sql.Timestamp`, `GregorianCalendar`, and `groovy.time.TimeCategory`
+  durations.
+- **Config** — `ConfigSlurper` and `ConfigObject`, environments included.
 - **JDK metaclass answers** — `respondsTo` / `hasProperty` on a `String`,
-  number, collection or range answer Groovy's own `MetaMethod`s and
-  `MetaProperty`s; list wrappers (`asSynchronized`, `asUnmodifiable`,
-  `Collections.unmodifiableList`) are live views with the JDK class names.
+  number, collection, range or script class answer Groovy's own `MetaMethod`s
+  and `MetaProperty`s; list, set and map wrappers (`asSynchronized`,
+  `asUnmodifiable`, `Collections.unmodifiableList`) are live views with the
+  JDK class names.
 - **`groovy.json`** — `JsonOutput.toJson` / `prettyPrint`,
   `JsonSlurper.parseText` and `JsonBuilder`.
 - **Closure coercion at a typed parameter** — a closure passed where a
@@ -688,8 +692,7 @@ Implemented and checked against Apache Groovy:
   `catch (groovy.lang.MissingMethodException e)`, a multi-catch arm,
   `instanceof`, and `new`.
 
-See [`BUGS.md`](BUGS.md) for the known-gaps list (XML namespaces, region time
-zones, set and map wrapper views).
+See [`BUGS.md`](BUGS.md) for the known-gaps list.
 
 ---
 

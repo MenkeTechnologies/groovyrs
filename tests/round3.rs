@@ -3531,3 +3531,1089 @@ t(22) { p.breadthFirst().collect { it instanceof String ? "S:$it" : it.name() } 
 "####;
     check(src, expected);
 }
+
+/// The lines of the program's standard error that start with `prefix`, each
+/// ending in `\n`.
+fn stderr_lines(src: &str, prefix: &str) -> String {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("groovyrs_round3_err_{}.groovy", fasthash(src)));
+    std::fs::write(&path, src).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_groovy"))
+        .arg(&path)
+        .output()
+        .expect("spawn groovy");
+    let _ = std::fs::remove_file(&path);
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter(|l| l.starts_with(prefix))
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
+/// `asSynchronized` / `asUnmodifiable` / `Collections.unmodifiableSet` & co. on a set or map are live views with the JDK class and write policy; `asImmutable` stays a copy.
+#[test]
+fn round7_set_map_wrapper_views() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def s = [1, 2] as Set; def v = s.asSynchronized(); v << 3
+t(1) { s }
+t(2) { v.getClass().name }
+s << 4
+t(3) { v }
+t(4) { v.contains(4) }
+t(5) { v.size() }
+def m = [a: 1]; def mv = m.asSynchronized(); mv.b = 2
+t(6) { m }
+m.c = 3
+t(7) { mv }
+t(8) { mv.c }
+def m2 = [a: 1]; def mu = m2.asUnmodifiable(); m2.c = 3
+t(9) { mu }
+t(10) { mu.d = 4 }
+t(11) { mu.remove('a') }
+t(12) { mu.getClass().name }
+def su = Collections.unmodifiableSet(s)
+t(13) { su << 9 }
+s << 5
+t(14) { su }
+def ts = new TreeSet([3, 1]); def tv = ts.asUnmodifiable(); ts << 2
+t(15) { tv }
+t(16) { tv.first() }
+t(17) { tv.getClass().name }
+t(18) { def x = [b: 2]; def y = Collections.synchronizedMap(x); y.put('a', 1); x }
+t(19) { mv.each { k, val -> print k }; '' }
+t(20) { mv.collect { k, val -> val } }
+t(21) { v.collect { it * 2 } }
+t(22) { v == s }
+t(23) { mu.keySet() }
+t(24) { mu.containsKey('c') }
+t(25) { def fs = [1] as Set; def fi = fs.asImmutable(); fs << 2; fi }
+t(26) { Collections.unmodifiableCollection([1] as Set).getClass().name }
+t(27) { v.remove(1); s }
+t(28) { mv.clear(); m }
+"####;
+    let expected = r####"1: [1, 2, 3]
+2: java.util.Collections$SynchronizedSet
+3: [1, 2, 3, 4]
+4: true
+5: 4
+6: [a:1, b:2]
+7: [a:1, b:2, c:3]
+8: 3
+9: [a:1, c:3]
+10: java.lang.UnsupportedOperationException null
+11: java.lang.UnsupportedOperationException null
+12: java.util.Collections$UnmodifiableMap
+13: java.lang.UnsupportedOperationException null
+14: [1, 2, 3, 4, 5]
+15: [1, 2, 3]
+16: 1
+17: java.util.Collections$UnmodifiableNavigableSet
+18: [b:2, a:1]
+abc19: 
+20: [1, 2, 3]
+21: [2, 4, 6, 8, 10]
+22: true
+23: [a, c]
+24: true
+25: [1]
+26: java.util.Collections$UnmodifiableCollection
+27: [2, 3, 4, 5]
+28: [:]
+"####;
+    check(src, expected);
+}
+
+/// Namespace-aware XML: slurper local-name selection, `declareNamespace` prefixes, `NamespaceAwareHashMap` attributes, parser `QName` names, and the non-aware `(false, false)` parsers.
+#[test]
+fn round7_xml_namespaces() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def xml = '''<r xmlns="urn:d" xmlns:a="urn:a" a:k="v" plain="p"><a:x id="1">ax</a:x><y>dy</y><a:x>ax2</a:x></r>'''
+def r = new groovy.xml.XmlSlurper().parseText(xml)
+t(1) { r.name() }
+t(2) { r.x.size() }
+t(3) { r.'a:x'.size() }
+t(4) { r.y.text() }
+t(5) { r.attributes() }
+t(6) { r.attributes().getClass().name }
+t(7) { r.@k }
+t(8) { r.'@a:k' }
+t(9) { r.x[0].namespaceURI() }
+t(10) { r.namespaceURI() }
+t(11) { r.y.namespaceURI() }
+t(12) { r.lookupNamespace('a') }
+t(13) { r.declareNamespace(a: 'urn:a').'a:x'.size() }
+t(14) { r.x[0].name() }
+t(15) { r.@plain }
+def p = new groovy.xml.XmlParser().parseText(xml)
+t(16) { p.name() }
+t(17) { p.name().getClass().name }
+t(18) { p.attributes() }
+t(19) { p.x.size() }
+t(20) { p.'a:x'.size() }
+t(21) { p.children()[0].name() }
+t(22) { p }
+t(23) { p.y[0].name() }
+t(24) { p.name().localPart }
+t(25) { p.name().namespaceURI }
+t(26) { p.children()[0].name().prefix }
+t(27) { p.'**'.size() }
+def q = new groovy.xml.XmlSlurper(false, false).parseText(xml)
+t(28) { q.name() }
+t(29) { q.'a:x'.size() }
+t(30) { q.x.size() }
+t(31) { q.attributes() }
+def u = new groovy.xml.XmlParser(false, false).parseText(xml)
+t(32) { u.name() }
+t(33) { u.attributes() }
+t(34) { u.'a:x'.size() }
+t(35) { new groovy.xml.XmlSlurper().parseText('<a><b/></a>').b[0].attributes().getClass().name }
+println r.declareNamespace(z: 'urn:a').'z:x'.size()
+println r.declareNamespace(z: 'urn:d').'z:y'.size()
+println r.declareNamespace(z: 'urn:d').'z:x'.size()
+println r.'*'.size()
+println r.x.@id
+println r.@'a:k'
+println p.attribute('plain')
+println p.'@plain'
+def qn = new groovy.namespace.QName('urn:a', 'x')
+println p[qn].size()
+println p.children()[0].name() == 'x'
+println p.children()[0].name() == 'a:x'
+println q.children()[0].name()
+println new groovy.xml.XmlSlurper(false, false).parseText('<r xmlns="urn:d" xmlns:a="urn:a" a:k="v" plain="p"/>').attributes().keySet()
+"####;
+    let expected = r####"1: r
+2: 2
+3: 0
+4: dy
+5: [plain:p, {urn:a}k:v]
+6: groovy.xml.slurpersupport.NamespaceAwareHashMap
+7: 
+8: v
+9: urn:a
+10: urn:d
+11: groovy.lang.MissingMethodException No signature of method: namespaceURI for class: groovy.xml.slurpersupport.NodeChildren is applicable for argument types: () values: []
+12: urn:a
+13: 2
+14: x
+15: p
+16: {urn:d}r
+17: groovy.namespace.QName
+18: [{urn:a}k:v, plain:p]
+19: 0
+20: 2
+21: {urn:a}x
+22: {urn:d}r[attributes={{urn:a}k=v, plain=p}; value=[{urn:a}x[attributes={id=1}; value=[ax]], {urn:d}y[attributes={}; value=[dy]], {urn:a}x[attributes={}; value=[ax2]]]]
+23: {urn:d}y
+24: r
+25: urn:d
+26: a
+27: 4
+28: r
+29: 2
+30: 0
+31: [xmlns:a:urn:a, xmlns:urn:d, a:k:v, plain:p]
+32: r
+33: [xmlns:urn:d, xmlns:a:urn:a, a:k:v, plain:p]
+34: 2
+35: groovy.xml.slurpersupport.NamespaceAwareHashMap
+2
+1
+0
+3
+1
+v
+p
+p
+2
+false
+true
+a:x
+[xmlns:a, xmlns, a:k, plain]
+"####;
+    check(src, expected);
+}
+
+/// Malformed XML raises the `SAXParseException` messages Xerces raises.
+#[test]
+fn round7_xml_parse_errors() {
+    let src = r####"['<a><b></a>', 'junk', '<a>', '<a></b>', '<a x=1/>', '<a x="1></a>', '<a><b>text</c></a>', '<a/><b/>', '<a/>junk', '  <a>\n<b>\n</a>', '<a b="1" b="2"/>', '<a>&foo;</a>', '<a><!-- x </a>', '<1a/>', '<a>\n  <b></c>\n</a>', '', '<a x="<"/>', '<a>&#xZZ;</a>', '<?xml version="1.0"?><a></a><', '<a></a >', '<a x></a>'].each { s ->
+  try { new groovy.xml.XmlSlurper().parseText(s); println "ok" } catch (e) { println "${e.getClass().name}: ${e.message}" }
+}
+"####;
+    let expected = r####"org.xml.sax.SAXParseException: The element type "b" must be terminated by the matching end-tag "</b>".
+org.xml.sax.SAXParseException: Content is not allowed in prolog.
+org.xml.sax.SAXParseException: XML document structures must start and end within the same entity.
+org.xml.sax.SAXParseException: The element type "a" must be terminated by the matching end-tag "</a>".
+org.xml.sax.SAXParseException: Open quote is expected for attribute "x" associated with an  element type  "a".
+org.xml.sax.SAXParseException: The value of attribute "x" associated with an element type "a" must not contain the '<' character.
+org.xml.sax.SAXParseException: The element type "b" must be terminated by the matching end-tag "</b>".
+org.xml.sax.SAXParseException: The markup in the document following the root element must be well-formed.
+org.xml.sax.SAXParseException: Content is not allowed in trailing section.
+org.xml.sax.SAXParseException: The element type "b" must be terminated by the matching end-tag "</b>".
+org.xml.sax.SAXParseException: Attribute "b" was already specified for element "a".
+org.xml.sax.SAXParseException: The entity "foo" was referenced, but not declared.
+org.xml.sax.SAXParseException: XML document structures must start and end within the same entity.
+org.xml.sax.SAXParseException: The markup in the document preceding the root element must be well-formed.
+org.xml.sax.SAXParseException: The element type "b" must be terminated by the matching end-tag "</b>".
+org.xml.sax.SAXParseException: Premature end of file.
+org.xml.sax.SAXParseException: The value of attribute "x" associated with an element type "a" must not contain the '<' character.
+org.xml.sax.SAXParseException: A hexadecimal representation must immediately follow the "&#x" in a character reference.
+org.xml.sax.SAXParseException: XML document structures must start and end within the same entity.
+ok
+org.xml.sax.SAXParseException: Attribute name "x" associated with an element type "a" must be followed by the ' = ' character.
+"####;
+    check(src, expected);
+    // The JDK parser's `[Fatal Error] :line:col:` lines, on standard error.
+    let fatal = r####"[Fatal Error] :1:9: The element type "b" must be terminated by the matching end-tag "</b>".
+[Fatal Error] :1:1: Content is not allowed in prolog.
+[Fatal Error] :1:4: XML document structures must start and end within the same entity.
+[Fatal Error] :1:6: The element type "a" must be terminated by the matching end-tag "</a>".
+[Fatal Error] :1:6: Open quote is expected for attribute "x" associated with an  element type  "a".
+[Fatal Error] :1:9: The value of attribute "x" associated with an element type "a" must not contain the '<' character.
+[Fatal Error] :1:13: The element type "b" must be terminated by the matching end-tag "</b>".
+[Fatal Error] :1:6: The markup in the document following the root element must be well-formed.
+[Fatal Error] :1:5: Content is not allowed in trailing section.
+[Fatal Error] :3:3: The element type "b" must be terminated by the matching end-tag "</b>".
+[Fatal Error] :1:17: Attribute "b" was already specified for element "a".
+[Fatal Error] :1:9: The entity "foo" was referenced, but not declared.
+[Fatal Error] :1:15: XML document structures must start and end within the same entity.
+[Fatal Error] :1:2: The markup in the document preceding the root element must be well-formed.
+[Fatal Error] :2:8: The element type "b" must be terminated by the matching end-tag "</b>".
+[Fatal Error] :1:1: Premature end of file.
+[Fatal Error] :1:7: The value of attribute "x" associated with an element type "a" must not contain the '<' character.
+[Fatal Error] :1:7: A hexadecimal representation must immediately follow the "&#x" in a character reference.
+[Fatal Error] :1:30: XML document structures must start and end within the same entity.
+[Fatal Error] :1:5: Attribute name "x" associated with an element type "a" must be followed by the ' = ' character.
+"####;
+    assert_eq!(stderr_lines(src, "[Fatal Error]"), fatal);
+}
+
+/// `respondsTo` on a script class answers `CachedMethod`s: declared return and parameter types, `static`, the declaring class of an override, the reflected `toString`.
+#[test]
+fn round7_responds_to_script_classes() {
+    let src = r####"class P { def a(int x) { x }; String a(String s) { s }; static int st() { 1 }; def b() {} ; int c(Integer i, List l) { 0 } }
+class Q extends P { def a(int x) { 2 } }
+def p = new P()
+def show = { m -> "${m.getClass().name}|${m.name}|${m.parameterTypes*.name}|${m.returnType.name}|${m.declaringClass.name}|${m.isStatic()}|$m" }
+p.respondsTo('a').each { println show(it) }
+println p.respondsTo('a', 1).size()
+println p.respondsTo('a', 'x')*.returnType*.name
+p.respondsTo('st').each { println show(it) }
+p.respondsTo('c').each { println show(it) }
+println p.respondsTo('nope')
+new Q().respondsTo('a').each { println show(it) }
+println P.respondsTo('st').size()
+p.respondsTo('a')[0].parameterTypes.each { println it.getClass().name }
+"####;
+    let expected = r####"org.codehaus.groovy.reflection.CachedMethod|a|[int]|java.lang.Object|P|false|public java.lang.Object P.a(int)
+org.codehaus.groovy.reflection.CachedMethod|a|[java.lang.String]|java.lang.String|P|false|public java.lang.String P.a(java.lang.String)
+1
+[java.lang.String]
+org.codehaus.groovy.reflection.CachedMethod|st|[]|int|P|true|public static int P.st()
+org.codehaus.groovy.reflection.CachedMethod|c|[java.lang.Integer, java.util.List]|int|P|false|public int P.c(java.lang.Integer,java.util.List)
+[]
+org.codehaus.groovy.reflection.CachedMethod|a|[int]|java.lang.Object|Q|false|public java.lang.Object Q.a(int)
+org.codehaus.groovy.reflection.CachedMethod|a|[java.lang.String]|java.lang.String|P|false|public java.lang.String P.a(java.lang.String)
+1
+org.codehaus.groovy.reflection.stdclasses.IntegerCachedClass
+"####;
+    check(src, expected);
+}
+
+/// A script-class instance built before its class's metaclass was first injected into keeps the original metaclass.
+#[test]
+fn round7_emc_existing_instances() {
+    let src = r####"class P {}
+class Q extends P {}
+def t = { o, n -> try { println "$n " + o.z() } catch (e) { println "$n " + e.getClass().simpleName } }
+def p1 = new P()
+def q1 = new Q()
+def mc = P.metaClass
+def p2 = new P()
+P.metaClass.z = { -> 7 }
+def p3 = new P()
+def q2 = new Q()
+t(p1, 'p1'); t(p2, 'p2'); t(p3, 'p3'); t(q1, 'q1'); t(q2, 'q2')
+def s = 'abc'
+String.metaClass.zz = { -> 'zz' }
+println s.zz()
+class R { def r() { 1 } }
+def r1 = new R()
+R.metaClass.r = { -> 2 }
+println r1.r()
+println new R().r()
+r1.metaClass.w = { -> 3 }
+println r1.w()
+"####;
+    let expected = r####"p1 MissingMethodException
+p2 MissingMethodException
+p3 7
+q1 7
+q2 7
+zz
+1
+2
+3
+"####;
+    check(src, expected);
+}
+
+/// `with` / `tap` / `identity` / `inspect` / `respondsTo` on a `GString` see the `GString`, not its text.
+#[test]
+fn round7_gstring_object_methods() {
+    let src = r####"def x = 3
+def g = "v$x"
+println g.with { it.getClass().name }
+println g.tap { }.getClass().name
+println g.identity { it.getClass().name }
+println g.inspect()
+println g.asType(String).getClass().name
+println g.respondsTo('getValues').size()
+println g.hasProperty('values') != null
+println g.compareTo('v3')
+println g.toString().getClass().name
+println g.intern().getClass().name
+println g.getStrings().size()
+println g.collect { it }.size()
+println g.isCase('v3')
+println g.asBoolean()
+println g.toList()
+"####;
+    let expected = r####"org.codehaus.groovy.runtime.GStringImpl
+org.codehaus.groovy.runtime.GStringImpl
+org.codehaus.groovy.runtime.GStringImpl
+"v3"
+java.lang.String
+1
+true
+0
+java.lang.String
+java.lang.String
+2
+2
+true
+true
+[v, 3]
+"####;
+    check(src, expected);
+}
+
+/// A `def` local read only as text stores an immutable `GString` as its `String` — and keeps a lazy or mutable one a `GString`.
+#[test]
+fn round7_gstring_text_locals() {
+    let src = r####"def x = 3
+def a = "v$x"; println a.getClass().name
+def b = "v$x"; println b.size()
+def c = "v$x"; println c.toUpperCase(); println c.getClass().name
+def d = "v$x"; def l = [d]; println l[0].getClass().name
+def e = "v$x"; println(e == 'v3')
+def f = "v$x"; println f
+def g = "v$x"; println g.with { it.getClass().name }
+def h = "v$x"; def cl = { h.getClass().name }; println cl()
+def i = "v$x"; println "${i}".values[0].getClass().name
+def j = "v$x"; println j.equals('v3')
+def k = "v$x"; println k.length(); k = 5; println k.getClass().name
+def m = "v$x"; def mm = m; println mm.getClass().name
+def lst = [1]
+def gs = "$lst"
+lst << 2
+println gs
+def num = 1
+def ms = "a${-> num}"
+num = 2
+println ms
+"####;
+    let expected = r####"org.codehaus.groovy.runtime.GStringImpl
+2
+V3
+org.codehaus.groovy.runtime.GStringImpl
+org.codehaus.groovy.runtime.GStringImpl
+true
+v3
+org.codehaus.groovy.runtime.GStringImpl
+org.codehaus.groovy.runtime.GStringImpl
+org.codehaus.groovy.runtime.GStringImpl
+false
+2
+java.lang.Integer
+org.codehaus.groovy.runtime.GStringImpl
+[1, 2]
+a2
+"####;
+    check(src, expected);
+}
+
+/// `x in c` is `c.isCase(x)` for a class, a pattern, a closure and a set.
+#[test]
+fn round7_in_operator() {
+    let src = r####"def t(n, Closure c) { try { def r = c(); println "$n: $r" } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+t(1) { 2 in [1, 2] }
+t(2) { 2 in 1..3 }
+t(3) { 'a' in 'abc' }
+t(4) { 'ab' in 'xaby' }
+t(5) { 'k' in [k: 1] }
+t(6) { 'k' in [k: null] }
+t(7) { 'k' in [k: 0] }
+t(8) { 2.0 in [1, 2] }
+t(9) { 2 in [1, 2.0] }
+t(10) { null in [null] }
+t(11) { 3 !in [1, 2] }
+t(12) { 'abc' in ~/a.*/ }
+t(13) { 5 in Integer }
+t(14) { 'x' in String }
+t(15) { [1] in [[1], [2]] }
+t(16) { 2 in ([1, 2] as Set) }
+t(17) { 2 in (1..3).step(2) }
+t(18) { 1.5 in 1..2 }
+t(19) { 'b' in 'a'..'c' }
+t(21) { 'a' in ['A'] }
+t(22) { 'x' in { it == 'x' } }
+t(23) { 5 in null }
+t(24) { 2 in [1, 2].iterator() }
+t(25) { 'ab' in ['ab'] as String[] }
+t(26) { 1 in [1: 'a'] }
+"####;
+    let expected = r####"1: true
+2: true
+3: true
+4: true
+5: true
+6: true
+7: true
+8: false
+9: false
+10: true
+11: true
+12: true
+13: true
+14: true
+15: true
+16: true
+17: false
+18: false
+19: true
+21: false
+22: true
+23: false
+24: false
+25: true
+26: true
+"####;
+    check(src, expected);
+}
+
+/// `as` and `instanceof` bind tighter than the other relational operators.
+#[test]
+fn round7_cast_precedence() {
+    let src = r####"println(1 < 2 as int)
+println(3 << 1 as String)
+println((3 << 1 as String).getClass().name)
+println("5" as int instanceof Integer)
+println(2 in [1,2] as Set)
+println([1] instanceof List == true)
+"####;
+    let expected = r####"true
+6
+java.lang.String
+true
+true
+true
+"####;
+    check(src, expected);
+}
+
+/// Line continuation in triple-quoted strings, `indent`, `stripIndent(boolean)`, a `GString`'s Groovy `stripIndent`, whitespace-only lines, and no `tokenize(char[])`.
+#[test]
+fn round7_string_corners() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c().inspect() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def x = 5
+t(1) { '''  a
+    b
+  c'''.stripIndent() }
+t(2) { """|a $x
+  |b""".stripMargin() }
+t(3) { '''#a
+  #b'''.stripMargin('#') }
+t(4) { '''\
+line1
+line2''' }
+t(5) { """\
+  x=$x
+""".stripIndent() }
+t(6) { '   \n  a\n    b\n'.stripIndent() }
+t(7) { 'a\tb'.stripIndent() }
+t(8) { 'a,b,,c,'.split(',') as List }
+t(9) { 'a,b,,c,'.tokenize(',') }
+t(10) { 'a b  c'.split() as List }
+t(11) { 'a b  c'.tokenize() }
+t(12) { 'a.b.c'.split('.') as List }
+t(13) { 'a1b2c3'.split(/\d/) as List }
+t(14) { ',a,b'.split(',') as List }
+t(15) { 'a;b,c'.tokenize(';,') }
+t(16) { 'a;b,c'.tokenize([';', ','] as char[]) }
+t(17) { 'aXbXc'.split('X', 2) as List }
+t(18) { ''.split(',') as List }
+t(19) { ''.tokenize(',') }
+t(20) { 'abc'.split('') as List }
+t(21) { 'a,b'.split(',').getClass().name }
+t(22) { 'a,b'.tokenize(',').getClass().name }
+t(23) { 'a  b'.split(' ') as List }
+t(24) { 'a\nb\r\nc'.readLines() }
+t(25) { 'a\nb\n'.split('\n') as List }
+t(26) { '  x  '.stripLeading() + '|' }
+t(27) { 'aXbXc'.split('X', -1) as List }
+t(28) { 'a,,b,,'.split(',', -1) as List }
+t(29) { 'hello'.tokenize('l') }
+t(30) { """a
+b""".normalize() }
+t(31) { 'a\r\nb'.denormalize().size() }
+t(32) { 'abc'.indent(2) }
+t(33) { '  abc\n  d'.stripIndent(true) }
+t(1) { 'a\nb\r\nc\n'.indent(-1) }
+t(2) { '  a\n b\n'.indent(-2) }
+t(3) { ''.indent(3) }
+t(4) { 'x'.indent(0) }
+t(5) { '\t\ta\n\tb'.stripIndent(true) }
+t(6) { '   \n  a\n    b'.stripIndent(true) }
+t(7) { 'a\n  b'.stripIndent(false) }
+t(8) { "a\\\nb" }
+t(9) { 'p\
+q' }
+t(10) { "x\
+y" }
+println '   \n  a\n    b'.stripIndent(2).inspect()
+println 'ab\n   \ncd\n'.stripIndent(1).inspect()
+"####;
+    let expected = r####"1: 'a\n  b\nc'
+2: 'a 5\nb'
+3: 'a\nb'
+4: 'line1\nline2'
+5: 'x=5\n'
+6: '\n  a\n    b\n'
+7: 'a\tb'
+8: ['a', 'b', '', 'c']
+9: ['a', 'b', 'c']
+10: ['a', 'b', 'c']
+11: ['a', 'b', 'c']
+12: []
+13: ['a', 'b', 'c']
+14: ['', 'a', 'b']
+15: ['a', 'b', 'c']
+16: groovy.lang.MissingMethodException No signature of method: tokenize for class: java.lang.String is applicable for argument types: ([C) values: [;,]
+17: ['a', 'bXc']
+18: ['']
+19: []
+20: ['a', 'b', 'c']
+21: '[Ljava.lang.String;'
+22: 'java.util.ArrayList'
+23: ['a', '', 'b']
+24: ['a', 'b', 'c']
+25: ['a', 'b']
+26: 'x  |'
+27: ['a', 'b', 'c']
+28: ['a', '', 'b', '', '']
+29: ['he', 'o']
+30: 'a\nb'
+31: 3
+32: '  abc\n'
+33: 'abc\nd'
+1: 'a\nb\nc\n'
+2: 'a\nb\n'
+3: ''
+4: 'x\n'
+5: '\ta\nb'
+6: '\na\n  b'
+7: 'a\n  b'
+8: 'a\\\nb'
+9: 'pq'
+10: 'xy'
+'\na\n  b'
+'b\n\nd\n'
+"####;
+    check(src, expected);
+}
+
+/// `Expando`: `properties`, `toString` / `equals` closures and its metaclass answers.
+#[test]
+fn round7_expando() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def e = new Expando(name: 'n', age: 3)
+t(1) { e.name }
+t(2) { e.missing }
+t(3) { e.greet = { -> "hi ${name}" }; e.greet() }
+t(6) { e.getProperty('age') }
+t(7) { e.setProperty('x', 9); e.x }
+t(8) { e.add = { a, b -> a + b }; e.add(1, 2) }
+t(9) { e.nope() }
+t(10) { e == new Expando(name: 'n', age: 3) }
+t(11) { e.hashCode() == new Expando().hashCode() }
+t(12) { new Expando().toString() }
+t(13) { e.class.name }
+t(14) { e.properties.keySet() }
+t(15) { def x = new Expando(); x.a = 1; x.b = 2; x.properties.collect { k, v -> k + v } }
+t(16) { def x = new Expando(); x.toString = { -> 'custom' }; x.toString() }
+t(17) { def x = new Expando(); x.toString = { -> 'custom' }; "$x" }
+t(18) { def x = new Expando(); x.equals = { o -> true }; x == 5 }
+t(19) { e.respondsTo('greet') }
+t(20) { e.hasProperty('age') != null }
+"####;
+    let expected = r####"1: n
+2: null
+3: hi n
+6: 3
+7: 9
+8: 3
+9: groovy.lang.MissingMethodException No signature of method: nope for class: groovy.util.Expando is applicable for argument types: () values: []
+10: false
+11: false
+12: {}
+13: groovy.util.Expando
+14: [name, age, greet, x, add]
+15: [a1, b2]
+16: custom
+17: custom
+18: true
+19: []
+20: false
+"####;
+    check(src, expected);
+}
+
+/// `ConfigSlurper`: dotted and block assignments, environments, auto-created `ConfigObject`s, `flatten` / `toProperties` / `isSet` / `merge`, and expressions over earlier settings.
+#[test]
+fn round7_config_slurper() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def text = '''
+app.name = 'demo'
+app.port = 8080
+db {
+  url = "jdbc:x"
+  pool { max = 5 }
+}
+list = [1, 2]
+flag = true
+environments {
+  prod { app.port = 80 }
+}
+'''
+def c = new ConfigSlurper().parse(text)
+t(1) { c.app.name }
+t(2) { c.app.port }
+t(3) { c.db.url }
+t(4) { c.db.pool.max }
+t(5) { c.list }
+t(6) { c.flag }
+t(7) { c.getClass().name }
+t(8) { c.nope }
+t(9) { c.nope.getClass().name }
+t(10) { c.flatten() }
+t(11) { c.toProperties() }
+t(12) { c.app }
+t(13) { c.keySet() }
+t(14) { new ConfigSlurper('prod').parse(text).app.port }
+t(15) { c.isSet('app') }
+t(16) { c.db.pool }
+t(17) { c.containsKey('db') }
+t(18) { c.app.port + 1 }
+t(19) { def d = new ConfigSlurper().parse('a.b.c = 1'); d }
+t(20) { def d = new ConfigSlurper().parse('a = 1\nb = a + 1'); d.b }
+t(21) { c.merge(new ConfigSlurper().parse('app.extra = 2')); c.app }
+t(22) { c.toString() }
+
+text = '''
+app {
+  name = 'demo'
+  title = "${name}-app"
+  url = "http://${host ?: 'localhost'}:${port ?: 80}"
+}
+servers = [[name: 'a'], [name: 'b']]
+size = 2 * 3
+neg = -4
+ratio = 1 / 4
+def local = 7
+fromLocal = local + 1
+'''
+c = new ConfigSlurper().parse(text)
+t(1) { c.app.title }
+t(2) { c.app.url }
+t(3) { c.servers*.name }
+t(4) { c.size }
+t(5) { c.neg }
+t(6) { c.ratio }
+t(7) { c.fromLocal }
+t(8) { c.local }
+t(10) { c instanceof Map }
+t(11) { c.app.size() }
+t(12) { c.a.b.c.getClass().name }
+t(13) { c.keySet() }
+t(14) { def m = []; c.app.each { k, v -> m << k }; m }
+t(15) { c.app.name = 'z'; c.app.name }
+t(16) { c == new ConfigSlurper().parse(text) }
+t(17) { new ConfigSlurper().parse('x = 1').x.getClass().name }
+t(18) { new ConfigSlurper().parse('s.t = [1, 2]\ns.t << 3').s.t }
+"####;
+    let expected = r####"1: demo
+2: 8080
+3: jdbc:x
+4: 5
+5: [1, 2]
+6: true
+7: groovy.util.ConfigObject
+8: [:]
+9: groovy.util.ConfigObject
+10: [app.name:demo, app.port:8080, db.url:jdbc:x, db.pool.max:5, list:[1, 2], flag:true]
+11: [flag:true, app.port:8080, db.pool.max:5, list:[1, 2], app.name:demo, db.url:jdbc:x]
+12: [name:demo, port:8080]
+13: [app, db, list, flag, nope]
+14: 80
+15: true
+16: [max:5]
+17: true
+18: 8081
+19: [a:[b:[c:1]]]
+20: 2
+21: [name:demo, port:8080, extra:2]
+22: [app:[name:demo, port:8080, extra:2], db:[url:jdbc:x, pool:[max:5]], list:[1, 2], flag:true, nope:[:]]
+1: demo-app
+2: http://localhost:80
+3: [a, b]
+4: 6
+5: -4
+6: 0.25
+7: 8
+8: [:]
+10: true
+11: 5
+12: groovy.util.ConfigObject
+13: [app, servers, size, neg, ratio, fromLocal, local, a]
+14: [name, title, host, port, url]
+15: z
+16: false
+17: java.lang.Integer
+18: [1, 2, 3]
+"####;
+    check(src, expected);
+}
+
+/// Region time zones from the tz database with the JDK short names, custom `GMT±h` ids, legacy three-letter ids, `java.sql.Timestamp` and `GregorianCalendar`.
+#[test]
+fn round7_time_zones_calendar() {
+    let src = r####"def t(n, Closure c) { try { println "$n: " + c() } catch (e) { println "$n: ${e.getClass().name} ${e.message?.readLines()?.getAt(0)}" } }
+def f = 'yyyy-MM-dd HH:mm:ss z Z'
+def ny = TimeZone.getTimeZone('America/New_York')
+def d1 = new Date(1700000000000L)  // Nov 2023
+def d2 = new Date(1690000000000L)  // Jul 2023
+def d3 = new Date(4102444800000L)  // 2100
+def d4 = new Date(-2000000000000L) // 1906
+t(1) { d1.format(f, ny) }
+t(2) { d2.format(f, ny) }
+t(3) { d3.format(f, ny) }
+t(4) { d4.format(f, ny) }
+t(5) { ny.ID }
+t(6) { ny.rawOffset }
+t(7) { ny.getOffset(d2.time) }
+t(8) { ny.inDaylightTime(d2) }
+t(9) { ny.useDaylightTime() }
+t(10) { TimeZone.getTimeZone('Bogus/Zone').ID }
+t(11) { d1.format(f, TimeZone.getTimeZone('Asia/Kolkata')) }
+t(12) { d1.format(f, TimeZone.getTimeZone('Europe/London')) }
+t(13) { d2.format(f, TimeZone.getTimeZone('Europe/London')) }
+t(14) { d1.format(f, TimeZone.getTimeZone('Australia/Sydney')) }
+t(15) { d1.format(f, TimeZone.getTimeZone('Asia/Tokyo')) }
+t(16) { d1.format(f, TimeZone.getTimeZone('UTC')) }
+t(17) { d1.format(f, TimeZone.getTimeZone('GMT+05:30')) }
+t(18) { d1.format(f, TimeZone.getTimeZone('Europe/Berlin')) }
+t(19) { d2.format(f, TimeZone.getTimeZone('America/Los_Angeles')) }
+t(20) { d1.format(f, TimeZone.getTimeZone('America/Sao_Paulo')) }
+t(21) { d1.format(f, TimeZone.getTimeZone('Asia/Dubai')) }
+t(22) { d1.format(f, TimeZone.getTimeZone('PST')) }
+t(23) { d1.format(f, TimeZone.getTimeZone('EST')) }
+t(24) { TimeZone.getTimeZone('GMT+5').ID }
+t(25) { TimeZone.getTimeZone('GMT-0800').ID }
+t(26) { d1.toTimestamp().getClass().name }
+t(27) { d1.toTimestamp().time }
+t(28) { def c = Calendar.getInstance(ny); c.setTime(d1); c.get(Calendar.YEAR) + ' ' + c.get(Calendar.MONTH) + ' ' + c.get(Calendar.DAY_OF_MONTH) + ' ' + c.get(Calendar.HOUR_OF_DAY) }
+t(29) { def c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.setTimeInMillis(0); c.add(Calendar.MONTH, 13); c.time.time }
+t(30) { def c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(2020, 1, 29); c.timeInMillis }
+t(31) { Calendar.getInstance().getClass().name }
+t(32) { def c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.timeInMillis = 0; c.get(Calendar.DAY_OF_WEEK) }
+t(33) { def c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.timeInMillis = 0; c[Calendar.YEAR] }
+t(34) { def c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.timeInMillis = 86400000L*40; c.getActualMaximum(Calendar.DAY_OF_MONTH) }
+t(35) { def c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.timeInMillis = 0; c.format('yyyy') }
+t(36) { new java.sql.Timestamp(1500L).toString().size() }
+t(37) { d1.toCalendar().getClass().name }
+t(38) { def c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(2021, 0, 31); c.add(Calendar.MONTH, 1); c.format('yyyy-MM-dd') }
+t(39) { def c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(2020, 1, 29); c.add(Calendar.YEAR, 1); c.format('yyyy-MM-dd') }
+t(40) { def c = Calendar.getInstance(TimeZone.getTimeZone('America/New_York')); c.clear(); c.set(2023, 2, 12, 2, 30); c.format('yyyy-MM-dd HH:mm z') }
+t(41) { def c = Calendar.getInstance(TimeZone.getTimeZone('UTC')); c.clear(); c.set(2020, 0, 1); c.add(Calendar.DAY_OF_MONTH, 60); c.get(Calendar.DAY_OF_YEAR) }
+"####;
+    let expected = r####"1: 2023-11-14 17:13:20 EST -0500
+2: 2023-07-22 00:26:40 EDT -0400
+3: 2099-12-31 19:00:00 EST -0500
+4: 1906-08-16 15:26:40 EST -0500
+5: America/New_York
+6: -18000000
+7: -14400000
+8: true
+9: true
+10: GMT
+11: 2023-11-15 03:43:20 IST +0530
+12: 2023-11-14 22:13:20 GMT +0000
+13: 2023-07-22 05:26:40 BST +0100
+14: 2023-11-15 09:13:20 AEDT +1100
+15: 2023-11-15 07:13:20 JST +0900
+16: 2023-11-14 22:13:20 UTC +0000
+17: 2023-11-15 03:43:20 GMT+05:30 +0530
+18: 2023-11-14 23:13:20 CET +0100
+19: 2023-07-21 21:26:40 PDT -0700
+20: 2023-11-14 19:13:20 BRT -0300
+21: 2023-11-15 02:13:20 GST +0400
+22: 2023-11-14 14:13:20 PST -0800
+23: 2023-11-14 17:13:20 EST -0500
+24: GMT+05:00
+25: GMT-08:00
+26: java.sql.Timestamp
+27: 1700000000000
+28: 2023 10 14 17
+29: 34214400000
+30: 1582934400000
+31: java.util.GregorianCalendar
+32: 5
+33: 1970
+34: 28
+35: 1970
+36: 21
+37: java.util.GregorianCalendar
+38: 2021-02-28
+39: 2021-02-28
+40: 2023-03-12 03:30 EDT
+41: 61
+"####;
+    check(src, expected);
+}
+
+/// Region time zones across history, daylight time and the far future (the zone file's POSIX rule).
+#[test]
+fn round7_time_zone_sweep() {
+    let src = r####"def f = 'yyyy-MM-dd HH:mm:ss.SSS z Z'
+def ids = ['America/New_York', 'Europe/London', 'Australia/Lord_Howe', 'Asia/Kathmandu', 'America/St_Johns', 'Pacific/Chatham', 'Africa/Casablanca', 'America/Santiago', 'Asia/Tehran', 'America/Godthab', 'Antarctica/Troll', 'Etc/GMT+5', 'CST', 'AET', 'EST5EDT', 'Europe/Moscow', 'Pacific/Kiritimati']
+def instants = [0L, 1700000000000L, 1690000000000L, 4102444800000L, 7258118400000L, -1000000000000L, 1711846800000L, 1711850400000L, 4118000000000L, 7273800000000L]
+ids.each { id -> def z = TimeZone.getTimeZone(id); instants.each { ms -> println "$id $ms ${new Date(ms).format(f, z)} ${z.inDaylightTime(new Date(ms))}" } ; println "$id raw=${z.rawOffset} dst=${z.useDaylightTime()}" }
+"####;
+    let expected = r####"America/New_York 0 1969-12-31 19:00:00.000 EST -0500 false
+America/New_York 1700000000000 2023-11-14 17:13:20.000 EST -0500 false
+America/New_York 1690000000000 2023-07-22 00:26:40.000 EDT -0400 true
+America/New_York 4102444800000 2099-12-31 19:00:00.000 EST -0500 false
+America/New_York 7258118400000 2199-12-31 19:00:00.000 EST -0500 false
+America/New_York -1000000000000 1938-04-24 18:13:20.000 EDT -0400 true
+America/New_York 1711846800000 2024-03-30 21:00:00.000 EDT -0400 true
+America/New_York 1711850400000 2024-03-30 22:00:00.000 EDT -0400 true
+America/New_York 4118000000000 2100-06-29 20:53:20.000 EDT -0400 true
+America/New_York 7273800000000 2200-07-01 08:00:00.000 EDT -0400 true
+America/New_York raw=-18000000 dst=true
+Europe/London 0 1970-01-01 01:00:00.000 GMT +0100 false
+Europe/London 1700000000000 2023-11-14 22:13:20.000 GMT +0000 false
+Europe/London 1690000000000 2023-07-22 05:26:40.000 BST +0100 true
+Europe/London 4102444800000 2100-01-01 00:00:00.000 GMT +0000 false
+Europe/London 7258118400000 2200-01-01 00:00:00.000 GMT +0000 false
+Europe/London -1000000000000 1938-04-24 23:13:20.000 BST +0100 true
+Europe/London 1711846800000 2024-03-31 02:00:00.000 BST +0100 true
+Europe/London 1711850400000 2024-03-31 03:00:00.000 BST +0100 true
+Europe/London 4118000000000 2100-06-30 01:53:20.000 BST +0100 true
+Europe/London 7273800000000 2200-07-01 13:00:00.000 BST +0100 true
+Europe/London raw=0 dst=true
+Australia/Lord_Howe 0 1970-01-01 10:00:00.000 LHST +1000 false
+Australia/Lord_Howe 1700000000000 2023-11-15 09:13:20.000 LHDT +1100 true
+Australia/Lord_Howe 1690000000000 2023-07-22 14:56:40.000 LHST +1030 false
+Australia/Lord_Howe 4102444800000 2100-01-01 11:00:00.000 LHDT +1100 true
+Australia/Lord_Howe 7258118400000 2200-01-01 11:00:00.000 LHDT +1100 true
+Australia/Lord_Howe -1000000000000 1938-04-25 08:13:20.000 LHST +1000 false
+Australia/Lord_Howe 1711846800000 2024-03-31 12:00:00.000 LHDT +1100 true
+Australia/Lord_Howe 1711850400000 2024-03-31 13:00:00.000 LHDT +1100 true
+Australia/Lord_Howe 4118000000000 2100-06-30 11:23:20.000 LHST +1030 false
+Australia/Lord_Howe 7273800000000 2200-07-01 22:30:00.000 LHST +1030 false
+Australia/Lord_Howe raw=37800000 dst=true
+Asia/Kathmandu 0 1970-01-01 05:30:00.000 NPT +0530 false
+Asia/Kathmandu 1700000000000 2023-11-15 03:58:20.000 NPT +0545 false
+Asia/Kathmandu 1690000000000 2023-07-22 10:11:40.000 NPT +0545 false
+Asia/Kathmandu 4102444800000 2100-01-01 05:45:00.000 NPT +0545 false
+Asia/Kathmandu 7258118400000 2200-01-01 05:45:00.000 NPT +0545 false
+Asia/Kathmandu -1000000000000 1938-04-25 03:43:20.000 NPT +0530 false
+Asia/Kathmandu 1711846800000 2024-03-31 06:45:00.000 NPT +0545 false
+Asia/Kathmandu 1711850400000 2024-03-31 07:45:00.000 NPT +0545 false
+Asia/Kathmandu 4118000000000 2100-06-30 06:38:20.000 NPT +0545 false
+Asia/Kathmandu 7273800000000 2200-07-01 17:45:00.000 NPT +0545 false
+Asia/Kathmandu raw=20700000 dst=false
+America/St_Johns 0 1969-12-31 20:30:00.000 NST -0330 false
+America/St_Johns 1700000000000 2023-11-14 18:43:20.000 NST -0330 false
+America/St_Johns 1690000000000 2023-07-22 01:56:40.000 NDT -0230 true
+America/St_Johns 4102444800000 2099-12-31 20:30:00.000 NST -0330 false
+America/St_Johns 7258118400000 2199-12-31 20:30:00.000 NST -0330 false
+America/St_Johns -1000000000000 1938-04-24 18:43:20.000 NST -0330 false
+America/St_Johns 1711846800000 2024-03-30 22:30:00.000 NDT -0230 true
+America/St_Johns 1711850400000 2024-03-30 23:30:00.000 NDT -0230 true
+America/St_Johns 4118000000000 2100-06-29 22:23:20.000 NDT -0230 true
+America/St_Johns 7273800000000 2200-07-01 09:30:00.000 NDT -0230 true
+America/St_Johns raw=-12600000 dst=true
+Pacific/Chatham 0 1970-01-01 12:45:00.000 CHAST +1245 false
+Pacific/Chatham 1700000000000 2023-11-15 11:58:20.000 CHADT +1345 true
+Pacific/Chatham 1690000000000 2023-07-22 17:11:40.000 CHAST +1245 false
+Pacific/Chatham 4102444800000 2100-01-01 13:45:00.000 CHADT +1345 true
+Pacific/Chatham 7258118400000 2200-01-01 13:45:00.000 CHADT +1345 true
+Pacific/Chatham -1000000000000 1938-04-25 10:28:20.000 CHAST +1215 false
+Pacific/Chatham 1711846800000 2024-03-31 14:45:00.000 CHADT +1345 true
+Pacific/Chatham 1711850400000 2024-03-31 15:45:00.000 CHADT +1345 true
+Pacific/Chatham 4118000000000 2100-06-30 13:38:20.000 CHAST +1245 false
+Pacific/Chatham 7273800000000 2200-07-02 00:45:00.000 CHAST +1245 false
+Pacific/Chatham raw=45900000 dst=true
+Africa/Casablanca 0 1970-01-01 00:00:00.000 WET +0000 false
+Africa/Casablanca 1700000000000 2023-11-14 23:13:20.000 WEST +0100 true
+Africa/Casablanca 1690000000000 2023-07-22 05:26:40.000 WEST +0100 true
+Africa/Casablanca 4102444800000 2100-01-01 00:00:00.000 WET +0000 false
+Africa/Casablanca 7258118400000 2200-01-01 00:00:00.000 WET +0000 false
+Africa/Casablanca -1000000000000 1938-04-24 22:13:20.000 WET +0000 false
+Africa/Casablanca 1711846800000 2024-03-31 01:00:00.000 WET +0000 false
+Africa/Casablanca 1711850400000 2024-03-31 02:00:00.000 WET +0000 false
+Africa/Casablanca 4118000000000 2100-06-30 00:53:20.000 WET +0000 false
+Africa/Casablanca 7273800000000 2200-07-01 12:00:00.000 WET +0000 false
+Africa/Casablanca raw=0 dst=false
+America/Santiago 0 1969-12-31 21:00:00.000 CLST -0300 true
+America/Santiago 1700000000000 2023-11-14 19:13:20.000 CLST -0300 true
+America/Santiago 1690000000000 2023-07-22 00:26:40.000 CLT -0400 false
+America/Santiago 4102444800000 2099-12-31 21:00:00.000 CLST -0300 true
+America/Santiago 7258118400000 2199-12-31 21:00:00.000 CLST -0300 true
+America/Santiago -1000000000000 1938-04-24 18:13:20.000 CLT -0400 false
+America/Santiago 1711846800000 2024-03-30 22:00:00.000 CLST -0300 true
+America/Santiago 1711850400000 2024-03-30 23:00:00.000 CLST -0300 true
+America/Santiago 4118000000000 2100-06-29 20:53:20.000 CLT -0400 false
+America/Santiago 7273800000000 2200-07-01 08:00:00.000 CLT -0400 false
+America/Santiago raw=-14400000 dst=true
+Asia/Tehran 0 1970-01-01 03:30:00.000 IRST +0330 false
+Asia/Tehran 1700000000000 2023-11-15 01:43:20.000 IRST +0330 false
+Asia/Tehran 1690000000000 2023-07-22 07:56:40.000 IRST +0330 false
+Asia/Tehran 4102444800000 2100-01-01 03:30:00.000 IRST +0330 false
+Asia/Tehran 7258118400000 2200-01-01 03:30:00.000 IRST +0330 false
+Asia/Tehran -1000000000000 1938-04-25 01:43:20.000 IRST +0330 false
+Asia/Tehran 1711846800000 2024-03-31 04:30:00.000 IRST +0330 false
+Asia/Tehran 1711850400000 2024-03-31 05:30:00.000 IRST +0330 false
+Asia/Tehran 4118000000000 2100-06-30 04:23:20.000 IRST +0330 false
+Asia/Tehran 7273800000000 2200-07-01 15:30:00.000 IRST +0330 false
+Asia/Tehran raw=12600000 dst=false
+America/Godthab 0 1969-12-31 21:00:00.000 WGT -0300 false
+America/Godthab 1700000000000 2023-11-14 20:13:20.000 WGT -0200 false
+America/Godthab 1690000000000 2023-07-22 02:26:40.000 WGT -0200 false
+America/Godthab 4102444800000 2099-12-31 22:00:00.000 WGT -0200 false
+America/Godthab 7258118400000 2199-12-31 22:00:00.000 WGT -0200 false
+America/Godthab -1000000000000 1938-04-24 19:13:20.000 WGT -0300 false
+America/Godthab 1711846800000 2024-03-31 00:00:00.000 WGST -0100 true
+America/Godthab 1711850400000 2024-03-31 01:00:00.000 WGST -0100 true
+America/Godthab 4118000000000 2100-06-29 23:53:20.000 WGST -0100 true
+America/Godthab 7273800000000 2200-07-01 11:00:00.000 WGST -0100 true
+America/Godthab raw=-7200000 dst=true
+Antarctica/Troll 0 1970-01-01 00:00:00.000 GMT +0000 false
+Antarctica/Troll 1700000000000 2023-11-14 22:13:20.000 GMT +0000 false
+Antarctica/Troll 1690000000000 2023-07-22 06:26:40.000 CEST +0200 true
+Antarctica/Troll 4102444800000 2100-01-01 00:00:00.000 GMT +0000 false
+Antarctica/Troll 7258118400000 2200-01-01 00:00:00.000 GMT +0000 false
+Antarctica/Troll -1000000000000 1938-04-24 22:13:20.000 GMT +0000 false
+Antarctica/Troll 1711846800000 2024-03-31 03:00:00.000 CEST +0200 true
+Antarctica/Troll 1711850400000 2024-03-31 04:00:00.000 CEST +0200 true
+Antarctica/Troll 4118000000000 2100-06-30 02:53:20.000 CEST +0200 true
+Antarctica/Troll 7273800000000 2200-07-01 14:00:00.000 CEST +0200 true
+Antarctica/Troll raw=0 dst=true
+Etc/GMT+5 0 1969-12-31 19:00:00.000 GMT-05:00 -0500 false
+Etc/GMT+5 1700000000000 2023-11-14 17:13:20.000 GMT-05:00 -0500 false
+Etc/GMT+5 1690000000000 2023-07-21 23:26:40.000 GMT-05:00 -0500 false
+Etc/GMT+5 4102444800000 2099-12-31 19:00:00.000 GMT-05:00 -0500 false
+Etc/GMT+5 7258118400000 2199-12-31 19:00:00.000 GMT-05:00 -0500 false
+Etc/GMT+5 -1000000000000 1938-04-24 17:13:20.000 GMT-05:00 -0500 false
+Etc/GMT+5 1711846800000 2024-03-30 20:00:00.000 GMT-05:00 -0500 false
+Etc/GMT+5 1711850400000 2024-03-30 21:00:00.000 GMT-05:00 -0500 false
+Etc/GMT+5 4118000000000 2100-06-29 19:53:20.000 GMT-05:00 -0500 false
+Etc/GMT+5 7273800000000 2200-07-01 07:00:00.000 GMT-05:00 -0500 false
+Etc/GMT+5 raw=-18000000 dst=false
+CST 0 1969-12-31 18:00:00.000 CST -0600 false
+CST 1700000000000 2023-11-14 16:13:20.000 CST -0600 false
+CST 1690000000000 2023-07-21 23:26:40.000 CDT -0500 true
+CST 4102444800000 2099-12-31 18:00:00.000 CST -0600 false
+CST 7258118400000 2199-12-31 18:00:00.000 CST -0600 false
+CST -1000000000000 1938-04-24 17:13:20.000 CDT -0500 true
+CST 1711846800000 2024-03-30 20:00:00.000 CDT -0500 true
+CST 1711850400000 2024-03-30 21:00:00.000 CDT -0500 true
+CST 4118000000000 2100-06-29 19:53:20.000 CDT -0500 true
+CST 7273800000000 2200-07-01 07:00:00.000 CDT -0500 true
+CST raw=-21600000 dst=true
+AET 0 1970-01-01 10:00:00.000 AEST +1000 false
+AET 1700000000000 2023-11-15 09:13:20.000 AEDT +1100 true
+AET 1690000000000 2023-07-22 14:26:40.000 AEST +1000 false
+AET 4102444800000 2100-01-01 11:00:00.000 AEDT +1100 true
+AET 7258118400000 2200-01-01 11:00:00.000 AEDT +1100 true
+AET -1000000000000 1938-04-25 08:13:20.000 AEST +1000 false
+AET 1711846800000 2024-03-31 12:00:00.000 AEDT +1100 true
+AET 1711850400000 2024-03-31 13:00:00.000 AEDT +1100 true
+AET 4118000000000 2100-06-30 10:53:20.000 AEST +1000 false
+AET 7273800000000 2200-07-01 22:00:00.000 AEST +1000 false
+AET raw=36000000 dst=true
+EST5EDT 0 1969-12-31 19:00:00.000 EST -0500 false
+EST5EDT 1700000000000 2023-11-14 17:13:20.000 EST -0500 false
+EST5EDT 1690000000000 2023-07-22 00:26:40.000 EDT -0400 true
+EST5EDT 4102444800000 2099-12-31 19:00:00.000 EST -0500 false
+EST5EDT 7258118400000 2199-12-31 19:00:00.000 EST -0500 false
+EST5EDT -1000000000000 1938-04-24 17:13:20.000 EST -0500 false
+EST5EDT 1711846800000 2024-03-30 21:00:00.000 EDT -0400 true
+EST5EDT 1711850400000 2024-03-30 22:00:00.000 EDT -0400 true
+EST5EDT 4118000000000 2100-06-29 20:53:20.000 EDT -0400 true
+EST5EDT 7273800000000 2200-07-01 08:00:00.000 EDT -0400 true
+EST5EDT raw=-18000000 dst=true
+Europe/Moscow 0 1970-01-01 03:00:00.000 MSK +0300 false
+Europe/Moscow 1700000000000 2023-11-15 01:13:20.000 MSK +0300 false
+Europe/Moscow 1690000000000 2023-07-22 07:26:40.000 MSK +0300 false
+Europe/Moscow 4102444800000 2100-01-01 03:00:00.000 MSK +0300 false
+Europe/Moscow 7258118400000 2200-01-01 03:00:00.000 MSK +0300 false
+Europe/Moscow -1000000000000 1938-04-25 01:13:20.000 MSK +0300 false
+Europe/Moscow 1711846800000 2024-03-31 04:00:00.000 MSK +0300 false
+Europe/Moscow 1711850400000 2024-03-31 05:00:00.000 MSK +0300 false
+Europe/Moscow 4118000000000 2100-06-30 03:53:20.000 MSK +0300 false
+Europe/Moscow 7273800000000 2200-07-01 15:00:00.000 MSK +0300 false
+Europe/Moscow raw=10800000 dst=false
+Pacific/Kiritimati 0 1969-12-31 13:20:00.000 LINT -1040 false
+Pacific/Kiritimati 1700000000000 2023-11-15 12:13:20.000 LINT +1400 false
+Pacific/Kiritimati 1690000000000 2023-07-22 18:26:40.000 LINT +1400 false
+Pacific/Kiritimati 4102444800000 2100-01-01 14:00:00.000 LINT +1400 false
+Pacific/Kiritimati 7258118400000 2200-01-01 14:00:00.000 LINT +1400 false
+Pacific/Kiritimati -1000000000000 1938-04-24 11:33:20.000 LINT -1040 false
+Pacific/Kiritimati 1711846800000 2024-03-31 15:00:00.000 LINT +1400 false
+Pacific/Kiritimati 1711850400000 2024-03-31 16:00:00.000 LINT +1400 false
+Pacific/Kiritimati 4118000000000 2100-06-30 14:53:20.000 LINT +1400 false
+Pacific/Kiritimati 7273800000000 2200-07-02 02:00:00.000 LINT +1400 false
+Pacific/Kiritimati raw=50400000 dst=false
+"####;
+    check(src, expected);
+}
+
+/// A `MetaMethod`'s `parameterTypes` are `CachedClass`es of Groovy's own kinds; `nativeParameterTypes` and arrays.
+#[test]
+fn round7_cached_class_types() {
+    let src = r####"println 'abc'.respondsTo('center', 3, 'x')[0].parameterTypes
+println 'abc'.respondsTo('center')[0].parameterTypes[0].getClass().name
+println 'abc'.respondsTo('center')[0].declaringClass.getClass().name
+println 'abc'.respondsTo('center')[0].parameterTypes*.theClass
+println([1].respondsTo('each')[0].parameterTypes[0].getClass().name)
+class R { void v(int[] a, P p) {} }
+class P {}
+println new R().respondsTo('v')[0]
+println new R().respondsTo('v')[0].parameterTypes*.getClass()*.name
+println new R().respondsTo('v')[0].parameterTypes*.name
+"####;
+    let expected = r####"[class java.lang.Number, interface java.lang.CharSequence]
+org.codehaus.groovy.reflection.stdclasses.NumberCachedClass
+org.codehaus.groovy.reflection.CachedClass
+[class java.lang.Number]
+org.codehaus.groovy.reflection.stdclasses.CachedClosureClass
+public void R.v(int[],P)
+[org.codehaus.groovy.reflection.stdclasses.ArrayCachedClass, org.codehaus.groovy.reflection.CachedClass]
+[[I, P]
+"####;
+    check(src, expected);
+}

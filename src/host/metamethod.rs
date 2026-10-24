@@ -33,9 +33,62 @@ pub(super) enum Meta {
         ty: String,
         class: String,
     },
+    /// A `CachedClass` — what `parameterTypes` and `declaringClass` answer:
+    /// the type's name and the `CachedClass` subclass Groovy uses for it.
+    CachedClass {
+        name: String,
+        class: String,
+    },
 }
 
 type Index = HashMap<String, (Vec<Method>, Vec<(String, String, String)>)>;
+
+thread_local! {
+    /// The `CachedClass` subclass of each type the table names.
+    static CACHED: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+/// The `CachedClass` for the type `name`: the table's kind for it, or the
+/// plain `CachedClass` (what Groovy uses for a script class, too).
+fn cached_class(name: &str) -> Value {
+    with_index(|_| ());
+    let name = jvm_name(name);
+    let name = name.as_str();
+    let class = CACHED
+        .with(|c| c.borrow().get(name).cloned())
+        .unwrap_or_else(|| {
+            if name.starts_with('[') || name.ends_with("[]") {
+                "org.codehaus.groovy.reflection.stdclasses.ArrayCachedClass".to_string()
+            } else {
+                "org.codehaus.groovy.reflection.CachedClass".to_string()
+            }
+        });
+    wrap(Meta::CachedClass {
+        name: name.to_string(),
+        class,
+    })
+}
+
+/// A `MetaMethod` value built outside the table (a script class's method).
+pub(super) fn method_value(
+    name: &str,
+    is_static: bool,
+    owner: &str,
+    ret: &str,
+    params: Vec<String>,
+    class: &str,
+    text: Option<String>,
+) -> Value {
+    wrap(Meta::Method(Method {
+        name: name.to_string(),
+        is_static,
+        owner: owner.to_string(),
+        ret: ret.to_string(),
+        params,
+        class: class.to_string(),
+        text,
+    }))
+}
 
 thread_local! {
     /// The table, parsed on first use: receiver class → its methods, in
@@ -73,6 +126,9 @@ fn parse_table() -> Index {
                     class: class.to_string(),
                     text: (*text != "-").then(|| text.to_string()),
                 });
+            }
+            ["C", name, class] => {
+                CACHED.with(|c| c.borrow_mut().insert(name.to_string(), class.to_string()));
             }
             ["P", recv, name, ty, class] => {
                 index.entry(recv.to_string()).or_default().1.push((
@@ -192,6 +248,7 @@ pub(super) fn text(v: &Value) -> Option<String> {
         Meta::Property { class, .. } => {
             format!("{class}@{:x}", id.wrapping_mul(0x9E37_79B1) | 0x1000_0000)
         }
+        Meta::CachedClass { name, .. } => render_class(&name),
     })
 }
 
@@ -199,6 +256,7 @@ pub(super) fn class_name(v: &Value) -> Option<String> {
     Some(match as_meta(v)? {
         Meta::Method(m) => m.class,
         Meta::Property { class, .. } => class,
+        Meta::CachedClass { class, .. } => class,
     })
 }
 
@@ -212,13 +270,40 @@ pub(super) fn dispatch(v: &Value, method: &str, args: &[Value]) -> Option<Value>
         (Meta::Method(m), "getName") => Value::str(m.name),
         (Meta::Method(m), "isStatic") => Value::bool(m.is_static),
         (Meta::Method(m), "getReturnType") => class_ref(&m.ret),
-        (Meta::Method(m), "getDeclaringClass") => class_ref(&m.owner),
-        (Meta::Method(m), "getParameterTypes" | "getNativeParameterTypes") => {
+        (Meta::Method(m), "getDeclaringClass") => cached_class(&m.owner),
+        (Meta::Method(m), "getParameterTypes") => {
+            glist(m.params.iter().map(|p| cached_class(p)).collect())
+        }
+        (Meta::Method(m), "getNativeParameterTypes") => {
             glist(m.params.iter().map(|p| class_ref(p)).collect())
         }
+        (Meta::CachedClass { name, .. }, "getName") => Value::str(name),
+        (Meta::CachedClass { name, .. }, "getTheClass") => class_ref(&name),
         (Meta::Property { name, .. }, "getName") => Value::str(name),
         (Meta::Property { ty, .. }, "getType") => class_ref(&ty),
         (_, "toString") => Value::str(text(v)?),
         _ => return None,
     })
+}
+
+/// `Class.getName()` of a type written with array brackets: `int[]` is `[I`,
+/// `String[]` is `[Ljava.lang.String;`. Any other name is already one.
+fn jvm_name(t: &str) -> String {
+    let base = t.trim_end_matches("[]");
+    let dims = (t.len() - base.len()) / 2;
+    if dims == 0 {
+        return t.to_string();
+    }
+    let elem = match base {
+        "int" => "I".to_string(),
+        "long" => "J".to_string(),
+        "short" => "S".to_string(),
+        "byte" => "B".to_string(),
+        "double" => "D".to_string(),
+        "float" => "F".to_string(),
+        "char" => "C".to_string(),
+        "boolean" => "Z".to_string(),
+        other => format!("L{other};"),
+    };
+    format!("{}{elem}", "[".repeat(dims))
 }

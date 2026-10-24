@@ -317,6 +317,302 @@ P	java.lang.String	blank	boolean	groovy.lang.MetaBeanProperty
 P	java.lang.String	bytes	[B	groovy.lang.MetaBeanProperty
 P	java.lang.String	class	java.lang.Class	groovy.lang.MetaBeanProperty
 P	java.lang.String	empty	boolean	groovy.lang.MetaBeanProperty
+M	org.codehaus.groovy.runtime.GStringImpl	DO	0	java.lang.Object	java.lang.Object	[Ljava.lang.Object;	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	org.codehaus.groovy.runtime.GStringImpl	NV	0	java.lang.Object	groovy.lang.NamedValue	java.lang.Object	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	org.codehaus.groovy.runtime.GStringImpl	NVL	0	java.lang.Object	java.util.List	[Ljava.lang.Object;	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	org.codehaus.groovy.runtime.GStringImpl	SV	0	java.lang.Object	groovy.lang.GString	[Ljava.lang.Object;	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	org.codehaus.groovy.runtime.GStringImpl	SVD	0	java.lang.Object	groovy.lang.GString	[Ljava.lang.Object;	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	org.codehaus.groovy.runtime.GStringImpl	SVI	0	java.lang.Object	groovy.lang.GString	[Ljava.lang.Object;	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	org.codehaus.groovy.runtime.GStringImpl	addShutdownHook	0	java.lang.Object	void	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	any	0	java.lang.Object	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	any	0	java.lang.Object	boolean	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	asBoolean	0	java.lang.CharSequence	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	asType	0	groovy.lang.GString	java.lang.Object	java.lang.Class	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	bitwiseNegate	0	java.lang.CharSequence	java.util.regex.Pattern		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	build	0	groovy.lang.Buildable	void	groovy.lang.GroovyObject	org.codehaus.groovy.reflection.CachedMethod	public abstract void groovy.lang.Buildable.build(groovy.lang.GroovyObject)
+M	org.codehaus.groovy.runtime.GStringImpl	capitalize	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	center	0	java.lang.CharSequence	java.lang.String	java.lang.Number	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	center	0	java.lang.CharSequence	java.lang.String	java.lang.Number,java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	charAt	0	java.lang.CharSequence	char	int	org.codehaus.groovy.reflection.CachedMethod	public abstract char java.lang.CharSequence.charAt(int)
+M	org.codehaus.groovy.runtime.GStringImpl	clamp	0	java.lang.Comparable	java.lang.Comparable	groovy.lang.Range	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	clamp	0	java.lang.Comparable	java.lang.Comparable	java.lang.Comparable,java.lang.Comparable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	codePointAt	0	org.codehaus.groovy.runtime.GStringImpl	int	int	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.codePointAt(int)
+M	org.codehaus.groovy.runtime.GStringImpl	codePointBefore	0	org.codehaus.groovy.runtime.GStringImpl	int	int	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.codePointBefore(int)
+M	org.codehaus.groovy.runtime.GStringImpl	codePointCount	0	org.codehaus.groovy.runtime.GStringImpl	int	int,int	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.codePointCount(int,int)
+M	org.codehaus.groovy.runtime.GStringImpl	collect	0	java.lang.Object	java.util.Collection		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	collect	0	java.lang.Object	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	collect	0	java.lang.Object	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	compareTo	0	java.lang.Comparable	int	java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public abstract int java.lang.Comparable.compareTo(java.lang.Object)
+M	org.codehaus.groovy.runtime.GStringImpl	compareTo	0	org.codehaus.groovy.runtime.GStringImpl	int	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.compareTo(java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	compareToIgnoreCase	0	org.codehaus.groovy.runtime.GStringImpl	int	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.compareToIgnoreCase(java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	concat	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.concat(java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	contains	0	org.codehaus.groovy.runtime.GStringImpl	boolean	java.lang.CharSequence	org.codehaus.groovy.reflection.CachedMethod	public boolean org.codehaus.groovy.runtime.GStringImpl.contains(java.lang.CharSequence)
+M	org.codehaus.groovy.runtime.GStringImpl	containsIgnoreCase	0	java.lang.CharSequence	boolean	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	contentEquals	0	org.codehaus.groovy.runtime.GStringImpl	boolean	java.lang.CharSequence	org.codehaus.groovy.reflection.CachedMethod	public boolean org.codehaus.groovy.runtime.GStringImpl.contentEquals(java.lang.CharSequence)
+M	org.codehaus.groovy.runtime.GStringImpl	contentEquals	0	org.codehaus.groovy.runtime.GStringImpl	boolean	java.lang.StringBuffer	org.codehaus.groovy.reflection.CachedMethod	public boolean org.codehaus.groovy.runtime.GStringImpl.contentEquals(java.lang.StringBuffer)
+M	org.codehaus.groovy.runtime.GStringImpl	count	0	java.lang.CharSequence	int	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	denormalize	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	digest	0	java.lang.CharSequence	java.lang.String	java.lang.String	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	drop	0	groovy.lang.GString	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	dropRight	0	groovy.lang.GString	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	dropWhile	0	groovy.lang.GString	java.lang.String	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	dump	0	java.lang.Object	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	each	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	eachLine	0	java.lang.CharSequence	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	eachLine	0	java.lang.CharSequence	java.lang.Object	int,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	eachMatch	0	java.lang.CharSequence	java.lang.CharSequence	java.lang.CharSequence,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	eachMatch	0	java.lang.CharSequence	java.lang.CharSequence	java.util.regex.Pattern,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	eachWithIndex	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	endsWith	0	org.codehaus.groovy.runtime.GStringImpl	boolean	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public boolean org.codehaus.groovy.runtime.GStringImpl.endsWith(java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	endsWithAny	0	java.lang.CharSequence	boolean	[Ljava.lang.CharSequence;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	endsWithIgnoreCase	0	java.lang.CharSequence	boolean	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	equals	0	groovy.lang.GString	boolean	java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public boolean groovy.lang.GString.equals(java.lang.Object)
+M	org.codehaus.groovy.runtime.GStringImpl	equals	0	groovy.lang.GString	boolean	groovy.lang.GString	org.codehaus.groovy.reflection.CachedMethod	public boolean groovy.lang.GString.equals(groovy.lang.GString)
+M	org.codehaus.groovy.runtime.GStringImpl	equalsIgnoreCase	0	org.codehaus.groovy.runtime.GStringImpl	boolean	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public boolean org.codehaus.groovy.runtime.GStringImpl.equalsIgnoreCase(java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	every	0	java.lang.Object	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	every	0	java.lang.Object	boolean	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	expand	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	expand	0	java.lang.CharSequence	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	expandLine	0	java.lang.CharSequence	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	find	0	java.lang.Object	java.lang.Object		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	find	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	find	0	java.lang.CharSequence	java.lang.String	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	find	0	java.lang.CharSequence	java.lang.String	java.util.regex.Pattern	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	find	0	java.lang.CharSequence	java.lang.String	java.lang.CharSequence,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	find	0	java.lang.CharSequence	java.lang.String	java.util.regex.Pattern,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findAll	0	java.lang.Object	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findAll	0	java.lang.Object	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findAll	0	java.lang.CharSequence	java.util.List	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findAll	0	java.lang.CharSequence	java.util.List	java.util.regex.Pattern	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findAll	0	java.lang.CharSequence	java.util.List	java.lang.CharSequence,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findAll	0	java.lang.CharSequence	java.util.List	java.util.regex.Pattern,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findAllGroups	0	java.lang.CharSequence	java.util.List	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findAllGroups	0	java.lang.CharSequence	java.util.List	java.util.regex.Pattern	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findBalancedGroups	0	java.lang.CharSequence	java.util.List	java.lang.String,java.lang.String	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findBalancedGroups	0	java.lang.CharSequence	java.util.List	java.lang.String,java.lang.String,groovy.util.regex.BalancedGroup$MatchOptions	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findGroups	0	java.lang.CharSequence	java.util.List	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findGroups	0	java.lang.CharSequence	java.util.List	java.util.regex.Pattern	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findIndexOf	0	java.lang.Object	int	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findIndexOf	0	java.lang.Object	int	int,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findIndexValues	0	java.lang.Object	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findIndexValues	0	java.lang.Object	java.util.List	java.lang.Number,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findLastIndexOf	0	java.lang.Object	int	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findLastIndexOf	0	java.lang.Object	int	int,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findResult	0	java.lang.Object	java.lang.Object		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findResult	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findResult	0	java.lang.Object	java.lang.Object	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	findResult	0	java.lang.Object	java.lang.Object	java.lang.Object,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	freeze	0	org.codehaus.groovy.runtime.GStringImpl	groovy.lang.GString		org.codehaus.groovy.reflection.CachedMethod	public groovy.lang.GString org.codehaus.groovy.runtime.GStringImpl.freeze()
+M	org.codehaus.groovy.runtime.GStringImpl	getAt	0	java.lang.Object	java.lang.Object	java.lang.String	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	getAt	0	groovy.lang.GString	java.lang.String	groovy.lang.IntRange	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	getAt	0	groovy.lang.GString	java.lang.String	groovy.lang.Range	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	getAt	0	groovy.lang.GString	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	getAt	0	java.lang.CharSequence	java.lang.String	groovy.lang.EmptyRange	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	getAt	0	java.lang.CharSequence	java.lang.String	java.util.Collection	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	getBytes	0	groovy.lang.GString	[B		org.codehaus.groovy.reflection.CachedMethod	public byte[] groovy.lang.GString.getBytes()
+M	org.codehaus.groovy.runtime.GStringImpl	getBytes	0	groovy.lang.GString	[B	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public byte[] groovy.lang.GString.getBytes(java.lang.String) throws java.io.UnsupportedEncodingException
+M	org.codehaus.groovy.runtime.GStringImpl	getBytes	0	org.codehaus.groovy.runtime.GStringImpl	[B	java.nio.charset.Charset	org.codehaus.groovy.reflection.CachedMethod	public byte[] org.codehaus.groovy.runtime.GStringImpl.getBytes(java.nio.charset.Charset)
+M	org.codehaus.groovy.runtime.GStringImpl	getChars	0	org.codehaus.groovy.runtime.GStringImpl	void	int,int,[C,int	org.codehaus.groovy.reflection.CachedMethod	public void org.codehaus.groovy.runtime.GStringImpl.getChars(int,int,char[],int)
+M	org.codehaus.groovy.runtime.GStringImpl	getChars	0	java.lang.CharSequence	[C		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	getClass	0	java.lang.Object	java.lang.Class		org.codehaus.groovy.reflection.CachedMethod	public final native java.lang.Class java.lang.Object.getClass()
+M	org.codehaus.groovy.runtime.GStringImpl	getCodePoints	0	java.lang.CharSequence	[I		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	getMetaClass	0	groovy.lang.GroovyObject	groovy.lang.MetaClass		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	getMetaPropertyValues	0	java.lang.Object	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	getProperties	0	java.lang.Object	java.util.Map		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	getStrings	0	org.codehaus.groovy.runtime.GStringImpl	[Ljava.lang.String;		org.codehaus.groovy.reflection.CachedMethod	public java.lang.String[] org.codehaus.groovy.runtime.GStringImpl.getStrings()
+M	org.codehaus.groovy.runtime.GStringImpl	getValue	0	groovy.lang.GString	java.lang.Object	int	org.codehaus.groovy.reflection.CachedMethod	public java.lang.Object groovy.lang.GString.getValue(int)
+M	org.codehaus.groovy.runtime.GStringImpl	getValueCount	0	groovy.lang.GString	int		org.codehaus.groovy.reflection.CachedMethod	public int groovy.lang.GString.getValueCount()
+M	org.codehaus.groovy.runtime.GStringImpl	getValues	0	org.codehaus.groovy.runtime.GStringImpl	[Ljava.lang.Object;		org.codehaus.groovy.reflection.CachedMethod	public java.lang.Object[] org.codehaus.groovy.runtime.GStringImpl.getValues()
+M	org.codehaus.groovy.runtime.GStringImpl	grep	0	java.lang.Object	java.util.Collection		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	grep	0	java.lang.Object	java.util.Collection	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	hasProperty	0	java.lang.Object	groovy.lang.MetaProperty	java.lang.String	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	hashCode	0	groovy.lang.GString	int		org.codehaus.groovy.reflection.CachedMethod	public int groovy.lang.GString.hashCode()
+M	org.codehaus.groovy.runtime.GStringImpl	identity	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	indexOf	0	org.codehaus.groovy.runtime.GStringImpl	int	int	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.indexOf(int)
+M	org.codehaus.groovy.runtime.GStringImpl	indexOf	0	org.codehaus.groovy.runtime.GStringImpl	int	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.indexOf(java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	indexOf	0	org.codehaus.groovy.runtime.GStringImpl	int	int,int	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.indexOf(int,int)
+M	org.codehaus.groovy.runtime.GStringImpl	indexOf	0	org.codehaus.groovy.runtime.GStringImpl	int	java.lang.String,int	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.indexOf(java.lang.String,int)
+M	org.codehaus.groovy.runtime.GStringImpl	inject	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	inject	0	java.lang.Object	java.lang.Object	java.util.function.BinaryOperator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	inject	0	java.lang.Object	java.lang.Object	java.lang.Object,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	inject	0	java.lang.Object	java.lang.Object	java.lang.Object,java.util.function.BiFunction	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	inspect	0	java.lang.Object	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	intern	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String		org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.intern()
+M	org.codehaus.groovy.runtime.GStringImpl	invokeMethod	0	groovy.lang.GroovyObject	java.lang.Object	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public default java.lang.Object groovy.lang.GroovyObject.invokeMethod(java.lang.String,java.lang.Object)
+M	org.codehaus.groovy.runtime.GStringImpl	is	0	java.lang.Object	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	isAllWhitespace	0	java.lang.CharSequence	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	isBigDecimal	0	java.lang.CharSequence	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	isBigInteger	0	java.lang.CharSequence	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	isBlank	0	org.codehaus.groovy.runtime.GStringImpl	boolean		org.codehaus.groovy.reflection.CachedMethod	public boolean org.codehaus.groovy.runtime.GStringImpl.isBlank()
+M	org.codehaus.groovy.runtime.GStringImpl	isCase	0	java.lang.CharSequence	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	isDouble	0	java.lang.CharSequence	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	isEmpty	0	java.lang.CharSequence	boolean		org.codehaus.groovy.reflection.CachedMethod	public default boolean java.lang.CharSequence.isEmpty()
+M	org.codehaus.groovy.runtime.GStringImpl	isFloat	0	java.lang.CharSequence	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	isInteger	0	java.lang.CharSequence	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	isLong	0	java.lang.CharSequence	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	isNotCase	0	java.lang.CharSequence	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	isNumber	0	java.lang.CharSequence	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	iterator	0	java.lang.Object	java.util.Iterator		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	lastIndexOf	0	org.codehaus.groovy.runtime.GStringImpl	int	int	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.lastIndexOf(int)
+M	org.codehaus.groovy.runtime.GStringImpl	lastIndexOf	0	org.codehaus.groovy.runtime.GStringImpl	int	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.lastIndexOf(java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	lastIndexOf	0	org.codehaus.groovy.runtime.GStringImpl	int	int,int	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.lastIndexOf(int,int)
+M	org.codehaus.groovy.runtime.GStringImpl	lastIndexOf	0	org.codehaus.groovy.runtime.GStringImpl	int	java.lang.String,int	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.lastIndexOf(java.lang.String,int)
+M	org.codehaus.groovy.runtime.GStringImpl	leftShift	0	java.lang.CharSequence	java.lang.StringBuilder	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	length	0	java.lang.CharSequence	int		org.codehaus.groovy.reflection.CachedMethod	public abstract int java.lang.CharSequence.length()
+M	org.codehaus.groovy.runtime.GStringImpl	lines	0	org.codehaus.groovy.runtime.GStringImpl	java.util.stream.Stream		org.codehaus.groovy.reflection.CachedMethod	public java.util.stream.Stream org.codehaus.groovy.runtime.GStringImpl.lines()
+M	org.codehaus.groovy.runtime.GStringImpl	macro	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	org.codehaus.groovy.runtime.GStringImpl	macro	0	java.lang.Object	java.lang.Object	boolean,groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	org.codehaus.groovy.runtime.GStringImpl	macro	0	java.lang.Object	java.lang.Object	org.codehaus.groovy.control.CompilePhase,groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	org.codehaus.groovy.runtime.GStringImpl	macro	0	java.lang.Object	java.lang.Object	org.codehaus.groovy.control.CompilePhase,boolean,groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	org.codehaus.groovy.runtime.GStringImpl	matches	0	org.codehaus.groovy.runtime.GStringImpl	boolean	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public boolean org.codehaus.groovy.runtime.GStringImpl.matches(java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	matches	0	java.lang.CharSequence	boolean	java.util.regex.Pattern	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	md5	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	metaClass	0	java.lang.Object	groovy.lang.MetaClass	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	minus	0	java.lang.CharSequence	java.lang.String	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	minus	0	java.lang.CharSequence	java.lang.String	java.util.regex.Pattern	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	multiply	0	java.lang.CharSequence	java.lang.String	java.lang.Number	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	negate	0	groovy.lang.GString	java.util.regex.Pattern		org.codehaus.groovy.reflection.CachedMethod	public java.util.regex.Pattern groovy.lang.GString.negate()
+M	org.codehaus.groovy.runtime.GStringImpl	next	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	next	0	java.lang.CharSequence	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	normalize	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	notify	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notify()
+M	org.codehaus.groovy.runtime.GStringImpl	notifyAll	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notifyAll()
+M	org.codehaus.groovy.runtime.GStringImpl	numberAwareCompareTo	0	java.lang.Comparable	int	java.lang.Comparable	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	offsetByCodePoints	0	org.codehaus.groovy.runtime.GStringImpl	int	int,int	org.codehaus.groovy.reflection.CachedMethod	public int org.codehaus.groovy.runtime.GStringImpl.offsetByCodePoints(int,int)
+M	org.codehaus.groovy.runtime.GStringImpl	padLeft	0	java.lang.CharSequence	java.lang.String	java.lang.Number	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	padLeft	0	java.lang.CharSequence	java.lang.String	java.lang.Number,java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	padRight	0	java.lang.CharSequence	java.lang.String	java.lang.Number	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	padRight	0	java.lang.CharSequence	java.lang.String	java.lang.Number,java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	plus	0	org.codehaus.groovy.runtime.GStringImpl	groovy.lang.GString	groovy.lang.GString	org.codehaus.groovy.reflection.CachedMethod	public groovy.lang.GString org.codehaus.groovy.runtime.GStringImpl.plus(groovy.lang.GString)
+M	org.codehaus.groovy.runtime.GStringImpl	plus	0	groovy.lang.GString	groovy.lang.GString	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public groovy.lang.GString groovy.lang.GString.plus(java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	plus	0	java.lang.CharSequence	java.lang.String	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	previous	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	previous	0	java.lang.CharSequence	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	print	0	java.lang.Object	void	java.io.PrintWriter	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	print	0	java.lang.Object	void	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	printf	0	java.lang.Object	void	java.lang.String,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	printf	0	java.lang.Object	void	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	println	0	java.lang.Object	void		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	println	0	java.lang.Object	void	java.io.PrintWriter	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	println	0	java.lang.Object	void	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	putAt	0	java.lang.Object	void	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	readLines	0	java.lang.CharSequence	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	regionMatches	0	org.codehaus.groovy.runtime.GStringImpl	boolean	int,java.lang.String,int,int	org.codehaus.groovy.reflection.CachedMethod	public boolean org.codehaus.groovy.runtime.GStringImpl.regionMatches(int,java.lang.String,int,int)
+M	org.codehaus.groovy.runtime.GStringImpl	regionMatches	0	org.codehaus.groovy.runtime.GStringImpl	boolean	boolean,int,java.lang.String,int,int	org.codehaus.groovy.reflection.CachedMethod	public boolean org.codehaus.groovy.runtime.GStringImpl.regionMatches(boolean,int,java.lang.String,int,int)
+M	org.codehaus.groovy.runtime.GStringImpl	repeat	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String	int	org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.repeat(int)
+M	org.codehaus.groovy.runtime.GStringImpl	replace	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String	char,char	org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.replace(char,char)
+M	org.codehaus.groovy.runtime.GStringImpl	replace	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String	java.lang.CharSequence,java.lang.CharSequence	org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.replace(java.lang.CharSequence,java.lang.CharSequence)
+M	org.codehaus.groovy.runtime.GStringImpl	replace	0	java.lang.CharSequence	java.lang.String	java.util.Map	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	replace	0	java.lang.CharSequence	java.lang.String	int,java.util.Map	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	replaceAll	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String	java.lang.String,java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.replaceAll(java.lang.String,java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	replaceAll	0	java.lang.CharSequence	java.lang.String	java.lang.CharSequence,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	replaceAll	0	java.lang.CharSequence	java.lang.String	java.lang.CharSequence,java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	replaceAll	0	java.lang.CharSequence	java.lang.String	java.util.regex.Pattern,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	replaceAll	0	java.lang.CharSequence	java.lang.String	java.util.regex.Pattern,java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	replaceFirst	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String	java.lang.String,java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.replaceFirst(java.lang.String,java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	replaceFirst	0	java.lang.CharSequence	java.lang.String	java.lang.CharSequence,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	replaceFirst	0	java.lang.CharSequence	java.lang.String	java.lang.CharSequence,java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	replaceFirst	0	java.lang.CharSequence	java.lang.String	java.util.regex.Pattern,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	replaceFirst	0	java.lang.CharSequence	java.lang.String	java.util.regex.Pattern,java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	respondsTo	0	java.lang.Object	java.util.List	java.lang.String	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	respondsTo	0	java.lang.Object	java.util.List	java.lang.String,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	reverse	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	setMetaClass	0	groovy.lang.GroovyObject	void	groovy.lang.MetaClass	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	sha256	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	size	0	java.lang.CharSequence	int		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	sleep	1	java.lang.Object	void	long	org.codehaus.groovy.runtime.metaclass.NewStaticMetaMethod	-
+M	org.codehaus.groovy.runtime.GStringImpl	sleep	1	java.lang.Object	void	long,groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewStaticMetaMethod	-
+M	org.codehaus.groovy.runtime.GStringImpl	split	0	java.lang.Object	java.util.Collection	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	split	0	org.codehaus.groovy.runtime.GStringImpl	[Ljava.lang.String;	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public java.lang.String[] org.codehaus.groovy.runtime.GStringImpl.split(java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	split	0	org.codehaus.groovy.runtime.GStringImpl	[Ljava.lang.String;	java.lang.String,int	org.codehaus.groovy.reflection.CachedMethod	public java.lang.String[] org.codehaus.groovy.runtime.GStringImpl.split(java.lang.String,int)
+M	org.codehaus.groovy.runtime.GStringImpl	split	0	java.lang.CharSequence	[Ljava.lang.String;		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	splitEachLine	0	java.lang.CharSequence	java.lang.Object	java.lang.CharSequence,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	splitEachLine	0	java.lang.CharSequence	java.lang.Object	java.util.regex.Pattern,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	sprintf	0	java.lang.Object	java.lang.String	java.lang.String,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	sprintf	0	java.lang.Object	java.lang.String	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	startsWith	0	org.codehaus.groovy.runtime.GStringImpl	boolean	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public boolean org.codehaus.groovy.runtime.GStringImpl.startsWith(java.lang.String)
+M	org.codehaus.groovy.runtime.GStringImpl	startsWith	0	org.codehaus.groovy.runtime.GStringImpl	boolean	java.lang.String,int	org.codehaus.groovy.reflection.CachedMethod	public boolean org.codehaus.groovy.runtime.GStringImpl.startsWith(java.lang.String,int)
+M	org.codehaus.groovy.runtime.GStringImpl	startsWithAny	0	java.lang.CharSequence	boolean	[Ljava.lang.CharSequence;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	startsWithIgnoreCase	0	java.lang.CharSequence	boolean	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	stream	0	java.lang.Object	java.util.stream.Stream		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	strip	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String		org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.strip()
+M	org.codehaus.groovy.runtime.GStringImpl	stripIndent	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	stripIndent	0	java.lang.CharSequence	java.lang.String	boolean	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	stripIndent	0	java.lang.CharSequence	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	stripLeading	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String		org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.stripLeading()
+M	org.codehaus.groovy.runtime.GStringImpl	stripMargin	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	stripMargin	0	java.lang.CharSequence	java.lang.String	char	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	stripMargin	0	java.lang.CharSequence	java.lang.String	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	stripTrailing	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String		org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.stripTrailing()
+M	org.codehaus.groovy.runtime.GStringImpl	subSequence	0	java.lang.CharSequence	java.lang.CharSequence	int,int	org.codehaus.groovy.reflection.CachedMethod	public abstract java.lang.CharSequence java.lang.CharSequence.subSequence(int,int)
+M	org.codehaus.groovy.runtime.GStringImpl	substring	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String	int	org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.substring(int)
+M	org.codehaus.groovy.runtime.GStringImpl	substring	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String	int,int	org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.substring(int,int)
+M	org.codehaus.groovy.runtime.GStringImpl	take	0	groovy.lang.GString	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	takeAfter	0	groovy.lang.GString	java.lang.String	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	takeBefore	0	groovy.lang.GString	java.lang.String	java.lang.String	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	takeBefore	0	java.lang.CharSequence	java.lang.CharSequence	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	takeBetween	0	groovy.lang.GString	java.lang.String	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	takeBetween	0	groovy.lang.GString	java.lang.String	java.lang.CharSequence,int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	takeBetween	0	groovy.lang.GString	java.lang.String	java.lang.CharSequence,java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	takeBetween	0	groovy.lang.GString	java.lang.String	java.lang.CharSequence,java.lang.CharSequence,int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	takeIf	0	java.lang.Object	java.lang.Object	java.util.function.Predicate	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	takeRight	0	groovy.lang.GString	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	takeWhile	0	groovy.lang.GString	java.lang.String	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	tap	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toBigDecimal	0	java.lang.CharSequence	java.math.BigDecimal		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toBigInteger	0	java.lang.CharSequence	java.math.BigInteger		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toCharArray	0	org.codehaus.groovy.runtime.GStringImpl	[C		org.codehaus.groovy.reflection.CachedMethod	public char[] org.codehaus.groovy.runtime.GStringImpl.toCharArray()
+M	org.codehaus.groovy.runtime.GStringImpl	toCurrencyNumber	0	java.lang.CharSequence	java.lang.Number	java.util.Locale	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toDouble	0	java.lang.CharSequence	java.lang.Double		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toFloat	0	java.lang.CharSequence	java.lang.Float		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toInteger	0	java.lang.CharSequence	java.lang.Integer		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toList	0	java.lang.CharSequence	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toLong	0	java.lang.CharSequence	java.lang.Long		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toLowerCase	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String		org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.toLowerCase()
+M	org.codehaus.groovy.runtime.GStringImpl	toLowerCase	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String	java.util.Locale	org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.toLowerCase(java.util.Locale)
+M	org.codehaus.groovy.runtime.GStringImpl	toNumber	0	java.lang.CharSequence	java.lang.Number	java.util.Locale	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toPercentNumber	0	java.lang.CharSequence	java.lang.Number	java.util.Locale	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toSet	0	java.lang.CharSequence	java.util.Set		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toShort	0	java.lang.CharSequence	java.lang.Short		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toString	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.CachedMethod	public abstract java.lang.String java.lang.CharSequence.toString()
+M	org.codehaus.groovy.runtime.GStringImpl	toURI	0	java.lang.CharSequence	java.net.URI		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toURL	0	java.lang.CharSequence	java.net.URL		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	toUpperCase	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String		org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.toUpperCase()
+M	org.codehaus.groovy.runtime.GStringImpl	toUpperCase	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String	java.util.Locale	org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.toUpperCase(java.util.Locale)
+M	org.codehaus.groovy.runtime.GStringImpl	tokenize	0	java.lang.CharSequence	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	tokenize	0	java.lang.CharSequence	java.util.List	java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	tokenize	0	java.lang.CharSequence	java.util.List	java.lang.Character	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	tr	0	java.lang.CharSequence	java.lang.String	java.lang.CharSequence,java.lang.CharSequence	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	trim	0	org.codehaus.groovy.runtime.GStringImpl	java.lang.String		org.codehaus.groovy.reflection.CachedMethod	public java.lang.String org.codehaus.groovy.runtime.GStringImpl.trim()
+M	org.codehaus.groovy.runtime.GStringImpl	uncapitalize	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	unexpand	0	java.lang.CharSequence	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	unexpand	0	java.lang.CharSequence	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	unexpandLine	0	java.lang.CharSequence	java.lang.String	int	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	use	0	java.lang.Object	java.lang.Object	[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	use	0	java.lang.Object	java.lang.Object	java.lang.Class,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	use	0	java.lang.Object	java.lang.Object	java.util.List,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	wait	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final void java.lang.Object.wait() throws java.lang.InterruptedException
+M	org.codehaus.groovy.runtime.GStringImpl	wait	0	java.lang.Object	void	long	org.codehaus.groovy.reflection.CachedMethod	public final void java.lang.Object.wait(long) throws java.lang.InterruptedException
+M	org.codehaus.groovy.runtime.GStringImpl	wait	0	java.lang.Object	void	long,int	org.codehaus.groovy.reflection.CachedMethod	public final void java.lang.Object.wait(long,int) throws java.lang.InterruptedException
+M	org.codehaus.groovy.runtime.GStringImpl	with	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	with	0	java.lang.Object	java.lang.Object	boolean,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	withMethodClosure	0	java.lang.Object	java.lang.Object	org.codehaus.groovy.runtime.MethodClosure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	withTraits	0	java.lang.Object	java.lang.Object	[Ljava.lang.Class;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	org.codehaus.groovy.runtime.GStringImpl	writeTo	0	groovy.lang.Writable	java.io.Writer	java.io.Writer	org.codehaus.groovy.reflection.CachedMethod	public abstract java.io.Writer groovy.lang.Writable.writeTo(java.io.Writer) throws java.io.IOException
+P	org.codehaus.groovy.runtime.GStringImpl	EMPTY_STRING_ARRAY	[Ljava.lang.String;	org.codehaus.groovy.reflection.CachedField
+P	org.codehaus.groovy.runtime.GStringImpl	EMPTY_OBJECT_ARRAY	[Ljava.lang.Object;	org.codehaus.groovy.reflection.CachedField
+P	org.codehaus.groovy.runtime.GStringImpl	EMPTY	groovy.lang.GString	org.codehaus.groovy.reflection.CachedField
+P	org.codehaus.groovy.runtime.GStringImpl	serialVersionUID	long	org.codehaus.groovy.reflection.CachedField
+P	org.codehaus.groovy.runtime.GStringImpl	strings	[Ljava.lang.String;	groovy.lang.MetaBeanProperty
+P	org.codehaus.groovy.runtime.GStringImpl	frozen	boolean	org.codehaus.groovy.reflection.CachedField
+P	org.codehaus.groovy.runtime.GStringImpl	cacheable	boolean	org.codehaus.groovy.reflection.CachedField
+P	org.codehaus.groovy.runtime.GStringImpl	cachedStringLiteral	java.lang.String	org.codehaus.groovy.reflection.CachedField
+P	org.codehaus.groovy.runtime.GStringImpl	blank	boolean	groovy.lang.MetaBeanProperty
+P	org.codehaus.groovy.runtime.GStringImpl	bytes	[B	groovy.lang.MetaBeanProperty
+P	org.codehaus.groovy.runtime.GStringImpl	class	java.lang.Class	groovy.lang.MetaBeanProperty
+P	org.codehaus.groovy.runtime.GStringImpl	empty	boolean	groovy.lang.MetaBeanProperty
+P	org.codehaus.groovy.runtime.GStringImpl	valueCount	int	groovy.lang.MetaBeanProperty
+P	org.codehaus.groovy.runtime.GStringImpl	values	[Ljava.lang.Object;	groovy.lang.MetaBeanProperty
 M	java.lang.Integer	DO	0	java.lang.Object	java.lang.Object	[Ljava.lang.Object;	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
 M	java.lang.Integer	NV	0	java.lang.Object	groovy.lang.NamedValue	java.lang.Object	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
 M	java.lang.Integer	NVL	0	java.lang.Object	java.util.List	[Ljava.lang.Object;	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
@@ -4729,3 +5025,192 @@ P	groovy.lang.IntRange	fromInt	int	groovy.lang.MetaBeanProperty
 P	groovy.lang.IntRange	inclusive	java.lang.Boolean	groovy.lang.MetaBeanProperty
 P	groovy.lang.IntRange	last	java.lang.Integer	groovy.lang.MetaBeanProperty
 P	groovy.lang.IntRange	toInt	int	groovy.lang.MetaBeanProperty
+M	groovy.util.Expando	DO	0	java.lang.Object	java.lang.Object	[Ljava.lang.Object;	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	groovy.util.Expando	NV	0	java.lang.Object	groovy.lang.NamedValue	java.lang.Object	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	groovy.util.Expando	NVL	0	java.lang.Object	java.util.List	[Ljava.lang.Object;	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	groovy.util.Expando	SV	0	java.lang.Object	groovy.lang.GString	[Ljava.lang.Object;	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	groovy.util.Expando	SVD	0	java.lang.Object	groovy.lang.GString	[Ljava.lang.Object;	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	groovy.util.Expando	SVI	0	java.lang.Object	groovy.lang.GString	[Ljava.lang.Object;	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	groovy.util.Expando	addShutdownHook	0	java.lang.Object	void	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	any	0	java.lang.Object	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	any	0	java.lang.Object	boolean	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	asBoolean	0	java.lang.Object	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	asType	0	java.lang.Object	java.lang.Object	java.lang.Class	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	collect	0	java.lang.Object	java.util.Collection		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	collect	0	java.lang.Object	java.util.Collection	java.util.Collection,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	collect	0	java.lang.Object	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	dump	0	java.lang.Object	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	each	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	eachWithIndex	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	equals	0	groovy.util.Expando	boolean	java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public boolean groovy.util.Expando.equals(java.lang.Object)
+M	groovy.util.Expando	every	0	java.lang.Object	boolean		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	every	0	java.lang.Object	boolean	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	find	0	java.lang.Object	java.lang.Object		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	find	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	findAll	0	java.lang.Object	java.util.List		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	findAll	0	java.lang.Object	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	findIndexOf	0	java.lang.Object	int	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	findIndexOf	0	java.lang.Object	int	int,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	findIndexValues	0	java.lang.Object	java.util.List	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	findIndexValues	0	java.lang.Object	java.util.List	java.lang.Number,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	findLastIndexOf	0	java.lang.Object	int	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	findLastIndexOf	0	java.lang.Object	int	int,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	findResult	0	java.lang.Object	java.lang.Object		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	findResult	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	findResult	0	java.lang.Object	java.lang.Object	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	findResult	0	java.lang.Object	java.lang.Object	java.lang.Object,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	getAt	0	java.lang.Object	java.lang.Object	java.lang.String	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	getClass	0	java.lang.Object	java.lang.Class		org.codehaus.groovy.reflection.CachedMethod	public final native java.lang.Class java.lang.Object.getClass()
+M	groovy.util.Expando	getMetaClass	0	groovy.lang.GroovyObject	groovy.lang.MetaClass		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	getMetaPropertyValues	0	groovy.util.Expando	java.util.List		org.codehaus.groovy.reflection.CachedMethod	public java.util.List groovy.util.Expando.getMetaPropertyValues()
+M	groovy.util.Expando	getProperties	0	groovy.util.Expando	java.util.Map		org.codehaus.groovy.reflection.CachedMethod	public java.util.Map groovy.util.Expando.getProperties()
+M	groovy.util.Expando	getProperty	0	groovy.lang.GroovyObject	java.lang.Object	java.lang.String	org.codehaus.groovy.reflection.CachedMethod	public default java.lang.Object groovy.lang.GroovyObject.getProperty(java.lang.String)
+M	groovy.util.Expando	grep	0	java.lang.Object	java.util.Collection		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	grep	0	java.lang.Object	java.util.Collection	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	hasProperty	0	java.lang.Object	groovy.lang.MetaProperty	java.lang.String	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	hashCode	0	groovy.util.Expando	int		org.codehaus.groovy.reflection.CachedMethod	public int groovy.util.Expando.hashCode()
+M	groovy.util.Expando	identity	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	inject	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	inject	0	java.lang.Object	java.lang.Object	java.util.function.BinaryOperator	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	inject	0	java.lang.Object	java.lang.Object	java.lang.Object,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	inject	0	java.lang.Object	java.lang.Object	java.lang.Object,java.util.function.BiFunction	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	inspect	0	java.lang.Object	java.lang.String		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	invokeMethod	0	groovy.lang.GroovyObject	java.lang.Object	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public default java.lang.Object groovy.lang.GroovyObject.invokeMethod(java.lang.String,java.lang.Object)
+M	groovy.util.Expando	is	0	java.lang.Object	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	isCase	0	java.lang.Object	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	isNotCase	0	java.lang.Object	boolean	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	iterator	0	java.lang.Object	java.util.Iterator		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	macro	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	groovy.util.Expando	macro	0	java.lang.Object	java.lang.Object	boolean,groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	groovy.util.Expando	macro	0	java.lang.Object	java.lang.Object	org.codehaus.groovy.control.CompilePhase,groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	groovy.util.Expando	macro	0	java.lang.Object	java.lang.Object	org.codehaus.groovy.control.CompilePhase,boolean,groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewInstanceMetaMethod	-
+M	groovy.util.Expando	metaClass	0	java.lang.Object	groovy.lang.MetaClass	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	notify	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notify()
+M	groovy.util.Expando	notifyAll	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final native void java.lang.Object.notifyAll()
+M	groovy.util.Expando	print	0	java.lang.Object	void	java.io.PrintWriter	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	print	0	java.lang.Object	void	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	printf	0	java.lang.Object	void	java.lang.String,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	printf	0	java.lang.Object	void	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	println	0	java.lang.Object	void		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	println	0	java.lang.Object	void	java.io.PrintWriter	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	println	0	java.lang.Object	void	java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	putAt	0	java.lang.Object	void	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	respondsTo	0	java.lang.Object	java.util.List	java.lang.String	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	respondsTo	0	java.lang.Object	java.util.List	java.lang.String,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	setMetaClass	0	groovy.lang.GroovyObject	void	groovy.lang.MetaClass	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	setProperty	0	groovy.lang.GroovyObject	void	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.CachedMethod	public default void groovy.lang.GroovyObject.setProperty(java.lang.String,java.lang.Object)
+M	groovy.util.Expando	sleep	1	java.lang.Object	void	long	org.codehaus.groovy.runtime.metaclass.NewStaticMetaMethod	-
+M	groovy.util.Expando	sleep	1	java.lang.Object	void	long,groovy.lang.Closure	org.codehaus.groovy.runtime.metaclass.NewStaticMetaMethod	-
+M	groovy.util.Expando	split	0	java.lang.Object	java.util.Collection	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	sprintf	0	java.lang.Object	java.lang.String	java.lang.String,[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	sprintf	0	java.lang.Object	java.lang.String	java.lang.String,java.lang.Object	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	stream	0	java.lang.Object	java.util.stream.Stream		org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	takeIf	0	java.lang.Object	java.lang.Object	java.util.function.Predicate	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	tap	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	toString	0	groovy.util.Expando	java.lang.String		org.codehaus.groovy.reflection.CachedMethod	public java.lang.String groovy.util.Expando.toString()
+M	groovy.util.Expando	use	0	java.lang.Object	java.lang.Object	[Ljava.lang.Object;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	use	0	java.lang.Object	java.lang.Object	java.lang.Class,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	use	0	java.lang.Object	java.lang.Object	java.util.List,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	wait	0	java.lang.Object	void		org.codehaus.groovy.reflection.CachedMethod	public final void java.lang.Object.wait() throws java.lang.InterruptedException
+M	groovy.util.Expando	wait	0	java.lang.Object	void	long	org.codehaus.groovy.reflection.CachedMethod	public final void java.lang.Object.wait(long) throws java.lang.InterruptedException
+M	groovy.util.Expando	wait	0	java.lang.Object	void	long,int	org.codehaus.groovy.reflection.CachedMethod	public final void java.lang.Object.wait(long,int) throws java.lang.InterruptedException
+M	groovy.util.Expando	with	0	java.lang.Object	java.lang.Object	groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	with	0	java.lang.Object	java.lang.Object	boolean,groovy.lang.Closure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	withMethodClosure	0	java.lang.Object	java.lang.Object	org.codehaus.groovy.runtime.MethodClosure	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+M	groovy.util.Expando	withTraits	0	java.lang.Object	java.lang.Object	[Ljava.lang.Class;	org.codehaus.groovy.reflection.GeneratedMetaMethod$Proxy	-
+P	groovy.util.Expando	expandoProperties	java.util.Map	org.codehaus.groovy.reflection.CachedField
+P	groovy.util.Expando	class	java.lang.Class	groovy.lang.MetaBeanProperty
+P	groovy.util.Expando	metaPropertyValues	java.util.List	groovy.lang.MetaBeanProperty
+P	groovy.util.Expando	properties	java.util.Map	groovy.lang.MetaBeanProperty
+C	[B	org.codehaus.groovy.reflection.stdclasses.ArrayCachedClass
+C	[C	org.codehaus.groovy.reflection.stdclasses.ArrayCachedClass
+C	[I	org.codehaus.groovy.reflection.stdclasses.ArrayCachedClass
+C	[Ljava.lang.CharSequence;	org.codehaus.groovy.reflection.stdclasses.ArrayCachedClass
+C	[Ljava.lang.Class;	org.codehaus.groovy.reflection.stdclasses.ArrayCachedClass
+C	[Ljava.lang.Object;	org.codehaus.groovy.reflection.stdclasses.ArrayCachedClass
+C	[Ljava.lang.String;	org.codehaus.groovy.reflection.stdclasses.ArrayCachedClass
+C	boolean	org.codehaus.groovy.reflection.stdclasses.BooleanCachedClass
+C	char	org.codehaus.groovy.reflection.stdclasses.CharacterCachedClass
+C	double	org.codehaus.groovy.reflection.stdclasses.DoubleCachedClass
+C	float	org.codehaus.groovy.reflection.stdclasses.FloatCachedClass
+C	groovy.lang.Buildable	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	groovy.lang.Closure	org.codehaus.groovy.reflection.stdclasses.CachedClosureClass
+C	groovy.lang.EmptyRange	org.codehaus.groovy.reflection.CachedClass
+C	groovy.lang.GString	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	groovy.lang.GroovyObject	org.codehaus.groovy.reflection.CachedClass
+C	groovy.lang.IntRange	org.codehaus.groovy.reflection.CachedClass
+C	groovy.lang.MetaClass	org.codehaus.groovy.reflection.CachedClass
+C	groovy.lang.Range	org.codehaus.groovy.reflection.CachedClass
+C	groovy.lang.Writable	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	groovy.util.Expando	org.codehaus.groovy.reflection.CachedClass
+C	groovy.util.regex.BalancedGroup$MatchOptions	org.codehaus.groovy.reflection.CachedClass
+C	int	org.codehaus.groovy.reflection.stdclasses.IntegerCachedClass
+C	java.io.File	org.codehaus.groovy.reflection.CachedClass
+C	java.io.PrintWriter	org.codehaus.groovy.reflection.CachedClass
+C	java.io.Writer	org.codehaus.groovy.reflection.CachedClass
+C	java.lang.Boolean	org.codehaus.groovy.reflection.stdclasses.BooleanCachedClass
+C	java.lang.CharSequence	org.codehaus.groovy.reflection.CachedClass
+C	java.lang.Character	org.codehaus.groovy.reflection.stdclasses.CharacterCachedClass
+C	java.lang.Class	org.codehaus.groovy.reflection.CachedClass
+C	java.lang.Comparable	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.lang.Double	org.codehaus.groovy.reflection.stdclasses.DoubleCachedClass
+C	java.lang.Float	org.codehaus.groovy.reflection.stdclasses.FloatCachedClass
+C	java.lang.Integer	org.codehaus.groovy.reflection.stdclasses.IntegerCachedClass
+C	java.lang.Iterable	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.lang.Long	org.codehaus.groovy.reflection.stdclasses.LongCachedClass
+C	java.lang.Number	org.codehaus.groovy.reflection.stdclasses.NumberCachedClass
+C	java.lang.Object	org.codehaus.groovy.reflection.stdclasses.ObjectCachedClass
+C	java.lang.String	org.codehaus.groovy.reflection.stdclasses.StringCachedClass
+C	java.lang.StringBuffer	org.codehaus.groovy.reflection.CachedClass
+C	java.lang.constant.Constable	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.lang.constant.ConstantDesc	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.lang.invoke.MethodHandles$Lookup	org.codehaus.groovy.reflection.CachedClass
+C	java.math.BigDecimal	org.codehaus.groovy.reflection.stdclasses.BigDecimalCachedClass
+C	java.math.BigInteger	org.codehaus.groovy.reflection.stdclasses.BigIntegerCachedClass
+C	java.math.MathContext	org.codehaus.groovy.reflection.CachedClass
+C	java.math.RoundingMode	org.codehaus.groovy.reflection.CachedClass
+C	java.nio.charset.Charset	org.codehaus.groovy.reflection.CachedClass
+C	java.util.AbstractCollection	org.codehaus.groovy.reflection.CachedClass
+C	java.util.AbstractMap	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.util.ArrayList	org.codehaus.groovy.reflection.CachedClass
+C	java.util.Collection	org.codehaus.groovy.reflection.CachedClass
+C	java.util.Comparator	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.util.Deque	org.codehaus.groovy.reflection.CachedClass
+C	java.util.HashMap	org.codehaus.groovy.reflection.CachedClass
+C	java.util.HashSet	org.codehaus.groovy.reflection.CachedClass
+C	java.util.Iterator	org.codehaus.groovy.reflection.CachedClass
+C	java.util.LinkedHashMap	org.codehaus.groovy.reflection.CachedClass
+C	java.util.LinkedHashSet	org.codehaus.groovy.reflection.CachedClass
+C	java.util.LinkedList	org.codehaus.groovy.reflection.CachedClass
+C	java.util.List	org.codehaus.groovy.reflection.CachedClass
+C	java.util.Locale	org.codehaus.groovy.reflection.CachedClass
+C	java.util.Map	org.codehaus.groovy.reflection.CachedClass
+C	java.util.Map$Entry	org.codehaus.groovy.reflection.CachedClass
+C	java.util.NavigableMap	org.codehaus.groovy.reflection.CachedClass
+C	java.util.NavigableSet	org.codehaus.groovy.reflection.CachedClass
+C	java.util.Queue	org.codehaus.groovy.reflection.CachedClass
+C	java.util.Random	org.codehaus.groovy.reflection.CachedClass
+C	java.util.SequencedCollection	org.codehaus.groovy.reflection.CachedClass
+C	java.util.SequencedMap	org.codehaus.groovy.reflection.CachedClass
+C	java.util.SequencedSet	org.codehaus.groovy.reflection.CachedClass
+C	java.util.Set	org.codehaus.groovy.reflection.CachedClass
+C	java.util.SortedMap	org.codehaus.groovy.reflection.CachedClass
+C	java.util.SortedSet	org.codehaus.groovy.reflection.CachedClass
+C	java.util.TreeMap	org.codehaus.groovy.reflection.CachedClass
+C	java.util.TreeSet	org.codehaus.groovy.reflection.CachedClass
+C	java.util.function.BiConsumer	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.util.function.BiFunction	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.util.function.BiPredicate	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.util.function.BinaryOperator	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.util.function.Consumer	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.util.function.Function	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.util.function.IntFunction	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.util.function.ObjIntConsumer	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.util.function.Predicate	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.util.function.UnaryOperator	org.codehaus.groovy.reflection.stdclasses.CachedSAMClass
+C	java.util.regex.Pattern	org.codehaus.groovy.reflection.CachedClass
+C	long	org.codehaus.groovy.reflection.stdclasses.LongCachedClass
+C	org.codehaus.groovy.control.CompilePhase	org.codehaus.groovy.reflection.CachedClass
+C	org.codehaus.groovy.runtime.GStringImpl	org.codehaus.groovy.reflection.CachedClass
+C	org.codehaus.groovy.runtime.MethodClosure	org.codehaus.groovy.reflection.stdclasses.CachedClosureClass
+C	short	org.codehaus.groovy.reflection.stdclasses.ShortCachedClass

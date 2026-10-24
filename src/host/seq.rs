@@ -814,8 +814,7 @@ fn wrapper_class(v: &Value, synchronized: bool) -> Option<&'static str> {
 }
 
 /// `asUnmodifiable()` / `asSynchronized()` (and `Collections.unmodifiable…` /
-/// `synchronized…`): a live view of a list. A set or map is wrapped as a copy
-/// (BUGS.md: set and map wrapper views).
+/// `synchronized…`): a live view of a list, set or map.
 pub(super) fn wrapper(v: &Value, synchronized: bool) -> Option<Value> {
     let class = wrapper_class(v, synchronized)?;
     let writes = if synchronized {
@@ -824,7 +823,7 @@ pub(super) fn wrapper(v: &Value, synchronized: bool) -> Option<Value> {
         Writes::Frozen
     };
     if as_set(v).is_some() || is_omap(v) {
-        return wrapped_copy(v, class, writes);
+        return coll_view(v, class, writes).or_else(|| wrapped_copy(v, class, writes));
     }
     if as_range(v).is_some() {
         return wrapped_copy(v, class, writes);
@@ -924,29 +923,29 @@ pub(super) fn static_call(vm: &mut VM, class: &str, method: &str, args: &[Value]
                     Writes::Frozen,
                 )
             } else {
-                wrapped_copy(
+                shared_wrapper(
                     &arg0,
                     "java.util.Collections$UnmodifiableCollection",
                     Writes::Frozen,
                 )?
             }
         }
-        ("unmodifiableSet", 1) if class == "Collections" => wrapped_copy(
+        ("unmodifiableSet", 1) if class == "Collections" => shared_wrapper(
             &arg0,
             "java.util.Collections$UnmodifiableSet",
             Writes::Frozen,
         )?,
-        ("unmodifiableMap", 1) if class == "Collections" => wrapped_copy(
+        ("unmodifiableMap", 1) if class == "Collections" => shared_wrapper(
             &arg0,
             "java.util.Collections$UnmodifiableMap",
             Writes::Frozen,
         )?,
         ("synchronizedList", 1) if class == "Collections" => wrapper(&arg0, true)?,
         ("synchronizedMap", 1) if class == "Collections" => {
-            wrapped_copy(&arg0, "java.util.Collections$SynchronizedMap", Writes::Open)?
+            shared_wrapper(&arg0, "java.util.Collections$SynchronizedMap", Writes::Open)?
         }
         ("synchronizedSet", 1) if class == "Collections" => {
-            wrapped_copy(&arg0, "java.util.Collections$SynchronizedSet", Writes::Open)?
+            shared_wrapper(&arg0, "java.util.Collections$SynchronizedSet", Writes::Open)?
         }
         ("asList", _) if class == "Arrays" => {
             // `Arrays.asList(array)` spreads an object array; anything else is
@@ -1115,4 +1114,10 @@ pub(super) fn tuple_component(v: &Value, name: &str) -> Option<Value> {
         return None;
     }
     as_list(v)?.get(index - 1).cloned()
+}
+
+/// `Collections.unmodifiableSet` / `synchronizedMap` / …: a live view of a
+/// set or map with the class the factory names, or a copy of anything else.
+fn shared_wrapper(v: &Value, class: &'static str, writes: Writes) -> Option<Value> {
+    coll_view(v, class, writes).or_else(|| wrapped_copy(v, class, writes))
 }

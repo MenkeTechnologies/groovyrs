@@ -489,6 +489,13 @@ pub const GNAME_TEXT: u16 = 787;
 /// `String` rather than a `GString` object.
 pub const GSTRING_TEXT: u16 = 788;
 
+/// Builtin id for a `GString` literal stored in a local every read of which
+/// is a text read (see the compiler's `text_only_locals`): the rendered
+/// `String` when every value is immutable — nothing could tell the two
+/// apart — and the `GString` otherwise, so a `${-> x}` part or a mutable
+/// value still renders when it is read.
+pub const GSTRING_STORED: u16 = 789;
+
 /// The method name `list.remove((Object) x)` compiles to: the cast selects
 /// `Collection.remove(Object)` over `List.remove(int)`, which only the call
 /// site can see. Not an identifier, so no script can name it.
@@ -599,6 +606,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GFN_CHECK, b_fn_check);
     vm.register_builtin(GNAME_TEXT, b_name_text);
     vm.register_builtin(GSTRING_TEXT, b_gstring_text);
+    vm.register_builtin(GSTRING_STORED, b_gstring_stored);
     vm.register_builtin(GJCAST, b_java_cast);
     vm.register_builtin(GLIST_ADOPT, b_list_adopt);
     vm.register_builtin(GCLASSREF, b_classref);
@@ -723,10 +731,18 @@ thread_local! {
     static EMC_INSTANCE: RefCell<HashMap<(u32, String), Value>> = RefCell::new(HashMap::new());
     /// `X.metaClass.constructor` closures, by class, in the order added.
     static EMC_CTORS: RefCell<HashMap<String, Vec<Value>>> = RefCell::new(HashMap::new());
+    /// The heap length when each class's metaclass was first injected into:
+    /// a script-class instance older than that keeps its original metaclass.
+    static EMC_BORN: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
     /// Set once any injection exists, so dispatch pays one flag read without.
     static ANY_EMC: Cell<bool> = const { Cell::new(false) };
     /// Set once a `JsonSlurper` or `JsonBuilder` exists.
     static ANY_JSON: Cell<bool> = const { Cell::new(false) };
+    /// The set or map each wrapper view (`asSynchronized()` on a set, …)
+    /// reads and writes, by the view's heap id. Kept beside the heap rather
+    /// than in it so storage accessors can resolve a view while they hold
+    /// the heap borrowed.
+    static VIEW_TARGETS: RefCell<HashMap<u32, u32>> = RefCell::new(HashMap::new());
     /// Set once a `Date`, `TimeZone` or `TimeCategory` duration exists.
     static ANY_DATE: Cell<bool> = const { Cell::new(false) };
     /// The instances `map as C` built through its proxy fallback (a key `C`
@@ -1628,6 +1644,9 @@ fn java_class_name(v: &Value) -> String {
     {
         return class.to_string();
     }
+    if ANY_JSON.with(Cell::get) && config::slurper_env(v).is_some() {
+        return "groovy.util.ConfigSlurper".to_string();
+    }
     if let Some(class) = metamethod::class_name(v) {
         return class;
     }
@@ -2009,6 +2028,7 @@ fn register_throwables() {
                 plain_fields: std::collections::HashSet::new(),
                 final_fields: std::collections::HashSet::new(),
                 ret_types: std::collections::HashMap::new(),
+                method_sigs: Vec::new(),
             });
         }
     });
@@ -2261,6 +2281,8 @@ fn interned_class_name(name: &str) -> &'static str {
 
 #[path = "host/bignum.rs"]
 mod bignum;
+#[path = "host/config.rs"]
+mod config;
 #[path = "host/date.rs"]
 mod date;
 #[path = "host/digest.rs"]
@@ -2279,6 +2301,8 @@ mod metamethod;
 mod params;
 #[path = "host/seq.rs"]
 mod seq;
+#[path = "host/tz.rs"]
+mod tz;
 #[path = "host/urlcodec.rs"]
 mod urlcodec;
 #[path = "host/xml.rs"]
@@ -2428,10 +2452,20 @@ enum HeapObj {
     /// An `XmlSlurper` / `XmlParser` or a view over what one parsed (see
     /// [`xml::XmlVal`]).
     Xml(Box<xml::XmlVal>),
+    /// A `groovy.util.ConfigSlurper` and the environment it was built for.
+    ConfigSlurper(Option<String>),
     /// A JDK value's `MetaMethod` / `MetaProperty` (see [`metamethod::Meta`]).
     Meta(Box<metamethod::Meta>),
+    /// A JDK wrapper *view* of a set or map: the storage is the target's
+    /// (see [`VIEW_TARGETS`]); the class and write policy are the view's own
+    /// flavor.
+    CollView,
     /// A `java.util.Date`: its instant in milliseconds since the epoch.
     Date(i64),
+    /// A `java.sql.Timestamp`: its instant in milliseconds.
+    Timestamp(i64),
+    /// A `java.util.GregorianCalendar` (see [`date::Cal`]).
+    Calendar(Box<date::Cal>),
     /// A `java.util.TimeZone` (see [`date::Zone`]).
     TimeZone(date::Zone),
     /// A `groovy.time` duration (see [`date::Dur`]).
@@ -2841,12 +2875,25 @@ struct ClassMeta {
     final_fields: std::collections::HashSet<String>,
     /// `name/arity` → the method's declared return type, as written.
     ret_types: std::collections::HashMap<String, String>,
+    /// Every declared method's signature, in declaration order.
+    method_sigs: Vec<MethodSig>,
+}
+
+/// A declared method's name, return type as written, `static` flag and
+/// parameter types as written.
+#[derive(Clone)]
+struct MethodSig {
+    name: String,
+    ret: String,
+    is_static: bool,
+    types: Vec<String>,
 }
 
 /// Clear the object heap, class registry, and decimal-literal intern table
 /// (called from [`install`]).
 fn reset_heap() {
     seq::reset();
+    VIEW_TARGETS.with(|v| v.borrow_mut().clear());
     mapkey::reset();
     HEAP.with(|h| h.borrow_mut().clear());
     CLASSES.with(|c| c.borrow_mut().clear());
@@ -2860,6 +2907,7 @@ fn reset_heap() {
     EMC_STATICS.with(|m| m.borrow_mut().clear());
     EMC_INSTANCE.with(|m| m.borrow_mut().clear());
     EMC_CTORS.with(|m| m.borrow_mut().clear());
+    EMC_BORN.with(|m| m.borrow_mut().clear());
     ANY_EMC.with(|a| a.set(false));
     MAP_PROXIES.with(|m| m.borrow_mut().clear());
     SCRIPT_THIS.with(|s| s.borrow_mut().take());
@@ -3661,41 +3709,84 @@ fn responds_to(recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
         // A plain `new Object()` has no script class; the JDK table answers it.
         .filter(|c| *c != u32::MAX)
         .or_else(|| as_class_ref(recv).and_then(|n| find_class(&n)))?;
-    let prefix = format!("{method}/");
-    let mut seen: Vec<Vec<String>> = Vec::new();
-    for meta in class_chain(class).into_iter().rev().filter_map(class_meta) {
-        for (key, decls) in &meta.typed_overloads {
-            if !key.starts_with(&prefix) {
-                continue;
-            }
-            for (types, _) in decls {
-                let fits = args.is_empty()
-                    || (types.len() == args.len()
-                        && types
-                            .iter()
-                            .zip(args)
-                            .all(|(t, v)| params::param_fit(t, v).is_some()));
-                if fits && !seen.contains(types) {
-                    seen.push(types.clone());
-                }
+    // Root ancestor first, so an override takes its parent's place.
+    let mut found: Vec<(String, MethodSig)> = Vec::new();
+    for meta in class_chain(class).into_iter().filter_map(class_meta) {
+        for sig in meta.method_sigs.iter().filter(|s| s.name == method) {
+            match found.iter_mut().find(|(_, s)| s.types == sig.types) {
+                Some(slot) => *slot = (meta.name.clone(), sig.clone()),
+                None => found.push((meta.name.clone(), sig.clone())),
             }
         }
     }
-    let injected = ANY_EMC.with(Cell::get) && emc_lookup(recv, method).is_some();
-    let owner = class_meta(class).map(|m| m.name).unwrap_or_default();
-    let mut found: Vec<Value> = seen
-        .iter()
-        .map(|types| {
-            Value::str(format!(
-                "public java.lang.Object {owner}.{method}({})",
-                types.join(",")
-            ))
+    let fits = |types: &[String]| {
+        args.is_empty()
+            || (types.len() == args.len()
+                && types
+                    .iter()
+                    .zip(args)
+                    .all(|(t, v)| params::param_fit(t, v).is_some()))
+    };
+    let mut out: Vec<Value> = found
+        .into_iter()
+        .filter(|(_, s)| fits(&s.types))
+        .map(|(owner, s)| {
+            let params: Vec<String> = s.types.iter().map(|t| qualified_type(t)).collect();
+            let ret = qualified_type(&s.ret);
+            let text = format!(
+                "public {}{ret} {owner}.{method}({})",
+                if s.is_static { "static " } else { "" },
+                params.join(",")
+            );
+            metamethod::method_value(
+                method,
+                s.is_static,
+                &owner,
+                &ret,
+                params,
+                "org.codehaus.groovy.reflection.CachedMethod",
+                Some(text),
+            )
         })
         .collect();
-    if injected {
-        found.push(Value::str(format!("{owner}.{method}")));
+    if ANY_EMC.with(Cell::get) && emc_lookup(recv, method).is_some() {
+        let owner = class_meta(class).map(|m| m.name).unwrap_or_default();
+        out.push(metamethod::method_value(
+            method,
+            false,
+            &owner,
+            "java.lang.Object",
+            Vec::new(),
+            "org.codehaus.groovy.runtime.metaclass.ClosureMetaMethod",
+            None,
+        ));
     }
-    Some(glist(found))
+    // A method the class does not declare is `Object`'s or the GDK's.
+    if out.is_empty() {
+        return metamethod::responds_to("java.lang.Object", method, args).or(Some(glist(out)));
+    }
+    Some(glist(out))
+}
+
+/// A type as written in a declaration, as its `Class` name: `def` is
+/// `java.lang.Object`, a default-imported JDK class gains its package, and a
+/// primitive or script class stays as it is.
+fn qualified_type(t: &str) -> String {
+    match t {
+        "def" | "Object" => "java.lang.Object".to_string(),
+        "int" | "long" | "short" | "byte" | "double" | "float" | "char" | "boolean" | "void" => {
+            t.to_string()
+        }
+        _ if t.contains('.') => t.to_string(),
+        _ => match jdk_class_package(t) {
+            Some(pkg) => format!("{pkg}.{t}"),
+            None if find_class(t).is_some() => t.to_string(),
+            None => match t {
+                "Closure" | "GString" | "Range" | "IntRange" => format!("groovy.lang.{t}"),
+                _ => t.to_string(),
+            },
+        },
+    }
 }
 
 /// `metaClass.constructor = { … }` / `<< { … }`: a constructor for `class`
@@ -3749,6 +3840,12 @@ fn emc_register(mc: &Value, name: &str, clo: Value) {
             EMC_INSTANCE.with(|m| m.borrow_mut().insert((id, name.to_string()), clo))
         }
         (None, false) => {
+            // The first injection replaces the class's metaclass; an instance
+            // built before then keeps the one it was built with.
+            let born = HEAP.with(|h| h.borrow().len() as u32);
+            EMC_BORN.with(|b| {
+                b.borrow_mut().entry(class.clone()).or_insert(born);
+            });
             EMC_METHODS.with(|m| m.borrow_mut().insert((class, name.to_string()), clo))
         }
     };
@@ -3769,12 +3866,26 @@ fn emc_lookup(recv: &Value, method: &str) -> Option<Value> {
         }
     }
     let classes: Vec<String> = match as_instance(recv) {
-        Some(inst) => class_chain(inst.class)
-            .into_iter()
-            .rev()
-            .filter_map(class_meta)
-            .map(|m| m.name)
-            .collect(),
+        Some(inst) => {
+            let own = class_meta(inst.class).map(|m| m.name);
+            let id = match recv {
+                Value::Obj(id) => *id,
+                _ => u32::MAX,
+            };
+            class_chain(inst.class)
+                .into_iter()
+                .rev()
+                .filter_map(class_meta)
+                .map(|m| m.name)
+                // A script-class instance holds the metaclass it was built
+                // with: injections into its own class made after it are seen,
+                // ones that replaced the metaclass before it are not.
+                .filter(|c| {
+                    own.as_ref() != Some(c)
+                        || EMC_BORN.with(|b| b.borrow().get(c).map_or(true, |born| *born <= id))
+                })
+                .collect()
+        }
         None => vec![java_class_name(recv)],
     };
     classes
@@ -4383,6 +4494,29 @@ fn b_gstring_text(vm: &mut VM, _argc: u8) -> Value {
     Value::str(gstring_text(vm, &vals))
 }
 
+/// `GSTRING_STORED`: see [`GSTRING_STORED`].
+fn b_gstring_stored(vm: &mut VM, _argc: u8) -> Value {
+    let n = vm.stack.pop().unwrap_or(Value::Undef).to_int().max(0) as usize;
+    let start = vm.stack.len().saturating_sub(n);
+    let vals: Vec<Value> = vm.stack.drain(start..).collect();
+    if gstring_immutable(&vals) {
+        return Value::str(gstring_text(vm, &vals));
+    }
+    heap_push(HeapObj::GString(vals, None))
+}
+
+/// Whether every value of a `GString`'s alternating parts is immutable, so
+/// its text can never change.
+fn gstring_immutable(vals: &[Value]) -> bool {
+    vals.iter().skip(1).step_by(2).all(|v| {
+        matches!(
+            v,
+            Value::Str(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Undef
+        ) || is_dec_handle(v)
+            || as_float_handle(v).is_some()
+    })
+}
+
 fn b_gstring(vm: &mut VM, _argc: u8) -> Value {
     let n = vm.stack.pop().unwrap_or(Value::Undef).to_int().max(0) as usize;
     let mut vals = Vec::with_capacity(n);
@@ -4394,14 +4528,7 @@ fn b_gstring(vm: &mut VM, _argc: u8) -> Value {
     // each time it is read (so a closure value — the `${-> x}` idiom — and a
     // mutated collection show their state at that moment). A range value
     // renders through its own `toString`, as for `println` and `+`.
-    let immutable = vals.iter().skip(1).step_by(2).all(|v| {
-        matches!(
-            v,
-            Value::Str(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Undef
-        ) || is_dec_handle(v)
-            || as_float_handle(v).is_some()
-    });
-    let cached = immutable.then(|| gstring_text(vm, &vals));
+    let cached = gstring_immutable(&vals).then(|| gstring_text(vm, &vals));
     heap_push(HeapObj::GString(vals, cached))
 }
 
@@ -4437,6 +4564,9 @@ fn as_omap(v: &Value) -> Option<Vec<(String, Value)>> {
 /// `withDefault` itself resolves its receiver first.
 fn map_backing(v: &Value) -> Value {
     let Value::Obj(id) = v else { return v.clone() };
+    if let Some(target) = view_target_id(*id) {
+        return Value::Obj(target);
+    }
     match HEAP.with(|h| match h.borrow().get(*id as usize) {
         Some(HeapObj::MapWithDefault(target)) => Some(*target),
         _ => None,
@@ -4799,7 +4929,10 @@ fn similar_map_kind(kind: MapKind) -> MapKind {
 fn omap_set(v: &Value, key: String, val: Value) -> bool {
     match map_backing(v) {
         Value::Obj(id) => {
-            if seq::write_refused(id, true) {
+            // A wrapper view refuses by its own policy, then by its target's.
+            if matches!(v, Value::Obj(o) if *o != id && seq::write_refused(*o, true))
+                || seq::write_refused(id, true)
+            {
                 return true;
             }
             HEAP.with(|h| match h.borrow_mut().get_mut(id as usize) {
@@ -6018,6 +6151,7 @@ fn capitalize(s: &str) -> String {
 /// constructor table on top.
 fn b_class(vm: &mut VM, _argc: u8) -> Value {
     // Pushed last by `register_class`, so these pop first and in reverse.
+    let sigs_a = vm.stack.pop().unwrap_or(Value::Undef);
     let ret_types_h = vm.stack.pop().unwrap_or(Value::Undef);
     let bool_getters_a = vm.stack.pop().unwrap_or(Value::Undef);
     let overloads_h = vm.stack.pop().unwrap_or(Value::Undef);
@@ -6162,9 +6296,36 @@ fn b_class(vm: &mut VM, _argc: u8) -> Value {
             .collect(),
         _ => std::collections::HashMap::new(),
     };
+    let method_sigs: Vec<MethodSig> = match sigs_a {
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|v| {
+                let text = v.as_str_cow().into_owned();
+                let mut f = text.split('\t');
+                let name = f.next()?.to_string();
+                let ret = f.next()?.to_string();
+                let is_static = f.next()? == "1";
+                let types = f
+                    .next()
+                    .unwrap_or("")
+                    .split(',')
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                Some(MethodSig {
+                    name,
+                    ret,
+                    is_static,
+                    types,
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     CLASSES.with(|c| {
         c.borrow_mut().push(ClassMeta {
             name,
+            method_sigs,
             declared_fields,
             plain_fields,
             final_fields,
@@ -6308,13 +6469,25 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
             ANY_JSON.with(|a| a.set(true));
             return markup::new_builder(args);
         }
-        "XmlSlurper" | "XmlParser" if args.is_empty() => {
+        "ConfigSlurper" if args.len() <= 1 => {
+            ANY_JSON.with(|a| a.set(true));
+            return config::new_slurper(args);
+        }
+        "ConfigObject" if args.is_empty() => {
+            ANY_JSON.with(|a| a.set(true));
+            return Some(config::new_config());
+        }
+        "XmlSlurper" | "XmlParser" | "QName" if args.len() <= 3 => {
             ANY_JSON.with(|a| a.set(true));
             return xml::construct(simple_name_of(class).as_str(), args);
         }
         "Date" if args.len() <= 1 => {
             ANY_DATE.with(|a| a.set(true));
             return date::construct(args);
+        }
+        "Timestamp" | "GregorianCalendar" if args.len() <= 1 => {
+            ANY_DATE.with(|a| a.set(true));
+            return date::construct_named(simple_name_of(class).as_str(), args);
         }
         "JsonSlurper" if args.is_empty() => {
             ANY_JSON.with(|a| a.set(true));
@@ -9366,6 +9539,13 @@ fn b_setprop(vm: &mut VM, _argc: u8) -> Value {
 /// `setProperty(name, value)` and `putAt(name, value)`. Honours a user `setX`
 /// setter, else writes the field.
 fn set_property(vm: &mut VM, recv: Value, name: String, value: Value) -> Value {
+    // A calendar's settable properties are its setters (`c.timeInMillis = 0`).
+    if ANY_DATE.with(Cell::get) {
+        let setter = format!("set{}", capitalize(&name));
+        if date::dispatch(&recv, &setter, std::slice::from_ref(&value)).is_some() {
+            return value;
+        }
+    }
     if ANY_JSON.with(Cell::get) && markup::set_option(&recv, &name, &value) {
         return value;
     }
@@ -9519,6 +9699,11 @@ fn map_default(vm: &mut VM, map: &Value, key: &str, subject: &Value) -> Value {
 /// `recv[index]`, shared by the `[…]` subscript builtin and by the `getAt(…)`
 /// method — Groovy defines the subscript *as* `getAt`, so both are one path.
 fn index_read(vm: &mut VM, recv: Value, index: Value) -> Value {
+    if ANY_DATE.with(Cell::get) {
+        if let Some(v) = date::dispatch(&recv, "getAt", std::slice::from_ref(&index)) {
+            return v;
+        }
+    }
     if ANY_JSON.with(Cell::get) {
         if let Some(v) = xml_call(vm, &recv, "getAt", std::slice::from_ref(&index)) {
             return v;
@@ -10674,17 +10859,7 @@ fn dispatch_call(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Va
 fn dispatch_call_inner(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>) -> Value {
     // A `GString` rendered when built answers every `String` method as its
     // text, straight away; its own members are answered below.
-    if !matches!(
-        method,
-        "getClass"
-            | "getStrings"
-            | "getValues"
-            | "getValueCount"
-            | "equals"
-            | "hashCode"
-            | "plus"
-            | "is"
-    ) {
+    if !crate::compiler::GSTRING_OWN_METHODS.contains(&method) {
         if let Some(text) = gstring_cached(&recv) {
             return dispatch_call(vm, Value::str(text), method, args);
         }
@@ -10723,11 +10898,23 @@ fn xml_call(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Option<V
     Some(dispatch_call(vm, glist(items), method, args.to_vec()))
 }
 
+/// `Expando.equals`: its `equals` closure's answer, when it has one.
+fn expando_equal(a: &Value, b: &Value) -> Option<bool> {
+    let props = as_expando(a)?;
+    let clo = omap_get(&props, "equals").flatten()?;
+    closure_meta(&clo)?;
+    let out = with_vm(|vm| dispatch_call(vm, a.clone(), "equals", vec![b.clone()]))?;
+    Some(out.is_truthy())
+}
+
 /// `GPathResult.equals`: a slurper view on the left equals what renders as
 /// its text; a view on the right equals only another view.
 fn xml_equal(a: &Value, b: &Value) -> Option<bool> {
     if !ANY_JSON.with(Cell::get) {
         return None;
+    }
+    if let Some(eq) = xml::qname_equal(a, b) {
+        return Some(eq);
     }
     let (view, other) = match (xml::gpath_text(a), xml::gpath_text(b)) {
         (Some(x), Some(y)) => return Some(x == y),
@@ -10748,6 +10935,9 @@ fn dispatch_json(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Opt
     let recv = recv.clone();
     let args = args.to_vec();
     if let Some(v) = xml_call(vm, &recv, method, &args) {
+        return Some(v);
+    }
+    if let Some(v) = config::dispatch(vm, &recv, method, &args) {
         return Some(v);
     }
     if markup::helper_builder(&recv).is_some() {
@@ -11037,10 +11227,30 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
                     matches!((&recv, &args[0]), (Value::Obj(a), Value::Obj(b)) if a == b),
                 );
             }
+            // No JDK `String.stripIndent` for a `GString`: Groovy's own runs.
+            "stripIndent" if args.is_empty() => {
+                let text = gstring_render(vm, &recv, &parts);
+                return dispatch_call(vm, Value::str(text), method, vec![Value::bool(true)]);
+            }
+            // `InvokerHelper.inspect`: a `GString` is double-quoted.
+            "inspect" if args.is_empty() => {
+                let text = gstring_render(vm, &recv, &parts);
+                return Value::str(format!(
+                    "\"{}\"",
+                    text.replace('\\', "\\\\").replace('"', "\\\"")
+                ));
+            }
             _ => {}
         }
-        let text = gstring_render(vm, &recv, &parts);
-        return dispatch_call(vm, Value::str(text), method, args);
+        // `with` / `tap` / `identity` hand the closure the `GString` itself,
+        // and the metaclass questions are about `GStringImpl`.
+        if !matches!(
+            method,
+            "with" | "tap" | "identity" | "respondsTo" | "hasProperty"
+        ) {
+            let text = gstring_render(vm, &recv, &parts);
+            return dispatch_call(vm, Value::str(text), method, args);
+        }
     }
     // A `List` rides a handle so two names can see one list. Every list method
     // is already written against the transient `Value::Array` form, so the call
@@ -11142,8 +11352,9 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
     // mutator call inside the body (`[1, 2].tap { add(3) }`) has to reach this
     // list — so they run against the handle, further down, not against the
     // detached element copy this branch would hand them.
-    let delegating =
-        matches!(method, "with" | "tap") && args.len() == 1 && closure_meta(&args[0]).is_some();
+    let delegating = matches!(method, "with" | "tap" | "identity")
+        && args.len() == 1
+        && closure_meta(&args[0]).is_some();
     if let Some(id) = list_id(&recv).filter(|_| !delegating) {
         // `getClass()` reads the reference, not the elements, so it answers on a
         // stale window too — and it has to answer *here*, because the call below
@@ -11696,7 +11907,11 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
     // Groovy's `Object.with { … }` / `Object.tap { … }`: run the closure with
     // the receiver as `it`. `with` answers the closure's result, `tap` the
     // receiver. Defined on every value, so it precedes the per-type tables.
-    if matches!(method, "with" | "tap") && args.len() == 1 && closure_meta(&args[0]).is_some() {
+    // `identity { … }` is `with { … }` under its older name.
+    if matches!(method, "with" | "tap" | "identity")
+        && args.len() == 1
+        && closure_meta(&args[0]).is_some()
+    {
         DELEGATES.with(|d| d.borrow_mut().push(recv.clone()));
         let result = invoke_closure(vm, &args[0], std::slice::from_ref(&recv));
         // A mutator run against the delegate replaced its contents, so `tap`
@@ -14295,6 +14510,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 }
             }
         }
+        // `tokenize` takes a `String` or `Character` of delimiters (or a
+        // `List` of them); there is no `char[]` overload.
+        (Value::Str(_), "tokenize") if args.first().is_some_and(|a| array_elem(a).is_some()) => {
+            raise_missing_method(vm, recv, method, args)
+        }
         (Value::Str(s), "tokenize") => {
             let delims = args.first().map(groovy_str);
             let parts: Vec<Value> = match &delims {
@@ -14362,21 +14582,85 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // indent and every line's trailing whitespace — except that a string
         // *ending* in a line terminator opts out of the outdent entirely.
         (Value::Str(s), "stripIndent") if args.is_empty() => Value::str(strip_indent(s)),
+        // `stripIndent(true)` forces Groovy's own outdent — the smallest
+        // leading run of whitespace among the non-blank lines — and
+        // `stripIndent(false)` is the JDK's.
+        (Value::Str(s), "stripIndent") if matches!(args.first(), Some(Value::Bool(_))) => {
+            if !args[0].is_truthy() {
+                return Value::str(strip_indent(s));
+            }
+            let lines = read_lines(s);
+            let n = lines
+                .iter()
+                .filter(|l| !l.chars().all(char::is_whitespace))
+                .map(|l| l.chars().take_while(|c| *c == ' ' || *c == '\t').count())
+                .min()
+                .unwrap_or(0);
+            if n == 0 {
+                return Value::str(s.to_string());
+            }
+            let mut out: String = lines
+                .iter()
+                .map(|l| {
+                    // A whitespace-only line normalizes to an empty one.
+                    if l.chars().all(char::is_whitespace) {
+                        "\n".to_string()
+                    } else {
+                        l.chars().skip(n).collect::<String>() + "\n"
+                    }
+                })
+                .collect();
+            if !s.ends_with('\n') {
+                out.pop();
+            }
+            Value::str(out)
+        }
+        // JDK `String.indent(n)`: each line gains `n` spaces (or loses up to
+        // `-n` leading whitespace) and ends with `\n`.
+        (Value::Str(s), "indent") if args.len() == 1 => {
+            let n = args.first().and_then(as_i64).unwrap_or(0);
+            let mut out = String::new();
+            for line in jdk_lines(s) {
+                if n > 0 {
+                    out.push_str(&" ".repeat(n as usize));
+                    out.push_str(line);
+                } else {
+                    let skip = line
+                        .chars()
+                        .take(n.unsigned_abs() as usize)
+                        .take_while(|c| c.is_whitespace())
+                        .count();
+                    out.extend(line.chars().skip(skip));
+                }
+                out.push('\n');
+            }
+            Value::str(out)
+        }
         // `s.stripIndent(n)` drops exactly `n` leading characters per line (a
-        // shorter line becomes empty) and joins the lines with `\n`.
+        // shorter or whitespace-only line becomes empty) and joins the lines
+        // with `\n`.
         (Value::Str(s), "stripIndent") => {
             let n = args.first().and_then(as_i64).unwrap_or(0);
             if s.is_empty() || n <= 0 {
                 return Value::str(s.to_string());
             }
             let n = n as usize;
-            Value::str(
-                read_lines(s)
-                    .iter()
-                    .map(|l| l.chars().skip(n).collect::<String>())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
+            let mut out = read_lines(s)
+                .iter()
+                .map(|l| {
+                    if l.chars().all(char::is_whitespace) {
+                        String::new()
+                    } else {
+                        l.chars().skip(n).collect::<String>()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            // A final line ending stays.
+            if s.ends_with('\n') {
+                out.push('\n');
+            }
+            Value::str(out)
         }
         // `s.stripMargin([c])` — drop each line's leading whitespace up to and
         // including the first margin character (`|` by default). A line without
@@ -17011,6 +17295,17 @@ fn b_in(vm: &mut VM, _argc: u8) -> Value {
     if let Some(r) = as_range(&raw) {
         return Value::bool(range_contains(&r, &needle));
     }
+    // A class, a pattern and a closure answer their `isCase`: an instance
+    // test, a whole-string match, the closure's truth.
+    if as_class_ref(&raw).is_some()
+        || closure_meta(&raw).is_some()
+        || regex_matches(&raw, "").is_some()
+    {
+        return is_case(vm, &raw, &needle);
+    }
+    if as_set(&raw).is_some() {
+        return dispatch_call(vm, raw, "contains", vec![needle]);
+    }
     let coll = deref_list(&raw);
     if let Some(found) = omap_get(&coll, &mapkey::encode(&needle)) {
         return Value::bool(found.is_some());
@@ -17781,10 +18076,10 @@ pub fn jdk_class_package(name: &str) -> Option<&'static str> {
         | "Tuple7" | "Tuple8" | "Tuple9" | "Tuple10" | "Tuple11" | "Tuple12" | "Tuple13"
         | "Tuple14" | "Tuple15" | "Tuple16" => "groovy.lang",
         "Collections" | "Arrays" | "List" | "Map" | "Set" | "Random" | "UUID" | "Objects"
-        | "Optional" | "Date" | "TimeZone" => "java.util",
+        | "Optional" | "Date" | "TimeZone" | "Calendar" | "GregorianCalendar" => "java.util",
         // Named for its resolve-strategy constants (`Closure.DELEGATE_FIRST`).
         "Closure" => "groovy.lang",
-        "Expando" => "groovy.util",
+        "Expando" | "ConfigSlurper" | "ConfigObject" => "groovy.util",
         _ => return None,
     })
 }
@@ -17805,6 +18100,8 @@ pub fn jdk_qualified_class(package: &str, name: &str) -> Option<String> {
             ("java.math", "RoundingMode")
                 | ("java.math", "MathContext")
                 | ("groovy.time", "TimeCategory")
+                | ("java.sql", "Timestamp")
+                | ("groovy.namespace", "QName")
         );
     known.then(|| format!("{package}.{name}"))
 }
@@ -18043,7 +18340,10 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
     if (class, method) == ("Tuple", "tuple") {
         return seq::tuple_of(args);
     }
-    if matches!(class, "Date" | "TimeZone") {
+    if matches!(
+        class,
+        "Date" | "TimeZone" | "Calendar" | "GregorianCalendar"
+    ) {
         if let Some(v) = date::static_call(vm, class, method, args) {
             ANY_DATE.with(|a| a.set(true));
             return Some(v);
@@ -18767,6 +19067,9 @@ fn java_system_property(name: &str) -> Option<String> {
 
 /// The static fields a script reads off a JDK class (`Integer.MAX_VALUE`).
 fn static_field(class: &str, name: &str) -> Option<Value> {
+    if matches!(class, "Calendar" | "GregorianCalendar") {
+        return date::calendar_constant(name).map(Value::int);
+    }
     Some(match (class, name) {
         // `groovy.lang.Closure`'s resolve-strategy constants, which a script
         // names when it sets `clo.resolveStrategy`.
@@ -20132,10 +20435,41 @@ fn stepped_range_sublist(vm: &mut VM, r: &RangeVal, step: &Value, args: &[Value]
 // layout rather than a guess, and the probes in `parity-scripts/probes.txt`
 // pin it.
 
+/// The set or map a wrapper view stands for, if `id` is one.
+fn view_target_id(id: u32) -> Option<u32> {
+    VIEW_TARGETS.with(|v| {
+        let v = v.borrow();
+        if v.is_empty() {
+            None
+        } else {
+            v.get(&id).copied()
+        }
+    })
+}
+
+/// The storage a set handle reads and writes: its own, or a view's target.
+fn set_backing_id(id: u32) -> u32 {
+    view_target_id(id).unwrap_or(id)
+}
+
+/// A wrapper view of the set or map `v` reporting `class`, with the write
+/// policy `writes`; `None` when `v` has no heap storage to share.
+fn coll_view(v: &Value, class: &'static str, writes: seq::Writes) -> Option<Value> {
+    let target = match map_backing(v) {
+        Value::Obj(id) => set_backing_id(id),
+        _ => return None,
+    };
+    let view = heap_push(HeapObj::CollView);
+    let Value::Obj(vid) = view else { return None };
+    VIEW_TARGETS.with(|m| m.borrow_mut().insert(vid, target));
+    seq::set_flavor(&view, class, writes);
+    Some(view)
+}
+
 /// The set behind a handle: its elements in insertion order and its kind.
 fn as_set(v: &Value) -> Option<(Vec<Value>, SetKind)> {
     match v {
-        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(set_backing_id(*id) as usize) {
             Some(HeapObj::SetVal { items, kind, .. }) => Some((items.clone(), *kind)),
             _ => None,
         }),
@@ -20262,7 +20596,7 @@ fn set_elements(items: &[Value], kind: SetKind) -> Vec<Value> {
 /// The implementation kind of a set handle, read without copying it.
 fn set_kind(v: &Value) -> Option<SetKind> {
     let Value::Obj(id) = v else { return None };
-    HEAP.with(|h| match h.borrow().get(*id as usize) {
+    HEAP.with(|h| match h.borrow().get(set_backing_id(*id) as usize) {
         Some(HeapObj::SetVal { kind, .. }) => Some(*kind),
         _ => None,
     })
@@ -20563,7 +20897,7 @@ fn index_member(index: &SetIndex, items: &[Value], probe: &Value) -> bool {
 /// can re-enter the VM for a user class's `equals`, which would re-borrow.
 fn set_member(recv: &Value, items: &[Value], probe: &Value) -> bool {
     let hit = match recv {
-        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(set_backing_id(*id) as usize) {
             Some(HeapObj::SetVal { index, .. }) => index.find(probe),
             _ => None,
         }),
@@ -20587,7 +20921,7 @@ fn set_member(recv: &Value, items: &[Value], probe: &Value) -> bool {
 /// candidate is cloned, so this is O(1) where the scan was O(n).
 fn set_membership_fast(recv: &Value, probe: &Value) -> Option<bool> {
     let Value::Obj(id) = recv else { return None };
-    let candidate = HEAP.with(|h| match h.borrow().get(*id as usize) {
+    let candidate = HEAP.with(|h| match h.borrow().get(set_backing_id(*id) as usize) {
         Some(HeapObj::SetVal { items, index, .. }) => {
             Some(index.find(probe).map(|p| p.map(|pos| items[pos].clone())))
         }
@@ -20650,7 +20984,7 @@ fn set_is_hashed(v: &Value) -> bool {
     let Value::Obj(id) = v else { return false };
     HEAP.with(|h| {
         matches!(
-            h.borrow().get(*id as usize),
+            h.borrow().get(set_backing_id(*id) as usize),
             Some(HeapObj::SetVal { kind, .. }) if !matches!(kind, SetKind::Tree | SetKind::TreeBy(_))
         )
     })
@@ -20659,7 +20993,7 @@ fn set_is_hashed(v: &Value) -> bool {
 /// The element count of a set handle, without copying its elements.
 fn set_len(v: &Value) -> Option<usize> {
     match v {
-        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(*id as usize) {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(set_backing_id(*id) as usize) {
             Some(HeapObj::SetVal { items, .. }) => Some(items.len()),
             _ => None,
         }),
@@ -20671,11 +21005,13 @@ fn set_len(v: &Value) -> Option<usize> {
 /// the element is absent — this does no membership test of its own.
 fn set_push(v: &Value, item: Value) {
     let Value::Obj(id) = v else { return };
-    if seq::write_refused(*id, true) {
+    if seq::write_refused(*id, true) || seq::write_refused(set_backing_id(*id), true) {
         return;
     }
     HEAP.with(|h| {
-        if let Some(HeapObj::SetVal { items, index, .. }) = h.borrow_mut().get_mut(*id as usize) {
+        if let Some(HeapObj::SetVal { items, index, .. }) =
+            h.borrow_mut().get_mut(set_backing_id(*id) as usize)
+        {
             index.record(&item, items.len());
             items.push(item);
         }
@@ -20690,13 +21026,13 @@ fn set_push(v: &Value, item: Value) {
 /// element vector, so every position an index entry names could have moved.
 fn set_store(v: &Value, items: Vec<Value>) {
     let Value::Obj(id) = v else { return };
-    if seq::write_refused(*id, true) {
+    if seq::write_refused(*id, true) || seq::write_refused(set_backing_id(*id), true) {
         return;
     }
     HEAP.with(|h| {
         if let Some(HeapObj::SetVal {
             items: dst, index, ..
-        }) = h.borrow_mut().get_mut(*id as usize)
+        }) = h.borrow_mut().get_mut(set_backing_id(*id) as usize)
         {
             *index = SetIndex::build(&items);
             *dst = items;
@@ -21368,7 +21704,10 @@ fn subsequences_of(items: &[Value]) -> Vec<Value> {
 fn omap_retain(v: &Value, keep: impl Fn(&str) -> bool) -> bool {
     match map_backing(v) {
         Value::Obj(id) => {
-            if seq::write_refused(id, true) {
+            // A wrapper view refuses by its own policy, then by its target's.
+            if matches!(v, Value::Obj(o) if *o != id && seq::write_refused(*o, true))
+                || seq::write_refused(id, true)
+            {
                 return true;
             }
             HEAP.with(|h| match h.borrow_mut().get_mut(id as usize) {
@@ -21459,6 +21798,8 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
         return match omap_get(&props, name).flatten() {
             Some(v) => v,
             None if name == "class" => class_ref_of(recv),
+            // `Expando.getProperties()` — the expando's own property map.
+            None if name == "properties" => props,
             None => Value::Undef,
         };
     }
@@ -21467,6 +21808,10 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     // other value: `[a:1].size`, `[a:1].class`, and `[a:1].length` are all
     // `null` in Groovy, while `[size: 9].size` is `9`. Checked first for that
     // reason.
+    // A `ConfigObject` creates what it is asked for and lacks.
+    if ANY_JSON.with(Cell::get) && config::is_config(recv) {
+        return config::get_or_create(recv, name);
+    }
     if let Some(found) = omap_get(recv, name) {
         // A missing key on a `withDefault` map runs the closure and stores its
         // answer here too: `[x:1].withDefault { 7 }.y` is `7` and leaves
@@ -22544,8 +22889,15 @@ fn render_shape(vm: &mut VM, v: &Value) -> String {
             return text;
         }
     }
-    // `Expando.toString` is its property map's, Java-style (`{a=1}`).
+    // `Expando.toString` is its `toString` closure's, else its property
+    // map's, Java-style (`{a=1}`).
     if let Some(props) = as_expando(v) {
+        if let Some(Some(clo)) = omap_get(&props, "toString") {
+            if closure_meta(&clo).is_some() {
+                let out = dispatch_call(vm, v.clone(), "toString", Vec::new());
+                return groovy_str(&out);
+            }
+        }
         return java_to_string(vm, &props);
     }
     // `Optional.toString`: `Optional[value]` (the value through Java's
@@ -23004,6 +23356,36 @@ fn read_lines(s: &str) -> Vec<String> {
 /// trailing whitespace. A string ending in a line terminator opts *out* of the
 /// outdent (the indent stays) but still loses its trailing whitespace, and the
 /// terminator is put back.
+/// `String.lines()`: split on `\n`, `\r` and `\r\n`, with no empty line after
+/// a final terminator.
+fn jdk_lines(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\n' => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            b'\r' => {
+                out.push(&s[start..i]);
+                if b.get(i + 1) == Some(&b'\n') {
+                    i += 1;
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if start < s.len() {
+        out.push(&s[start..]);
+    }
+    out
+}
+
 fn strip_indent(s: &str) -> String {
     if s.is_empty() {
         return String::new();
@@ -23450,7 +23832,7 @@ pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
         }
     }
     if matches!(op, NumOp::Eq | NumOp::Ne) {
-        if let Some(eq) = xml_equal(a, b) {
+        if let Some(eq) = xml_equal(a, b).or_else(|| expando_equal(a, b)) {
             return Ok(Value::bool(eq == matches!(op, NumOp::Eq)));
         }
     }

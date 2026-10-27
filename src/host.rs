@@ -469,7 +469,7 @@ pub const GFIELD_INIT: u16 = 783;
 
 /// Builtin id for the conversion a store into a variable declared as a script
 /// class applies: Groovy's `castToType`, which unlike `as` refuses what it
-/// cannot convert (see [`cast_assign`]). Stack: the value, then the type name.
+/// cannot convert (see `cast_assign`). Stack: the value, then the type name.
 pub const GCAST_ASSIGN: u16 = 784;
 
 /// Builtin id for `this` outside any class: the script object.
@@ -25786,7 +25786,7 @@ fn step_fractional(
 }
 
 /// Does `name` spell a JDK or Groovy type Groovy imports by default (or a
-/// qualified one) whose hierarchy [`jdktypes`] knows? The compiler reads a
+/// qualified one) whose hierarchy `jdktypes` knows? The compiler reads a
 /// `case Comparable:` label as a type check through this.
 pub fn is_jdk_type_name(name: &str) -> bool {
     jdktypes::resolve(name).is_some()

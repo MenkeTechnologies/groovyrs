@@ -4,24 +4,40 @@
 //! no output-comparing test can see it; it only turns filling a collection
 //! quadratic. Each test here fills one far enough that the quadratic form takes
 //! minutes on a debug build while the linear form takes a few seconds, and
-//! bounds the run well above the latter.
+//! bounds the run well above the latter. The bound is on the child's CPU time,
+//! not wall time, so a loaded machine running other jobs does not fail it.
 
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// Run `src` through the `groovy` binary; answer its stdout and wall time.
+/// User plus system CPU time consumed so far by this process's waited-for
+/// children.
+fn children_cpu() -> Duration {
+    // SAFETY: `getrusage` only writes the `rusage` it is handed.
+    let usage = unsafe {
+        let mut u: libc::rusage = std::mem::zeroed();
+        libc::getrusage(libc::RUSAGE_CHILDREN, &mut u);
+        u
+    };
+    let tv = |t: libc::timeval| {
+        Duration::from_secs(t.tv_sec as u64) + Duration::from_micros(t.tv_usec as u64)
+    };
+    tv(usage.ru_utime) + tv(usage.ru_stime)
+}
+
+/// Run `src` through the `groovy` binary; answer its stdout and CPU time.
 fn timed(name: &str, src: &str) -> (String, Duration) {
     let path = std::env::temp_dir().join(format!(
         "groovyrs_scaling_{name}_{}.groovy",
         std::process::id()
     ));
     std::fs::write(&path, src).unwrap();
-    let start = Instant::now();
+    let start = children_cpu();
     let out = Command::new(env!("CARGO_BIN_EXE_groovy"))
         .arg(&path)
         .output()
         .expect("spawn groovy");
-    let took = start.elapsed();
+    let took = children_cpu() - start;
     let _ = std::fs::remove_file(&path);
     assert!(
         out.status.success(),
@@ -31,7 +47,7 @@ fn timed(name: &str, src: &str) -> (String, Duration) {
     (String::from_utf8_lossy(&out.stdout).into_owned(), took)
 }
 
-/// The bound every program here must finish inside. The linear form of each
+/// The CPU time every program here must finish inside. The linear form of each
 /// takes a few seconds on a debug build; the quadratic one took minutes.
 const BOUND: Duration = Duration::from_secs(20);
 

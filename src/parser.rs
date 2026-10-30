@@ -993,6 +993,7 @@ impl Parser {
             let mut key = String::new();
             // The `name = true` attributes, by name.
             let mut set_true: Vec<String> = Vec::new();
+            let mut set_false: Vec<String> = Vec::new();
             if self.is(&Tok::LParen) {
                 let mut depth = 0;
                 loop {
@@ -1018,6 +1019,7 @@ impl Parser {
                             args.push_str("true");
                             set_true.push(key.clone());
                         }
+                        Tok::False => set_false.push(key.clone()),
                         _ => {}
                     }
                     self.advance();
@@ -1065,7 +1067,15 @@ impl Parser {
                 "AutoClone" => gen.auto_clone = true,
                 "Category" => gen.category = Some(args.clone()),
                 // `@Immutable` and `@Value` are `@Canonical` plus read-only properties.
-                "Singleton" => gen.singleton = true,
+                "Singleton" => {
+                    gen.singleton = true;
+                    gen.singleton_property = opts
+                        .iter()
+                        .find(|(k, _)| k == "property")
+                        .map(|(_, v)| v.clone());
+                    gen.singleton_lazy = flag("lazy");
+                    gen.singleton_lax = set_false.iter().any(|k| k == "strict");
+                }
                 "Immutable" | "Value" => {
                     gen.to_string = true;
                     gen.equals_hash = true;
@@ -1125,6 +1135,7 @@ impl Parser {
         is_trait: bool,
         generated: Generated,
     ) -> Result<StmtKind, String> {
+        let decl_line = self.line();
         self.advance(); // `class` / `interface` / `trait`
         let name = self.ident()?;
         self.skip_newlines();
@@ -1166,7 +1177,7 @@ impl Parser {
             }
             self.advance();
         }
-        let (mut fields, ctors, methods, abstract_methods) =
+        let (mut fields, mut ctors, mut methods, abstract_methods) =
             self.class_body(&name, is_interface)?;
         // Every field an interface declares is a `static final` constant; a
         // trait's fields are per-instance state.
@@ -1190,20 +1201,14 @@ impl Parser {
             });
         }
         if generated.singleton {
-            fields.push(Field {
-                name: "instance".to_string(),
-                ty: name.clone(),
-                init: Some(Expr::New {
-                    class: name.clone(),
-                    args: Vec::new(),
-                    line: self.line(),
-                    anon: None,
-                }),
-                is_static: true,
-                is_property: true,
-                is_delegate: false,
-                is_final: false,
-            });
+            self.singleton_members(
+                &name,
+                &generated,
+                decl_line,
+                &mut fields,
+                &mut ctors,
+                &mut methods,
+            )?;
         }
         Ok(StmtKind::Class {
             name,
@@ -1218,6 +1223,121 @@ impl Parser {
             abstract_methods,
             anonymous: false,
         })
+    }
+
+    /// The members `@Singleton` adds, ported from Groovy's
+    /// `SingletonASTTransformation`: a static field holding the instance (made
+    /// when the class initializes, or by the first `getInstance()` when
+    /// `lazy`), its static getter, and — unless the class declares a no-argument
+    /// constructor — a no-argument constructor that refuses once the instance
+    /// exists, with `RuntimeException("Can't instantiate singleton S. Use
+    /// S.instance")`.
+    fn singleton_members(
+        &self,
+        class: &str,
+        generated: &Generated,
+        line: u32,
+        fields: &mut Vec<Field>,
+        ctors: &mut Vec<Ctor>,
+        methods: &mut Vec<Method>,
+    ) -> Result<(), String> {
+        if !generated.singleton_lax && !ctors.is_empty() {
+            return Err(format!(
+                "groovyrs: @Singleton didn't expect to find one or more additional constructors: remove constructor(s) or set strict=false on line {line}"
+            ));
+        }
+        let prop = generated
+            .singleton_property
+            .clone()
+            .unwrap_or_else(|| "instance".to_string());
+        let field = || Expr::Var(prop.clone());
+        let make = || Expr::New {
+            class: class.to_string(),
+            args: Vec::new(),
+            line,
+            anon: None,
+        };
+        let not_null = |e: Expr| Expr::Binary {
+            op: BinOp::Ne,
+            lhs: Box::new(e),
+            rhs: Box::new(Expr::Null),
+        };
+        let lazy = generated.singleton_lazy;
+        fields.push(Field {
+            name: prop.clone(),
+            ty: class.to_string(),
+            init: (!lazy).then(make),
+            is_static: true,
+            is_property: false,
+            is_delegate: false,
+            is_final: !lazy,
+        });
+        let getter = format!("get{}", crate::host::capitalize(&prop));
+        if !methods
+            .iter()
+            .any(|m| m.name == getter && m.params.is_empty())
+        {
+            let mut body = Vec::new();
+            if lazy {
+                body.push(Stmt::new(
+                    line,
+                    StmtKind::If {
+                        cond: Expr::Binary {
+                            op: BinOp::Eq,
+                            lhs: Box::new(field()),
+                            rhs: Box::new(Expr::Null),
+                        },
+                        then: vec![Stmt::new(
+                            line,
+                            StmtKind::Assign {
+                                name: prop.clone(),
+                                op: AssignOp::Assign,
+                                value: make(),
+                            },
+                        )],
+                        els: Vec::new(),
+                    },
+                ));
+            }
+            body.push(Stmt::new(
+                line,
+                StmtKind::Return {
+                    value: Some(field()),
+                },
+            ));
+            methods.push(Method {
+                name: getter,
+                params: Vec::new(),
+                param_types: Vec::new(),
+                body,
+                ret_ty: class.to_string(),
+                is_static: true,
+            });
+        }
+        if !ctors.iter().any(|c| c.params.is_empty()) {
+            let message = format!("Can't instantiate singleton {class}. Use {class}.{prop}");
+            ctors.push(Ctor {
+                params: Vec::new(),
+                param_types: Vec::new(),
+                body: vec![Stmt::new(
+                    line,
+                    StmtKind::If {
+                        cond: not_null(field()),
+                        then: vec![Stmt::new(
+                            line,
+                            StmtKind::Throw(Expr::New {
+                                class: "RuntimeException".to_string(),
+                                args: vec![Expr::Str(message)],
+                                line,
+                                anon: None,
+                            }),
+                        )],
+                        els: Vec::new(),
+                    },
+                )],
+            });
+        }
+        Ok(())
     }
 
     /// A type's `{ members }`, sorted into fields, constructors, methods and

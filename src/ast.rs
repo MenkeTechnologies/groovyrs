@@ -404,6 +404,15 @@ pub struct Generated {
     pub immutable: bool,
     /// `@Singleton` — a `static` `instance` property holding the one instance.
     pub singleton: bool,
+    /// `@Singleton(property = 'p')` — the name of the static property holding
+    /// the instance (`instance` when unset).
+    pub singleton_property: Option<String>,
+    /// `@Singleton(lazy = true)` — the instance is made by the first
+    /// `getInstance()`, not when the class initializes.
+    pub singleton_lazy: bool,
+    /// `@Singleton(strict = false)` â declared constructors are allowed; by
+    /// default they are a compile error.
+    pub singleton_lax: bool,
     /// A `record` declaration: its components are read-only properties read
     /// through `x()` (no `getX()`), and it renders `Name[x=1, y=2]`.
     pub record: bool,

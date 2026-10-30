@@ -6557,6 +6557,41 @@ fn static_read(vm: &mut VM, recv: &Value, name: &str) -> Option<Result<Value, St
     }))
 }
 
+/// `C.name` through a `static getName()` that the script class `C` or an
+/// ancestor declares with no parameters. `None` when there is none, so the
+/// caller reads the field.
+fn static_getter_read(
+    vm: &mut VM,
+    recv: &Value,
+    class: &str,
+    name: &str,
+) -> Option<Result<Value, String>> {
+    let cid = find_class(class)?;
+    let cap = capitalize(name);
+    let declares = |getter: &str| {
+        class_chain(cid)
+            .iter()
+            .filter_map(|c| class_meta(*c))
+            .any(|m| {
+                m.method_sigs
+                    .iter()
+                    .any(|s| s.is_static && s.types.is_empty() && s.name == getter)
+            })
+    };
+    let getter = format!("get{cap}");
+    if !declares(&getter) {
+        return None;
+    }
+    let (idx, args) = resolve_method_call(vm, cid, &getter, &[])?;
+    if let Err(e) = ensure_static_init(vm, cid) {
+        return Some(Err(e));
+    }
+    let mut pushes = Vec::with_capacity(args.len() + 1);
+    pushes.push(recv.clone());
+    pushes.extend(args);
+    Some(invoke_sub(vm, idx, &pushes))
+}
+
 /// Write the `static` field `name` through `recv`. `None` when no class in
 /// reach declares it.
 fn static_write(vm: &mut VM, recv: &Value, name: &str, value: Value) -> Option<Result<(), String>> {
@@ -6632,7 +6667,7 @@ fn set_instance_field(v: &Value, field: &str, val: Value) -> bool {
 
 /// Uppercase the first character (`x` → `X`) for Groovy's getter/setter naming
 /// (`getX`/`setX`).
-fn capitalize(s: &str) -> String {
+pub(crate) fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
@@ -22835,6 +22870,12 @@ fn dispatch_property(vm: &mut VM, recv: &Value, name: &str) -> Value {
     // A `java.lang.Class` exposes its accessors as properties (`c.name`,
     // `c.simpleName`) — Groovy's getter-to-property rule.
     if let Some(qualified) = as_class_ref(recv) {
+        // A script class's `static` property reads through its static getter
+        // when one is declared (`K.x` calls `static getX()`), as Groovy's
+        // `MetaClassImpl.getProperty` prefers the getter to the field.
+        if let Some(res) = static_getter_read(vm, recv, &qualified, name) {
+            return static_result(vm, res);
+        }
         // A script class's `static` field (`Q.n`).
         if let Some(res) = static_read(vm, recv, name) {
             return static_result(vm, res);

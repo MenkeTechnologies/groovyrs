@@ -695,3 +695,44 @@ groovy.lang.GroovyRuntimeException
 "####;
     check(src, expected);
 }
+
+/// `@Singleton` is a port of `SingletonASTTransformation`: a static `getInstance()`,
+/// a `lazy` instance made on first use, a `property` name, and a no-argument
+/// constructor that raises once the instance exists. `S.x` reads through a
+/// declared `static getX()`. `new S()` made a second instance and `getInstance()`
+/// was missing.
+#[test]
+fn singleton_transform_guards_the_constructor() {
+    let src = r####"@Singleton class S { int n = 1 }
+println S.instance.n
+println S.instance.is(S.getInstance())
+try { new S(); println "made" } catch (e) { println e.class.name + ": " + e.message }
+@Singleton(lazy = true) class L { }
+println "before"
+println L.instance.getClass().name
+println L.instance.is(L.instance)
+@Singleton(property = 'only') class Q { }
+println Q.only.getClass().name
+try { new Q() } catch (e) { println e.message }
+try { S.instance = null } catch (e) { println e.class.name }
+@Singleton(strict = false) class T { int v; T() { v = 3 } }
+println T.instance.v
+class K { static int x = 1; static int getX() { 5 } }
+println K.x
+println K.@x
+"####;
+    let expected = r####"1
+true
+java.lang.RuntimeException: Can't instantiate singleton S. Use S.instance
+before
+L
+true
+Q
+Can't instantiate singleton Q. Use Q.only
+groovy.lang.ReadOnlyPropertyException
+3
+5
+1
+"####;
+    check(src, expected);
+}

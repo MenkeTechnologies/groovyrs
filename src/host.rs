@@ -724,10 +724,14 @@ thread_local! {
     /// (a zero divisor) is only *thrown* while armed; unarmed it stays the hard
     /// fault it has always been, because nothing would ever look at it.
     static EXC_ARMED: Cell<bool> = const { Cell::new(false) };
-    /// The `(source column, value)` pairs recorded while evaluating the current
-    /// `assert` condition — what Groovy's power-assert rendering lays out under
-    /// the condition's source text. Cleared at each `assert`.
-    static ASSERT_VALUES: RefCell<Vec<(u32, Value)>> = const { RefCell::new(Vec::new()) };
+    /// The `(call depth, source column, value)` triples recorded while
+    /// evaluating `assert` conditions — what Groovy's power-assert rendering
+    /// lays out under the condition's source text. The depth is the VM's frame
+    /// count when the value was recorded, so an `assert` that runs inside
+    /// another's condition (in a closure or a function the condition calls)
+    /// keeps its values apart: each `assert` starts by dropping what was
+    /// recorded at its own depth or deeper, and renders only its own depth's.
+    static ASSERT_VALUES: RefCell<Vec<(usize, u32, Value)>> = const { RefCell::new(Vec::new()) };
     /// The new contents a self-mutating GDK list call produced, parked for the
     /// compiler-emitted writeback that follows it (see [`b_writeback`]).
     ///
@@ -8371,11 +8375,13 @@ fn is_case(vm: &mut VM, label: &Value, subject: &Value) -> Value {
 // Power assert
 // ---------------------------------------------------------------------------
 
-/// `GASSERT_START`: begin an `assert`, discarding any values a previous one
-/// recorded.
+/// `GASSERT_START`: begin an `assert`, discarding the values a previous one at
+/// this call depth or deeper recorded. An enclosing `assert` whose condition is
+/// still running keeps its own.
 fn b_assert_start(vm: &mut VM, argc: u8) -> Value {
     pop_args(vm, argc);
-    ASSERT_VALUES.with(|v| v.borrow_mut().clear());
+    let depth = vm.frames.len();
+    ASSERT_VALUES.with(|v| v.borrow_mut().retain(|(d, ..)| *d < depth));
     Value::Undef
 }
 
@@ -8385,7 +8391,8 @@ fn b_assert_start(vm: &mut VM, argc: u8) -> Value {
 fn b_assert_rec(vm: &mut VM, _argc: u8) -> Value {
     let col = vm.stack.pop().unwrap_or(Value::Undef).to_int() as u32;
     let value = vm.stack.pop().unwrap_or(Value::Undef);
-    ASSERT_VALUES.with(|v| v.borrow_mut().push((col, value.clone())));
+    let depth = vm.frames.len();
+    ASSERT_VALUES.with(|v| v.borrow_mut().push((depth, col, value.clone())));
     value
 }
 
@@ -8407,7 +8414,17 @@ fn b_assert_fail(vm: &mut VM, _argc: u8) -> Value {
     let ast_text = pop_str(vm);
     let text = pop_str(vm);
     let message = vm.stack.pop().unwrap_or(Value::Undef);
-    let values = ASSERT_VALUES.with(|v| std::mem::take(&mut *v.borrow_mut()));
+    let depth = vm.frames.len();
+    let values: Vec<(u32, Value)> = ASSERT_VALUES.with(|v| {
+        let mut v = v.borrow_mut();
+        let own = v
+            .iter()
+            .filter(|(d, ..)| *d == depth)
+            .map(|(_, col, value)| (*col, value.clone()))
+            .collect();
+        v.retain(|(d, ..)| *d < depth);
+        own
+    });
     let (class, message) = match message {
         // `text` is the statement's verbatim source, which the recorded columns
         // are 1-based over.

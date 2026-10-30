@@ -843,3 +843,34 @@ groovy.lang.MissingMethodException
 "####;
     check(src, expected);
 }
+
+/// An `assert` that runs inside another's condition (in a closure or a called
+/// function) records and renders its own values; the enclosing one keeps its
+/// own. The inner one's values replaced the outer's.
+#[test]
+fn nested_asserts_keep_their_own_values() {
+    let src = r####"def x = 5; def a = [1, 2]
+try { assert a.every { assert it > 0; it > x } } catch (AssertionError e) { println e.message }
+try { assert a.every { assert it > 1; true } } catch (AssertionError e) { println e.message }
+def chk(n) { assert n > 0; n > 3 }
+try { assert chk(x - 4) && x > 9 } catch (AssertionError e) { println e.message }
+try { assert chk(x) && x > 9 } catch (AssertionError e) { println e.message }
+"####;
+    let expected = r####"assert a.every { assert it > 0; it > x }
+       | |
+       | false
+       [1, 2]
+assert it > 1
+       |  |
+       1  false
+assert chk(x - 4) && x > 9
+       |   | |    |
+       |   5 1    false
+       false
+assert chk(x) && x > 9
+       |   |  |  | |
+       |   5  |  5 false
+       true   false
+"####;
+    check(src, expected);
+}

@@ -5791,6 +5791,30 @@ impl Compiler {
                 let (l, r) = (self.static_num_kind(lhs)?, self.static_num_kind(rhs)?);
                 Some(l.max(r))
             }
+            // `%` promotes as `+` does (`int % int` is an `Integer`, `long % int`
+            // a `Long`, `double % int` a `Double`), and its magnitude never
+            // exceeds the divisor's, so a typed accumulator fed by it
+            // (`int s = 0; … s += i % 7`) needs no store conversion — which
+            // would be a `CallBuiltin` in the loop body and keep the loop out
+            // of the tracing tier.
+            Expr::Binary {
+                op: BinOp::Mod,
+                lhs,
+                rhs,
+            } => {
+                let (l, r) = (self.static_num_kind(lhs)?, self.static_num_kind(rhs)?);
+                Some(l.max(r))
+            }
+            // The bitwise operators on two integral operands answer the wider
+            // of the two integral types, and never leave it.
+            Expr::Binary {
+                op: BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor,
+                lhs,
+                rhs,
+            } => {
+                let (l, r) = (self.static_num_kind(lhs)?, self.static_num_kind(rhs)?);
+                (l != NumKind::Double && r != NumKind::Double).then(|| l.max(r))
+            }
             _ => None,
         }
     }

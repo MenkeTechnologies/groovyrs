@@ -804,3 +804,42 @@ true
 "####;
     check(src, expected);
 }
+
+/// Every active category's declarations of a name are weighed together by the
+/// receiver's and arguments' types, and the closest fit wins whichever order the
+/// categories were applied in. The innermost category answered by arity alone.
+#[test]
+fn categories_select_by_receiver_type() {
+    let src = r####"class SCat { static String hi(String s) { "S:$s" } }
+class ICat { static String hi(Integer i) { "I:$i" } }
+use(SCat, ICat) { println "a".hi(); println 5.hi() }
+use(ICat, SCat) { println "a".hi(); println 5.hi() }
+class OCat { static String hi(Object o) { "O:$o" } }
+use(OCat, SCat) { println "a".hi(); println 5.hi() }
+use(SCat, OCat) { println "a".hi(); println 5.hi() }
+class NCat { static String twice(Number n) { "N:" + (n * 2) } }
+class LCat { static String twice(Long n) { "L:" + (n * 2) } }
+use(LCat, NCat) { println 3.twice(); println 3L.twice(); println 1.5.twice() }
+class ACat { static String add(String s, Integer i) { "SI" }; static String add(String s, String t) { "SS" } }
+use(ACat) { println "x".add(1); println "x".add("y") }
+@Category(String) class Shout { String shout() { toUpperCase() + "!" } }
+use(Shout) { println "hey".shout(); try { 5.shout() } catch (e) { println e.class.name } }
+"####;
+    let expected = r####"S:a
+I:5
+S:a
+I:5
+S:a
+O:5
+S:a
+O:5
+N:6
+L:6
+N:3.0
+SI
+SS
+HEY!
+groovy.lang.MissingMethodException
+"####;
+    check(src, expected);
+}

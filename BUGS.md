@@ -423,6 +423,9 @@ reported as parse or compile errors, never silently mis-run.
   metaclass's `respondsTo`/`hasProperty`, `metaClass.m << { … }`,
   `metaClass.constructor << { … }` (chosen by its parameter types), and
   `@Category(T)` restricted to `T` receivers.
+- **Category selection by type** â every active category's declarations of a
+  name are weighed together against the receiver's and arguments' declared
+  types, closest fit first, the innermost category winning a tie.
 - **AST transforms** — `@ToString(ignoreNulls = true)`, `@Sortable`,
   `@AutoClone`; an annotation on a script function or local
   (`@CompileStatic`, `@Memoized`, `@Field`) is read past.
@@ -1822,13 +1825,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   answers the code points as an `ArrayList` (see above). (`toArray()`,
   `toCharArray()` and `String.bytes` answer real `Object[]` / `char[]` /
   `byte[]` arrays.)
-- **A category is selected by arity, not by its first parameter's type.** Groovy
-  applies `static int twice(Integer i)` only to an `Integer` receiver; groovyrs
-  applies any method of an active category whose declared parameter count matches
-  the call plus one, whatever the receiver is. Two categories declaring the same
-  method name for different receiver types would therefore resolve to the
-  innermost rather than to the matching one. The runtime is dynamically typed —
-  declared parameter types are diagnostic everywhere else too.
 - **A closure's `resolveStrategy` is stored, not obeyed, and `owner` is
   absent.** `clo.delegate` and `clo.resolveStrategy` read and write, and a
   user-set delegate joins the resolution chain — a name the owner cannot resolve

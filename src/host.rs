@@ -708,6 +708,12 @@ thread_local! {
     /// recent first, with the receiver passed as the category method's first
     /// argument — which is what a Groovy category is.
     static CATEGORIES: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    /// The `Long`/`Short`/`Byte` box a numeric call's receiver was before
+    /// [`dispatch_boxed`] read it back to its number, innermost last, so a
+    /// category method weighs the receiver's real class (`3L.twice()` picks
+    /// `twice(Long)` over `twice(Number)`). Taken by the first category lookup,
+    /// so a call nested inside that one does not see it.
+    static BOXED_RECEIVERS: RefCell<Vec<Option<Value>>> = const { RefCell::new(Vec::new()) };
     static SPREAD_ARGS: RefCell<Option<Vec<Value>>> = const { RefCell::new(None) };
     static MISS_PROBE: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Set when the method [`MISS_PROBE`] names has missed.
@@ -10929,23 +10935,28 @@ fn b_use(vm: &mut VM, argc: u8) -> Value {
 
 /// A method an active category supplies for `recv`, if any.
 ///
-/// Tried innermost-first, and only after the receiver's own dispatch has failed
-/// — a category never shadows a method the receiver already has. The receiver
-/// becomes the category method's first argument, which is what makes
+/// Tried only after the receiver's own dispatch has failed — a category never
+/// shadows a method the receiver already has. The receiver becomes the
+/// category method's first argument, which is what makes
 /// `static int twice(Integer i)` answer `3.twice()`.
+///
+/// Every active category's declarations of the name are weighed together, as
+/// `GroovyCategorySupport` does: the receiver and arguments must fit the
+/// declared parameter types, and the closest fit wins ([`params::best_fit`]),
+/// so `use(SCat, ICat)` answers `"a".hi()` from `hi(String)` and `5.hi()` from
+/// `hi(Integer)` whichever order the two were applied in. On a tie the
+/// innermost (most recently applied) category wins.
 fn dispatch_category(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Option<Value> {
     let ids: Vec<u32> = CATEGORIES.with(|c| c.borrow().iter().rev().copied().collect());
+    // (full parameter types including the receiver's, sub, `@Category` form)
+    let mut candidates: Vec<(Vec<String>, u16, bool)> = Vec::new();
     for id in ids {
-        // A category that does not supply this method is simply skipped — the
-        // next one still gets its turn.
-        let Some(idx) = lookup_method(id, method) else {
-            continue;
-        };
         // An `@Category` class's instance method runs with the receiver as
         // `this`; a classic category's static method takes it as its first
         // argument, which its declared parameter count includes.
         let annotated = class_generates(id, GEN_CATEGORY);
         // An `@Category(T)` method applies only to a `T`.
+        let mut receiver_ty = "def".to_string();
         if annotated && ensure_static_init(vm, id).is_ok() {
             let target = STATICS.with(|s| {
                 s.borrow()
@@ -10953,31 +10964,73 @@ fn dispatch_category(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) ->
                     .and_then(|f| f.get("$category"))
                     .map(groovy_str)
             });
-            if target.is_some_and(|t| !t.is_empty() && !value_is_a(recv, &t)) {
-                continue;
+            match target {
+                Some(t) if !t.is_empty() => {
+                    if !value_is_a(recv, &t) {
+                        continue;
+                    }
+                    receiver_ty = t;
+                }
+                _ => {}
             }
         }
-        let receiver_params = u8::from(!annotated);
-        if method_arity(id, method) != Some(args.len() as u8 + receiver_params) {
-            continue;
-        }
-        // Slot 0 of a method body is `this`, which a static category method
-        // never uses.
-        let mut pushes = Vec::with_capacity(args.len() + 2);
-        if !annotated {
-            pushes.push(Value::Undef);
-        }
-        pushes.push(recv.clone());
-        pushes.extend_from_slice(args);
-        return Some(match invoke_sub(vm, idx, &pushes) {
-            Ok(v) => v,
-            Err(e) => {
-                fault(vm, e);
-                Value::Undef
+        let arity = args.len() + usize::from(!annotated);
+        let key = format!("{method}/{arity}");
+        let decls: Vec<(Vec<String>, u16)> = match class_meta(id) {
+            Some(meta) if meta.typed_overloads.contains_key(&key) => {
+                meta.typed_overloads[&key].clone()
             }
-        });
+            _ => match lookup_overload_exact(id, method, arity).or_else(|| {
+                (method_arity(id, method) == Some(arity as u8))
+                    .then(|| lookup_method(id, method))
+                    .flatten()
+            }) {
+                Some(idx) => vec![(vec!["def".to_string(); arity], idx)],
+                None => continue,
+            },
+        };
+        for (types, idx) in decls {
+            let full = if annotated {
+                std::iter::once(receiver_ty.clone()).chain(types).collect()
+            } else {
+                types
+            };
+            candidates.push((full, idx, annotated));
+        }
     }
-    None
+    // The receiver as the call saw it: a box [`dispatch_boxed`] read back to
+    // its number is weighed as its own class.
+    let recv = BOXED_RECEIVERS
+        .with(|b| b.borrow_mut().last_mut().and_then(Option::take))
+        .filter(|b| {
+            boxed::unbox(b.clone()).to_int() == recv.to_int() && matches!(recv, Value::Int(_))
+        })
+        .unwrap_or_else(|| recv.clone());
+    let mut full_args = Vec::with_capacity(args.len() + 1);
+    full_args.push(recv);
+    full_args.extend_from_slice(args);
+    let decls: Vec<(Vec<String>, u16)> = candidates
+        .iter()
+        .map(|(types, idx, _)| (types.clone(), *idx))
+        .collect();
+    let params::Fit::Best(idx) = params::best_fit(&decls, &full_args) else {
+        return None;
+    };
+    let annotated = candidates.iter().any(|(_, i, a)| *i == idx && *a);
+    // Slot 0 of a method body is `this`, which a static category method
+    // never uses.
+    let mut pushes = Vec::with_capacity(args.len() + 2);
+    if !annotated {
+        pushes.push(Value::Undef);
+    }
+    pushes.extend(full_args);
+    Some(match invoke_sub(vm, idx, &pushes) {
+        Ok(v) => v,
+        Err(e) => {
+            fault(vm, e);
+            Value::Undef
+        }
+    })
 }
 
 /// Is `method` one a `Map` itself answers? A map entry holding a closure is
@@ -11611,7 +11664,14 @@ fn dispatch_boxed(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Op
     }
     let long = boxed::is_long_box(recv) || args.iter().any(boxed::is_long_box);
     let unboxed: Vec<Value> = args.iter().cloned().map(boxed::unbox).collect();
+    let boxed_recv = boxed::as_box(recv).is_some();
+    if boxed_recv {
+        BOXED_RECEIVERS.with(|b| b.borrow_mut().push(Some(recv.clone())));
+    }
     let out = dispatch_call_unboxed(vm, boxed::unbox(recv.clone()), method, unboxed);
+    if boxed_recv {
+        BOXED_RECEIVERS.with(|b| b.borrow_mut().pop());
+    }
     let at_width = matches!(
         method,
         "plus"

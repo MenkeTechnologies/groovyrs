@@ -294,7 +294,8 @@ Implemented and checked against Apache Groovy:
   operator method: `+`→`plus`, `-`→`minus`, `*`→`multiply`, `/`→`div`,
   `%`→`remainder`, `**`→`power`, unary `-`→`negative`, `[]`→`getAt`,
   `<<`→`leftShift`, `>>`→`rightShift`;
-  `<`/`>`/`<=`/`>=`/`<=>` via `compareTo` (`<=>` answers its sign); null-safe `==`/`!=` via `compareTo`
+  `<`/`>`/`<=`/`>=`/`<=>` via `compareTo` on a class that implements
+  `Comparable` (`<=>` answers its sign); null-safe `==`/`!=` via `compareTo`
   (Comparable) or `equals`. A primitive operand never routes to a method.
 - **Method / property dispatch** — `s.length()`, `list.size()`,
   `"hi".toUpperCase()`, `map.k`, chains on literals (`[1,2,3].size()`), over a
@@ -421,7 +422,8 @@ Implemented and checked against Apache Groovy:
   `2.3333333333`, and `1.0G.divide(3.0G)` raises `ArithmeticException` where the
   operator approximates.
 - **`<=>` needs a `Comparable`** — a list, a map, a set, a range and a user class
-  with no `compareTo` are not, so `[1, 2] <=> [1, 3]` raises the
+  that does not implement `Comparable` (declaring `compareTo` is not enough) are
+  not, so `[1, 2] <=> [1, 3]` raises the
   `IllegalArgumentException` Groovy raises (even for two equal lists) rather than
   inventing an order. `null` still orders before everything.
 - **JDK statics** — `Objects` (`equals`, `isNull` / `nonNull`, `toString`,

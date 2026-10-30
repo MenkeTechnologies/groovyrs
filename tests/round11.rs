@@ -773,3 +773,34 @@ java.util.Collections$UnmodifiableMap
 "####;
     check(src, expected);
 }
+
+/// Declaring `compareTo` does not make a class `Comparable`: `<=>` and the
+/// relational operators raise `IllegalArgumentException` for it, and `==` falls
+/// back to identity. A declared `compareTo` stood in for `implements Comparable`.
+#[test]
+fn compare_to_without_comparable_is_not_comparable() {
+    let src = r####"class V { int v; int compareTo(o) { v <=> o.v } }
+class W implements Comparable { int v; int compareTo(o) { v <=> o.v } }
+class X extends W { }
+println(new W(v: 1) <=> new W(v: 2))
+println(new W(v: 1) < new W(v: 2))
+println(new X(v: 2) == new X(v: 2))
+for (op in [{ a, b -> a <=> b }, { a, b -> a < b }, { a, b -> a >= b }]) {
+    try { println op(new V(v: 1), new V(v: 2)) } catch (e) { println e.class.name }
+}
+println(new V(v: 1) == new V(v: 1))
+def v = new V(v: 1); println(v == v)
+println([new W(v: 3), new W(v: 1)].sort()*.v)
+"####;
+    let expected = r####"-1
+true
+true
+java.lang.IllegalArgumentException
+java.lang.IllegalArgumentException
+java.lang.IllegalArgumentException
+false
+true
+[1, 3]
+"####;
+    check(src, expected);
+}

@@ -770,9 +770,10 @@ println new Scale(10) / 3
 
 #[test]
 fn comparable_class_drives_relational_operators() {
-    // A class defining `compareTo` powers `<`, `>`, `<=`, `>=`.
+    // A `Comparable` class's `compareTo` powers `<`, `>`, `<=`, `>=` (declaring
+    // `compareTo` without `implements Comparable` does not; see round11).
     let src = r#"
-class Vec {
+class Vec implements Comparable<Vec> {
     int x
     Vec(int v) { this.x = v }
     int compareTo(Vec o) { x - o.x }
@@ -814,9 +815,9 @@ println p == null
 
 #[test]
 fn comparable_drives_equality() {
-    // A Comparable class (defines `compareTo`) compares equal via compareTo==0.
+    // A Comparable class compares equal via compareTo==0.
     let src = r#"
-class Vec {
+class Vec implements Comparable<Vec> {
     int x
     Vec(int v) { this.x = v }
     int compareTo(Vec o) { x - o.x }

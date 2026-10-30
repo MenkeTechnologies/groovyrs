@@ -8817,9 +8817,7 @@ fn values_equal_shape(a: &Value, b: &Value) -> bool {
     // with `a1 == a2`.
     for (x, y) in [(a, b), (b, a)] {
         if let Some(inst) = as_instance(x) {
-            if lookup_method(inst.class, "equals").is_some()
-                || lookup_method(inst.class, "compareTo").is_some()
-            {
+            if lookup_method(inst.class, "equals").is_some() || is_comparable_instance(x) {
                 return instance_equals(x, y).unwrap_or(false);
             }
         }
@@ -23407,7 +23405,10 @@ fn b_mod(vm: &mut VM, _argc: u8) -> Value {
 fn b_cmp(vm: &mut VM, _argc: u8) -> Value {
     let b = vm.stack.pop().unwrap_or(Value::Undef);
     let a = vm.stack.pop().unwrap_or(Value::Undef);
-    if let Some(res) = call_user_method(vm, &a, "compareTo", std::slice::from_ref(&b)) {
+    let user = (as_instance(&a).is_none() || is_comparable_instance(&a))
+        .then(|| call_user_method(vm, &a, "compareTo", std::slice::from_ref(&b)))
+        .flatten();
+    if let Some(res) = user {
         return match res {
             Ok(v) => match as_i64(&v) {
                 Some(n) => Value::int(n.signum()),
@@ -23494,12 +23495,21 @@ fn number_string_order(a: &Value, b: &Value) -> Option<Option<std::cmp::Ordering
     Some(Some(if flip { order.reverse() } else { order }))
 }
 
+/// Whether `v` is a script-class instance that is `Comparable`: its class (or
+/// an ancestor, or a trait it has) implements `Comparable`, or `@Sortable`
+/// generated it. Declaring `compareTo` alone does not make a class
+/// `Comparable`, so `<=>`, `<` and `==` do not call it.
+fn is_comparable_instance(v: &Value) -> bool {
+    as_instance(v).is_some_and(|inst| {
+        class_generates(inst.class, GEN_SORTABLE) || value_is_a(v, "Comparable")
+    })
+}
+
 /// True for a value Java would not accept as `Comparable`: a collection, a map,
 /// a range, or a class instance with no `compareTo`.
 fn is_incomparable(v: &Value) -> bool {
-    if let Some(inst) = as_instance(v) {
-        return lookup_method(inst.class, "compareTo").is_none()
-            && !class_generates(inst.class, GEN_SORTABLE);
+    if as_instance(v).is_some() {
+        return !is_comparable_instance(v);
     }
     matches!(v, Value::Array(_) | Value::Hash(_))
         || as_list_raw(v).is_some()
@@ -24821,7 +24831,7 @@ fn instance_equals(a: &Value, b: &Value) -> Result<bool, String> {
         return Ok(false);
     };
     // Comparable → equality is `compareTo(...) == 0`.
-    if lookup_method(inst.class, "compareTo").is_some() {
+    if is_comparable_instance(a) {
         return match instance_compare(a, b) {
             Some(res) => res.map(|c| c == 0),
             None => Ok(false),
@@ -24846,8 +24856,9 @@ fn instance_equals(a: &Value, b: &Value) -> Result<bool, String> {
 /// and Comparable-based `==`. `None` when the class defines no `compareTo` (so
 /// an ordered comparison falls back to the hook's default).
 fn instance_compare(a: &Value, b: &Value) -> Option<Result<i64, String>> {
-    let inst = as_instance(a)?;
-    lookup_method(inst.class, "compareTo")?;
+    if !is_comparable_instance(a) {
+        return None;
+    }
     let res =
         with_vm(|vm| call_user_method(vm, a, "compareTo", std::slice::from_ref(b))).flatten()?;
     Some(res.map(|v| v.to_int()))

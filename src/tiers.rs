@@ -2,9 +2,9 @@
 //!
 //! Enabling the JIT is not the same as being compiled by it, and the only
 //! honest way to tell the two apart is to ask the VM. This module runs a
-//! program and then queries fusevm's own eligibility and cache predicates â
+//! program and then queries fusevm's own eligibility and cache predicates —
 //! `is_block_eligible`, `block_jit_is_compiled`, `trace_is_compiled`,
-//! `find_jit_region` â so the answer comes from the compiler that would have
+//! `find_jit_region` — so the answer comes from the compiler that would have
 //! done the work rather than from an assumption about it.
 //!
 //! `groovy --tiers script.groovy` prints the report.
@@ -13,13 +13,13 @@ use std::collections::BTreeMap;
 
 use fusevm::{Chunk, ChunkBuilder, JitCompiler, Op};
 
-/// A loop header â the target of a backward branch â and what became of it.
+/// A loop header — the target of a backward branch — and what became of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Loop {
     /// Op index of the loop header the backward branch jumps to.
     pub anchor: usize,
     /// Whether fusevm would accept this loop's body as a trace. Asked of
-    /// `is_trace_eligible` with the body's ops â the same predicate the
+    /// `is_trace_eligible` with the body's ops — the same predicate the
     /// recorder applies to what it recorded, which for a loop whose body has
     /// no early exit is the same op sequence.
     pub trace_eligible: bool,
@@ -32,7 +32,7 @@ pub struct Loop {
 /// What the tiers did with one chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkTiers {
-    /// Which chunk this is â `main` for a whole Groovy program.
+    /// Which chunk this is — `main` for a whole Groovy program.
     pub name: String,
     /// Ops in the compiled chunk.
     pub ops: usize,
@@ -46,7 +46,7 @@ pub struct ChunkTiers {
     pub largest_eligible_region: Option<(usize, usize)>,
     /// Every loop header, and whether the tracing JIT compiled it.
     pub loops: Vec<Loop>,
-    /// Op kinds the **block** tier refuses, by occurrence count â what keeps
+    /// Op kinds the **block** tier refuses, by occurrence count — what keeps
     /// the whole chunk from being compiled in one piece.
     ///
     /// Not the same question as whether a loop is traced: the tracing tier
@@ -130,7 +130,7 @@ impl std::fmt::Display for Report {
 /// compiles after its warmup threshold and the tracing tier only after a loop
 /// has gone round enough times to be recorded. groovyrs writes program output
 /// straight to the process stdout, so the program's own output precedes the
-/// report â what is measured is what an ordinary run does.
+/// report — what is measured is what an ordinary run does.
 pub fn report(src: &str) -> Result<Report, String> {
     // The chunk lowered here is the same bytecode the run below executes, and
     // fusevm keys its compiled code by the chunk's op hash, so asking this copy
@@ -179,7 +179,7 @@ pub fn inspect_chunk(name: &str, chunk: &Chunk) -> ChunkTiers {
     }
 }
 
-/// Every op index a backward branch jumps to â fusevm anchors a trace at each.
+/// Every op index a backward branch jumps to — fusevm anchors a trace at each.
 fn loop_anchors(ops: &[Op]) -> Vec<usize> {
     let mut anchors: Vec<usize> = ops
         .iter()
@@ -244,7 +244,7 @@ mod tests {
         "def f(int n) { def t = 0; for (int i = 0; i < n; i++) { t += i }; return t }\nf(200000)";
 
     /// The report can say yes. A counted loop built by hand in the rotated
-    /// shape â entered at its body, closed by a conditional backward branch â
+    /// shape — entered at its body, closed by a conditional backward branch —
     /// is the one shape fusevm's trace compiler accepts (`jit.rs` compiles a
     /// `JumpIfTrue`/`JumpIfFalse` close and bails on an unconditional `Jump`),
     /// and after a run the report finds the installed trace. Without this,
@@ -285,8 +285,8 @@ mod tests {
     /// backward `Jump`, which the trace compiler records and then declines, so
     /// the hottest shape a Groovy program has stayed in the interpreter
     /// forever. `Compiler::while_stmt` now emits every `for` and `while`
-    /// rotated â the test duplicated as an entry guard and a conditional
-    /// backward branch â which is the shape
+    /// rotated — the test duplicated as an entry guard and a conditional
+    /// backward branch — which is the shape
     /// [`a_rotated_slot_loop_reaches_a_compiled_trace`] proves fusevm accepts.
     ///
     /// Keeping it as an assertion rather than deleting it is the point: rotate
@@ -294,8 +294,8 @@ mod tests {
     /// refuse, and this fails.
     ///
     /// It does not assert `!blacklisted`, because this program's accumulator
-    /// leaves 32-bit `Integer` range â `f(200000)` sums to 19 999 900 000, which
-    /// wraps â and fusevm blacklists a strict-mode trace that bails on integer
+    /// leaves 32-bit `Integer` range — `f(200000)` sums to 19 999 900 000, which
+    /// wraps — and fusevm blacklists a strict-mode trace that bails on integer
     /// overflow. That is a different mechanism from loop shape, and
     /// [`a_loop_that_does_not_overflow_keeps_its_trace`] is what covers it.
     #[test]
@@ -313,7 +313,7 @@ mod tests {
     /// The same loop shape whose accumulator stays inside `Integer` range keeps
     /// its trace: nothing deopts, so the header is never blacklisted. Together
     /// with the test above this separates the two reasons a loop can end up
-    /// back in the interpreter â the shape the frontend emits (fixed) and
+    /// back in the interpreter — the shape the frontend emits (fixed) and
     /// Groovy's 32-bit wrap reaching the trace's overflow bail (not).
     #[test]
     fn a_loop_that_does_not_overflow_keeps_its_trace() {

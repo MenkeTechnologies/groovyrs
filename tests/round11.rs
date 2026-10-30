@@ -633,3 +633,38 @@ class java.lang.Class
 "####;
     check(src, expected);
 }
+
+/// A closure parameter default applies only to a call that stops short of the
+/// parameter, as Groovy's one-`doCall`-per-arity closures do: an explicit
+/// `null` stays `null`. The default answered for an explicit `null` too.
+#[test]
+fn closure_default_does_not_replace_an_explicit_null() {
+    let src = r####"def c = { a, b = 5 -> "$a $b" }
+println c(1, null)
+println c(1)
+println c(1, 2)
+def d = { a = 1, b = 2 -> "$a $b" }
+println d()
+println d(null)
+println d(7)
+println d(null, null)
+println([3].collect { v, w = 'w' -> "$v $w" })
+def e = { a, b = a * 2 -> b }
+println e(4)
+println(c.call(3))
+println(c.call(3, null))
+"####;
+    let expected = r####"1 null
+1 5
+1 2
+1 2
+null 2
+7 2
+null null
+[3 w]
+8
+3 5
+3 null
+"####;
+    check(src, expected);
+}

@@ -4651,6 +4651,9 @@ impl Compiler {
                 let keep = if *post { Keep::Old } else { Keep::New };
                 self.write_target(target, incdec_op(*inc), &ONE, keep)?;
             }
+            Expr::Call { name, line, .. } if name == crate::ast::CLOSURE_ARGC => {
+                self.emit_call_builtin(crate::host::GCLOSURE_ARGC, 0, *line)?;
+            }
             Expr::Call { name, args, line } => {
                 self.call(name, args, *line)?;
                 // A user function that answers a `Long` boxes it on the way

@@ -13,6 +13,12 @@
 //! `this`, property get/set with auto getter/setter, `new`). See `BUGS.md` for
 //! what is still missing.
 
+/// The synthetic call name a closure's defaulted-parameter prologue reads its
+/// argument count through (the parser emits it, the compiler lowers it to
+/// [`crate::host::GCLOSURE_ARGC`]), named like the other synthetic names
+/// (`$closure_N`, `$mp`).
+pub const CLOSURE_ARGC: &str = "$closure_argc";
+
 /// A parsed script: the ordered top-level statements.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {

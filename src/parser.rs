@@ -4396,7 +4396,7 @@ impl Parser {
         self.eat(&Tok::LBrace)?;
         self.skip_newlines();
         let explicit_params = self.has_closure_arrow();
-        let mut defaults: Vec<(String, Expr)> = Vec::new();
+        let mut defaults: Vec<(String, usize, Expr)> = Vec::new();
         let mut varargs = false;
         let mut param_types: Vec<String> = Vec::new();
         let params = if explicit_params {
@@ -4449,12 +4449,12 @@ impl Parser {
                 param_types.push(ty);
                 let name = self.ident()?;
                 // `{ a, b = 5 -> … }` — a default value for a trailing
-                // parameter. It becomes a guard at the top of the body, because
-                // a call that omits the argument arrives with it null.
+                // parameter. It becomes a guard at the top of the body on the
+                // number of arguments the call passed.
                 if self.is(&Tok::Assign) {
                     self.advance();
                     self.skip_newlines();
-                    defaults.push((name.clone(), self.expression()?));
+                    defaults.push((name.clone(), params.len(), self.expression()?));
                 }
                 params.push(name);
                 if self.is(&Tok::Comma) {
@@ -4474,11 +4474,12 @@ impl Parser {
             Vec::new()
         };
         let mut body = self.block()?;
-        // Prepend `if (p == null) p = <default>` for each defaulted parameter.
-        // (A call that passes an explicit `null` therefore takes the default,
-        // where Groovy — which generates one overload per arity — keeps null.)
+        // Prepend `if (<argument count> <= i) p = <default>` for each defaulted
+        // parameter at index `i`. Groovy generates one `doCall` per arity, so
+        // the default applies only to a call that stops short of the
+        // parameter, and an explicit `null` stays `null`.
         let default_count = defaults.len();
-        for (name, value) in defaults.into_iter().rev() {
+        for (name, index, value) in defaults.into_iter().rev() {
             let line = body.first().map(|s| s.line).unwrap_or(0);
             body.insert(
                 0,
@@ -4486,9 +4487,13 @@ impl Parser {
                     line,
                     StmtKind::If {
                         cond: Expr::Binary {
-                            op: BinOp::Eq,
-                            lhs: Box::new(Expr::Var(name.clone())),
-                            rhs: Box::new(Expr::Null),
+                            op: BinOp::Le,
+                            lhs: Box::new(Expr::Call {
+                                name: crate::ast::CLOSURE_ARGC.to_string(),
+                                args: Vec::new(),
+                                line,
+                            }),
+                            rhs: Box::new(Expr::Int(index as i64, IntWidth::Int)),
                         },
                         then: vec![Stmt::new(
                             line,

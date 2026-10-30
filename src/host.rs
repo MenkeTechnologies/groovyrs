@@ -512,6 +512,11 @@ pub const GNEW_ANON: u16 = 791;
 /// field initializer. Stack: the instance, then the capture's index.
 pub const GANON_CAP: u16 = 792;
 
+/// Builtin id for the number of arguments the running closure body was called
+/// with, which its defaulted parameters' prologue reads (see
+/// [`crate::ast::CLOSURE_ARGC`]).
+pub const GCLOSURE_ARGC: u16 = 793;
+
 /// The method name `list.remove((Object) x)` compiles to: the cast selects
 /// `Collection.remove(Object)` over `List.remove(int)`, which only the call
 /// site can see. Not an identifier, so no script can name it.
@@ -636,6 +641,7 @@ pub fn install(vm: &mut VM) {
     vm.register_builtin(GBOX_LONG, b_box_long);
     vm.register_builtin(GNEW_ANON, b_new_anon);
     vm.register_builtin(GANON_CAP, b_anon_cap);
+    vm.register_builtin(GCLOSURE_ARGC, b_closure_argc);
     // A fresh VM install starts with an empty object heap: `Value::Obj` handles
     // are chunk-relative (a closure carries a name-pool index, an instance a
     // class id), so a handle from a prior run must never survive into a new
@@ -842,6 +848,20 @@ thread_local! {
     /// The op indices of the `+ 0` before a native bitwise op (see
     /// [`set_unbox_sites`]).
     static UNBOX_SITES: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+}
+
+thread_local! {
+    /// The argument count of each closure call in progress, innermost last,
+    /// pushed and popped around the body by [`invoke_closure_with`].
+    static CLOSURE_ARGC: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `GCLOSURE_ARGC`: how many arguments the running closure body was called
+/// with. Groovy generates one `doCall` per arity for `{ a, b = 5 -> }`, so a
+/// defaulted parameter takes its default only when the call stops short of
+/// it, and an explicit `null` stays `null`.
+fn b_closure_argc(_vm: &mut VM, _argc: u8) -> Value {
+    Value::int(CLOSURE_ARGC.with(|s| s.borrow().last().copied().unwrap_or(0)) as i64)
 }
 
 thread_local! {
@@ -5610,6 +5630,7 @@ fn invoke_closure_with(
         vm.stack.push(cap.clone());
     }
     CLOSURE_STACK.with(|s| s.borrow_mut().push(clo.clone()));
+    CLOSURE_ARGC.with(|s| s.borrow_mut().push(args.len()));
     let no_stack = NO_STACK.replace(false);
     let out = run_sub(vm, entry, stack_base);
     NO_STACK.set(no_stack);
@@ -5618,6 +5639,9 @@ fn invoke_closure_with(
     // the plain `MissingMethodException`.
     downgrade_no_stack();
     CLOSURE_STACK.with(|s| {
+        s.borrow_mut().pop();
+    });
+    CLOSURE_ARGC.with(|s| {
         s.borrow_mut().pop();
     });
     if delegated.is_some() {

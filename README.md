@@ -588,8 +588,9 @@ Implemented and checked against Apache Groovy:
   (with `includes`, `excludes`, `includeFields`, `includeSuperProperties`),
   `@Canonical` (the three together), `@Immutable` / `@Value`
   (`@Canonical` plus read-only properties: a write raises
-  `ReadOnlyPropertyException`), `@Singleton` (a static `instance` and `getInstance()`, `lazy`, `property`,
-  and a constructor that refuses a second instance), and
+  `ReadOnlyPropertyException`, and collection properties are unmodifiable
+  copies), `@Singleton` (a static `instance` and `getInstance()`, `lazy`,
+  `property`, and a constructor that refuses a second instance), and
   a field-level `@Delegate` (calls the class does not answer forward to the
   field; with several delegate fields, the first one takes them all). Members
   are chosen as Groovy chooses them — the annotated class's own properties,

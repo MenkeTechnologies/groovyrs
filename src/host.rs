@@ -7706,7 +7706,26 @@ fn new_instance(vm: &mut VM, name: String, args: Vec<Value>, captures: Vec<Value
     } else {
         return raise_no_matching_ctor(vm, &meta.name, &args);
     }
+    if class_generates(cid, GEN_IMMUTABLE) {
+        freeze_collection_fields(&handle);
+    }
     handle
+}
+
+/// An `@Immutable` instance's collection properties, as the generated
+/// constructor leaves them: each `List`, `Set` and `Map` replaced by an
+/// unmodifiable copy (`Collections.unmodifiableList(new ArrayList(xs))` and its
+/// siblings), so neither a write through the property nor a later change to the
+/// collection the caller passed reaches the instance.
+fn freeze_collection_fields(handle: &Value) {
+    let Some(inst) = as_instance(handle) else {
+        return;
+    };
+    for (name, v) in inst.fields {
+        if let Some(frozen) = seq::unmodifiable_copy(&v) {
+            set_instance_field(handle, &name, frozen);
+        }
+    }
 }
 
 /// Run the implicit superclass constructor for a class with no declared ctors:

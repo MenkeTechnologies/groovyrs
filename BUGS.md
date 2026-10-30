@@ -1921,8 +1921,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   binary-heap order), `Stack`, `Vector` and a seeded `Random` are, but
   `list.stream()` and `Arrays.stream` are not, `"s".chars()` answers the element
   list. `Arrays.hashCode` is not ported.
-- **`@Immutable` does not copy or freeze its collection properties.** Property
-  writes raise `ReadOnlyPropertyException`, but a `List`/`Map` property stays
-  mutable in place where Groovy wraps it unmodifiable. `@Delegate` ignores its
-  attributes and forwards to the first delegate field only. `@Category`/`use(Cat)` on a script class,
-  `@Lazy`, `@Memoized` and `@Builder` are not modeled.
+- **`@Delegate` ignores its attributes and forwards to the first delegate field
+  only.** `@Category`/`use(Cat)` on a script class, `@Lazy`, `@Memoized` and
+  `@Builder` are not modeled.

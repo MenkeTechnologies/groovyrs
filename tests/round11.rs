@@ -736,3 +736,40 @@ groovy.lang.ReadOnlyPropertyException
 "####;
     check(src, expected);
 }
+
+/// An `@Immutable` class holds unmodifiable copies of its `List`, `Set` and `Map`
+/// properties: an in-place write raises `UnsupportedOperationException` and a
+/// later change to the passed collection does not show. They stayed mutable.
+#[test]
+fn immutable_collection_properties_are_frozen_copies() {
+    let src = r####"import groovy.transform.Immutable
+@Immutable class P { List xs; Map m; String n }
+def p = new P(xs: [1], m: [a: 1], n: 'x')
+try { p.xs << 2; println p.xs } catch (e) { println e.class.name }
+try { p.xs.add(3); println p.xs } catch (e) { println e.class.name }
+try { p.m.b = 2; println p.m } catch (e) { println e.class.name }
+println p.xs.getClass().name
+def src = [9]; def q = new P(xs: src, m: [:], n: 'y'); src << 10; println q.xs
+println p
+def r = new P([5], [k: 1], 'z'); try { r.xs << 6 } catch (e) { println e.class.name }; println r.xs
+println(p == new P(xs: [1], m: [a: 1], n: 'x'))
+@Immutable class Q2 { Set s }
+def q2 = new Q2(s: [1, 2] as Set); try { q2.s << 3 } catch (e) { println e.class.name }; println q2.s; println q2.s.getClass().name
+println p.m.getClass().name
+"####;
+    let expected = r####"java.lang.UnsupportedOperationException
+java.lang.UnsupportedOperationException
+java.lang.UnsupportedOperationException
+java.util.Collections$UnmodifiableRandomAccessList
+[9]
+P([1], [a:1], x)
+java.lang.UnsupportedOperationException
+[5]
+true
+java.lang.UnsupportedOperationException
+[1, 2]
+java.util.Collections$UnmodifiableSet
+java.util.Collections$UnmodifiableMap
+"####;
+    check(src, expected);
+}

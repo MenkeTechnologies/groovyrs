@@ -973,8 +973,12 @@ reported as parse or compile errors, never silently mis-run.
   is not how `println` renders them. Recorded shapes: variables, binary
   operators (under the operator's column), unary `!`/`-`, `instanceof`, method
   calls and property reads (under the member name's column), subscripts (under
-  the `[`), and calls. The `assert cond : message` form instead raises a plain
-  `java.lang.AssertionError` reading `<message>. Expression: <canonical text>`,
+  the `[`), and calls. Inside a `GString` placeholder (`${…}`, `$a.b`, in
+  every quoting form) values are recorded at their columns in the script, as
+  Groovy 6 records them; inside a closure body nothing is, because Groovy
+  compiles the body into a class with no value recorder. The
+  `assert cond : message` form instead raises a plain `java.lang.AssertionError`
+  reading `<message>. Expression: <canonical text>`,
   plus a `Values:` clause naming the condition's bare-variable operands — where
   the canonical text is Groovy's `Expression.getText()` (fully parenthesised,
   implicit `this` on a bare call, qualified type names), *not* the source. The
@@ -1371,11 +1375,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   — because those are the places the compiler now checks for a pending throw.
   Only the value handed straight to `println` runs the print first. Same shape
   and cause as the `ConcurrentModificationException` entry below.
-- **A power assert does not record inside a `GString`.** A placeholder is lexed
-  on its own, so its columns are relative to the placeholder rather than the
-  script and recording it would put values under the wrong column. `assert
-  "v=${x}" == "no"` therefore shows the `==` result but not `x`, where Groovy
-  shows both.
 - **A handful of `java.util.regex` constructs are refused, not approximated.**
   The engine underneath is `fancy-regex`, chosen because Java's flavour is
   backtracking (backreferences, lookaround) and the linear-time `regex` crate

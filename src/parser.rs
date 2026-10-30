@@ -4381,7 +4381,18 @@ impl Parser {
     /// names bind the closure's arguments; without one (`{ ... }`) the closure
     /// takes a single implicit parameter named `it`. The body is a statement
     /// list whose last expression is the closure's return value.
+    ///
+    /// A power assert records nothing inside a closure: Groovy compiles the
+    /// body into a class of its own, whose code has no value recorder, so
+    /// `assert [1].any { it == x }` shows only `any`'s result.
     fn closure_literal(&mut self) -> Result<Expr, String> {
+        let recording = self.recording.take();
+        let e = self.closure_literal_unrecorded();
+        self.recording = recording;
+        e
+    }
+
+    fn closure_literal_unrecorded(&mut self) -> Result<Expr, String> {
         self.eat(&Tok::LBrace)?;
         self.skip_newlines();
         let explicit_params = self.has_closure_arrow();
@@ -4836,7 +4847,9 @@ fn gstring_expr(parts: &[GPart], outer: &mut Parser) -> Result<Expr, String> {
     for part in parts {
         out.push(match part {
             GPart::Text(t) => GStringPart::Text(t.clone()),
-            GPart::Expr(src) => GStringPart::Expr(parse_interpolation(src, outer)?),
+            GPart::Expr(src, offset) => {
+                GStringPart::Expr(parse_interpolation(src, *offset, outer)?)
+            }
         });
     }
     Ok(Expr::GString(out))
@@ -5309,20 +5322,30 @@ fn method_pointer(recv: Expr, name: String, line: u32) -> Expr {
 /// It runs the same lexer and expression grammar as the enclosing script, so an
 /// interpolation is not a second, weaker language. An anonymous class written
 /// in one is numbered and hoisted with the enclosing parser's.
-fn parse_interpolation(src: &str, outer: &mut Parser) -> Result<Expr, String> {
+///
+/// `offset` is where `src` begins in the source `outer` was lexed from. Inside
+/// an `assert` condition the placeholder's tokens are rebased onto that source
+/// and the sub-parser records its values at their columns there, as Groovy's
+/// power assert does; everywhere else the placeholder is parsed from its own
+/// text, which costs no copy of the enclosing source.
+fn parse_interpolation(src: &str, offset: usize, outer: &mut Parser) -> Result<Expr, String> {
     // `${-> expr}` is a closure literal whose braces are the placeholder's own.
     if src.trim_start().starts_with("->") {
-        return parse_interpolation(&format!("{{ {src} }}"), outer);
+        return parse_interpolation(&format!("{{ {src} }}"), offset - 2, outer);
     }
-    let tokens = crate::lexer::lex(src)?;
+    let mut tokens = crate::lexer::lex(src)?;
+    let text = if outer.recording.is_some() {
+        rebase_offsets(&mut tokens, offset);
+        outer.src.clone()
+    } else {
+        src.to_string()
+    };
     let mut p = Parser {
         toks: tokens,
-        src: src.to_string(),
+        src: text,
         pos: 0,
         tmp: 0,
-        // A placeholder is lexed on its own, so its columns are relative to the
-        // placeholder rather than the script — see BUGS.md.
-        recording: None,
+        recording: outer.recording,
         pending: Vec::new(),
         hoisted: Vec::new(),
         param_defaults: Vec::new(),
@@ -5351,6 +5374,22 @@ fn parse_interpolation(src: &str, outer: &mut Parser) -> Result<Expr, String> {
         ));
     }
     Ok(e)
+}
+
+/// Shift lexed tokens' byte offsets by `base`, including the placeholder offsets
+/// a `GString` token carries, so they index the source the lexed text was
+/// sliced from.
+fn rebase_offsets(tokens: &mut [Token], base: usize) {
+    for t in tokens {
+        t.offset += base;
+        if let Tok::GStr(parts) = &mut t.kind {
+            for part in parts {
+                if let GPart::Expr(_, at) = part {
+                    *at += base;
+                }
+            }
+        }
+    }
 }
 
 /// Java's eight primitive type names.

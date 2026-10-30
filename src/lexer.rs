@@ -35,7 +35,10 @@ pub struct Token {
 #[derive(Debug, Clone, PartialEq)]
 pub enum GPart {
     Text(String),
-    Expr(String),
+    /// The placeholder's source text and the byte offset of its first character
+    /// in the lexed source, so a power assert can record the values inside it
+    /// at their real columns.
+    Expr(String, usize),
 }
 
 /// Token kinds.
@@ -462,7 +465,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                         if !s.is_empty() {
                             parts.push(GPart::Text(std::mem::take(&mut s)));
                         }
-                        parts.push(GPart::Expr(inner));
+                        parts.push(GPart::Expr(inner, i + 2));
                         i = next;
                         continue;
                     }
@@ -474,7 +477,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                         if !s.is_empty() {
                             parts.push(GPart::Text(std::mem::take(&mut s)));
                         }
-                        parts.push(GPart::Expr(path));
+                        parts.push(GPart::Expr(path, i + 1));
                         i = next;
                         continue;
                     }
@@ -522,7 +525,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 .iter()
                 .map(|p| match p {
                     GPart::Text(t) => t.clone(),
-                    GPart::Expr(e) => format!("${{{e}}}"),
+                    GPart::Expr(e, _) => format!("${{{e}}}"),
                 })
                 .collect();
             out.push(Token {
@@ -866,7 +869,7 @@ fn scan_slashy(src: &str, start: usize, line: u32) -> Result<(Vec<GPart>, usize,
                 if !text.is_empty() {
                     parts.push(GPart::Text(std::mem::take(&mut text)));
                 }
-                parts.push(GPart::Expr(inner));
+                parts.push(GPart::Expr(inner, i + 2));
                 i = next;
                 continue;
             }
@@ -875,7 +878,7 @@ fn scan_slashy(src: &str, start: usize, line: u32) -> Result<(Vec<GPart>, usize,
                 if !text.is_empty() {
                     parts.push(GPart::Text(std::mem::take(&mut text)));
                 }
-                parts.push(GPart::Expr(path));
+                parts.push(GPart::Expr(path, i + 1));
                 i = next;
                 continue;
             }
@@ -939,7 +942,7 @@ fn scan_dollar_slashy(
                 if !text.is_empty() {
                     parts.push(GPart::Text(std::mem::take(&mut text)));
                 }
-                parts.push(GPart::Expr(inner));
+                parts.push(GPart::Expr(inner, i + 2));
                 i = next;
             }
             (b'$', Some(b)) if is_ident_start(b) => {
@@ -947,7 +950,7 @@ fn scan_dollar_slashy(
                 if !text.is_empty() {
                     parts.push(GPart::Text(std::mem::take(&mut text)));
                 }
-                parts.push(GPart::Expr(path));
+                parts.push(GPart::Expr(path, i + 1));
                 i = next;
             }
             (b'\\', Some(b'u')) => {

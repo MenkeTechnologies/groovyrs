@@ -509,3 +509,39 @@ println({ -> this }().toString().startsWith("scriptobj@"))
 "####;
     check_as("scriptobj", src, "true\ntrue\ntrue\ntrue\n");
 }
+
+/// A power assert records the values inside a `GString` placeholder at their
+/// columns in the script, in every placeholder form and nesting, and records
+/// nothing inside a closure body. Placeholders were parsed from their own text,
+/// so their columns were unknown and none of their values was shown.
+#[test]
+fn power_assert_records_inside_gstring_placeholders() {
+    let src = r####"def x = 5; def a = [1, 2]
+def show(Closure c) { try { c() } catch (AssertionError e) { println e.message } }
+show { assert "v=${x + 1} and ${a.size()}" == "no" }
+show { assert "o${"i${x * 2}"}" == "no" }
+show { assert "${a[0] + x}".size() == 9 }
+show { assert "q${ -> x}" == "no" }
+show { assert a.any { it == x } }
+"####;
+    let expected = r####"assert "v=${x + 1} and ${a.size()}" == "no"
+            | |          | |        |
+            5 6          | 2        false
+                         [1, 2]
+assert "o${"i${x * 2}"}" == "no"
+               | |       |
+               5 10      false
+assert "${a[0] + x}".size() == 9
+          ||   | |   |      |
+          |1   6 5   1      false
+          [1, 2]
+assert "q${ -> x}" == "no"
+                   |
+                   false
+assert a.any { it == x }
+       | |
+       | false
+       [1, 2]
+"####;
+    check(src, expected);
+}

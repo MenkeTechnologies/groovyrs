@@ -599,3 +599,37 @@ false
 "####;
     check(src, expected);
 }
+
+/// `X.class` on a type name is a class literal, the class `X` itself, for a
+/// JDK type and a script class alike; `.class` on a class *value* is still
+/// `java.lang.Class`. `Integer.class` answered `class java.lang.Class`.
+#[test]
+fn class_literal_on_a_type_name_is_the_class() {
+    let src = r####"class A { static int n = 3 }
+println Integer.class
+println A.class
+println Math.class.name
+println String.class == String
+println A.class.name
+println A.class.simpleName
+println Integer.class.class
+println A.class.n
+println Integer.class.MAX_VALUE
+println([1, 2].class)
+def f(x) { x.class }
+println f(A)
+"####;
+    let expected = r####"class java.lang.Integer
+class A
+java.lang.Math
+true
+A
+A
+class java.lang.Class
+3
+2147483647
+class java.util.ArrayList
+class java.lang.Class
+"####;
+    check(src, expected);
+}

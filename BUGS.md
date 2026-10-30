@@ -609,7 +609,9 @@ reported as parse or compile errors, never silently mis-run.
   value that prints `class java.lang.Integer`, and whose `getName()`/`name`,
   `getSimpleName()`/`simpleName`, and `getCanonicalName()` answer. `null` reports
   `class org.codehaus.groovy.runtime.NullObject`, which is what Groovy's
-  `NullObject` gives.
+  `NullObject` gives. On a type name, `X.class` is the class literal
+  (`Integer.class` is `class java.lang.Integer`, `A.class` is `class A`), not
+  the class of the `Class` value.
 - **`String.toBigDecimal()`.** `new BigDecimal(text.trim())`, with the exact
   scale (`"100.00"` → `100.00`) and with `BigDecimal`'s own character-level
   `NumberFormatException` diagnostics: `Character x is neither a decimal digit

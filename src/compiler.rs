@@ -4810,6 +4810,12 @@ impl Compiler {
                         return self.emit_call_builtin(crate::host::GCLASSREF, 0, *line);
                     }
                 }
+                // `Integer.class` / `A.class` on a type name is a class literal:
+                // the class itself, not the `getClass()` of the class value
+                // (`java.lang.Class`).
+                if name == "class" && self.names_class(recv) {
+                    return self.expr(recv);
+                }
                 // `String.CASE_INSENSITIVE_ORDER`: the JDK `Comparator` ordering
                 // by `compareToIgnoreCase`, built as the closure-backed
                 // `Comparator` a script would write for it, so every consumer
@@ -5768,6 +5774,19 @@ impl Compiler {
         let tidx = self.b.add_constant(Value::str(ty.to_string()));
         self.b.emit(Op::LoadConst(tidx), self.cur_line);
         self.emit_call_builtin(crate::host::GJCAST, 0, self.cur_line)
+    }
+
+    /// Does `e` name a class rather than a value — a script class or a JDK type
+    /// written bare, not shadowed by a field, an outer member or a local? The
+    /// same test [`Compiler::expr`] applies to `Expr::Var` before lowering it
+    /// to a `GCLASSREF`.
+    fn names_class(&self, e: &Expr) -> bool {
+        let Expr::Var(name) = e else { return false };
+        if self.is_field(name) || self.outer_member(name, false) {
+            return false;
+        }
+        (self.class_index.contains_key(name) && !self.is_local(name))
+            || self.is_static_class_ref(name)
     }
 
     /// The numeric type `e` statically has: a literal, a typed variable, or

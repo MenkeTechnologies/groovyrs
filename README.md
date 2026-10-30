@@ -465,6 +465,7 @@ Implemented and checked against Apache Groovy:
   every element (null-safe, so a `null` element spreads to `null`).
 - **`getClass()` / `.class`** — a `java.lang.Class` value that prints
   `class java.lang.Integer` and answers `name`/`simpleName`/`canonicalName`.
+  On a type name it is the class literal: `Integer.class` is the `Integer` class.
 - **`String.toBigDecimal()`** — `new BigDecimal(text.trim())`, with the exact
   scale and `BigDecimal`'s own character-level `NumberFormatException` messages.
 - **Ranges** — `0..5` / `0..<5`, the exclusive-left `1<..5` / `1<..<5`, descending (`5..1`), character (`'a'..'e'`) and

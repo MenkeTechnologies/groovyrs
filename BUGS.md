@@ -1359,12 +1359,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   cleanup lines under groovyrs and omits them under `groovy`. An *unlabeled*
   `break`/`continue`, and a labeled one naming the loop the `try` is directly
   inside, run the `finally` in both.
-- **A list element handed to a closure with defaulted parameters is spread.**
-  `[[1], [2, null]].collect { x, y = 9 -> "$x $y" }` binds each list across
-  `x` and `y` (`[1 9, 2 null]`); Groovy picks the one-argument `doCall` the
-  default generates and binds the whole list to `x` (`[[1] 9, [2, null] 9]`).
-  A direct call takes the default only when it stops short of the parameter,
-  as Groovy does, so an explicit `null` stays `null`.
 - **A `null` *right* operand of arithmetic on a number.** With `x` null, Groovy
   raises `groovy.lang.GroovyRuntimeException` ("Ambiguous method overloading for
   method java.lang.Integer#plus") for `5 + x`, `5 - x`, `5 * x` and `5 / x`, and

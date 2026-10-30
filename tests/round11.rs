@@ -874,3 +874,32 @@ assert chk(x) && x > 9
 "####;
     check(src, expected);
 }
+
+/// A list element is spread across a closure's parameters only when the closure
+/// has no one-argument `doCall`: `{ x, y = 9 -> }` binds the whole list to `x`,
+/// and `{ x, y, z = 0 -> }` takes it spread. The defaulted form was spread.
+#[test]
+fn list_element_spread_needs_two_required_params() {
+    let src = r####"println([[1], [2, null]].collect { x, y = 9 -> "$x $y" })
+println([[1, 2]].collect { x, y -> "$x $y" })
+println([[1, 2]].collect { x -> "$x" })
+println([[1, 2, 3]].collect { x, y, z = 0 -> "$x $y $z" })
+println([[1, 2]].each { x, y = 9 -> println "$x $y" })
+def m = [a: 1]; m.each { k, v = 3 -> println "$k $v" }
+println([[1, 2]].collect { x, y, z = 0 -> "$x $y $z" })
+println([[1, 2], [3, 4]].findAll { a, b = 0 -> a instanceof List })
+println([[1, 2]].collect { Object... xs -> xs.length })
+"####;
+    let expected = r####"[[1] 9, [2, null] 9]
+[1 2]
+[[1, 2]]
+[1 2 3]
+[1, 2] 9
+[[1, 2]]
+a 1
+[1 2 0]
+[[1, 2], [3, 4]]
+[1]
+"####;
+    check(src, expected);
+}

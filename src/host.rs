@@ -14024,11 +14024,13 @@ fn dispatch_iteration(
 }
 
 /// The arguments Groovy passes a closure for one collection element: a closure
-/// declaring more than one parameter receives a **list** element *spread* across
-/// its parameters (`[[1, 2]].collect { a, b -> a + b }` yields `[3]`), and every
-/// other case receives the element itself.
+/// that cannot be called with one argument receives a **list** element *spread*
+/// across its parameters (`[[1, 2]].collect { a, b -> a + b }` yields `[3]`),
+/// and every other case receives the element itself. A closure whose
+/// parameters after the first all have defaults has a one-argument `doCall`,
+/// so `{ x, y = 9 -> }` binds the whole list to `x`.
 fn item_args(clo: &Value, item: &Value) -> Vec<Value> {
-    let spread = closure_meta(clo).map(|m| m.params).unwrap_or(1) >= 2;
+    let spread = closure_meta(clo).map_or(1, |m| m.min_params) >= 2;
     // The element is a list handle; deref to see the elements to spread.
     match deref_list(item) {
         Value::Array(a) if spread => a.to_vec(),

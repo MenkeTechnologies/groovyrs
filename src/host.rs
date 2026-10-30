@@ -9408,7 +9408,16 @@ fn dispatch_instance_method(
             return Some(Ok(has_property(cid, &groovy_str(&args[0]))));
         }
         let Some((idx, args)) = resolve_method_call(vm, cid, method, args) else {
-            return pending_exc().then_some(Ok(Value::Undef));
+            if pending_exc() {
+                return Some(Ok(Value::Undef));
+            }
+            // `C.newInstance(args)` with no `static newInstance` of the class's
+            // own is the GDK's `Class.newInstance(Object[])`: `new C(args)`.
+            if method == "newInstance" {
+                let name = class_meta(cid).map(|m| m.name).unwrap_or_default();
+                return Some(Ok(construct(vm, &name, args.to_vec())));
+            }
+            return None;
         };
         if let Err(e) = ensure_static_init(vm, cid) {
             return Some(Err(e));
@@ -17203,6 +17212,8 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                     let other = as_class_ref(&args[0]).unwrap_or_default();
                     Value::bool(class_assignable(&qualified, &other))
                 }
+                // The GDK's `Class.newInstance(Object[])`: `new C(args)`.
+                "newInstance" => construct(vm, &simple_name_of(&qualified), args.to_vec()),
                 _ => match dispatch_static(vm, &simple_name_of(&qualified), method, args) {
                     Some(v) => v,
                     None => raise_missing_method(vm, recv, method, args),

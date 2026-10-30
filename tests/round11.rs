@@ -668,3 +668,30 @@ null null
 "####;
     check(src, expected);
 }
+
+/// `C.newInstance(args)` is the GDK's `Class.newInstance(Object[])`, `new C(args)`,
+/// for a script class and a JDK class, unless the class declares its own
+/// `static newInstance`. It raised `MissingMethodException`.
+#[test]
+fn class_new_instance_constructs() {
+    let src = r####"class A { int x = 4; String toString() { "A($x)" } }
+println A.newInstance()
+println A.class.newInstance()
+println A.newInstance().x
+class B { int y; B(int y) { this.y = y } }
+println B.newInstance(7).y
+println(Integer.newInstance(5) + 1)
+class F { static newInstance() { "mine" } }
+println F.newInstance()
+try { B.newInstance() } catch (e) { println e.class.name }
+"####;
+    let expected = r####"A(4)
+A(4)
+4
+7
+6
+mine
+groovy.lang.GroovyRuntimeException
+"####;
+    check(src, expected);
+}

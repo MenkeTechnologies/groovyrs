@@ -24052,6 +24052,11 @@ pub fn groovy_str(v: &Value) -> String {
     if let (Some(class), Value::Obj(id)) = (config::script_class_of(v), v) {
         return format!("{class}@{:x}", id.wrapping_mul(0x9E37_79B1) | 0x1000_0000);
     }
+    // The script object has `Object.toString`: the script class, `@`, and
+    // `Integer.toHexString(hashCode())`, the number `this.hashCode()` answers.
+    if is_script_this(v) {
+        return format!("{}@{:x}", script_class(), object_hash_code(v) as u32);
+    }
     if let Some(o) = as_optional(v) {
         return match o {
             Some(x) => format!("Optional[{}]", groovy_str(&x)),

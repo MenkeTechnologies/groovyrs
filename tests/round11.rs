@@ -496,3 +496,16 @@ true
 "####;
     check(src, expected);
 }
+
+/// The script object renders through `Object.toString` — its class name, `@`,
+/// and the hex of its `hashCode()` — wherever it is printed. It rendered as the
+/// heap's fallback `(obj:0)`.
+#[test]
+fn script_object_renders_as_class_at_hash() {
+    let src = r####"println this.toString() == "scriptobj@" + Integer.toHexString(this.hashCode())
+println "${this}" == this.toString()
+println([this].toString() == "[" + this + "]")
+println({ -> this }().toString().startsWith("scriptobj@"))
+"####;
+    check_as("scriptobj", src, "true\ntrue\ntrue\ntrue\n");
+}

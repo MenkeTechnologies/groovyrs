@@ -23674,6 +23674,13 @@ fn extreme_value(
 ) -> Result<Value, String> {
     let mut best: Option<Value> = None;
     for it in items {
+        // With no closure or comparator, `min()`/`max()` are
+        // `GroovyCollections.min`/`max`, which skip `null` elements (the result
+        // is `null` only when every element is). The closure and comparator
+        // forms see every element, `null` included.
+        if matches!(order, OrderBy::Natural) && matches!(it, Value::Undef) {
+            continue;
+        }
         best = Some(match best {
             None => it.clone(),
             Some(b) => {

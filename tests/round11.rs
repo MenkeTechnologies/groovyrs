@@ -545,3 +545,33 @@ assert a.any { it == x }
 "####;
     check(src, expected);
 }
+
+/// `min()`/`max()` with no argument skip `null` elements, as
+/// `GroovyCollections.min`/`max` do; the closure and comparator forms see
+/// every element. `[1, null, 2].min()` answered `null`.
+#[test]
+fn natural_min_and_max_skip_nulls() {
+    let src = r####"println([1,null,2].min())
+println([null, 3, 1].min())
+println([null].min())
+println([null, 1].max())
+println([2, null, 1].max())
+println([3, null, 1].min { it })
+println([3, null, 1].min { a, b -> a <=> b })
+println(([3, null, 1] as Integer[]).min())
+println([3, null, 1].toSet().min())
+println([].min())
+"####;
+    let expected = r####"1
+1
+null
+1
+2
+null
+null
+1
+1
+null
+"####;
+    check(src, expected);
+}

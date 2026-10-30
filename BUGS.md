@@ -1223,10 +1223,9 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   (a variable holding `0` casts to `false`, which is what groovyrs answers for
   both). `((char) null) as int` is `0` in Groovy; groovyrs's `char` is a
   one-character `String`, which `as int` parses.
-- **A *script-declared* class name is not a value.** `Foo.class` and `Foo.name`
-  for a class the script declares do not resolve — such a name is only meaningful
-  in `new`, `instanceof`, a `catch` clause, and a `switch` `case` label;
-  `getClass()` on a *value* is what answers. The **JDK** classes a script names
+- **Class names as values.** A class the script declares is its
+  `java.lang.Class` wherever the name is written as a value (`Foo.class`,
+  `Foo.name`, `def c = Foo`). The **JDK** classes a script names
   statically (`Math`, `Integer`, `Long`, `Double`, `Float`, `Short`, `Byte`,
   `Boolean`, `Character`, `String`, `System`, `BigDecimal`, …) *do* resolve to a
   `java.lang.Class`, so `Math.max(1, 2)`, `Integer.parseInt("42")` and

@@ -96,7 +96,11 @@ reported as parse or compile errors, never silently mis-run.
   `new HashSet`/`LinkedHashSet`/`TreeSet` build a real set behind a handle, not a
   de-duplicated list. `getClass()` names the implementation, `==` ignores order
   and is never true against a `List`, `add` answers `false` for an element
-  already present and mutates through the handle, and the operators
+  already present and mutates through the handle. A `HashSet` or
+  `LinkedHashSet` holds its elements under Java's `hashCode`/`equals`, so `1`
+  and `1.0`, `1.0` and `1.00`, `1` and `1L`, and a `GString` and a `String` are
+  distinct elements; a `TreeSet`, and the GDK's `minus`/`intersect`, coerce as
+  `==` does. The operators
   re-de-duplicate — `([1, 2] as Set) + ([2, 3] as Set)` is `[1, 2, 3]`. The
   methods whose Groovy result is a `List` rather than a `Set` (`collect`, `sort`,
   `toList`) still answer a list, and `+` dispatches on its left operand, so
@@ -1088,11 +1092,6 @@ this file.
 
 **Wrong values:**
 
-- `[1, 1.0].toSet().size()` is `1`; Groovy answers `2` — the hashed
-  collections still equate two numbers of different classes, where `==`,
-  `contains` and `count` no longer do. Their index narrows candidates by the
-  coercing equality, so switching them to `Object.equals` needs an index that
-  can answer more than one candidate per key.
 - `"abc".chars()` and `"a\nb".lines()` answer Java streams in Groovy;
   groovyrs has no stream values and answers an `ArrayList` (of the code points
   and of the lines), so `.toList()` agrees with Groovy and `getClass()` does

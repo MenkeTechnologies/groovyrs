@@ -74,3 +74,20 @@ println total
     assert_eq!(out, "240000\n");
     assert!(took < BOUND, "filling took {took:?}");
 }
+
+/// Filling a `HashSet` with a mix of number classes and strings. Its index
+/// used to cover only a set of plain integers or of plain strings, so a set
+/// mixing them (or holding a decimal) fell back to scanning every element on
+/// each `add`; it now keys every number and string by its Java `hashCode`.
+#[test]
+fn filling_a_mixed_set_is_linear_in_its_size() {
+    let src = r#"
+def s = new HashSet()
+for (int i = 0; i < 40000; i++) { s << i; s << (i + 0.5); s.add("k" + i) }
+println s.size()
+println((s - [1, 2.0]).size())
+"#;
+    let (out, took) = timed("set_fill", src);
+    assert_eq!(out, "120000\n119998\n");
+    assert!(took < BOUND, "filling took {took:?}");
+}

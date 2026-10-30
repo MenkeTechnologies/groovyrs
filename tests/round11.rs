@@ -903,3 +903,60 @@ a 1
 "####;
     check(src, expected);
 }
+
+/// A `HashSet` decides membership by Java's `hashCode`/`equals`: `1` and `1.0`,
+/// `1.0` and `1.00`, `1` and `1L`, and a `GString` and a `String` are distinct
+/// elements, while a `TreeSet` and the GDK's `minus`/`intersect` still coerce.
+/// Membership used Groovy's coercing `==`, so `[1, 1.0].toSet()` had one element.
+#[test]
+fn hash_sets_use_java_equality() {
+    let src = r####"println([1, 1.0].toSet().size())
+println([1, 1L].toSet().size())
+println([1, 1.0d].toSet().size())
+def s = new HashSet([1]); println s.contains(1.0); println s.add(1.0); println s
+println([1, 1.0] as Set)
+println([1, 1.0].unique())
+println(new LinkedHashSet([1G, 1]).size())
+println(new LinkedHashSet([1.0, 1.00]).size())
+println(new LinkedHashSet(["a", "a"]).size())
+println(([1, 2] as Set) + [2.0, 3])
+println(([1, 2] as Set) - [2.0])
+println(([1, 2] as Set).intersect([2.0]))
+println(([1.0, 2] as Set).contains(1))
+println(([1, 2] as Set) == ([1.0, 2] as Set))
+println(([1, 1.0] as Set).size())
+def h = new HashSet(); h << 1; h << 1L; h << (short) 1; h << 1.0f; h << 1.0d; h << 1.0; h << 1G; println h.size()
+def m = [:] as HashMap; m[1] = 'a'; m[1L] = 'b'; println m.size()
+println(([1, 2] as Set).unique().size())
+def ls = [1, 1.0] as LinkedHashSet; ls.remove(1.0); println ls
+println(([3, 3.0, 'a', "a"] as Set).size())
+def x = 2; println((["a$x", "a2"] as Set).size())
+println(([[1], [1.0]] as Set).size())
+"####;
+    let expected = r####"2
+2
+2
+false
+true
+[1, 1.0]
+[1, 1.0]
+[1]
+2
+2
+1
+[1, 2, 2.0, 3]
+[1]
+[2]
+false
+true
+2
+7
+2
+2
+[1]
+3
+2
+2
+"####;
+    check(src, expected);
+}

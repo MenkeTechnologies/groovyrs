@@ -13431,6 +13431,7 @@ fn dispatch_iteration(
                         .into_iter()
                         .map(Value::array)
                         .collect(),
+                    SetEq::Java,
                 ),
                 SetKind::Hash {
                     req: DEFAULT_HASH_REQ,
@@ -21802,117 +21803,137 @@ fn dispatch_tree_by(
     })
 }
 
-/// The key a [`SetIndex`] hashes an element under. Deliberately narrow: only the
-/// two shapes whose `equals` relation is exactly key equality.
-#[derive(PartialEq, Eq, Hash, Clone)]
-enum SetKey {
-    Int(i64),
-    Str(Box<str>),
+/// Which equality a set decides membership by.
+///
+/// A `HashSet` / `LinkedHashSet` is Java's: `hashCode` then `equals`, so the
+/// `Integer` `1` and the `BigDecimal` `1.0` are two elements, as are `1.0` and
+/// `1.00`, a `Long` and an `Integer` of one number, and a `GString` and a
+/// `String` of one text. A `TreeSet` compares, so it keeps Groovy's coercing
+/// equality ([`values_equal`]). `minus` and `intersect` on a set are the GDK's,
+/// which coerce too.
+#[derive(PartialEq, Eq, Clone, Copy, Default)]
+enum SetEq {
+    #[default]
+    Java,
+    Groovy,
 }
 
-/// Which shape a set's index is keyed on. A set that mixes them (or holds
-/// anything else) has no index at all — see [`SetIndex`].
-#[derive(PartialEq, Eq, Clone, Copy)]
-enum SetKeyKind {
-    Int,
-    Str,
+impl SetEq {
+    /// The equality a set of `kind` stores its elements under.
+    fn of(kind: &SetKind) -> Self {
+        match kind {
+            SetKind::Tree | SetKind::TreeBy(_) => SetEq::Groovy,
+            _ => SetEq::Java,
+        }
+    }
+
+    /// Whether `a` and `b` are one element under this equality.
+    fn equal(self, a: &Value, b: &Value) -> bool {
+        match self {
+            SetEq::Java => java_equals(a, b),
+            SetEq::Groovy => values_equal(a, b),
+        }
+    }
+
+    /// The bucket `v` hashes to, or `None` when it cannot be hashed without
+    /// re-entering the VM (a script instance, a `GString`, a collection) — which
+    /// turns a set's index off. Two values this equality calls equal always
+    /// share a key; distinct values may collide, which is why a bucket holds
+    /// several positions and every candidate is confirmed with [`SetEq::equal`].
+    ///
+    /// Under Java equality the key is the value's own `hashCode`. Under the
+    /// coercing equality every number keys on its `double` value (two numbers
+    /// Groovy calls equal have one) and a `String` on its text.
+    fn key(self, v: &Value) -> Option<u64> {
+        let simple = matches!(
+            v,
+            Value::Int(_) | Value::Str(_) | Value::Float(_) | Value::Bool(_)
+        ) || boxed::as_box(v).is_some()
+            || as_dec(v).is_some()
+            || as_float_handle(v).is_some();
+        if !simple {
+            return None;
+        }
+        match self {
+            SetEq::Java => Some(shape_hash_code(v) as u32 as u64),
+            SetEq::Groovy => match v {
+                Value::Str(s) => Some(string_hash(s) as u32 as u64 | 1 << 63),
+                Value::Bool(b) => Some(u64::from(*b) | 1 << 62),
+                _ => {
+                    let f = as_f64(&boxed::unbox(v.clone()));
+                    // `0.0 == -0.0`, and every NaN is one key.
+                    let f = if f == 0.0 { 0.0 } else { f };
+                    Some(if f.is_nan() {
+                        u64::MAX
+                    } else {
+                        f.to_bits() & !(3 << 62)
+                    })
+                }
+            },
+        }
+    }
 }
 
-/// A `Set`'s membership accelerator: element key → its position in `items`.
+/// A `Set`'s membership accelerator: element key ([`SetEq::key`]) → the
+/// positions in `items` holding an element of that key.
 ///
-/// Membership in a `java.util.Set` is decided by `equals`, and groovyrs's
-/// [`values_equal`] can re-enter the VM for a user class's own `equals` and
-/// equates values across types (`1` and `1.0`, `1` and `true`, `1` and `"1"`).
-/// No hash of a value can be consistent with all of that, so this is an
-/// accelerator and never the answer:
-///
-/// * It exists only while every element is a plain `Value::Int` **or** every
-///   element is a plain `Value::Str`. Those are the two shapes where two
-///   elements are `values_equal` exactly when their keys are equal — no
-///   cross-type coercion can reach either from inside its own kind. The first
-///   element decides the kind; anything that does not fit turns the index off
-///   for the life of that set, and it falls back to the scan it always did.
-/// * A probe whose key kind differs from the set's is scanned, not looked up —
-///   that is what keeps `s.contains("1")` finding the `Integer` `1`.
-/// * A hit is a **candidate**: the caller confirms it with [`values_equal`]
-///   against the element itself. Only a miss is decisive, and it is decisive
-///   only because of the two rules above.
+/// It only ever narrows: a hit is a list of candidates the caller confirms
+/// with [`SetEq::equal`], and a miss is decisive because two equal values
+/// always share a key. Once the set holds an element no key can represent,
+/// the index is off for the life of that set and membership is a scan.
 ///
 /// Without it, filling a set was quadratic: 16 000 `s.add(i)` calls took ~13 s
 /// against Apache Groovy's ~1 s, and doubling the count quadrupled it.
 #[derive(Default, Clone)]
 struct SetIndex {
-    kind: Option<SetKeyKind>,
-    /// `None` once the set holds something no key can represent, or two kinds at
-    /// once. Never rebuilt after that: an element already scanned past has to
-    /// keep being scanned past.
-    map: Option<HashMap<SetKey, usize>>,
-}
-
-/// The index key for `v`, or `None` when no key can represent it.
-fn set_key(v: &Value) -> Option<SetKey> {
-    match v {
-        Value::Int(n) => Some(SetKey::Int(*n)),
-        Value::Str(s) => Some(SetKey::Str(s.as_str().into())),
-        _ => None,
-    }
-}
-
-fn set_key_kind(k: &SetKey) -> SetKeyKind {
-    match k {
-        SetKey::Int(_) => SetKeyKind::Int,
-        SetKey::Str(_) => SetKeyKind::Str,
-    }
+    eq: SetEq,
+    /// `None` once the set holds something no key can represent. Never rebuilt
+    /// after that: an element already scanned past has to keep being scanned.
+    map: Option<HashMap<u64, Vec<usize>>>,
 }
 
 impl SetIndex {
-    /// Build an index over `items`, or an off one when they do not all fit a
-    /// single key kind.
-    fn build(items: &[Value]) -> Self {
-        let mut idx = SetIndex {
-            kind: None,
-            map: Some(HashMap::with_capacity(items.len())),
-        };
+    /// An empty index under `eq`.
+    fn new(eq: SetEq) -> Self {
+        SetIndex {
+            eq,
+            map: Some(HashMap::new()),
+        }
+    }
+
+    /// Build an index over `items` under `eq`.
+    fn build(items: &[Value], eq: SetEq) -> Self {
+        let mut idx = SetIndex::new(eq);
         for (i, v) in items.iter().enumerate() {
             idx.record(v, i);
         }
         idx
     }
 
-    /// Note that `items[pos]` is `v`. Turns the index off when `v` has no key or
-    /// does not match the kind the set already settled on.
+    /// Note that `items[pos]` is `v`. Turns the index off when `v` has no key.
     fn record(&mut self, v: &Value, pos: usize) {
-        let Some(map) = self.map.as_mut() else { return };
-        let Some(key) = set_key(v) else {
-            self.map = None;
-            return;
-        };
-        let kk = set_key_kind(&key);
-        match self.kind {
-            None => self.kind = Some(kk),
-            Some(existing) if existing == kk => {}
-            Some(_) => {
-                self.map = None;
-                return;
-            }
-        }
-        map.insert(key, pos);
+        let key = self.eq.key(v);
+        self.record_key(key, pos);
     }
 
-    /// Where `probe` might be, when the index can answer at all.
-    ///
-    /// `None` means "no answer — scan". `Some(None)` means the element is
-    /// definitively absent. `Some(Some(pos))` is a candidate the caller must
-    /// still confirm with [`values_equal`].
-    fn find(&self, probe: &Value) -> Option<Option<usize>> {
-        let map = self.map.as_ref()?;
-        let key = set_key(probe)?;
-        // A probe of the other kind can still be `equals` to an element of this
-        // one (`"1"` and `1` compare by their printed form), so it is scanned.
-        if self.kind != Some(set_key_kind(&key)) {
-            return None;
+    /// [`SetIndex::record`] with the key already computed — what a caller
+    /// holding the heap borrow uses, since computing a key reads the heap.
+    fn record_key(&mut self, key: Option<u64>, pos: usize) {
+        let Some(map) = self.map.as_mut() else { return };
+        match key {
+            Some(key) => map.entry(key).or_default().push(pos),
+            None => self.map = None,
         }
-        Some(map.get(&key).copied())
+    }
+
+    /// The positions `probe` might be at, when the index can answer at all:
+    /// `None` means "no answer — scan", an empty list a definite miss.
+    fn find(&self, probe: &Value) -> Option<Vec<usize>> {
+        let map = self.map.as_ref()?;
+        // A probe no key represents (a `GString`, an instance) may still equal
+        // an element under the coercing equality, so it is scanned.
+        let key = self.eq.key(probe)?;
+        Some(map.get(&key).cloned().unwrap_or_default())
     }
 }
 
@@ -21931,36 +21952,23 @@ fn make_set(items: Vec<Value>, kind: SetKind) -> Value {
         with_vm(raise_stack_overflow);
         return Value::Undef;
     }
-    let items = dedup_values(items);
-    let index = SetIndex::build(&items);
+    let eq = SetEq::of(&kind);
+    let items = dedup_values(items, eq);
+    let index = SetIndex::build(&items, eq);
     heap_push(HeapObj::SetVal { items, kind, index })
 }
 
-/// `items` with every later duplicate dropped — `Set.add`'s answer for an
-/// element already present is `false`, and it leaves the first one in place.
+/// `items` with every later duplicate under `eq` dropped — `Set.add`'s answer
+/// for an element already present is `false`, and it leaves the first one in
+/// place.
 ///
 /// Indexed the same way membership is, and for the same reason: without it,
-/// building a set from `n` elements is `n²/2` `values_equal` calls, so
+/// building a set from `n` elements is `n²/2` equality tests, so
 /// `(1..n).toSet()` and every set operator that re-de-duplicates its result got
 /// four times slower for twice the input.
-/// Set membership: [`values_equal`], except that a `GString` and a `String`
-/// are never one element — their `hashCode`s differ, so a `HashSet` holding
-/// one does not find the other, and an integer box is one element only
-/// with a value of its own class.
-fn set_equal(a: &Value, b: &Value) -> bool {
-    if as_gstring(a).is_some() != as_gstring(b).is_some() {
-        return false;
-    }
-    // Nor are a `Long`, `Short` or `Byte` and an `Integer` of one number.
-    if boxed::as_box(a).is_some() || boxed::as_box(b).is_some() {
-        return boxed::int_view(a) == boxed::int_view(b);
-    }
-    values_equal(a, b)
-}
-
-fn dedup_values(items: Vec<Value>) -> Vec<Value> {
+fn dedup_values(items: Vec<Value>, eq: SetEq) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
-    let mut index = SetIndex::default();
+    let mut index = SetIndex::new(eq);
     for v in items {
         if !index_member(&index, &out, &v) {
             index.record(&v, out.len());
@@ -21970,41 +21978,38 @@ fn dedup_values(items: Vec<Value>) -> Vec<Value> {
     out
 }
 
-/// Whether `probe` is already in `items`, using `index` to narrow the search.
-///
-/// The index only ever *narrows*: a hit is a candidate that [`values_equal`]
-/// still has to confirm, and an index that cannot answer (`None`) falls back to
-/// the full scan. Only a miss inside an index that can answer is decisive — see
-/// [`SetIndex`] for why that is sound.
+/// Whether `probe` is already in `items` under `index`'s equality, using the
+/// index to narrow the search: its candidates are confirmed one by one, and an
+/// index that cannot answer falls back to the full scan.
 fn index_member(index: &SetIndex, items: &[Value], probe: &Value) -> bool {
+    let eq = index.eq;
     match index.find(probe) {
-        // Definitively absent: the index covers every element and holds no key
-        // equal to this one.
-        Some(None) => false,
-        // A candidate. `values_equal` decides, exactly as the scan would.
-        Some(Some(pos)) => items.get(pos).map(|v| set_equal(v, probe)).unwrap_or(false),
-        // No answer — the index is off, or the probe is of the other key kind.
-        None => items.iter().any(|v| set_equal(v, probe)),
+        Some(cands) => cands
+            .iter()
+            .any(|pos| items.get(*pos).is_some_and(|v| eq.equal(v, probe))),
+        None => items.iter().any(|v| eq.equal(v, probe)),
     }
 }
 
 /// Whether `probe` is in the set behind `recv`, consulting that set's index.
 ///
 /// `items` is the caller's snapshot of the same elements. The heap borrow is
-/// held only for the hash lookup and released before [`values_equal`] runs — it
+/// held only for the hash lookup and released before the equality runs — it
 /// can re-enter the VM for a user class's `equals`, which would re-borrow.
 fn set_member(recv: &Value, items: &[Value], probe: &Value) -> bool {
-    let hit = match recv {
+    let index = match recv {
         Value::Obj(id) => HEAP.with(|h| match h.borrow().get(set_backing_id(*id) as usize) {
-            Some(HeapObj::SetVal { index, .. }) => index.find(probe),
+            Some(HeapObj::SetVal { index, .. }) => Some((index.eq, index.find(probe))),
             _ => None,
         }),
         _ => None,
     };
+    let (eq, hit) = index.unwrap_or((SetEq::Java, None));
     match hit {
-        Some(None) => false,
-        Some(Some(pos)) => items.get(pos).map(|v| set_equal(v, probe)).unwrap_or(false),
-        None => items.iter().any(|v| set_equal(v, probe)),
+        Some(cands) => cands
+            .iter()
+            .any(|pos| items.get(*pos).is_some_and(|v| eq.equal(v, probe))),
+        None => items.iter().any(|v| eq.equal(v, probe)),
     }
 }
 
@@ -22014,21 +22019,21 @@ fn set_member(recv: &Value, items: &[Value], probe: &Value) -> bool {
 /// not — the receiver is not a set, or the index cannot answer for this probe —
 /// and the caller falls back to the copy-and-scan path.
 ///
-/// The heap borrow ends before [`values_equal`] runs, because confirming a
-/// candidate can re-enter the VM for a user class's `equals`. Only the one
-/// candidate is cloned, so this is O(1) where the scan was O(n).
+/// The heap borrow ends before the equality runs, because confirming a
+/// candidate can re-enter the VM for a user class's `equals`. Only the
+/// candidates are cloned, so this is O(1) where the scan was O(n).
 fn set_membership_fast(recv: &Value, probe: &Value) -> Option<bool> {
     let Value::Obj(id) = recv else { return None };
-    let candidate = HEAP.with(|h| match h.borrow().get(set_backing_id(*id) as usize) {
-        Some(HeapObj::SetVal { items, index, .. }) => {
-            Some(index.find(probe).map(|p| p.map(|pos| items[pos].clone())))
-        }
+    let (eq, cands) = HEAP.with(|h| match h.borrow().get(set_backing_id(*id) as usize) {
+        Some(HeapObj::SetVal { items, index, .. }) => index.find(probe).map(|c| {
+            (
+                index.eq,
+                c.iter().map(|pos| items[*pos].clone()).collect::<Vec<_>>(),
+            )
+        }),
         _ => None,
-    })??;
-    match candidate {
-        None => Some(false),
-        Some(cand) => Some(set_equal(&cand, probe)),
-    }
+    })?;
+    Some(cands.iter().any(|c| eq.equal(c, probe)))
 }
 
 /// `add` / `leftShift` / `contains` on a set, answered from its index alone.
@@ -22106,11 +22111,18 @@ fn set_push(v: &Value, item: Value) {
     if seq::write_refused(*id, true) || seq::write_refused(set_backing_id(*id), true) {
         return;
     }
+    // The key reads the heap (a decimal's value), so it is computed before
+    // the mutable borrow.
+    let eq = HEAP.with(|h| match h.borrow().get(set_backing_id(*id) as usize) {
+        Some(HeapObj::SetVal { index, .. }) => index.eq,
+        _ => SetEq::Java,
+    });
+    let key = eq.key(&item);
     HEAP.with(|h| {
         if let Some(HeapObj::SetVal { items, index, .. }) =
             h.borrow_mut().get_mut(set_backing_id(*id) as usize)
         {
-            index.record(&item, items.len());
+            index.record_key(key, items.len());
             items.push(item);
         }
     });
@@ -22127,12 +22139,17 @@ fn set_store(v: &Value, items: Vec<Value>) {
     if seq::write_refused(*id, true) || seq::write_refused(set_backing_id(*id), true) {
         return;
     }
+    let eq = HEAP.with(|h| match h.borrow().get(set_backing_id(*id) as usize) {
+        Some(HeapObj::SetVal { index, .. }) => index.eq,
+        _ => SetEq::Java,
+    });
+    let rebuilt = SetIndex::build(&items, eq);
     HEAP.with(|h| {
         if let Some(HeapObj::SetVal {
             items: dst, index, ..
         }) = h.borrow_mut().get_mut(set_backing_id(*id) as usize)
         {
-            *index = SetIndex::build(&items);
+            *index = rebuilt;
             *dst = items;
         }
     });
@@ -22172,7 +22189,10 @@ fn dispatch_set_method(
         "plus" | "minus" | "intersect" | "unique" | "toSet" | "asImmutable" | "asSynchronized"
         | "clone" => {
             let o = other();
-            let o_index = SetIndex::build(&o);
+            // `minus` / `intersect` are the GDK's, which coerce (`2` and `2.0`
+            // are one element to them); `plus` re-de-duplicates through
+            // `make_set`, under the set's own equality.
+            let o_index = SetIndex::build(&o, SetEq::Groovy);
             make_set(
                 match method {
                     "plus" => ordered().into_iter().chain(o).collect(),
@@ -22221,7 +22241,7 @@ fn dispatch_set_method(
             let v = first_arg(args);
             let next: Vec<Value> = items
                 .iter()
-                .filter(|k| !set_equal(k, &v))
+                .filter(|k| !SetEq::of(&kind).equal(k, &v))
                 .cloned()
                 .collect();
             let changed = next.len() != items.len();
@@ -22233,7 +22253,8 @@ fn dispatch_set_method(
             // The two filtering forms test every element against the whole
             // argument, so the argument gets an index of its own — otherwise
             // `a.removeAll(b)` is `|a| × |b|` `values_equal` calls.
-            let o_index = SetIndex::build(&o);
+            let eq = SetEq::of(&kind);
+            let o_index = SetIndex::build(&o, eq);
             let next: Vec<Value> = match method {
                 "addAll" => items.iter().cloned().chain(o).collect(),
                 "removeAll" => items
@@ -22247,7 +22268,7 @@ fn dispatch_set_method(
                     .cloned()
                     .collect(),
             };
-            let deduped = dedup_values(next);
+            let deduped = dedup_values(next, eq);
             let changed = deduped.len() != items.len();
             set_store(recv, deduped);
             Value::bool(changed)

@@ -1549,7 +1549,7 @@ fn cast_target_class(ty_simple: &str) -> String {
 /// ```
 fn raise_cast(vm: &mut VM, v: &Value, ty_simple: &str) -> Value {
     let target = cast_target_class(ty_simple);
-    let message = if as_omap(v).is_some() || matches!(v, Value::Hash(_)) {
+    let message = if is_omap(v) || matches!(v, Value::Hash(_)) {
         format!("Cannot coerce a map to class {target} because it is a final class")
     } else {
         format!(
@@ -1571,7 +1571,7 @@ fn raise_cast(vm: &mut VM, v: &Value, ty_simple: &str) -> Value {
 /// fourth `MathContext` overload, and a `Map`'s two are interfaces.
 fn raise_ambiguous_plus(vm: &mut VM, recv: &Value) -> Value {
     let class = java_class_name(recv);
-    let protos: &[&str] = if as_omap(recv).is_some() || matches!(recv, Value::Hash(_)) {
+    let protos: &[&str] = if is_omap(recv) || matches!(recv, Value::Hash(_)) {
         &["interface java.util.Collection", "interface java.util.Map"]
     } else if is_dec_handle(recv) && as_bigint(recv).is_none() {
         &[
@@ -4820,9 +4820,16 @@ fn as_omap_kind(v: &Value) -> Option<(Vec<(String, Value)>, MapKind)> {
     }
 }
 
-/// Just the implementation kind of an ordered-map handle.
+/// Just the implementation kind of an ordered-map handle, without copying its
+/// entries (a `getClass()` or `instanceof` on a map must not cost its size).
 fn omap_kind(v: &Value) -> Option<MapKind> {
-    as_omap_kind(v).map(|(_, k)| k)
+    match map_backing(v) {
+        Value::Obj(id) => HEAP.with(|h| match h.borrow().get(id as usize) {
+            Some(HeapObj::OrderedMap { kind, .. }) => Some(*kind),
+            _ => None,
+        }),
+        _ => None,
+    }
 }
 
 /// Reorder insertion-ordered entries into the order `kind` presents them in.
@@ -6979,7 +6986,7 @@ fn new_jdk(vm: &mut VM, class: &str, args: &[Value]) -> Option<Value> {
         // the map itself, as Groovy's constructor stores it.
         "Expando" => {
             let props = match args.first() {
-                Some(m) if as_omap(m).is_some() => m.clone(),
+                Some(m) if is_omap(m) => m.clone(),
                 _ => gmap_kind(
                     Vec::new(),
                     MapKind::Hash {
@@ -7565,7 +7572,7 @@ fn new_instance(vm: &mut VM, name: String, args: Vec<Value>, captures: Vec<Value
     let selection = select_ctor(vm, &meta, &args);
     // (A record takes named arguments beside its canonical constructor.)
     let named_args = argc == 1
-        && as_omap(&args[0]).is_some()
+        && is_omap(&args[0])
         && (meta.ctors.contains_key(&0) || class_generates(cid, GEN_RECORD));
     if matches!(selection, params::Selection::NoFit) && !named_args {
         return raise_no_matching_ctor(vm, &meta.name, &args);
@@ -7585,7 +7592,7 @@ fn new_instance(vm: &mut VM, name: String, args: Vec<Value>, captures: Vec<Value
     } else if meta.generated & GEN_TUPLE_CTOR != 0
         && !meta.ctors.contains_key(&argc)
         && argc as usize <= generated_members(cid, GenMember::Tuple).len()
-        && !(argc == 1 && as_omap(&args[0]).is_some())
+        && !(argc == 1 && is_omap(&args[0]))
     {
         // The constructor `@TupleConstructor` generates — on the annotated
         // class only, since a constructor is not inherited: its members (see
@@ -7603,7 +7610,7 @@ fn new_instance(vm: &mut VM, name: String, args: Vec<Value>, captures: Vec<Value
         {
             store_instance_field(vm, &handle, &f, v);
         }
-    } else if argc == 1 && as_omap(&args[0]).is_some() && !meta.ctors.contains_key(&1) {
+    } else if argc == 1 && is_omap(&args[0]) && !meta.ctors.contains_key(&1) {
         // Groovy's **map constructor**: `new P(a: 1, b: 2)` with no matching
         // declared constructor sets the named properties on a default-built
         // instance. Reached whether or not the class declares other
@@ -8865,7 +8872,7 @@ fn java_equals_shape(a: &Value, b: &Value) -> bool {
     }
     let structured = |v: &Value| {
         as_set(v).is_some()
-            || as_omap(v).is_some()
+            || is_omap(v)
             || as_range(v).is_some()
             || as_buffer(v).is_some()
             || as_instance(v).is_some()
@@ -9293,7 +9300,7 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         // rather than aliasing each other: `LinkedHashMap extends HashMap`, so a
         // `LinkedHashMap` is a `HashMap` but **not** the other way round, and
         // `SortedMap`/`NavigableMap` are the `TreeMap`'s alone.
-        "Map" | "AbstractMap" => matches!(value, Value::Hash(_)) || as_omap(value).is_some(),
+        "Map" | "AbstractMap" => matches!(value, Value::Hash(_)) || is_omap(value),
         "LinkedHashMap" => {
             matches!(value, Value::Hash(_)) || omap_kind(value) == Some(MapKind::Linked)
         }
@@ -11543,7 +11550,7 @@ fn boxed_arg_kept(recv: &Value, method: &str, i: usize, nargs: usize) -> bool {
     {
         return true;
     }
-    let map = as_omap(recv).is_some() || matches!(recv, Value::Hash(_));
+    let map = is_omap(recv) || matches!(recv, Value::Hash(_));
     let set = as_set(recv).is_some();
     match method {
         "equals" | "contains" | "indexOf" | "lastIndexOf" | "isCase" | "leftShift" | "push"
@@ -12071,7 +12078,7 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
     if method == "equals"
         && args.len() == 1
         && (is_list(&recv)
-            || as_omap(&recv).is_some()
+            || is_omap(&recv)
             || as_set(&recv).is_some()
             || as_range(&recv).is_some())
     {
@@ -12493,7 +12500,7 @@ fn dispatch_call_plain(vm: &mut VM, recv: Value, method: &str, args: Vec<Value>)
     // `m.foo()` where the map holds a closure under `foo` — Groovy's
     // map-as-object idiom, and what makes a map usable as a closure's
     // `delegate`. Below the map's own methods, so `m.size()` is still the map's.
-    if as_omap(&recv).is_some() && dispatch_map_method_exists(method) {
+    if is_omap(&recv) && dispatch_map_method_exists(method) {
         // A real `Map` method — fall through to it.
     } else if let Some(Some(entry)) = omap_get(&recv, method) {
         if closure_meta(&entry).is_some() {
@@ -17467,8 +17474,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
                 // `[a:1] << ['b', 2]` is a `MissingMethodException` in Groovy,
                 // and admitting the pair here would silently accept it.
                 "leftShift"
-                    if args.len() == 1
-                        && (as_omap(&args[0]).is_some() || as_entry(&args[0]).is_some()) =>
+                    if args.len() == 1 && (is_omap(&args[0]) || as_entry(&args[0]).is_some()) =>
                 {
                     for (k, v) in entry_pairs(&args[0]) {
                         omap_set(recv, k, v);
@@ -18377,7 +18383,7 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
         // A closure coerced to a *concrete* class is a proxy subclass whose
         // every method — its declared ones and its property getters — runs
         // the closure.
-        let proxied = closure_meta(&v).is_some() || (is_iface && as_omap(&v).is_some());
+        let proxied = closure_meta(&v).is_some() || (is_iface && is_omap(&v));
         if proxied && !value_is_a(&v, ty) {
             let name = class_meta(cid).map(|m| m.name).unwrap_or_default();
             return heap_push(HeapObj::Proxy {
@@ -18748,7 +18754,7 @@ fn java_cast(vm: &mut VM, v: Value, ty: &str) -> Value {
             }
         }
         "Map" | "HashMap" | "LinkedHashMap" | "TreeMap" => {
-            if as_omap(&v).is_some() {
+            if is_omap(&v) {
                 as_type(vm, v, &simple)
             } else {
                 raise_java_cast(vm, &v, &cast_class_name(&simple))
@@ -21378,7 +21384,7 @@ fn java_hash(v: &Value) -> Option<i32> {
             if as_dec(v).is_some()
                 || as_float_handle(v).is_some()
                 || as_list_raw(v).is_some()
-                || as_omap(v).is_some()
+                || is_omap(v)
                 || as_set(v).is_some()
                 || as_range(v).is_some()
                 || as_uuid(v).is_some() =>
@@ -23383,7 +23389,7 @@ fn is_incomparable(v: &Value) -> bool {
     }
     matches!(v, Value::Array(_) | Value::Hash(_))
         || as_list_raw(v).is_some()
-        || as_omap(v).is_some()
+        || is_omap(v)
         || as_set(v).is_some()
         || as_range(v).is_some()
 }
@@ -23784,7 +23790,7 @@ fn render_value_max(vm: &mut VM, v: &Value, max_size: i64) -> String {
     } else {
         return render_value(vm, v);
     };
-    let is_map = as_omap(v).is_some();
+    let is_map = is_omap(v);
     if is_map && entries.is_empty() {
         return "[:]".to_string();
     }
@@ -23816,7 +23822,7 @@ fn render_value_max(vm: &mut VM, v: &Value, max_size: i64) -> String {
 fn to_coll_string_budget(method: &str, recv: &Value, args: &[Value]) -> Option<i64> {
     let applies = match method {
         "toListString" => is_list(recv) || as_set(recv).is_some(),
-        "toMapString" => as_omap(recv).is_some(),
+        "toMapString" => is_omap(recv),
         _ => false,
     };
     match args {
@@ -24797,7 +24803,7 @@ fn cast_operand(v: Value, ty: &str) -> Value {
 /// A subscript with a box read back to its number, except on a map or an
 /// instance, where `m[1L]` and `m[1]` are two keys.
 fn index_operand(recv: &Value, index: Value) -> Value {
-    if as_omap(recv).is_some() || matches!(recv, Value::Hash(_)) || as_instance(recv).is_some() {
+    if is_omap(recv) || matches!(recv, Value::Hash(_)) || as_instance(recv).is_some() {
         index
     } else {
         boxed::unbox(index)
@@ -25185,8 +25191,8 @@ fn numeric_hook_plain(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> 
                 || matches!(b, Value::Array(_))
                 || matches!(a, Value::Undef)
                 || matches!(b, Value::Undef)
-                || as_omap(a).is_some()
-                || as_omap(b).is_some()
+                || is_omap(a)
+                || is_omap(b)
                 || as_buffer(a).is_some()
                 || as_buffer(b).is_some()
                 || as_writable(a).is_some()
@@ -25220,7 +25226,7 @@ fn numeric_hook_plain(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> 
         }
         // `map - other` drops the entries the other map holds identically —
         // the `Map.minus` GDK overload, dispatched on the left operand.
-        NumOp::Sub if as_omap(a).is_some() => {
+        NumOp::Sub if is_omap(a) => {
             let (x, y) = (a.clone(), b.clone());
             with_vm(|vm| dispatch_method(vm, &x, "minus", std::slice::from_ref(&y)))
                 .ok_or_else(|| "groovyrs: map `-` dispatched with no active VM".to_string())

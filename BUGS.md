@@ -423,7 +423,7 @@ reported as parse or compile errors, never silently mis-run.
   metaclass's `respondsTo`/`hasProperty`, `metaClass.m << { … }`,
   `metaClass.constructor << { … }` (chosen by its parameter types), and
   `@Category(T)` restricted to `T` receivers.
-- **Category selection by type** â every active category's declarations of a
+- **Category selection by type** — every active category's declarations of a
   name are weighed together against the receiver's and arguments' declared
   types, closest fit first, the innermost category winning a tie.
 - **AST transforms** — `@ToString(ignoreNulls = true)`, `@Sortable`,

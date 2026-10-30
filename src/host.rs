@@ -1209,6 +1209,21 @@ pub fn sited_numeric_hook(call: fusevm::NumericCall<'_>) -> Result<Value, String
     if boxed::as_box(call.a).is_some() || boxed::as_box(call.b).is_some() {
         return boxed_arith(call.op, call.a, call.b, wide_site(call.ip));
     }
+    // A `Character` operand: `c++` is `next()`, anything else its operator.
+    if boxed::as_char(call.a).is_some() || boxed::as_char(call.b).is_some() {
+        if INCDEC_SITES.with(|s| s.borrow().contains(&call.ip)) && boxed::as_char(call.a).is_some()
+        {
+            let method = if matches!(call.op, NumOp::Add) {
+                "next"
+            } else {
+                "previous"
+            };
+            if let Some(v) = with_vm(|vm| dispatch_method(vm, call.a, method, &[])) {
+                return Ok(v);
+            }
+        }
+        return char_operator(call.op, call.a, call.b);
+    }
     if let Some(v) = int_arith(call.op, call.a, call.b, call.ip) {
         return Ok(v);
     }
@@ -1782,6 +1797,9 @@ fn java_class_name(v: &Value) -> String {
     if let Some((kind, _)) = boxed::as_box(v) {
         return kind.class_name().to_string();
     }
+    if boxed::as_char(v).is_some() {
+        return "java.lang.Character".to_string();
+    }
     // An integer outside 32-bit range is a `Long`; inside it, Groovy's default
     // `Integer`. The one case this misreads is a `Long` small enough to be an
     // `Integer` (`1L`), which no longer exists once it is a `Value::Int`.
@@ -2315,7 +2333,7 @@ impl ArrayElem {
     fn zero(self) -> Value {
         match self {
             ArrayElem::Int | ArrayElem::Long | ArrayElem::Short | ArrayElem::Byte => Value::int(0),
-            ArrayElem::Char => Value::str("\u{0}".to_string()),
+            ArrayElem::Char => boxed::char_value(0),
             ArrayElem::Float | ArrayElem::Double => Value::Float(0.0),
             ArrayElem::Boolean => Value::Bool(false),
             ArrayElem::Ref(_) | ArrayElem::Object => Value::Undef,
@@ -4600,6 +4618,7 @@ fn b_bigint(vm: &mut VM, _argc: u8) -> Value {
 /// `asBoolean()`, which is a user method and so re-enters the VM.
 fn groovy_truthy(vm: &mut VM, v: &Value) -> bool {
     match v {
+        _ if boxed::as_char(v).is_some() => boxed::as_char(v) != Some(0),
         _ if boxed::as_box(v).is_some() => boxed::as_box(v).is_some_and(|(_, n)| n != 0),
         // Groovy: a String is truthy when non-empty. fusevm additionally treats
         // "0" as false (a shell convention), which Groovy does not.
@@ -7294,7 +7313,7 @@ fn dispatch_buffer_method(
             if method == "codePointAt" {
                 Value::int(i64::from(c as u32))
             } else {
-                Value::str(c.to_string())
+                boxed::char_value(c as u32)
             }
         }
         ("getAt", 1) if num(0).is_some() => {
@@ -8368,6 +8387,12 @@ fn is_case(vm: &mut VM, label: &Value, subject: &Value) -> Value {
     if matches!(label, Value::Undef) || matches!(subject, Value::Undef) {
         return Value::bool(matches!(label, Value::Undef) && matches!(subject, Value::Undef));
     }
+    // A `Character` label is `Object.isCase`, which is `equals`: `case c:`
+    // does not match the string `'c'`. (A string label matching a `Character`
+    // subject is `String.isCase`, the text comparison `values_equal` makes.)
+    if boxed::as_char(&label).is_some() {
+        return Value::bool(java_equals(&label, &subject));
+    }
     Value::bool(values_equal(&label, &subject))
 }
 
@@ -8747,6 +8772,12 @@ fn checked_equal(vm: &mut VM, eq: impl FnOnce() -> bool) -> bool {
 /// [`values_equal`] for one pair, its members compared through the guarded
 /// entry point.
 fn values_equal_shape(a: &Value, b: &Value) -> bool {
+    // A `Character` is `==` to another of its code point, to the number of its
+    // code point (`('c' as char) == 99`) and to the one-character string of
+    // its text (`DefaultTypeTransformation.compareEqual`).
+    if let Some(eq) = char_equal(a, b) {
+        return eq;
+    }
     // `==` compares a `Long`, `Short` or `Byte` by its number.
     if boxed::as_box(a).is_some() || boxed::as_box(b).is_some() {
         return values_equal_shape(&boxed::unbox(a.clone()), &boxed::unbox(b.clone()));
@@ -8926,9 +8957,32 @@ fn java_equals(a: &Value, b: &Value) -> bool {
     guarded_equal(a, b, java_equals_shape)
 }
 
+/// Groovy's `==` with a `Character` on either side, or `None` when neither is
+/// one.
+fn char_equal(a: &Value, b: &Value) -> Option<bool> {
+    let (ca, cb) = (boxed::as_char(a), boxed::as_char(b));
+    let (code, other) = match (ca, cb) {
+        (Some(x), Some(y)) => return Some(x == y),
+        (Some(x), None) => (x, b),
+        (None, Some(y)) => (y, a),
+        (None, None) => return None,
+    };
+    Some(if is_number(other) {
+        values_equal_shape(&Value::Int(i64::from(code)), other)
+    } else if matches!(other, Value::Str(_)) || as_gstring(other).is_some() {
+        groovy_str(other) == boxed::char_text(code)
+    } else {
+        false
+    })
+}
+
 /// [`java_equals`] for one pair, its members compared through the guarded
 /// entry point.
 fn java_equals_shape(a: &Value, b: &Value) -> bool {
+    // `Character.equals` is true only for a `Character` of the same code point.
+    if boxed::as_char(a).is_some() || boxed::as_char(b).is_some() {
+        return boxed::as_char(a).is_some() && boxed::as_char(a) == boxed::as_char(b);
+    }
     if let Some(eq) = xml_equal(a, b) {
         return eq;
     }
@@ -9172,6 +9226,10 @@ fn shape_hash_code(v: &Value) -> i32 {
     if let Some((kind, n)) = boxed::as_box(v) {
         return boxed::int_hash(kind, n);
     }
+    // `Character.hashCode()` is the code point.
+    if let Some(c) = boxed::as_char(v) {
+        return c as i32;
+    }
     match v {
         Value::Str(s) => string_hash(s),
         Value::Int(n) => integer_hash(*n),
@@ -9225,6 +9283,14 @@ fn value_is_a(value: &Value, class: &str) -> bool {
     // `null` is never an instance of anything.
     if matches!(value, Value::Undef) {
         return false;
+    }
+    // A `Character` is a `Comparable`, `Serializable` `Object` — not a
+    // `String`, a `CharSequence` or a `Number`.
+    if boxed::as_char(value).is_some() {
+        return matches!(
+            class.rsplit('.').next().unwrap_or(class),
+            "Character" | "Comparable" | "Serializable" | "Object"
+        );
     }
     // A user class instance: the named class must appear in its superclass chain.
     if let Some(inst) = as_instance(value) {
@@ -9449,6 +9515,7 @@ fn is_jdk_scalar(v: &Value) -> bool {
     ) || boxed::as_box(v).is_some()
         || as_dec(v).is_some()
         || as_float_handle(v).is_some()
+        || boxed::as_char(v).is_some()
 }
 
 /// A `StringBuilder` or `StringBuffer` (not a `StringWriter`).
@@ -14957,10 +15024,77 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
 /// rather than mis-running, and a modeled method that Groovy fails on (an
 /// out-of-range `list.get`, an unparsable `String.toInteger`) raises the same
 /// throwable Groovy does.
+/// The methods a `java.lang.Character` answers itself, and the GDK's
+/// `Character` methods (`isLetter()`, `toUpperCase()`, `next()`, …). `None`
+/// for any other name, which the general table then answers or reports
+/// missing.
+fn char_method(
+    vm: &mut VM,
+    recv: &Value,
+    code: u32,
+    method: &str,
+    args: &[Value],
+) -> Option<Value> {
+    let c = char::from_u32(code).unwrap_or(char::REPLACEMENT_CHARACTER);
+    Some(match (method, args) {
+        ("toString" | "inspect", []) => Value::str(boxed::char_text(code)),
+        ("charValue", []) => recv.clone(),
+        ("hashCode", []) => Value::int(i64::from(code)),
+        ("equals", [other]) => Value::bool(java_equals(recv, other)),
+        ("compareTo", [other]) => {
+            let o = boxed::as_char(other)?;
+            Value::int((i64::from(code) - i64::from(o)).signum())
+        }
+        ("isLetter", []) => Value::bool(c.is_alphabetic()),
+        ("isDigit", []) => Value::bool(c.is_numeric()),
+        ("isLetterOrDigit", []) => Value::bool(c.is_alphanumeric()),
+        ("isUpperCase", []) => Value::bool(c.is_uppercase()),
+        ("isLowerCase", []) => Value::bool(c.is_lowercase()),
+        ("isWhitespace", []) => Value::bool(java_is_whitespace(c)),
+        ("toUpperCase", []) => boxed::char_value(u32::from(java_char_upper(c))),
+        ("toLowerCase", []) => boxed::char_value(u32::from(java_char_lower(c))),
+        // `Character.next()` / `previous()` (what `c++` / `c--` call).
+        ("next", []) => boxed::char_value(u32::from((code as u16).wrapping_add(1))),
+        ("previous", []) => boxed::char_value(u32::from((code as u16).wrapping_sub(1))),
+        ("plus" | "minus" | "multiply" | "div", [other]) => {
+            let op = match method {
+                "plus" => NumOp::Add,
+                "minus" => NumOp::Sub,
+                "multiply" => NumOp::Mul,
+                _ => NumOp::Div,
+            };
+            match char_operator(op, recv, other) {
+                Ok(v) => v,
+                Err(e) => {
+                    fault(vm, e);
+                    Value::Undef
+                }
+            }
+        }
+        _ => return None,
+    })
+}
+
 fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> Value {
     // `getClass()` answers on every value, so it precedes the per-type table.
     if method == "getClass" && args.is_empty() {
         return class_ref_of(recv);
+    }
+    if let Some(code) = boxed::as_char(recv) {
+        if let Some(v) = char_method(vm, recv, code, method, args) {
+            return v;
+        }
+    }
+    // These `String` methods take a `CharSequence` or an `int` code point, and
+    // Groovy does not convert a `Character` argument to either.
+    if matches!(recv, Value::Str(_))
+        && matches!(
+            method,
+            "indexOf" | "lastIndexOf" | "contains" | "split" | "startsWith" | "endsWith"
+        )
+        && args.iter().any(|a| boxed::as_char(a).is_some())
+    {
+        return raise_missing_method(vm, recv, method, args);
     }
     // `inspect()` is `InvokerHelper.inspect`, which is the *verbose* rendering
     // [`inspect_value`] already produces for the power-assert layout: a String
@@ -15329,7 +15463,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             let len = utf16_len(s);
             let in_range = (0..len as i64).contains(&i);
             if in_range {
-                Value::str(utf16_slice(s, i as usize, i as usize + 1))
+                // `String.charAt` answers a `char`: the UTF-16 unit.
+                let unit = s.encode_utf16().nth(i as usize).unwrap_or(0);
+                boxed::char_value(u32::from(unit))
             } else {
                 raise(
                     vm,
@@ -15499,8 +15635,11 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             };
             Value::array(parts)
         }
+        // A `char[]` of UTF-16 code units, as Java's: an astral character is two.
         (Value::Str(s), "toCharArray") => garray(
-            s.chars().map(|c| Value::str(c.to_string())).collect(),
+            s.encode_utf16()
+                .map(|u| boxed::char_value(u32::from(u)))
+                .collect(),
             ArrayElem::Char,
         ),
         (Value::Str(s), "toList") => {
@@ -15513,7 +15652,9 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
             Value::array(s.chars().map(|c| Value::int(i64::from(c as u32))).collect())
         }
         (Value::Str(s), "getChars") if args.is_empty() => garray(
-            s.chars().map(|c| Value::str(c.to_string())).collect(),
+            s.encode_utf16()
+                .map(|u| boxed::char_value(u32::from(u)))
+                .collect(),
             ArrayElem::Char,
         ),
         // `s.bytes` / `s.getBytes()` — the UTF-8 encoding as *signed* bytes, so
@@ -15678,7 +15819,7 @@ fn dispatch_method(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) -> V
         // `s.toCharacter()` is `s.charAt(0)`; a `char` is a one-character
         // `String` here (BUGS.md, *Java `char`*).
         (Value::Str(s), "toCharacter") if args.is_empty() => match s.chars().next() {
-            Some(c) => Value::str(c.to_string()),
+            Some(c) => boxed::char_value(c as u32),
             None => {
                 raise(
                     vm,
@@ -18484,6 +18625,32 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
     // A list handle casts through its transient array form (`as Set`, `as List`).
     let v = deref_list(&v);
     let ty_simple = simple_name_of(ty);
+    // A `Character` converts to a number as its code point (`c as int`).
+    let v = match boxed::as_char(&v) {
+        Some(c)
+            if matches!(
+                ty_simple.as_str(),
+                "int"
+                    | "Integer"
+                    | "long"
+                    | "Long"
+                    | "short"
+                    | "Short"
+                    | "byte"
+                    | "Byte"
+                    | "double"
+                    | "Double"
+                    | "float"
+                    | "Float"
+                    | "BigDecimal"
+                    | "BigInteger"
+                    | "Number"
+            ) =>
+        {
+            Value::Int(i64::from(c))
+        }
+        _ => v,
+    };
     // A `GString` converts as the `String` it renders to, unless the target is
     // a type it already is.
     let v = match as_gstring(&v) {
@@ -18730,20 +18897,15 @@ fn as_type(vm: &mut VM, v: Value, ty: &str) -> Value {
         }
         "String" => Value::str(render_value(vm, &v)),
         "boolean" | "Boolean" => Value::bool(groovy_truthy(vm, &v)),
-        // A `char` cast takes the code point (`255 as char` is `ÿ`).
-        "char" | "Character" => match as_i64(&v) {
-            Some(n) => Value::str(
-                char::from_u32(n as u32)
-                    .map(String::from)
-                    .unwrap_or_default(),
-            ),
-            None => Value::str(
-                groovy_str(&v)
-                    .chars()
-                    .next()
-                    .map(String::from)
-                    .unwrap_or_default(),
-            ),
+        // A `char` cast takes the code point (`255 as char` is `ÿ`), and a
+        // string its first character; the result is a `Character`.
+        "char" | "Character" => match (boxed::as_char(&v), as_i64(&v)) {
+            (Some(_), _) => v,
+            (None, Some(n)) => boxed::char_value(n as u32),
+            (None, None) => match groovy_str(&v).chars().next() {
+                Some(c) => boxed::char_value(u32::from(c)),
+                None => Value::Undef,
+            },
         },
         // A Groovy `Range` already *is* a `java.util.List`, so the cast is
         // identity: `(1..3) as List` is still the `IntRange` `1..3`.
@@ -18842,7 +19004,7 @@ fn java_cast(vm: &mut VM, v: Value, ty: &str) -> Value {
             "boolean" => Value::bool(false),
             "double" => Value::float(f64::NAN),
             "float" => float_value(f32::NAN),
-            "char" => Value::str("\0"),
+            "char" => boxed::char_value(0),
             "int" | "long" | "short" | "byte" => {
                 let wrapper = cast_target_class(&simple);
                 raise(
@@ -18868,7 +19030,7 @@ fn java_cast(vm: &mut VM, v: Value, ty: &str) -> Value {
                 return raise_java_cast(vm, &Value::str(b.to_string()), "char");
             }
             match java_cast_number(&v) {
-                Some(n) => Value::str(java_char(n.int_value() as u16)),
+                Some(n) => boxed::char_value(u32::from(n.int_value() as u16)),
                 None => raise_java_cast(vm, &v, "char"),
             }
         }
@@ -19010,6 +19172,9 @@ impl CastNumber {
 }
 
 fn java_cast_number(v: &Value) -> Option<CastNumber> {
+    if let Some(c) = boxed::as_char(v) {
+        return Some(CastNumber::Code(c as u16));
+    }
     if let Some(f) = as_float_handle(v) {
         // A `Float` widens exactly: `(double) 0.1f` is `0.10000000149011612`.
         return Some(CastNumber::Double(f64::from(f)));
@@ -19029,14 +19194,6 @@ fn java_cast_number(v: &Value) -> Option<CastNumber> {
         }
         _ => None,
     }
-}
-
-/// The one-character `String` groovyrs models a `char` as, for UTF-16 unit
-/// `unit`. A lone surrogate has no `char` of its own and becomes U+FFFD.
-fn java_char(unit: u16) -> String {
-    char::from_u32(u32::from(unit))
-        .unwrap_or(char::REPLACEMENT_CHARACTER)
-        .to_string()
 }
 
 /// The class a Java-style cast names in its `GroovyCastException`: a primitive
@@ -19812,15 +19969,17 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
                 c.is_lowercase()
             })
         }
-        // These answer a `char`, which prints as the bare character.
-        ("Character", "toUpperCase" | "toLowerCase" | "toString") => {
+        // `toUpperCase` / `toLowerCase` / `valueOf` answer a `Character`;
+        // `toString` its one-character `String`.
+        ("Character", "toUpperCase" | "toLowerCase" | "valueOf") => {
             let c = java_char_arg(&arg0)?;
-            Value::str(match method {
-                "toUpperCase" => c.to_uppercase().to_string(),
-                "toLowerCase" => c.to_lowercase().to_string(),
-                _ => c.to_string(),
-            })
+            boxed::char_value(u32::from(match method {
+                "toUpperCase" => java_char_upper(c),
+                "toLowerCase" => java_char_lower(c),
+                _ => c,
+            }))
         }
+        ("Character", "toString") => Value::str(java_char_arg(&arg0)?.to_string()),
         ("Character", "compare") => {
             let (a, b) = (java_char_arg(&arg0)?, java_char_arg(args.get(1)?)?);
             Value::int(a as i64 - b as i64)
@@ -20075,8 +20234,28 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
 /// The `char` an argument to a `java.lang.Character` static denotes. A Groovy
 /// `char` is a one-character `String` here; an `int` argument selects the
 /// code-point overload, so `Character.isDigit(53)` asks about `'5'`.
+/// `Character.toUpperCase(char)`: the one-character upper case, or the
+/// character itself when its upper case is not one character (`ß`).
+fn java_char_upper(c: char) -> char {
+    let mut up = c.to_uppercase();
+    match (up.next(), up.next()) {
+        (Some(u), None) => u,
+        _ => c,
+    }
+}
+
+/// `Character.toLowerCase(char)`, as [`java_char_upper`].
+fn java_char_lower(c: char) -> char {
+    let mut low = c.to_lowercase();
+    match (low.next(), low.next()) {
+        (Some(l), None) => l,
+        _ => c,
+    }
+}
+
 fn java_char_arg(v: &Value) -> Option<char> {
     match v {
+        _ if boxed::as_char(v).is_some() => boxed::as_char(v).and_then(char::from_u32),
         Value::Int(n) => char::from_u32(u32::try_from(*n).ok()?),
         Value::Str(s) => s.chars().next(),
         _ => None,
@@ -20158,8 +20337,8 @@ fn static_field(class: &str, name: &str) -> Option<Value> {
         {
             Value::str(name.to_string())
         }
-        ("Character", "MIN_VALUE") => Value::str("\u{0}".to_string()),
-        ("Character", "MAX_VALUE") => Value::str("\u{ffff}".to_string()),
+        ("Character", "MIN_VALUE") => boxed::char_value(0),
+        ("Character", "MAX_VALUE") => boxed::char_value(0xffff),
         ("Character", "SIZE") => Value::int(16),
         ("Character", "BYTES") => Value::int(2),
         ("Double", "MAX_VALUE") => Value::float(f64::MAX),
@@ -20368,8 +20547,9 @@ fn format_one(vm: &mut VM, spec: &crate::format::Spec, arg: &Value) -> Option<St
                         return None;
                     }
                 },
-                // groovyrs's stand-in for `java.lang.Character`.
-                Value::Str(s) if s.chars().count() == 1 => s.to_string(),
+                _ if boxed::as_char(arg).is_some() => {
+                    boxed::char_text(boxed::as_char(arg).unwrap_or(0))
+                }
                 _ => return refuse(vm),
             };
             Some(pad_conversion(spec, &cased(&text, spec.conv, None), ""))
@@ -20783,6 +20963,9 @@ fn as_range(v: &Value) -> Option<RangeVal> {
 /// strings — Groovy's `ObjectRange` over characters (`'a'..'e'`).
 fn range_char_ends(r: &RangeVal) -> Option<(i64, i64)> {
     match (&r.from, &r.to) {
+        (a, b) if boxed::as_char(a).is_some() && boxed::as_char(b).is_some() => {
+            Some((i64::from(boxed::as_char(a)?), i64::from(boxed::as_char(b)?)))
+        }
         (Value::Str(a), Value::Str(b)) if a.chars().count() == 1 && b.chars().count() == 1 => {
             Some((
                 a.chars().next().unwrap() as i64,
@@ -20840,6 +21023,9 @@ fn range_reported_reverse(r: &RangeVal) -> bool {
 /// which stops a walk rather than looping.
 fn range_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
+        _ if boxed::as_char(a).is_some() && boxed::as_char(b).is_some() => {
+            Some(boxed::as_char(a).cmp(&boxed::as_char(b)))
+        }
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
         (Value::Str(x), Value::Str(y)) => Some(x.cmp(y)),
         // Any two numbers order by value — an `Integer` against a `BigDecimal`
@@ -20963,6 +21149,12 @@ fn range_bound(r: &RangeVal, upper: bool) -> Value {
 /// `MissingMethodException`.
 fn successor(v: &Value, forward: bool) -> Option<Value> {
     let delta: i64 = if forward { 1 } else { -1 };
+    // `Character.next()` / `previous()`.
+    if let Some(c) = boxed::as_char(v) {
+        return Some(boxed::char_value(u32::from(
+            (c as u16).wrapping_add(delta as u16),
+        )));
+    }
     match v {
         Value::Int(n) => Some(Value::int(n.wrapping_add(delta))),
         // `Double.next()` is `plus(1)`, still a `Double` — what a `1.5d..4d`
@@ -21845,10 +22037,16 @@ impl SetEq {
     /// coercing equality every number keys on its `double` value (two numbers
     /// Groovy calls equal have one) and a `String` on its text.
     fn key(self, v: &Value) -> Option<u64> {
+        // A `Character` is `==` to a number and to a string at once, so no
+        // single key serves the coercing equality; such a set scans.
+        if self == SetEq::Groovy && boxed::as_char(v).is_some() {
+            return None;
+        }
         let simple = matches!(
             v,
             Value::Int(_) | Value::Str(_) | Value::Float(_) | Value::Bool(_)
         ) || boxed::as_box(v).is_some()
+            || boxed::as_char(v).is_some()
             || as_dec(v).is_some()
             || as_float_handle(v).is_some();
         if !simple {
@@ -24220,12 +24418,28 @@ fn instance_default_str(v: &Value, inst: &Instance) -> String {
     default_instance_str(inst)
 }
 
+/// The text a `char[]` spells: its elements are UTF-16 code units, so a
+/// surrogate pair decodes to its one character.
+fn char_array_text(items: &[Value]) -> String {
+    let mut units: Vec<u16> = Vec::with_capacity(items.len());
+    for v in items {
+        match boxed::as_char(v) {
+            Some(c) => units.push(c as u16),
+            None => units.extend(groovy_str(v).encode_utf16()),
+        }
+    }
+    String::from_utf16_lossy(&units)
+}
+
 /// Render a value with Groovy's `println`/`toString` rules (as opposed to
 /// fusevm's shell-flavoured `as_str_cow`): booleans as `true`/`false`, whole
 /// decimals with a trailing `.0`, `Undef`/`null` as `null`.
 pub fn groovy_str(v: &Value) -> String {
     if let Some((_, n)) = boxed::as_box(v) {
         return n.to_string();
+    }
+    if let Some(c) = boxed::as_char(v) {
+        return boxed::char_text(c);
     }
     if let Some(text) = gstring_cached(v) {
         return text;
@@ -24334,7 +24548,7 @@ pub fn groovy_str(v: &Value) -> String {
     // where a `byte[]` prints `[97, 98, 99]`.
     if array_elem(v) == Some(ArrayElem::Char) {
         if let Some(items) = as_list(v) {
-            return items.iter().map(groovy_str).collect();
+            return char_array_text(&items);
         }
     }
     // A list handle renders `[a, b, c]` (`[]` when empty), exactly as the
@@ -25001,10 +25215,75 @@ fn date_operator(op: NumOp, a: &Value, b: &Value) -> Option<Value> {
 }
 
 pub fn numeric_hook(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
+    if boxed::as_char(a).is_some() || boxed::as_char(b).is_some() {
+        return char_operator(op, a, b);
+    }
     if boxed::as_box(a).is_some() || boxed::as_box(b).is_some() {
         return boxed_arith(op, a, b, false);
     }
     numeric_hook_plain(op, a, b)
+}
+
+/// An operator with a `Character` operand. Against another `Character` or a
+/// number, Groovy's `NumberMath` reads the `Character` as its code point, so
+/// `('c' as char) + 1` is the `Integer` `100` and `c1 - c2` an `Integer`;
+/// `==`/`!=` follow [`char_equal`], and an ordering against a string compares
+/// the texts. `Character.plus` takes only a `Character` or a `Number`, so
+/// `c + "x"` raises `MissingMethodException`; `"x" + c` is `String.plus` and
+/// concatenates.
+fn char_operator(op: NumOp, a: &Value, b: &Value) -> Result<Value, String> {
+    let numeric = |v: &Value| boxed::as_char(v).is_some() || is_number(v);
+    match op {
+        NumOp::Eq | NumOp::Ne => {
+            let eq = char_equal(a, b).unwrap_or(false);
+            return Ok(Value::bool(eq == matches!(op, NumOp::Eq)));
+        }
+        NumOp::Lt | NumOp::Gt | NumOp::Le | NumOp::Ge if !(numeric(a) && numeric(b)) => {
+            let text = |v: &Value| matches!(v, Value::Str(_)) || as_gstring(v).is_some();
+            if (text(a) || numeric(a)) && (text(b) || numeric(b)) {
+                let order = groovy_str(a).cmp(&groovy_str(b));
+                return Ok(Value::bool(match op {
+                    NumOp::Lt => order.is_lt(),
+                    NumOp::Gt => order.is_gt(),
+                    NumOp::Le => order.is_le(),
+                    _ => order.is_ge(),
+                }));
+            }
+        }
+        _ => {}
+    }
+    if numeric(a) && numeric(b) && matches!(op, NumOp::Lt | NumOp::Gt | NumOp::Le | NumOp::Ge) {
+        let (x, y) = (boxed::char_as_int(a), boxed::char_as_int(b));
+        let order = match (as_i64(&x), as_i64(&y)) {
+            (Some(p), Some(q)) => p.cmp(&q),
+            _ => java_compare_f64(as_f64(&x), as_f64(&y)),
+        };
+        return Ok(Value::bool(match op {
+            NumOp::Lt => order.is_lt(),
+            NumOp::Gt => order.is_gt(),
+            NumOp::Le => order.is_le(),
+            _ => order.is_ge(),
+        }));
+    }
+    if numeric(a) && numeric(b) {
+        return boxed_arith(op, &boxed::char_as_int(a), &boxed::char_as_int(b), false);
+    }
+    if boxed::as_char(a).is_none() {
+        // A string (or anything else) on the left keeps its own operator.
+        return numeric_hook_plain(op, a, b);
+    }
+    let name = match op {
+        NumOp::Add => "plus",
+        NumOp::Sub => "minus",
+        NumOp::Mul => "multiply",
+        NumOp::Div => "div",
+        NumOp::Mod => "mod",
+        NumOp::Pow => "power",
+        NumOp::Neg => "negative",
+        _ => "compareTo",
+    };
+    with_vm(|vm| raise_operator_operand(vm, name, a, b));
+    Ok(Value::Undef)
 }
 
 /// A shift's operands with any box read back to its number, and whether the
@@ -25965,6 +26244,7 @@ fn closure_arg_fits(ty: &str, v: &Value) -> bool {
             matches!(v, Value::Undef | Value::Array(_)) || is_list(v) || as_range(v).is_some()
         }
         "Map" => matches!(v, Value::Undef) || is_omap(v),
+        "char" | "Character" => matches!(v, Value::Undef) || boxed::as_char(v).is_some(),
         _ => true,
     }
 }

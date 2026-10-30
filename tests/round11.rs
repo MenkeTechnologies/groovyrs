@@ -960,3 +960,202 @@ true
 "####;
     check(src, expected);
 }
+
+/// `java.lang.Character` is its own value: `as char`, `(char)`, a `char` local,
+/// field or parameter, `charAt`, `toCharArray` and `Character.valueOf` make one.
+/// It prints as its character, adds and compares as its code point, is `==` to
+/// its one-character string but not `equals` it, and answers the `Character`
+/// methods. It was a one-character `String`.
+#[test]
+fn character_is_its_own_type() {
+    let src = r####"def c = 'c' as char
+def t(Closure k) { try { println k() } catch (e) { println e.class.name } }
+t { c }
+t { c.getClass().name }
+t { c instanceof Character }; t { c instanceof String }; t { c instanceof Comparable }; t { c instanceof Number }
+t { c == "c" }; t { "c" == c }; t { c == 99 }; t { c.equals("c") }; t { c.equals("c" as char) }
+t { c + 1 }; t { (c + 1).getClass().name }; t { c - ("a" as char) }; t { c + "x" }; t { "x" + c }
+t { (c * 2) }
+t { c < ("d" as char) }; t { c > 50 }
+def d = c; d++; t { d }; t { d.getClass().name }
+t { "${c}!" }
+t { c.inspect() }
+t { c.toString().getClass().name }
+t { c as int }; t { (int) c }; t { c as String }
+t { c.hashCode() }
+t { c.isLetter() }; t { c.isDigit() }; t { c.toUpperCase() }; t { c.toUpperCase().getClass().name }
+t { "abc".charAt(1) }; t { "abc".charAt(1).getClass().name }
+t { "abc".toCharArray()[0].getClass().name }
+t { ["c" as char].contains("c") }; t { ["c" as char].contains(c) }
+t { ([c, 'd' as char].join('-')) }
+t { "abcabc".indexOf(c) }
+t { "abc".replace(c, 'z' as char) }
+t { def sb = new StringBuilder(); sb.append(c); sb << c; sb }
+switch (c) { case 'c': println "case str"; break; default: println "default" }
+t { Character.valueOf(c).getClass().name }
+t { Character.isLetter(c) }
+t { (char) 65 }; t { ((char) 65).getClass().name }
+char e = "e"; t { e.getClass().name }; t { e + 1 }
+char f = 102; t { f }
+t { ([c] as Set).contains(c) }
+t { (c <=> ('a' as char)) }
+t { c.next() }
+t { ([b: c]) }
+t { String.valueOf(c) }
+t { "c".toCharacter().getClass().name }
+t { (c in ['c']) }
+t { (c.compareTo('a' as char)) }
+t { (c as Character) }
+t { (Character.toUpperCase(c)) }
+t { ((c as int) + 1) }
+t { c.charValue() }
+t { "abcabc".indexOf(c) }
+t { "abcabc".lastIndexOf(c) }
+t { "abc".contains(c) }
+t { "abc".split(c) }
+t { "a,b".tokenize(',' as char) }
+t { "abc".count(c) }
+t { "abc" - c }
+t { "abc".startsWith(c) }
+t { [a: 1][c] }
+t { def m = [:]; m[c] = 1; m['c'] = 2; m.size() }
+t { def m = [:]; m[c] = 1; m.keySet()[0].getClass().name }
+t { ("a" as char)..("e" as char) }
+t { (('a' as char)..('c' as char)).collect { it.getClass().name } }
+t { c.class }
+t { [c, c].unique().size() }
+t { [c] == ['c'] }
+t { "${c}".length() }
+t { c.toString() * 2 }
+t { String.valueOf(c) + "!" }
+t { new StringBuilder("ab").append(c).toString() }
+t { (int) 'c' }
+t { ((char) 'c').getClass().name }
+t { c.asType(Integer) }
+t { Character.isDigit('5' as char) }
+t { 'x'.toCharacter() == 'x' }
+t { switch (c) { case Character: return "char"; default: return "no" } }
+t { switch ('c') { case c: return "hit"; default: return "no" } }
+t { [c].sum() }
+t { c ? 'y' : 'n' }
+t { ('\0' as char) ? 'y' : 'n' }
+t { -c }
+def fc(char c) { c.getClass().name }
+def g(Character c) { c.getClass().name }
+t { fc('x') }; t { fc('x' as char) }; t { g('x' as char) }
+class P { char c; Character d }
+t { def p = new P(c: 'q', d: 'r' as char); p.c.getClass().name + " " + p.d.getClass().name }
+char[] arr = ['a', 'b'] as char[]
+t { arr[0].getClass().name }; t { arr }; t { new String(arr) }; t { ("abc" as char[]).length }
+t { def cl = { char z -> z.getClass().name }; cl('k') }
+t { def cl = { char z -> z.getClass().name }; cl('k' as char) }
+t { char x = 'x'; x.getClass().name }
+t { Character y = 'y'; y.getClass().name }
+"####;
+    let expected = r####"c
+java.lang.Character
+true
+false
+true
+false
+true
+true
+true
+false
+true
+100
+java.lang.Integer
+2
+groovy.lang.MissingMethodException
+xc
+198
+true
+true
+d
+java.lang.Character
+c!
+c
+java.lang.String
+99
+99
+c
+99
+true
+false
+C
+java.lang.Character
+b
+java.lang.Character
+java.lang.Character
+false
+true
+c-d
+groovy.lang.MissingMethodException
+abz
+cc
+case str
+java.lang.Character
+true
+A
+java.lang.Character
+java.lang.Character
+102
+f
+true
+1
+d
+[b:c]
+c
+java.lang.Character
+false
+1
+c
+C
+100
+c
+groovy.lang.MissingMethodException
+groovy.lang.MissingMethodException
+groovy.lang.MissingMethodException
+groovy.lang.MissingMethodException
+[a, b]
+groovy.lang.MissingMethodException
+ab
+groovy.lang.MissingMethodException
+null
+2
+java.lang.Character
+a..e
+[java.lang.Character, java.lang.Character, java.lang.Character]
+class java.lang.Character
+1
+true
+1
+cc
+c!
+abc
+99
+java.lang.Character
+99
+true
+true
+char
+no
+c
+y
+n
+groovy.lang.MissingMethodException
+groovy.lang.MissingMethodException
+java.lang.Character
+java.lang.Character
+java.lang.Character java.lang.Character
+java.lang.Character
+ab
+ab
+3
+groovy.lang.MissingMethodException
+java.lang.Character
+java.lang.Character
+java.lang.Character
+"####;
+    check(src, expected);
+}

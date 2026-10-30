@@ -1205,13 +1205,6 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
 
 ## Not implemented (errors today)
 
-- **`java.lang.Character` is a one-character `String`.** groovyrs has no
-  `Character` type, so `'c' as Character` is the `String` `"c"` and every
-  `plus` overload that names `Character` takes the `String` one instead:
-  `1 + ('c' as Character)` is `"1c"` where Groovy answers the number `100`, and
-  the whole `Character` row of the `+` matrix concatenates where Groovy either
-  adds or raises. The rest of the `plus` table is modeled (see above); this one
-  row waits on the type.
 - **`MissingMethodException` carries no "Possible solutions:" line.** Groovy's
   message has a second line listing candidate methods; groovyrs's stops after
   the signature line. Only a program that prints `e.getMessage()` sees it.
@@ -1221,8 +1214,7 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   groovyrs reads the parentheses as grouping. `(Boolean) 0` with an integer
   *literal* throws `WrongMethodTypeException` from Groovy's call-site linking
   (a variable holding `0` casts to `false`, which is what groovyrs answers for
-  both). `((char) null) as int` is `0` in Groovy; groovyrs's `char` is a
-  one-character `String`, which `as int` parses.
+  both).
 - **Class names as values.** A class the script declares is its
   `java.lang.Class` wherever the name is written as a value (`Foo.class`,
   `Foo.name`, `def c = Foo`). The **JDK** classes a script names
@@ -1576,20 +1568,13 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   (`GMETHOD_WIDE`) is emitted for *instance* calls only, so a static call
   arrives with both widths erased and the value-based rule picks the `int`
   overload. Same family as the `Long`-versus-`Integer` entry below.
-- **`charAt` and `toCharArray` cannot answer half a surrogate pair.** Every
-  string index is a UTF-16 code unit, matching Java, but there is no
-  `java.lang.Character` type and no Rust `char` can hold a lone surrogate, so
-  `"a😀b".charAt(1)` answers the replacement character where Java answers the
-  high surrogate `0xD83D`. `toCharArray()`/`chars()` answer a list of
-  one-character strings rather than a `char[]` of code units, so their length is
-  the code-point count.
-
-  The same missing type makes `%c` more permissive than the JDK's. Java's
-  `Formatter` takes a `Character` or an `int` code point and refuses a `String`
-  outright; groovyrs takes a *one-character* `String` (which is what `'a' as
-  char` evaluates to here) so that `sprintf("%c", 'a' as char)` still prints
-  `a`. A longer `String` raises `IllegalFormatConversionException` as Java
-  does, which is where the real mistake shows up.
+- **A lone surrogate `Character` has no text of its own.** `charAt` and
+  `toCharArray` answer UTF-16 code units as Java does (`"a😀b".charAt(1)` is the
+  high surrogate `0xD83D`, and the `char[]` has four elements), and a `char[]`
+  prints, converts with `new String(…)` and concatenates as the text its units
+  spell. A single surrogate `Character` rendered on its own is empty, though —
+  no Rust string holds half a pair — so joining the elements one by one
+  (`toCharArray().join("")`) drops an astral character Java keeps.
 - **`%a` ignores a precision.** `sprintf("%a", 1.5d)` is `0x1.8p0`, matching
   `Double.toHexString`, but `%.3a` prints the same rather than rounding the hex
   mantissa to three digits. The rounding is defined on the *hex* significand, a
@@ -1672,18 +1657,7 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   converted with `castToType`, as Groovy does (`int i = 3.7` holds `3`, `double
   d = 3` holds `3.0`, `int x` starts at `0`); any other declared type is kept
   for diagnostics but does not gate execution, and method parameter types are
-  not used to select or convert. A `char` local holds a one-character `String`
-  (groovyrs has no `Character` value).
-- **`Set` membership uses `==`'s numeric equality, where Java's is TYPED.**
-  Groovy's `==` on two numbers compares their values across classes (`1.0d ==
-  1.0f` and `1 == 1.0G` are both true), but `Set` membership runs
-  `Object.equals`, which is false between two different wrapper classes whatever
-  the values. groovyrs's set index decides it with `values_equal`, so a set takes
-  the numeric answer: `[1, 1.0G] as Set` keeps ONE element where Groovy keeps
-  two, and `[1.0d, 1.0f] as Set` likewise. (A *list*'s `contains`, `indexOf`
-  and `in` use the typed `Object.equals`, so `[1.0d].contains(1.0f)` is false as
-  in Groovy; only a `Long` small enough to be an `Integer` still matches one,
-  because the width is not carried on the value.)
+  not used to select or convert.
 - **A list a GDK method *returns* is not a reference; only a literal is.** A list
   literal is built behind a heap handle, so every claim in the *Lists are
   references* entry above holds for one — including a list reached through a map

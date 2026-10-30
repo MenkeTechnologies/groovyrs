@@ -442,7 +442,8 @@ Implemented and checked against Apache Groovy:
   `doubleToRawLongBits` / `longBitsToDouble`), `Boolean`, `BigDecimal` /
   `BigInteger` `ZERO` / `ONE` / `TWO` / `TEN`, `Character` (`isDigit` /
   `isLetter` / `isLetterOrDigit` / `isWhitespace` / `isUpperCase` /
-  `isLowerCase`, `toUpperCase` / `toLowerCase` / `toString`, `compare`,
+  `isLowerCase`, `toUpperCase` / `toLowerCase` / `valueOf` (each a
+  `Character`) / `toString`, `compare`,
   `getNumericValue`, `MIN_RADIX` / `MAX_RADIX` — each with the `int` code-point
   overload), `Collections` (`emptyList` / `emptyMap` / `emptySet`,
   `singletonList`, `nCopies`, `unmodifiableList`, the in-place `sort` / `reverse`,
@@ -468,6 +469,11 @@ Implemented and checked against Apache Groovy:
 - **`getClass()` / `.class`** — a `java.lang.Class` value that prints
   `class java.lang.Integer` and answers `name`/`simpleName`/`canonicalName`.
   On a type name it is the class literal: `Integer.class` is the `Integer` class.
+- **`java.lang.Character`** — its own value, made by `as char`, `(char)`, a
+  `char` local/field/parameter, `charAt`, `toCharArray` and `Character.valueOf`:
+  it prints as its character, adds and compares as its code point
+  (`('c' as char) + 1` is `100`), is `==` to its one-character string but not
+  `equals` it, and answers `isLetter()` / `toUpperCase()` / `next()` and the rest.
 - **`String.toBigDecimal()`** — `new BigDecimal(text.trim())`, with the exact
   scale and `BigDecimal`'s own character-level `NumberFormatException` messages.
 - **Ranges** — `0..5` / `0..<5`, the exclusive-left `1<..5` / `1<..<5`, descending (`5..1`), character (`'a'..'e'`) and

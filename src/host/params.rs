@@ -114,9 +114,9 @@ pub(super) fn param_fit(ty: &str, v: &Value) -> Option<u32> {
         "BigInteger" => fit(is_big, is_int),
         "Number" => fit(false, is_number),
         "boolean" | "Boolean" => fit(matches!(v, Value::Bool(_)), false),
-        // groovyrs has no `Character`: a one-character `String` stands in for
-        // one, and a `String` parameter still wins it over a `char` one.
-        "char" | "Character" => fit(false, matches!(v, Value::Str(s) if s.chars().count() == 1)),
+        // Only a `Character` fits: Groovy does not convert a one-character
+        // `String` argument to a `char` or `Character` parameter.
+        "char" | "Character" => fit(boxed::as_char(v).is_some(), false),
         "String" => fit(matches!(v, Value::Str(_)) || as_gstring(v).is_some(), false),
         "CharSequence" => fit(false, matches!(v, Value::Str(_)) || as_gstring(v).is_some()),
         "Closure" => fit(closure_meta(v).is_some(), false),

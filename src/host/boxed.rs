@@ -129,3 +129,48 @@ pub(super) fn int_hash(kind: IntKind, n: i64) -> i32 {
         _ => n as i32,
     }
 }
+
+/// The tag a `java.lang.Character` rides under. A `Character` is not an
+/// integer class, so [`as_box`] and [`int_view`] do not answer for it: every
+/// place that reads one as its code point does so on purpose ([`as_char`]).
+const CHAR_TAG: i64 = 2;
+
+/// A `java.lang.Character`: `Value::Ref` over `[tag, code point]`, like the
+/// `Short` and `Byte` boxes. A one-character `String` is a different value —
+/// `'c' as char` is a `Character`, `'c'` a `String`, and `==` equates the two
+/// while `equals` does not.
+pub(super) fn char_value(code: u32) -> Value {
+    Value::Ref(Box::new(Value::array(vec![
+        Value::Int(CHAR_TAG),
+        Value::Int(i64::from(code)),
+    ])))
+}
+
+/// The code point of a `Character`; `None` for anything else, a one-character
+/// `String` included.
+pub(super) fn as_char(v: &Value) -> Option<u32> {
+    match v {
+        Value::Ref(inner) => match &**inner {
+            Value::Array(a) => match a.as_slice() {
+                [Value::Int(CHAR_TAG), Value::Int(n)] => u32::try_from(*n).ok(),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The text of a `Character`: its one character.
+pub(super) fn char_text(code: u32) -> String {
+    char::from_u32(code).map(String::from).unwrap_or_default()
+}
+
+/// `v` with a `Character` read as its code point (an `Integer`), the way
+/// Groovy's `NumberMath` widens a `Character` operand; anything else as it is.
+pub(super) fn char_as_int(v: &Value) -> Value {
+    match as_char(v) {
+        Some(c) => Value::Int(i64::from(c)),
+        None => v.clone(),
+    }
+}

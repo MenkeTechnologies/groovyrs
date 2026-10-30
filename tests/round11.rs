@@ -575,3 +575,27 @@ null
 "####;
     check(src, expected);
 }
+
+/// `instanceof GroovyObject` holds for Groovy-implemented values only (a user
+/// instance, a closure, a `GString`, an `Expando`, a `ConfigObject`), never for
+/// a JDK value, an array or a Groovy `Range`; and `instanceof GString` never
+/// holds for a plain `String`. Both answered `true` for every value.
+#[test]
+fn groovy_object_and_gstring_type_tests() {
+    let src = r####"class A {}
+def x = 1
+def vals = ["s", 1, 1L, 1.5, 1.5d, 1.5f, 1G, true, [1], [a:1], [1] as Set, 1..2, 'a'..'c', ~/x/, ("ab" =~ /a/), new StringBuilder(), new A(), {it}, "g$x", new Expando(), [a:1].entrySet().first(), new Object(), [1] as int[], new Date(), new ConfigObject(), Optional.empty(), UUID.randomUUID()]
+println vals.collect { it instanceof GroovyObject }
+println vals.collect { it instanceof GString }
+println vals.collect { it instanceof String }
+println(("a$x" + "b") instanceof GString)
+println(("a" + "b$x") instanceof GString)
+"####;
+    let expected = r####"[false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, true, true, true, false, false, false, false, true, false, false]
+[false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, false, false, false, false, false, false, false, false]
+[true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
+true
+false
+"####;
+    check(src, expected);
+}

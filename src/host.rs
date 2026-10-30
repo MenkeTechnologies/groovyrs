@@ -9219,8 +9219,11 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         return answer;
     }
     match short {
-        "Object" | "GroovyObject" => true,
-        "String" | "GString" => matches!(value, Value::Str(_)),
+        "Object" => true,
+        "GroovyObject" => is_groovy_object(value),
+        // A `GString` is its own handle, answered above; a `String` is not one.
+        "String" => matches!(value, Value::Str(_)),
+        "GString" => false,
         // A `StringBuilder`/`StringBuffer` is a `CharSequence` too, which is what
         // `sb instanceof CharSequence` asks; a `StringWriter` is only a `Writer`.
         "CharSequence" => matches!(value, Value::Str(_)) || is_builder(value),
@@ -9314,6 +9317,22 @@ fn value_is_a(value: &Value, class: &str) -> bool {
         "TreeMap" | "SortedMap" | "NavigableMap" => omap_kind(value) == Some(MapKind::Tree),
         _ => false,
     }
+}
+
+/// `value instanceof GroovyObject` for a value none of the earlier arms of
+/// [`value_is_a`] claimed. A JDK class (`java.*`, `javax.*`) and an array never
+/// implement `groovy.lang.GroovyObject`; a Groovy runtime class does when the
+/// generated type table says so (`IntRange` does not, `Expando` does), and one
+/// the table does not carry is taken to be a Groovy object.
+fn is_groovy_object(value: &Value) -> bool {
+    if array_elem(value).is_some() {
+        return false;
+    }
+    let class = java_class_name(value);
+    if class.starts_with("java.") || class.starts_with("javax.") {
+        return false;
+    }
+    jdktypes::assignable("groovy.lang.GroovyObject", &class).unwrap_or(true)
 }
 
 /// A `java.util.List` that is not a Java array (arrays ride the list

@@ -1092,6 +1092,11 @@ this file.
 
 **Wrong values:**
 
+- A local variable named like a script method does not shadow it at a call.
+  With `def f(x) { "method" }` and `def f = { x -> "closure" }`, Groovy's
+  `f(1)` calls the variable (`closure`; a non-callable value raises
+  `MissingMethodException`), and groovyrs calls the method. Resolving it needs
+  the call site to consult the local scope before the method table.
 - `"abc".chars()` and `"a\nb".lines()` answer Java streams in Groovy;
   groovyrs has no stream values and answers an `ArrayList` (of the code points
   and of the lines), so `.toList()` agrees with Groovy and `getClass()` does

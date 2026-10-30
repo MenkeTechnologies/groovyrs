@@ -15040,6 +15040,9 @@ fn char_method(
         ("toString" | "inspect", []) => Value::str(boxed::char_text(code)),
         ("charValue", []) => recv.clone(),
         ("hashCode", []) => Value::int(i64::from(code)),
+        // `Object.dump()`: the JDK module keeps `Character.value` closed to
+        // reflection, so Groovy prints it as inaccessible.
+        ("dump", []) => Value::str(format!("<java.lang.Character@{code:x} value=inaccessible>")),
         ("equals", [other]) => Value::bool(java_equals(recv, other)),
         ("compareTo", [other]) => {
             let o = boxed::as_char(other)?;

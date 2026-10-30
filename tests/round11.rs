@@ -1182,3 +1182,14 @@ println([new LinkedHashSet([[6, 7]])].flatten())
 "####;
     check(src, expected);
 }
+
+/// `Character.dump()` is `Object.dump()`, which reports the field the JDK keeps
+/// closed to reflection as inaccessible. It raised `MissingMethodException`.
+#[test]
+fn character_dump() {
+    let src = r####"println(('c' as char).dump())
+"####;
+    let expected = r####"<java.lang.Character@63 value=inaccessible>
+"####;
+    check(src, expected);
+}

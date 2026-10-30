@@ -1159,3 +1159,26 @@ java.lang.Character
 "####;
     check(src, expected);
 }
+
+/// `flatten()` flattens a nested range or set into its elements, as it does a
+/// list: they are `Collection`s. They were kept whole.
+#[test]
+fn flatten_expands_ranges_and_sets() {
+    let src = r####"println([(1..3)].flatten())
+println([('a'..'c'), [4, [5]]].flatten())
+println([[1, 2] as Set, 3].flatten())
+println([(1..<1), 2].flatten())
+println([[a: 1], 2].flatten())
+println([(1..2).step(1)].flatten())
+println([new LinkedHashSet([[6, 7]])].flatten())
+"####;
+    let expected = r####"[1, 2, 3]
+[a, b, c, 4, 5]
+[1, 2, 3]
+[2]
+[[a:1], 2]
+[1, 2]
+[6, 7]
+"####;
+    check(src, expected);
+}

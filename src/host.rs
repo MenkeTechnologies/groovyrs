@@ -22933,6 +22933,16 @@ fn java_double_to_int(f: f64) -> i64 {
 fn flatten_values(items: &[Value]) -> Vec<Value> {
     let mut out = Vec::new();
     for v in items {
+        // A range and a set are `Collection`s too, and flatten into their
+        // elements (`[1..3].flatten()` is `[1, 2, 3]`).
+        if let Some(r) = as_range(v) {
+            out.extend(flatten_values(&range_elements(&r)));
+            continue;
+        }
+        if let Some((elems, kind)) = as_set(v) {
+            out.extend(flatten_values(&set_elements(&elems, kind)));
+            continue;
+        }
         // A nested list is a handle; deref so nesting flattens through both the
         // handle form and the transient array form.
         match deref_list(v) {

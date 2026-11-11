@@ -1,6 +1,6 @@
 //! The script's standard streams: every `System.out` / `println` / `printf`
-//! write goes through [`write_out`], and `System.in` reads through
-//! [`system_in`]. By default both are the process's descriptors; an embedder
+//! write goes through `write_out`, and `System.in` reads through
+//! `system_in`. By default both are the process's descriptors; an embedder
 //! ([`crate::embed::run_program`]) redirects them for the interpreter thread with
 //! [`capture_stdout`] and [`set_stdin`].
 

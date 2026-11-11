@@ -572,7 +572,8 @@ Implemented and checked against Apache Groovy:
   `groovy.xml.MarkupBuilder` (with `mkp` and its options), and
   `XmlSlurper` / `XmlParser` with GPath navigation and namespaces.
 - **Dates** — `java.util.Date` arithmetic, ordering, ranges and
-  `format`/`parse`, `TimeZone` with region ids from the system tz database,
+  `format`/`parse`, `TimeZone` with region ids from an embedded IANA tz
+  database (the JDK ships its own too, so no host zoneinfo is read),
   `java.sql.Timestamp`, `GregorianCalendar`, and `groovy.time.TimeCategory`
   durations.
 - **Config** — `ConfigSlurper` and `ConfigObject`, environments included.

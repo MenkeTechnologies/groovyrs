@@ -24,11 +24,6 @@ jobs:
         run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-      # ubuntu-26.04 ships the backward-compatible zone names (America/Godthab,
-      # EST5EDT, ...) in tzdata-legacy, not tzdata; the zone tests read them
-      # from /usr/share/zoneinfo.
-      - name: Install legacy tz names
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq tzdata-legacy
       - name: Build
         run: cargo build --verbose
       - name: Test

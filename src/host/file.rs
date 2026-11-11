@@ -1,6 +1,7 @@
 //! `java.io.File` with the GDK's text methods, and the line reader that
-//! `withReader` and `new StringReader(text)` hand a script. Paths are kept as
-//! written (`new File('rel/x.txt').path` stays relative), as Java keeps them.
+//! `withReader`, `new StringReader(text)` and `System.in` hand a script. Paths
+//! are kept as written (`new File('rel/x.txt').path` stays relative), as Java
+//! keeps them.
 
 use super::*;
 use std::path::Path;
@@ -150,6 +151,18 @@ pub(super) fn dispatch(vm: &mut VM, recv: &Value, method: &str, args: &[Value]) 
             let rest = reader_rest(recv)?;
             reader_advance(recv, rest.len());
             glist(lines(&rest))
+        }
+        // `System.in.newReader()` / `.withReader { }`: the reader is its own
+        // reader, so reads through either continue from the same position.
+        ("newReader", []) => recv.clone(),
+        ("withReader", [clo]) if closure_meta(clo).is_some() => {
+            match invoke_closure(vm, clo, std::slice::from_ref(recv)) {
+                Ok(v) => v,
+                Err(e) => {
+                    fault(vm, e);
+                    Value::Undef
+                }
+            }
         }
         ("close", []) => Value::Undef,
         _ => return None,

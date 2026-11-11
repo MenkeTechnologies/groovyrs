@@ -89,7 +89,11 @@ fn serve(cli: groovyrs::cli::Cli) -> ExitCode {
 
     match groovyrs::run_str_with_args(&src, &cli.argv) {
         Ok(_) => ExitCode::SUCCESS,
-        Err(e) => fail(&e),
+        // `System.exit(n)` ends the run through the fault path; exit with `n`.
+        Err(e) => match groovyrs::host::stdio::take_exit_status() {
+            Some(status) => ExitCode::from(status as u8),
+            None => fail(&e),
+        },
     }
 }
 

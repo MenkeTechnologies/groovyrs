@@ -14,6 +14,7 @@ pub mod cli;
 pub mod compiler;
 pub mod dap;
 pub mod decimal;
+pub mod embed;
 pub mod format;
 pub mod host;
 pub mod lexer;
@@ -25,6 +26,7 @@ pub mod throwable;
 pub mod tiers;
 
 pub use banner::version_banner;
+pub use embed::run_program;
 use fusevm::{VMResult, Value, VM};
 
 /// The stack the interpreter thread gets, in bytes.

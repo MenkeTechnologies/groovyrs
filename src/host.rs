@@ -2416,6 +2416,8 @@ mod metamethod;
 mod params;
 #[path = "host/seq.rs"]
 mod seq;
+#[path = "host/stdio.rs"]
+pub mod stdio;
 #[path = "host/tz.rs"]
 mod tz;
 #[path = "host/urlcodec.rs"]
@@ -3022,6 +3024,7 @@ struct MethodSig {
 /// (called from [`install`]).
 fn reset_heap() {
     seq::reset();
+    stdio::reset();
     VIEW_TARGETS.with(|v| v.borrow_mut().clear());
     mapkey::reset();
     HEAP.with(|h| h.borrow_mut().clear());
@@ -20208,6 +20211,11 @@ fn dispatch_static(vm: &mut VM, class: &str, method: &str, args: &[Value]) -> Op
         // null for a name the JVM does not carry, and the two-argument form
         // answers the supplied default instead.
         ("System", "lineSeparator") => Value::str("\n".to_string()),
+        // `System.exit(status)` ends the run where it stands; see [`stdio::exit`].
+        ("System", "exit") if args.len() == 1 => {
+            stdio::exit(vm, as_i64(&arg0).unwrap_or(0) as i32);
+            Value::Undef
+        }
         // The two clocks: wall time in milliseconds since the epoch, and a
         // monotonic nanosecond count from an arbitrary origin (positive here). Both `long`, which
         // `Compiler::is_wide` reads off the method name.
@@ -20298,6 +20306,8 @@ fn static_field(class: &str, name: &str) -> Option<Value> {
         // interchangeable (they all write to the same descriptor).
         ("System", "out") => heap_push(HeapObj::PrintStream { err: false }),
         ("System", "err") => heap_push(HeapObj::PrintStream { err: true }),
+        // `System.in`: one reader over stdin per run, so reads continue in order.
+        ("System", "in") => stdio::system_in(),
         ("Closure", "DELEGATE_ONLY") => Value::int(3),
         ("Integer", "MAX_VALUE") => Value::int(i32::MAX as i64),
         ("Integer", "MIN_VALUE") => Value::int(i32::MIN as i64),
@@ -22680,19 +22690,19 @@ fn print_stream_method(
         // `write(int)` emits the low byte.
         ("write", [byte]) if as_i64(byte).is_some() => {
             let b = [byte.to_int() as u8];
-            let _ = if err {
-                std::io::stderr().write_all(&b)
+            if err {
+                let _ = std::io::stderr().write_all(&b);
             } else {
-                std::io::stdout().write_all(&b)
-            };
+                stdio::write_out(&b);
+            }
             return Some(Value::Undef);
         }
         ("flush" | "close", []) => {
-            let _ = if err {
-                std::io::stderr().flush()
+            if err {
+                let _ = std::io::stderr().flush();
             } else {
-                std::io::stdout().flush()
-            };
+                stdio::flush_out();
+            }
             return Some(Value::Undef);
         }
         _ => return None,
@@ -22700,11 +22710,11 @@ fn print_stream_method(
     if faulted() || pending_exc() {
         return Some(Value::Undef);
     }
-    let _ = if err {
-        std::io::stderr().write_all(text.as_bytes())
+    if err {
+        let _ = std::io::stderr().write_all(text.as_bytes());
     } else {
-        std::io::stdout().write_all(text.as_bytes())
-    };
+        stdio::write_out(text.as_bytes());
+    }
     // `printf`, `format`, `append` and `<<` answer the stream; the rest are `void`.
     Some(
         if matches!(method, "printf" | "format" | "append" | "leftShift") {
@@ -22720,9 +22730,8 @@ fn print_stream_method(
 /// (`printf("%d %s", [1, "a"])`), both of which Groovy accepts.
 fn b_printf(vm: &mut VM, argc: u8) -> Value {
     let text = formatted(vm, argc);
-    print!("{text}");
-    use std::io::Write;
-    let _ = std::io::stdout().flush();
+    stdio::write_out(text.as_bytes());
+    stdio::flush_out();
     Value::Undef
 }
 
@@ -23366,7 +23375,6 @@ fn b_print(vm: &mut VM, argc: u8) -> Value {
 }
 
 fn print_args(vm: &mut VM, argc: u8, newline: bool) -> Value {
-    use std::io::Write;
     // Pop the args (pushed left-to-right, so the last is on top) and restore
     // source order.
     let mut vals = Vec::with_capacity(argc as usize);
@@ -23394,14 +23402,11 @@ fn print_args(vm: &mut VM, argc: u8, newline: bool) -> Value {
     if faulted() || (!already_unwinding && pending_exc()) {
         return Value::Undef;
     }
-    let stdout = std::io::stdout();
-    let mut lock = stdout.lock();
-    for s in &rendered {
-        let _ = write!(lock, "{s}");
-    }
+    let mut text = rendered.concat();
     if newline {
-        let _ = writeln!(lock);
+        text.push('\n');
     }
+    stdio::write_out(text.as_bytes());
     // `println`/`print` are `void`; the CallBuiltin result is discarded by a
     // trailing Pop in statement position.
     Value::Undef

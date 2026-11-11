@@ -137,6 +137,30 @@ for (n in 1..5) {
 }
 ```
 
+### Embedding
+
+The `groovyrs` library crate runs a whole program from Rust:
+
+```rust
+pub fn run_program(src: &str, input: &str) -> Result<String, String>
+```
+
+Each call gets a fresh interpreter on its own large-stack thread, so calls are
+independent and safe from any thread. `input` is what `System.in` reads
+(`System.in.newReader().readLine()`, `readLines()`, `withReader { }`); the
+return value is everything `println` / `print` / `printf` / `System.out` wrote,
+none of which reaches the process's stdout. A parse or runtime error, an
+uncaught exception, a nonzero `System.exit` or an interpreter panic returns
+`Err`; `System.exit(0)` returns `Ok` with the output so far.
+
+```rust
+let out = groovyrs::run_program(
+    "def name = System.in.newReader().readLine()\nprintln \"hi ${name}\"",
+    "world\n",
+)?;
+assert_eq!(out, "hi world\n");
+```
+
 ---
 
 ## [0x03] LANGUAGE FEATURES

@@ -4823,7 +4823,7 @@ Europe/Prague raw=3600000 save=3600000 use=true
 Africa/Casablanca raw=0 save=0 use=false
   2024-03-20 WET +0000 false 0 zo=0 dst=0
   2024-07-01 WEST +0100 true 3600000 zo=0 dst=3600000
-America/Inuvik raw=-25200000 save=0 use=false
+America/Inuvik raw=-21600000 save=0 use=false
   1975-07-01 MST -0700 true -25200000 zo=-28800000 dst=3600000
   1975-12-01 MST -0800 false -28800000 zo=-28800000 dst=0
   1990-07-01 MDT -0600 true -21600000 zo=-25200000 dst=3600000

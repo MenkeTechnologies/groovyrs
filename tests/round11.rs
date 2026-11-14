@@ -1193,3 +1193,214 @@ fn character_dump() {
 "####;
     check(src, expected);
 }
+
+/// A `TreeSet` answers the `NavigableSet` methods — `headSet`/`tailSet`/`subSet`
+/// with their inclusivity defaults, the four neighbour searches, `pollFirst`/
+/// `pollLast` and `descendingSet` — in its comparator's order when it has one.
+/// They raised `MissingMethodException`.
+#[test]
+fn tree_set_navigable_methods() {
+    let src = r####"def ts = new TreeSet([5, 1, 3, 9])
+println ts.headSet(5)
+println ts.headSet(5, true)
+println ts.tailSet(3)
+println ts.tailSet(3, false)
+println ts.subSet(1, 9)
+println ts.subSet(1, false, 9, true)
+println ts.headSet(5).getClass().name
+println ts.ceiling(4)
+println ts.floor(4)
+println ts.higher(5)
+println ts.lower(1)
+println ts.pollFirst()
+println ts.pollLast()
+println ts
+println ts.descendingSet()
+def e = new TreeSet()
+println e.pollFirst()
+println e.ceiling(1)
+def r = new TreeSet({ a, b -> b <=> a } as Comparator)
+r.addAll(['b', 'd', 'a', 'c'])
+println r
+println r.headSet('b')
+println r.ceiling('bb')
+println r.higher('b')
+println r.pollFirst()
+println r
+"####;
+    let expected = r####"[1, 3]
+[1, 3, 5]
+[3, 5, 9]
+[5, 9]
+[1, 3, 5]
+[3, 5, 9]
+java.util.TreeSet
+5
+3
+9
+null
+1
+9
+[3, 5]
+[5, 3]
+null
+null
+[d, c, b, a]
+[d, c]
+b
+a
+d
+[c, b, a]
+"####;
+    check(src, expected);
+}
+
+/// The GDK's `Matcher.hasGroup()` is `groupCount() > 0`. It raised
+/// `MissingMethodException`.
+#[test]
+fn matcher_has_group() {
+    let src = r####"println(('a1b2' =~ /([a-z])(\d)/).hasGroup())
+println(('a1b2' =~ /[a-z]\d/).hasGroup())
+println(('xyz' =~ /(?:x)y/).hasGroup())
+println(('xyz' =~ /(q)/).hasGroup())
+"####;
+    let expected = r####"true
+false
+false
+true
+"####;
+    check(src, expected);
+}
+
+/// `groovy.json.JsonOutput.toJson(…)` and the other `groovy.json` / `groovy.xml`
+/// classes resolve when written with their package and no import. The static
+/// forms raised `MissingPropertyException: No such property: groovy`.
+#[test]
+fn groovy_json_and_xml_classes_written_fully_qualified() {
+    let src = r####"println groovy.json.JsonOutput.toJson([a: 1, b: [true, null]])
+println new groovy.json.JsonSlurper().parseText('{"k":[1,2]}').k
+def sw = new StringWriter()
+new groovy.xml.MarkupBuilder(sw).root { item(id: 1, 'x') }
+println sw
+println new groovy.xml.XmlSlurper().parseText('<r><i>a</i></r>').i.text()
+println groovy.json.JsonOutput.toJson('q"')
+"####;
+    let expected = r####"{"a":1,"b":[true,null]}
+[1, 2]
+<root>
+  <item id='1'>x</item>
+</root>
+a
+"q\""
+"####;
+    check(src, expected);
+}
+
+/// Two boxed numbers with a `Double` or `Float` among them are equal by
+/// `Double.compare` (`FloatingPointMath.compareToImpl`): in a list, a map value,
+/// `unique()` and a `switch` label, NaN equals NaN and `0.0d` is not `-0.0d`.
+/// The signed zeros compared equal and `unique()` kept every NaN.
+#[test]
+fn floating_equality_in_collections_is_double_compare() {
+    let src = r####"println([Double.NaN] == [Double.NaN])
+println([0.0f] == [-0.0f])
+println([1.0d, Double.NaN] == [1, Double.NaN])
+println([0] == [-0.0d])
+println([0.0] == [-0.0d])
+println([0.0d] == [-0.0d])
+println([a: 0.0d] == [a: -0.0d])
+println([a: Float.NaN] == [a: Double.NaN])
+println([a: Double.NaN] == [a: Double.NaN])
+println([Double.NaN, 1.0d, Double.NaN].unique())
+println([0.0d, -0.0d].unique())
+println([1, 1.0d, 1.0f].unique())
+switch (-0.0d) { case 0.0d: println 'zero'; break; default: println 'not zero' }
+switch (Double.NaN) { case Double.NaN: println 'nan'; break; default: println 'not nan' }
+println([1.0d] == [1])
+println([0.1f] == [0.1d])
+"####;
+    let expected = r####"true
+false
+true
+false
+false
+false
+false
+true
+true
+[NaN, 1.0]
+[0.0, -0.0]
+[1]
+not zero
+nan
+true
+false
+"####;
+    check(src, expected);
+}
+
+/// A hash set of lists keys each list on `List.hashCode`, so `permutations()` of
+/// eight elements builds its 40 320-list set at once. It compared every new
+/// list against every kept one and ran for minutes.
+#[test]
+fn set_of_lists_hashes_each_list() {
+    let src = r####"println([3, 1, 4, 1, 5, 9, 2, 6].permutations().size())
+println([1, 2, 3, 4, 5, 6, 7, 8].permutations().size())
+println([[1, 2], [1, 2], [2, 1]].toSet().size())
+def s = [[1, 2]] as Set
+println s.contains([1, 2])
+println s.add([1, 2])
+println s.add([2, 1])
+println s
+println(([[1, [2]], [1, [2]]] as Set).size())
+"####;
+    let expected = r####"20160
+40320
+2
+true
+false
+true
+[[1, 2], [2, 1]]
+1
+"####;
+    check(src, expected);
+}
+
+/// A store to an `Integer`/`int`/`double`/`Short` field converts a `Long` value,
+/// and a `long`/`Long` field holds a `Long`. The first raised
+/// `GroovyCastException`; the second held an `Integer`.
+#[test]
+fn typed_field_store_converts_long_values() {
+    let src = r####"class B { Integer bi; Long bl; Double bd; int i; long l = 3; Short bs }
+def b = new B()
+def lv = 3L
+b.bi = lv; println "${b.bi} ${b.bi.class.name}"
+b.bl = 3; println "${b.bl} ${b.bl.class.name}"
+b.bd = lv; println "${b.bd} ${b.bd.class.name}"
+b.i = lv; println "${b.i} ${b.i.class.name}"
+b.bl = 3.9; println "${b.bl} ${b.bl.class.name}"
+b.bl = 3.9d; println "${b.bl} ${b.bl.class.name}"
+b.bs = lv; println "${b.bs} ${b.bs.class.name}"
+println b.l.class.name
+println new B(bi: 5L).bi.class.name
+println new B(bl: 5).bl.class.name
+b.@bl = 6; println b.bl.class.name
+b.bi = 2147483648L; println b.bi
+println b.l + b.bl
+"####;
+    let expected = r####"3 java.lang.Integer
+3 java.lang.Long
+3.0 java.lang.Double
+3 java.lang.Integer
+3 java.lang.Long
+3 java.lang.Long
+3 java.lang.Short
+java.lang.Long
+java.lang.Integer
+java.lang.Long
+java.lang.Long
+-2147483648
+9
+"####;
+    check(src, expected);
+}

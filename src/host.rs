@@ -6559,7 +6559,19 @@ fn typed_field_value(vm: &mut VM, class: u32, field: &str, value: Value) -> Valu
         .find_map(|m| m.field_types.get(field).cloned());
     match ty {
         Some(ty) if crate::compiler::COERCED_TYPES.contains(&ty.as_str()) => {
-            java_cast(vm, value, &ty)
+            // The operand is unboxed first, as the cast operator does it: a
+            // `Long` stored into an `Integer` or `double` field converts
+            // (`a.bi = 3L` holds the `Integer` `3`) rather than being refused.
+            let cast = java_cast(vm, cast_operand(value, &ty), &ty);
+            // `java_cast` leaves a `long` a plain integer for compiled code to
+            // box where it escapes; a field is where it escapes, so a `long` or
+            // `Long` field holds a `Long` (`a.bl = 3` reads back as one).
+            match cast {
+                Value::Int(n) if boxed::kind_named(&ty) == Some(boxed::IntKind::Long) => {
+                    boxed::long_value(n)
+                }
+                other => other,
+            }
         }
         _ => value,
     }
@@ -8179,6 +8191,12 @@ fn dispatch_matcher_method(
             Ok(p) => p.group_count() as i64,
             Err(_) => 0,
         }),
+        // The GDK's `Matcher.hasGroup()`: `groupCount() > 0`, a question about
+        // the pattern, so it answers before any `find` as well.
+        "hasGroup" if args.is_empty() => Value::bool(match &*crate::regex::compile(&m.source) {
+            Ok(p) => p.group_count() > 0,
+            Err(_) => false,
+        }),
         // `start()`/`end()` read the LAST match, so with no match state they are
         // Java's `IllegalStateException` — the same refusal `group()` makes, and
         // for the same reason. They used to answer `-1`, which is `Matcher`'s
@@ -8930,6 +8948,17 @@ fn values_equal_shape(a: &Value, b: &Value) -> bool {
             return matches!((a, b), (Value::Undef, Value::Undef))
         }
         _ => {}
+    }
+    // Two numbers with a `Double` or `Float` among them meet in
+    // `FloatingPointMath.compareToImpl`, which is `Double.compare` of the two
+    // `doubleValue()`s — not IEEE `==`. So in a collection, a map value, a
+    // `switch` label or `unique`, NaN equals NaN and `0.0d` is not `-0.0d`:
+    // `[Double.NaN] == [Double.NaN]` is true and `[0.0f] == [-0.0f]` false.
+    // A `BigDecimal` against a double takes the same path (`[0.0] == [-0.0d]`
+    // is false), which is why this precedes the decimal comparison.
+    let floating = |v: &Value| matches!(v, Value::Float(_)) || as_float_handle(v).is_some();
+    if (floating(a) || floating(b)) && is_number(a) && is_number(b) {
+        return java_compare_f64(as_f64(a), as_f64(b)).is_eq();
     }
     if let Some(Ok(v)) = decimal_operator(NumOp::Eq, a, b) {
         return matches!(v, Value::Bool(true));
@@ -19289,6 +19318,8 @@ pub fn jdk_qualified_class(package: &str, name: &str) -> Option<String> {
                 | ("groovy.time", "TimeCategory")
                 | ("java.sql", "Timestamp")
                 | ("groovy.namespace", "QName")
+                | ("groovy.json", "JsonOutput" | "JsonSlurper" | "JsonBuilder")
+                | ("groovy.xml", "MarkupBuilder" | "XmlSlurper" | "XmlParser")
         );
     known.then(|| format!("{package}.{name}"))
 }
@@ -22063,7 +22094,15 @@ impl SetEq {
             || as_dec(v).is_some()
             || as_float_handle(v).is_some();
         if !simple {
-            return None;
+            // A list of keyable elements keys on `List.hashCode` under Java
+            // equality, which is what `AbstractList.equals` pairs with. Without
+            // it a set of lists scanned on every insert, so building
+            // `permutations()` of eight elements (40 320 lists) was ~8·10⁸
+            // comparisons where Java hashes each list once.
+            return match self {
+                SetEq::Java => java_list_key(v).map(|h| h as u32 as u64),
+                SetEq::Groovy => None,
+            };
         }
         match self {
             SetEq::Java => Some(shape_hash_code(v) as u32 as u64),
@@ -22083,6 +22122,31 @@ impl SetEq {
             },
         }
     }
+}
+
+/// `List.hashCode()` — `31 * h + e.hashCode()` from `1` — for a list whose
+/// elements are all keyable under Java equality ([`SetEq::key`]: scalars,
+/// numbers, and lists of them). `None` for anything else, and for nesting
+/// deeper than a self-reaching list could be told apart from a real one.
+fn java_list_key(v: &Value) -> Option<i32> {
+    fn walk(v: &Value, depth: u32) -> Option<i32> {
+        if depth > 32 {
+            return None;
+        }
+        let items = match v {
+            Value::Array(a) => a.to_vec(),
+            _ => as_list_raw(v)?,
+        };
+        items.iter().try_fold(1i32, |h, e| {
+            let eh = if matches!(e, Value::Array(_)) || as_list_raw(e).is_some() {
+                walk(e, depth + 1)?
+            } else {
+                SetEq::Java.key(e)? as u32 as i32
+            };
+            Some(h.wrapping_mul(31).wrapping_add(eh))
+        })
+    }
+    walk(v, 0)
 }
 
 /// A `Set`'s membership accelerator: element key ([`SetEq::key`]) → the
@@ -22493,6 +22557,109 @@ fn dispatch_set_method(
             dispatch_call(vm, Value::array(ordered()), method, args.to_vec());
             recv.clone()
         }
+        _ if matches!(kind, SetKind::Tree | SetKind::TreeBy(_)) => {
+            return navigable_set_method(vm, recv, ordered(), kind, method, args)
+        }
+        _ => return None,
+    })
+}
+
+/// `java.util.TreeSet`'s `NavigableSet` methods, over the set's elements in
+/// its own order (`sorted`). Elements compare as the set orders them: by the
+/// comparator it was built with, else naturally.
+///
+/// The range forms (`headSet`, `tailSet`, `subSet`) answer a new `TreeSet` of
+/// the selected elements, which is the class the JDK's answer reports
+/// (`new TreeSet<>(m.headMap(…))`); it is not a live view — see BUGS.md. The
+/// defaults follow the JDK: `headSet(e)` excludes `e`, `tailSet(e)` includes
+/// it, `subSet(a, b)` includes `a` and excludes `b`.
+fn navigable_set_method(
+    vm: &mut VM,
+    recv: &Value,
+    sorted: Vec<Value>,
+    kind: SetKind,
+    method: &str,
+    args: &[Value],
+) -> Option<Value> {
+    let order = |vm: &mut VM, a: &Value, b: &Value| match kind {
+        SetKind::TreeBy(cmp) => comparator_order(vm, cmp, a, b),
+        _ => natural_order(a, b),
+    };
+    let flag = |i: usize, dflt: bool| match args.get(i) {
+        Some(Value::Bool(b)) => *b,
+        _ => dflt,
+    };
+    // Whether `e` lies on the kept side of the bound `args[at]`: below it for
+    // an upper bound, above it for a lower one, the bound itself by `incl`.
+    let within = |vm: &mut VM, e: &Value, at: usize, upper: bool, incl: bool| {
+        let o = order(vm, e, &args[at]);
+        if upper {
+            o.is_lt() || (incl && o.is_eq())
+        } else {
+            o.is_gt() || (incl && o.is_eq())
+        }
+    };
+    let select = |vm: &mut VM, keep: &mut dyn FnMut(&mut VM, &Value) -> bool| {
+        let kept: Vec<Value> = sorted.iter().filter(|e| keep(vm, e)).cloned().collect();
+        make_set(kept, kind)
+    };
+    // The first element (walking up, or down for `rev`) that `pick` accepts.
+    let neighbour = |vm: &mut VM, rev: bool, pick: &dyn Fn(std::cmp::Ordering) -> bool| {
+        let probe = &args[0];
+        let mut walk: Box<dyn Iterator<Item = &Value>> = if rev {
+            Box::new(sorted.iter().rev())
+        } else {
+            Box::new(sorted.iter())
+        };
+        walk.find(|e| pick(order(vm, e, probe)))
+            .cloned()
+            .unwrap_or(Value::Undef)
+    };
+    Some(match (method, args.len()) {
+        ("headSet", 1 | 2) => {
+            let incl = flag(1, false);
+            select(vm, &mut |vm, e| within(vm, e, 0, true, incl))
+        }
+        ("tailSet", 1 | 2) => {
+            let incl = flag(1, true);
+            select(vm, &mut |vm, e| within(vm, e, 0, false, incl))
+        }
+        ("subSet", 2) => select(vm, &mut |vm, e| {
+            within(vm, e, 0, false, true) && within(vm, e, 1, true, false)
+        }),
+        ("subSet", 4) => {
+            let (lo_incl, hi_incl) = (flag(1, true), flag(3, false));
+            select(vm, &mut |vm, e| {
+                within(vm, e, 0, false, lo_incl) && within(vm, e, 2, true, hi_incl)
+            })
+        }
+        ("ceiling", 1) => neighbour(vm, false, &|o| o.is_ge()),
+        ("higher", 1) => neighbour(vm, false, &|o| o.is_gt()),
+        ("floor", 1) => neighbour(vm, true, &|o| o.is_le()),
+        ("lower", 1) => neighbour(vm, true, &|o| o.is_lt()),
+        // `pollFirst`/`pollLast` remove and answer an end element, `null` on an
+        // empty set (where `first`/`last` raise).
+        ("pollFirst" | "pollLast", 0) => {
+            let Some(taken) = (if method == "pollFirst" {
+                sorted.first()
+            } else {
+                sorted.last()
+            })
+            .cloned() else {
+                return Some(Value::Undef);
+            };
+            let (items, _) = as_set(recv)?;
+            let rest: Vec<Value> = items
+                .into_iter()
+                .filter(|e| !order(vm, e, &taken).is_eq())
+                .collect();
+            set_store(recv, rest);
+            taken
+        }
+        // The reverse-ordered set. Its order is right; its class is the
+        // insertion-ordered set holding that sequence, not the JDK's
+        // reverse-comparator `TreeSet` — see BUGS.md.
+        ("descendingSet", 0) => make_set(sorted.into_iter().rev().collect(), SetKind::Linked),
         _ => return None,
     })
 }

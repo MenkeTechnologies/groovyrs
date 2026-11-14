@@ -958,7 +958,7 @@ reported as parse or compile errors, never silently mis-run.
   match (and raise `IllegalStateException` when there is none), `matches()`
   *sets* that match state on success so `if (m.matches()) { … m.group(1) … }`
   reads its captures, and its own truth is `find()`, so `while (m) { … }` walks
-  — plus `groupCount()`, `pattern()`, `reset()`, `size()` / `count`,
+  — plus `groupCount()`, the GDK's `hasGroup()`, `pattern()`, `reset()`, `size()` / `count`,
   `m[i]`, and iteration over its matches. `String` carries `matches`,
   `replaceAll` / `replaceFirst` (in both the `$n` and closure forms), `findAll`,
   `find`, and a `split` that follows Java's specified rules. The `/`-versus-
@@ -1540,11 +1540,19 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   strict numeric hook — which only sees non-numeric operands — never gets the
   chance.
 
+  The same rule makes boxed signed zeros unequal: `def z = 0; z == -0.0d` is
+  `false` in Groovy (only two statically primitive operands, such as the
+  literals in `0.0d == -0.0d`, compare by IEEE `==`), and here it is `true`.
+  `Float.NaN == Float.NaN` is wrong the same way: a `Float` operand reaches the
+  numeric hook, which widens it and compares by IEEE `==`.
+
   **This is not a fusevm limitation, and the earlier note that called it one was
-  wrong.** The host-side comparator already gets NaN right: `values_equal`
-  reaches `decimal_operator`, and `[Double.NaN].contains(Double.NaN)` and
-  `[Double.NaN] == [Double.NaN]` both answer `true` today. Every path that runs
-  through the host is already correct; the only wrong answer comes from the
+  wrong.** The host-side comparator gets it right: `values_equal` compares two
+  numbers with a `Double` or `Float` among them by `Double.compare`, as
+  `FloatingPointMath.compareToImpl` does, so `[Double.NaN] == [Double.NaN]`,
+  `[0.0f] == [-0.0f]` (`false`), `[Double.NaN, Double.NaN].unique()` and a
+  `switch (-0.0d) { case 0.0d: … }` label all answer as Groovy does. Every
+  path that runs through the host is correct; the only wrong answer comes from the
   *compiler* choosing fusevm's native `Op::NumEq` for a bare `==`. Nothing about
   fixing it requires a fusevm change — it requires the compiler to route `==` to
   a builtin when an operand may be a `Double`, exactly as `BinOp::Shr` already
@@ -1774,6 +1782,10 @@ class. (`println ++i` now parses as Groovy's `(println++)(i)` and raises
   gap: it carries no class, so `getClass()` on one names `java.lang.Object`
   rather than `java.util.LinkedHashMap$Entry`, `TreeMap$Entry`, or the
   `AbstractMap$SimpleImmutableEntry` that `firstEntry`/`pollFirstEntry` answer.
+  A `TreeSet`'s `headSet`/`tailSet`/`subSet` are the same: a new `TreeSet` of the
+  selected elements (the class the JDK's answer reports), not a live view, and
+  `descendingSet()` is a `LinkedHashSet` holding the reversed order where the
+  JDK answers a `TreeSet` over the reversed comparator.
 - **(Closed for lists, see Implemented) `asImmutable()` / `asSynchronized()` /
   `Collections.unmodifiableList` answer a plain copy.** All three answer the same *elements*, so a read through the
   result is right, but the wrapper type is not modeled: `getClass()` names

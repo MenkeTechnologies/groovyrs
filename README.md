@@ -264,6 +264,9 @@ Implemented and checked against Apache Groovy:
   the receiver's exactly, `findAll`/`collectEntries`/`minus`/`take` go through
   `createSimilarMap` (sortedness only), and `sort()` always builds a `TreeMap`
   while `sort(closure)`/`toSorted()` never do.
+  A `TreeSet` answers the `NavigableSet` methods the same way (`headSet`/`tailSet`/
+  `subSet` with the inclusivity flags, `lower`/`floor`/`ceiling`/`higher`,
+  `pollFirst`/`pollLast`, `descendingSet`), ordered by its comparator when it has one.
 - **`Map.equals` is by entry set** — order- and implementation-insensitive, so
   `[b:2, a:1] == [a:1, b:2]` and a `TreeMap` equals the `LinkedHashMap` holding
   the same entries, while a map never equals a list or a set.
@@ -520,7 +523,7 @@ Implemented and checked against Apache Groovy:
   (backslashes literal, interpolating, multi-line; `$` escapes the latter), the
   `=~` and `==~` operators, and a stateful
   `java.util.regex.Matcher` (`find`/`group`/`start`/`end`/`matches`/
-  `groupCount`/`pattern`/`m[i]`, iteration, and `find()` truth so `while (m)`
+  `groupCount`/`hasGroup`/`pattern`/`m[i]`, iteration, and `find()` truth so `while (m)`
   walks). `String` carries `matches`, `replaceAll`/`replaceFirst` in both the
   `$n` and closure forms, `findAll`, `find`, `eachMatch`, and Java's specified
   `split` rules. Every closure-taking one shares Groovy's call convention: the
@@ -583,7 +586,8 @@ Implemented and checked against Apache Groovy:
   `asUnmodifiable`, `Collections.unmodifiableList`) are live views with the
   JDK class names.
 - **`groovy.json`** — `JsonOutput.toJson` / `prettyPrint`,
-  `JsonSlurper.parseText` and `JsonBuilder`.
+  `JsonSlurper.parseText` and `JsonBuilder`, imported or written fully qualified
+  (`groovy.json.JsonOutput.toJson(…)`), as are the `groovy.xml` builders and slurpers.
 - **Closure coercion at a typed parameter** — a closure passed where a
   function, method, constructor or closure parameter is declared as one of the
   script's single-abstract-method interfaces or abstract classes is coerced to
